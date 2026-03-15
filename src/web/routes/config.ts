@@ -100,7 +100,6 @@ configRouter.get('/providers', async (_req: Request, res: Response, next: NextFu
 
       // Check if adapter is implemented
       const implemented = prov.api === 'bedrock' || prov.api === 'anthropic-messages'
-        || prov.api === 'openai-chat' || prov.api === 'google-generative-ai'
 
       // Mask key: show last 4 chars
       const rawKey = prov.api_key || prov.bearer_token || envKey
@@ -148,29 +147,19 @@ configRouter.post('/test-provider', async (req: Request, res: Response, next: Ne
 
     const { adapter, config: resolvedConfig } = resolveProvider(provider_name, providers)
 
-    // Two-tier test model lookup: provider-specific first, then protocol fallback.
-    // Many providers (DeepSeek, Moonshot, Qwen) share the openai-chat protocol but
-    // don't host OpenAI models — without this, they'd all try gpt-4o-mini and 404.
+    // Build a minimal test request
     const protocol = resolvedConfig.api
-    const TEST_MODELS_BY_PROVIDER: Record<string, string> = {
-      deepseek: 'deepseek-chat',
-      moonshot: 'moonshot-v1-128k',
-      qwen: 'qwen-turbo',
-      together: 'meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8',
-      doubao: 'ep-default',
-      nvidia: 'meta/llama-3.3-70b-instruct',
-    }
-    const TEST_MODELS_BY_PROTOCOL: Record<string, string> = {
-      'bedrock': 'us.anthropic.claude-haiku-4-5-20251001-v1:0',
-      'anthropic-messages': 'claude-haiku-4-5-20251001',
-      'openai-chat': 'gpt-4o-mini',
-      'google-generative-ai': 'gemini-2.5-flash',
-    }
-    const testModel = TEST_MODELS_BY_PROVIDER[provider_name]
-      ?? TEST_MODELS_BY_PROTOCOL[protocol]
-    if (!testModel) {
-      res.json({ ok: false, error: `Testing not yet supported for protocol "${protocol}"` })
-      return
+    let testModel: string
+    switch (protocol) {
+      case 'bedrock':
+        testModel = 'us.anthropic.claude-haiku-4-5-20251001-v1:0'
+        break
+      case 'anthropic-messages':
+        testModel = 'claude-haiku-4-5-20251001'
+        break
+      default:
+        res.json({ ok: false, error: `Testing not yet supported for protocol "${protocol}"` })
+        return
     }
 
     const start = Date.now()

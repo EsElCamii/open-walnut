@@ -13045,39 +13045,6 @@ img[data-lightbox-src],
   margin-bottom: 10px;
 }
 
-.provider-card-models {
-  margin-bottom: 10px;
-}
-
-.provider-card-models-label {
-  display: block;
-  font-size: 10px;
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.5px;
-  color: var(--fg-muted);
-  margin-bottom: 6px;
-}
-
-.provider-card-models-list {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 5px;
-}
-
-.provider-model-chip {
-  font-family: var(--font-mono);
-  font-size: 11px;
-  padding: 2px 7px;
-  border: 1px solid var(--border);
-  border-radius: 4px;
-  background: var(--bg-secondary);
-  color: var(--fg);
-  user-select: all;
-  cursor: default;
-  white-space: nowrap;
-}
-
 .provider-card-key-row {
   display: flex;
   gap: 10px;
