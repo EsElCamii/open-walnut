@@ -54,6 +54,7 @@ import { gitPullWalnut, ensureRepo, commitIfDirty, isGitAvailable, isLockContent
 import { registry } from '../core/integration-registry.js'
 import { loadPlugins, migrateConfigToPlugins, runPluginMigrations } from '../core/integration-loader.js'
 import type { SyncPollContext } from '../core/integration-types.js'
+import { syncReconciler } from '../core/sync-reconciler.js'
 import { integrationsRouter } from './routes/integrations.js'
 import { systemRouter } from './routes/system.js'
 import { notesRouter } from './routes/notes.js'
@@ -1659,8 +1660,23 @@ function startPluginSyncPolling(): void {
           },
         }
 
-        // Call the plugin's syncPoll
-        await plugin.sync.syncPoll(ctx)
+        // Call the plugin's syncPoll (delta pull)
+        let deltaFailed = false
+        try {
+          await plugin.sync.syncPoll(ctx)
+        } catch (deltaErr) {
+          deltaFailed = true
+          throw deltaErr // re-throw so outer catch still handles logging
+        } finally {
+          // Step 3: Full reconciliation check (runs even if delta succeeded)
+          try {
+            await syncReconciler.tick(plugin, ctx, { deltaFailed })
+          } catch (reconcileErr) {
+            log.web.debug(`${plugin.id} reconciler tick failed`, {
+              error: reconcileErr instanceof Error ? reconcileErr.message : String(reconcileErr),
+            })
+          }
+        }
         consecutiveFailures = 0
       } catch (err) {
         consecutiveFailures++

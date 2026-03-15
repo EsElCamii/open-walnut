@@ -9,6 +9,21 @@ import type { Task, TaskPhase, TaskPriority } from './types.js';
 import type { SubsystemLogger } from '../logging/index.js';
 import type { Router } from 'express';
 
+// ── RemoteSyncItem: standardized representation of a remote task for reconciliation ──
+
+export interface RemoteSyncItem {
+  /** Join key — must match what extractRemoteId() returns for local tasks. */
+  remoteId: string;
+  /** Title for logging and fallback matching. */
+  title: string;
+  /** ISO timestamp — framework uses this to decide who is newer. */
+  remoteUpdatedAt: string;
+  /** True if the remote item was deleted/archived. */
+  deleted?: boolean;
+  /** Mapped local fields (including ext) — ready to merge into a Task. */
+  fields: Partial<Task>;
+}
+
 // ── ExtData: plugin-specific fields written to task.ext ──
 
 export interface ExtData {
@@ -57,6 +72,17 @@ export interface IntegrationSync {
 
   // ── Pull (periodic sync from remote) ──
   syncPoll(ctx: SyncPollContext): Promise<void>;
+
+  // ── Full Reconciliation (optional — enables framework-driven full sync) ──
+
+  /** Pull ALL remote items matching this plugin's scope (no date filter).
+   *  Framework calls this periodically to detect drift, deletions, and unassignments.
+   *  Return undefined/null to skip reconciliation for this tick. */
+  fullPull?(ctx: SyncPollContext): Promise<RemoteSyncItem[] | undefined | null>;
+
+  /** Extract the remote ID from a local task's ext data.
+   *  Used to join local tasks with fullPull results. */
+  extractRemoteId?(task: Task): string | undefined;
 }
 
 // ── CategoryClaimFn: determines if a plugin owns a category ──

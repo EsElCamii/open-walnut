@@ -876,6 +876,61 @@ export async function pullTasks(
   return { tasks: allTasks, deltaLink };
 }
 
+/**
+ * Full pull for reconciliation — fetch ALL tasks from ALL lists (no delta, no timestamp filter).
+ * Returns a flat list of { remoteId, title, remoteUpdatedAt, fields } for three-way diff.
+ */
+export async function fullPullAllTasks(): Promise<Array<{
+  remoteId: string;
+  title: string;
+  remoteUpdatedAt: string;
+  fields: Partial<Task>;
+}>> {
+  const token = await getAccessToken();
+  const lists = await fetchTaskLists(token);
+  const result: Array<{ remoteId: string; title: string; remoteUpdatedAt: string; fields: Partial<Task> }> = [];
+
+  // Load deleted MS IDs — skip tasks we intentionally deleted locally
+  const deltaState = await readJsonFile<DeltaState>(DELTA_FILE, {
+    deltaLinks: {},
+    listNames: {},
+    lastSync: '',
+  });
+  const deletedMsIds = new Set(deltaState.deletedMsIds ?? []);
+
+  for (const list of lists) {
+    // Non-delta full fetch: /me/todo/lists/{listId}/tasks (no /delta suffix)
+    let allTasks: MSTodoTask[] = [];
+    let response = await graphRequest<GraphResponse<MSTodoTask>>(
+      token, 'GET', `/me/todo/lists/${list.id}/tasks`,
+    );
+    allTasks.push(...response.value);
+    let nextLink = response['@odata.nextLink'];
+    while (nextLink) {
+      response = await graphRequest<GraphResponse<MSTodoTask>>(token, 'GET', nextLink);
+      allTasks.push(...response.value);
+      nextLink = response['@odata.nextLink'];
+    }
+
+    for (const msTask of allTasks) {
+      if (deletedMsIds.has(msTask.id)) continue;
+      const fields = mapToLocal(msTask, list.displayName);
+      // Ensure ext includes list_id for completeness
+      if (fields.ext?.['ms-todo']) {
+        (fields.ext['ms-todo'] as Record<string, unknown>).list_id = list.id;
+      }
+      result.push({
+        remoteId: msTask.id,
+        title: msTask.title,
+        remoteUpdatedAt: msTask.lastModifiedDateTime,
+        fields,
+      });
+    }
+  }
+
+  return result;
+}
+
 // -- Sync status --
 
 export interface MsTodoSyncStatus {

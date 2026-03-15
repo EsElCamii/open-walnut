@@ -1869,7 +1869,7 @@ export async function deleteTask(idPrefix: string): Promise<{ task: Task }> {
   const task = matches[0];
 
   // Block deletion if task has active session slots
-  const activeIds = [task.plan_session_id, task.exec_session_id].filter(Boolean) as string[];
+  const activeIds = [task.session_id, task.plan_session_id, task.exec_session_id].filter(Boolean) as string[];
   if (activeIds.length > 0) {
     throw new ActiveSessionError(task.id, activeIds);
   }

@@ -2,7 +2,7 @@
  * Jira plugin — two-way sync with Jira Cloud/Server.
  * Wraps the existing jira sync.ts implementation.
  */
-import type { PluginApi, IntegrationSync } from '../../core/integration-types.js';
+import type { PluginApi, IntegrationSync, RemoteSyncItem } from '../../core/integration-types.js';
 import type { Task } from '../../core/types.js';
 
 export default function register(api: PluginApi): void {
@@ -85,6 +85,14 @@ export default function register(api: PluginApi): void {
         async (id, updates) => { await ctx.updateTask(id, updates); },
         async (taskData) => { const t = await ctx.addTask(taskData as any); return t as any; },
       );
+    },
+    async fullPull(): Promise<RemoteSyncItem[]> {
+      const { fullPullAllIssues } = await import('./sync.js');
+      return fullPullAllIssues();
+    },
+    extractRemoteId(task: Task): string | undefined {
+      // Jira uses issue_key as primary ID (e.g., "PROJ-123")
+      return (task.ext?.jira as Record<string, unknown>)?.issue_key as string | undefined;
     },
   };
 

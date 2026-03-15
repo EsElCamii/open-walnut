@@ -2,7 +2,7 @@
  * Microsoft To-Do plugin — two-way sync with MS Graph API.
  * Wraps the existing microsoft-todo.ts implementation.
  */
-import type { PluginApi, IntegrationSync } from '../../core/integration-types.js';
+import type { PluginApi, IntegrationSync, RemoteSyncItem } from '../../core/integration-types.js';
 import type { Task } from '../../core/types.js';
 
 export default function register(api: PluginApi): void {
@@ -86,6 +86,13 @@ export default function register(api: PluginApi): void {
         async (id, updates) => { await ctx.updateTask(id, updates); },
         async (taskData) => { const t = await ctx.addTask(taskData as any); return t as any; },
       );
+    },
+    async fullPull(): Promise<RemoteSyncItem[]> {
+      const { fullPullAllTasks } = await import('../microsoft-todo.js');
+      return fullPullAllTasks();
+    },
+    extractRemoteId(task: Task): string | undefined {
+      return (task.ext?.['ms-todo'] as Record<string, unknown>)?.id as string | undefined;
     },
   };
 

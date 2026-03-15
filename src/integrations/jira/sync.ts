@@ -390,6 +390,73 @@ export async function deltaPull(
   return hasChanges;
 }
 
+// ── Full pull for reconciliation ──
+
+/**
+ * Pull ALL Jira issues matching the plugin scope (no timestamp filter).
+ * Returns standardized items for three-way diff in SyncReconciler.
+ */
+export async function fullPullAllIssues(): Promise<Array<{
+  remoteId: string;
+  title: string;
+  remoteUpdatedAt: string;
+  fields: Partial<Task>;
+}>> {
+  const config = await getConfig();
+  const jiraConfig = getJiraConfig(config);
+  if (!jiraConfig?.base_url) return [];
+
+  const client = new JiraClient(jiraConfig);
+
+  // Build JQL — same filters as deltaPull but WITHOUT the updated >= timestamp
+  const jqlParts: string[] = [];
+  jqlParts.push(`project = "${jiraConfig.project_key}"`);
+  if (jiraConfig.assignee_filter) {
+    if (jiraConfig.assignee_filter === 'currentUser') {
+      jqlParts.push('assignee = currentUser()');
+    } else {
+      jqlParts.push(`assignee = "${jiraConfig.assignee_filter}"`);
+    }
+  }
+  if (jiraConfig.jql_filter) {
+    jqlParts.push(`(${jiraConfig.jql_filter})`);
+  }
+
+  const jql = jqlParts.join(' AND ') + ' ORDER BY updated DESC';
+  const jqlFields = [
+    'summary', 'description', 'status', 'priority', 'project', 'issuetype',
+    'created', 'updated', 'duedate', 'assignee', 'parent',
+  ];
+
+  // Paginate through all results
+  const result: Array<{ remoteId: string; title: string; remoteUpdatedAt: string; fields: Partial<Task> }> = [];
+  let startAt = 0;
+  const maxPerPage = 100;
+  let total = Infinity;
+
+  while (startAt < total) {
+    const searchResult = await client.searchIssues(jql, {
+      maxResults: maxPerPage,
+      startAt,
+      fields: jqlFields,
+    });
+    total = searchResult.total;
+    for (const issue of searchResult.issues) {
+      const fields = mapToLocal(issue, config);
+      result.push({
+        remoteId: issue.key,
+        title: issue.fields.summary,
+        remoteUpdatedAt: issue.fields.updated,
+        fields,
+      });
+    }
+    startAt += searchResult.issues.length;
+    if (searchResult.issues.length === 0) break;
+  }
+
+  return result;
+}
+
 // ── Full sync ──
 
 export interface JiraSyncResult {
