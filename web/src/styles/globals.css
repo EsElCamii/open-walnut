@@ -699,6 +699,7 @@ input:focus, textarea:focus, select:focus {
 .phase-picker-item.active { font-weight: 600; }
 .phase-picker-icon { width: 18px; text-align: center; font-size: 14px; }
 .phase-picker-check { margin-left: auto; color: var(--accent); font-size: 12px; }
+.phase-hook-indicator { margin-left: 4px; font-size: 11px; opacity: 0.7; cursor: help; }
 
 /* Priority picker dropdown */
 .priority-picker-wrapper { position: relative; }
@@ -12968,6 +12969,11 @@ img[data-lightbox-src],
   background: var(--card-bg);
 }
 
+.provider-card-active {
+  background: var(--card-bg);
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+
 .provider-card-header {
   display: flex;
   align-items: center;
@@ -13053,6 +13059,79 @@ img[data-lightbox-src],
 
 .provider-card-key-row .form-group {
   margin-bottom: 0;
+}
+
+/* Radio button for provider selection */
+.provider-radio {
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  border: 2px solid var(--border);
+  flex-shrink: 0;
+  cursor: pointer;
+  transition: border-color 0.15s, background 0.15s;
+  position: relative;
+}
+
+.provider-radio:hover {
+  border-color: var(--accent);
+}
+
+.provider-radio-selected {
+  border-color: var(--accent);
+  background: var(--accent);
+}
+
+.provider-radio-selected::after {
+  content: '';
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: white;
+}
+
+/* Active provider config sections */
+.provider-active-config {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-bottom: 12px;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.provider-config-row {
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+}
+
+.provider-model-config {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+}
+
+.provider-models-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--fg-muted);
+  cursor: pointer;
+  padding: 6px 0;
+  user-select: none;
+}
+
+.provider-models-toggle:hover {
+  color: var(--fg);
+}
+
+.provider-models-editor {
+  padding: 4px 0 0 0;
 }
 
 /* ── Question Popover (ask_question tool — floating above chat input) ── */

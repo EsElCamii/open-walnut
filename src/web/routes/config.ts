@@ -100,6 +100,7 @@ configRouter.get('/providers', async (_req: Request, res: Response, next: NextFu
 
       // Check if adapter is implemented
       const implemented = prov.api === 'bedrock' || prov.api === 'anthropic-messages'
+        || prov.api === 'openai-chat' || prov.api === 'google-generative-ai'
 
       // Mask key: show last 4 chars
       const rawKey = prov.api_key || prov.bearer_token || envKey
@@ -147,20 +148,26 @@ configRouter.post('/test-provider', async (req: Request, res: Response, next: Ne
 
     const { adapter, config: resolvedConfig } = resolveProvider(provider_name, providers)
 
-    // Build a minimal test request
+    // Build a minimal test request — pick a cheap model per protocol/provider
     const protocol = resolvedConfig.api
     let testModel: string
-    switch (protocol) {
-      case 'bedrock':
-        testModel = 'us.anthropic.claude-haiku-4-5-20251001-v1:0'
-        break
-      case 'anthropic-messages':
-        testModel = 'claude-haiku-4-5-20251001'
-        break
-      default:
-        res.json({ ok: false, error: `Testing not yet supported for protocol "${protocol}"` })
-        return
+    const TEST_MODELS: Record<string, Record<string, string>> = {
+      'bedrock': { '*': 'us.anthropic.claude-haiku-4-5-20251001-v1:0' },
+      'anthropic-messages': { '*': 'claude-haiku-4-5-20251001' },
+      'openai-chat': {
+        'openai': 'gpt-4o-mini',
+        'openrouter': 'anthropic/claude-haiku-4-5-20251001',
+        'deepseek': 'deepseek-chat',
+        '*': 'gpt-4o-mini',
+      },
+      'google-generative-ai': { '*': 'gemini-2.5-flash' },
     }
+    const protocolModels = TEST_MODELS[protocol]
+    if (!protocolModels) {
+      res.json({ ok: false, error: `Testing not yet supported for protocol "${protocol}"` })
+      return
+    }
+    testModel = protocolModels[provider_name] ?? protocolModels['*']
 
     const start = Date.now()
     await adapter.sendMessage({
