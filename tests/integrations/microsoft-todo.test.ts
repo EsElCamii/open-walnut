@@ -1,6 +1,8 @@
 import { describe, it, expect, vi, beforeEach, type Mock } from 'vitest';
 import { EventEmitter } from 'node:events';
 import type { Task, TaskPriority, TaskStatus } from '../../src/core/types.js';
+import { PHASE_ORDER } from '../../src/core/phase.js';
+import { PHASE_TO_MS_STATUS, phaseToMsStatus } from '../../src/integrations/ms-todo/phase.js';
 
 // ── Mocks ──
 
@@ -552,6 +554,38 @@ describe('mapToRemote → mapToLocal roundtrip', () => {
     expect(local.note).toBe('Note');
   });
 
+  it('roundtrips ALL phases 1:1 — no data loss on any phase', () => {
+    // This test enforces the contract: every Walnut phase must survive
+    // a mapToRemote → mapToLocal roundtrip unchanged. If a new phase is
+    // added to PHASE_ORDER but not handled by the MS To-Do body
+    // serializer, this test will catch it.
+
+
+    for (const phase of PHASE_ORDER) {
+      const original = makeTask({
+        title: `Phase roundtrip: ${phase}`,
+        phase,
+        description: 'desc',
+        summary: 'sum',
+        note: 'note',
+      });
+
+      const remote = mapToRemote(original);
+      const msTask = {
+        id: 'ms-id',
+        title: remote.title!,
+        status: remote.status as 'notStarted' | 'inProgress' | 'completed',
+        importance: remote.importance as 'high' | 'normal' | 'low',
+        body: remote.body as { content: string; contentType: string } | undefined,
+        createdDateTime: '2024-01-01T00:00:00Z',
+        lastModifiedDateTime: '2024-01-02T00:00:00Z',
+      };
+
+      const local = mapToLocal(msTask, 'personal');
+      expect(local.phase, `phase ${phase} did not roundtrip`).toBe(phase);
+    }
+  });
+
   it('roundtrips with only note field populated', () => {
     const original = makeTask({
       title: 'Note Only',
@@ -573,6 +607,32 @@ describe('mapToRemote → mapToLocal roundtrip', () => {
     expect(local.note).toBe('Just a note');
     expect(local.description).toBe('');
     expect(local.summary).toBe('');
+  });
+});
+
+// ────────────────────────────────────────────────────────────────────
+// Phase map completeness
+// ────────────────────────────────────────────────────────────────────
+
+describe('phase map completeness', () => {
+  it('PHASE_TO_MS_STATUS covers every phase in PHASE_ORDER', () => {
+
+
+
+    for (const phase of PHASE_ORDER) {
+      expect(PHASE_TO_MS_STATUS[phase], `PHASE_TO_MS_STATUS missing: ${phase}`).toBeDefined();
+    }
+  });
+
+  it('phaseToMsStatus never returns fallback for valid phases', () => {
+
+
+    const validStatuses = new Set(['notStarted', 'inProgress', 'completed']);
+
+    for (const phase of PHASE_ORDER) {
+      const status = phaseToMsStatus(phase);
+      expect(validStatuses.has(status), `phaseToMsStatus(${phase}) returned invalid: ${status}`).toBe(true);
+    }
   });
 });
 
