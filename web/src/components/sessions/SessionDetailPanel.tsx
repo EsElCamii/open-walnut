@@ -155,7 +155,7 @@ export function SessionDetailPanel({ session, taskTitle, summary, onTitleChanged
     const u = lastAssistant.usage as Record<string, number>;
     const totalInput = (u.input_tokens ?? 0) + (u.cache_creation_input_tokens ?? 0) + (u.cache_read_input_tokens ?? 0);
     if (totalInput > 0) {
-      const ctxSize = getContextWindowSize(rawModel);
+      const ctxSize = getContextWindowSize(rawModel, totalInput);
       contextPercent = Math.round(totalInput / ctxSize * 100);
     }
   }
@@ -284,6 +284,7 @@ export function SessionDetailPanel({ session, taskTitle, summary, onTitleChanged
                 processStatus={ps}
                 workStatus={ws}
                 size="md"
+                errorMessage={session.errorMessage}
               />
             </div>
           </div>

@@ -43,10 +43,14 @@ function is1MModel(model?: string): boolean {
 /**
  * Get the context window size for a model string.
  * Models with `[1m]` suffix have a 1M token context window; all others default to 200K.
- * TODO: Phase 4 — use ModelEntry.context_window from config when available.
+ * When totalInput is provided and exceeds 200K, auto-upgrades to 1M — Claude CLI resumes
+ * sometimes drop the `[1m]` suffix (the resumed session restores from stored state that
+ * doesn't persist the CLI --model flag's context variant), so observed usage is the truth.
  */
-export function getContextWindowSize(model?: string): number {
-  return is1MModel(model) ? CONTEXT_WINDOW_1M : CONTEXT_WINDOW_DEFAULT;
+export function getContextWindowSize(model?: string, totalInput?: number): number {
+  if (is1MModel(model)) return CONTEXT_WINDOW_1M;
+  if (totalInput != null && totalInput > CONTEXT_WINDOW_DEFAULT) return CONTEXT_WINDOW_1M;
+  return CONTEXT_WINDOW_DEFAULT;
 }
 
 /**
@@ -109,14 +113,9 @@ export async function sendMessage(opts: {
   const { adapter, config: providerConfig, model, maxTokens, betas } = await resolveForCall(opts.config);
 
   return adapter.sendMessage({
-    providerConfig,
-    model,
-    maxTokens,
-    system: opts.system,
-    messages: opts.messages,
-    tools: opts.tools,
-    signal: opts.signal,
-    betas,
+    providerConfig, model, maxTokens,
+    system: opts.system, messages: opts.messages, tools: opts.tools,
+    signal: opts.signal, betas,
   });
 }
 
@@ -136,15 +135,9 @@ export async function sendMessageStream(opts: {
   const { adapter, config: providerConfig, model, maxTokens, betas } = await resolveForCall(opts.config);
 
   return adapter.sendMessageStream({
-    providerConfig,
-    model,
-    maxTokens,
-    system: opts.system,
-    messages: opts.messages,
-    tools: opts.tools,
-    signal: opts.signal,
-    onTextDelta: opts.onTextDelta,
-    betas,
+    providerConfig, model, maxTokens,
+    system: opts.system, messages: opts.messages, tools: opts.tools,
+    signal: opts.signal, onTextDelta: opts.onTextDelta, betas,
   });
 }
 

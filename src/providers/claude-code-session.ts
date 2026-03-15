@@ -38,6 +38,7 @@ import type { SessionIO, SshTarget } from './session-io.js'
 import { recoverStateFromJsonl, extractImageFilePathFromInput } from '../core/session-history.js'
 import type { SessionRecord, SessionMode, ProcessStatus, WorkStatus } from '../core/types.js'
 import type { SessionServerClient } from './session-server-client.js'
+import { sanitizeInitModel, CONTEXT_WINDOW_DEFAULT } from '../agent/providers/defaults.js'
 
 // ── JSONL types from `claude -p --output-format stream-json --verbose` ──
 
@@ -152,10 +153,12 @@ function mapPermissionMode(cliMode: string): SessionMode | null {
 
 /**
  * Check if a JSONL output file contains a 'result' event line.
- * Only reads the last ~8KB of the file since 'result' is always the final event.
- * Used as ground truth when the JSONL tailer missed the result (race condition).
+ * Returns { hasResult: true } for successful results, { hasResult: false }
+ * otherwise. If the result has is_error:true (e.g. --resume "No conversation
+ * found"), returns { hasResult: false, errorMessage } so the caller can
+ * surface the error to the user instead of silently swallowing it.
  */
-function outputFileHasResult(filePath: string, fromOffset = 0): boolean {
+function outputFileCheckResult(filePath: string, fromOffset = 0): { hasResult: boolean; errorMessage?: string } {
   try {
     const fd = fs.openSync(filePath, 'r')
     try {
@@ -164,7 +167,7 @@ function outputFileHasResult(filePath: string, fromOffset = 0): boolean {
       // On resume, the file contains previous turns' events — including old
       // result events that would cause a false positive if we scanned them.
       const scanStart = Math.max(fromOffset, 0)
-      if (stat.size <= scanStart) return false  // No new data written this turn
+      if (stat.size <= scanStart) return { hasResult: false }  // No new data written this turn
       const bytesToRead = stat.size - scanStart
       const buf = Buffer.alloc(bytesToRead)
       fs.readSync(fd, buf, 0, bytesToRead, scanStart)
@@ -173,7 +176,14 @@ function outputFileHasResult(filePath: string, fromOffset = 0): boolean {
         if (!line.trim()) continue
         try {
           const event = JSON.parse(line)
-          if (event.type === 'result') return true
+          if (event.type === 'result') {
+            if (event.is_error) {
+              // --resume failure or other CLI error — extract message
+              const errors: string[] = Array.isArray(event.errors) ? event.errors : []
+              return { hasResult: false, errorMessage: errors[0] || 'Claude Code returned an error result' }
+            }
+            return { hasResult: true }
+          }
         } catch { continue }
       }
     } finally {
@@ -182,7 +192,7 @@ function outputFileHasResult(filePath: string, fromOffset = 0): boolean {
   } catch {
     // File doesn't exist or can't be read
   }
-  return false
+  return { hasResult: false }
 }
 
 /**
@@ -213,6 +223,9 @@ export { shellQuote } from './session-io.js'
  * @deprecated Use RemoteIO.setupRemote() instead. Kept for backwards compatibility.
  */
 export { buildRemoteCommand } from './session-io.js'
+
+// Exported for testing
+export { outputFileCheckResult }
 
 // ── ClaudeCodeSession ──
 
@@ -326,6 +339,17 @@ export class ClaudeCodeSession {
     return this._processStatus
   }
 
+  /**
+   * Mark this session's process as dead externally (e.g. pre-flight check
+   * discovered the PID is gone before a FIFO write).
+   * Clears the pipe so the next processNext() falls through to --resume.
+   */
+  markProcessDead(): void {
+    this.io?.deletePipe()
+    this._active = false
+    this._processStatus = 'stopped'
+  }
+
   get workStatus(): WorkStatus {
     return this._workStatus
   }
@@ -386,13 +410,18 @@ export class ClaudeCodeSession {
     } else {
       this._mode = 'default'
     }
-    // Map internal model IDs to CLI --model values
-    // '*-1m' variants → full model ID with [1m] suffix for 1M context window
+    // Map picker short IDs → full CLI model identifiers.
+    // The CLI understands [1m] suffix for 1M context window.
+    // Use full Bedrock model IDs for explicit control (short names like 'opus'
+    // let the CLI choose the context variant, which may change between versions).
     const MODEL_CLI_MAP: Record<string, string> = {
-      'opus-1m': 'claude-opus-4-6[1m]',
-      'sonnet-1m': 'claude-sonnet-4-6[1m]',
+      'opus':      'global.anthropic.claude-opus-4-6-v1',
+      'opus-1m':   'global.anthropic.claude-opus-4-6-v1[1m]',
+      'sonnet':    'us.anthropic.claude-sonnet-4-5-20250929-v1:0',
+      'sonnet-1m': 'us.anthropic.claude-sonnet-4-5-20250929-v1:0[1m]',
+      'haiku':     'us.anthropic.claude-haiku-4-5-20251001-v1:0',
     }
-    const cliModel = MODEL_CLI_MAP[model ?? ''] ?? (model || 'opus')
+    const cliModel = MODEL_CLI_MAP[model ?? ''] ?? (model || 'global.anthropic.claude-opus-4-6-v1[1m]')
     args.push('--model', cliModel)
     if (resumeSessionId) {
       this.claudeSessionId = resumeSessionId
@@ -1095,9 +1124,9 @@ export class ClaudeCodeSession {
 
     // If no result was emitted by the tailer, determine fallback behavior.
     if (!this.resultEmitted && !this._turnResultEmitted) {
-      const hasResultInFile = this._outputFile
-        ? outputFileHasResult(this._outputFile, this._turnStartOffset)
-        : false
+      const { hasResult: hasResultInFile, errorMessage: resultErrorMessage } = this._outputFile
+        ? outputFileCheckResult(this._outputFile, this._turnStartOffset)
+        : { hasResult: false, errorMessage: undefined }
 
       this.resultEmitted = true
 
@@ -1120,6 +1149,23 @@ export class ClaudeCodeSession {
           taskId: this.taskId,
           result: this.fullText,
           isError: false,
+        }, ['main-ai', 'session-runner'], { source: 'session-runner' })
+      } else if (resultErrorMessage) {
+        // Result event exists but is_error:true — e.g. --resume "No conversation found".
+        // Surface the error instead of silently treating it as success.
+        this._workStatus = 'error'
+        this._activity = undefined
+        this.emitStatusChanged('error', 'in_progress')
+        log.session.error('session PID died — error result in output file', {
+          taskId: this.taskId,
+          sessionId: this.claudeSessionId,
+          host: this._host,
+          errorMessage: resultErrorMessage,
+        })
+        bus.emit(EventNames.SESSION_ERROR, {
+          sessionId: this.claudeSessionId,
+          taskId: this.taskId,
+          error: resultErrorMessage,
         }, ['main-ai', 'session-runner'], { source: 'session-runner' })
       } else {
         let stderr = ''
@@ -1302,19 +1348,27 @@ export class ClaudeCodeSession {
             this._outputFile = this.io.outputFile
           }
 
-          // Capture model from init event for in-memory state (used by emitStatusChanged below)
-          // Strip ANSI escape codes — Claude CLI's --verbose mode may embed ANSI bold/color
-          // sequences in the sys.model JSON field (e.g. "\x1b[1m" for bold).
-          // Only strip sequences that start with the ESC character (\x1b).  A bare "[1m]"
-          // suffix is the legitimate 1M context window marker and must NOT be stripped.
+          // Capture model from init event — sanitize ANSI codes and validate.
+          // sanitizeInitModel strips real ANSI escapes (\x1b[...) while preserving
+          // the legitimate [1m] context window marker, then rejects malformed results.
           const rawModel = typeof sys.model === 'string' && sys.model
-            // eslint-disable-next-line no-control-regex
-            ? sys.model.replace(/\x1b\[[0-9;]*m/g, '')
+            ? sanitizeInitModel(sys.model)
             : undefined
           if (rawModel) {
             this._initModel = rawModel
             // Extract short model ID for display (e.g. "claude-opus-4-6")
             const shortModel = rawModel.replace(/^.*\./, '').replace(/[-_]v\d+.*$/, '') || rawModel
+            this._model = shortModel
+          } else if (typeof sys.model === 'string' && sys.model) {
+            // sanitizeInitModel rejected the string — log so we can diagnose.
+            log.session.warn('init model failed validation, using raw', {
+              rawModel: sys.model, sessionId: newId,
+            })
+            // Fall back to raw string with only ESC-prefix ANSI stripped
+            // eslint-disable-next-line no-control-regex
+            const fallback = sys.model.replace(/\x1b\[[0-9;]*[A-Za-z]/g, '')
+            this._initModel = fallback
+            const shortModel = fallback.replace(/^.*\./, '').replace(/[-_]v\d+.*$/, '') || fallback
             this._model = shortModel
           }
 
@@ -1565,6 +1619,11 @@ export class ClaudeCodeSession {
         }
 
         // ── Emit context window usage from assistant message ──
+        // Skip subagent messages — Agent/Task tool calls produce assistant messages
+        // with their own independent (smaller) context windows.  Without this guard,
+        // the UI bounces between parent (248K) and subagent (50K) context percentages.
+        // parent_tool_use_id is null for parent conversation, set for subagents.
+        if (parentToolUseId) break
         // Context % = totalInput / contextWindowSize * 100
         //   totalInput = input_tokens + cache_creation_input_tokens + cache_read_input_tokens
         //   These three fields are mutually exclusive (no overlap):
@@ -1579,8 +1638,13 @@ export class ClaudeCodeSession {
             const totalInput = usage.input_tokens
               + (usage.cache_creation_input_tokens ?? 0)
               + (usage.cache_read_input_tokens ?? 0)
-            // Detect context window size from init model string: [1m] → 1M, default 200K
-            const is1M = this._initModel?.includes('[1m]') ?? false
+            // Detect context window size:
+            //   1) init model string contains [1m] → 1M
+            //   2) totalInput > 200K → must be 1M (Claude CLI resumes sometimes
+            //      drop the [1m] suffix — auto-upgrade based on observed usage)
+            //   3) default → 200K
+            const is1M = (this._initModel?.includes('[1m]') ?? false)
+              || totalInput > CONTEXT_WINDOW_DEFAULT
             const contextWindowSize = is1M ? 1_000_000 : 200_000
             const contextPercent = Math.round(totalInput / contextWindowSize * 100)
             // Use assistant message model only as fallback when init event didn't
@@ -2884,7 +2948,17 @@ export class SessionRunner {
 
       // Try stdin write first (stream-json mode — reuses running process)
       if (targetSession && !hasPendingSwitch) {
-        if (targetSession.writeMessage(combined)) {
+        // Pre-flight liveness check: verify process is alive before writing to FIFO.
+        // Without this, a dead process leaves a stale FIFO on disk — writes succeed
+        // (kernel buffers them) but nobody reads, so messages are silently lost.
+        const pid = targetSession.processPid
+        if (pid && !isProcessAlive(pid, targetSession.host ? 'ssh' : 'claude')) {
+          log.session.warn('processNext: process dead before FIFO write — clearing pipe for --resume', {
+            sessionId, pid, host: targetSession.host,
+          })
+          targetSession.markProcessDead()
+          // Fall through to --resume spawn path below
+        } else if (targetSession.writeMessage(combined)) {
           log.session.info('processNext: message sent via stdin (no new process)', { sessionId })
 
           // Write synthetic user events to streams file so Phase 1 has user messages.

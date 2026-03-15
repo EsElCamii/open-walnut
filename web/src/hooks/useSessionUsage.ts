@@ -61,8 +61,11 @@ export function formatModelName(model: string | undefined): string {
   return `${family}${suffix}`;
 }
 
-/** Detect context window size from model string. Returns tokens. */
-export function getContextWindowSize(model: string | undefined): number {
+/** Detect context window size from model string and observed token usage. Returns tokens. */
+export function getContextWindowSize(model: string | undefined, totalInput?: number): number {
   if (model?.toLowerCase().includes('[1m]')) return 1_000_000;
+  // Claude CLI resumes sometimes drop the [1m] suffix — if tokens exceed 200K,
+  // the session must be using 1M context (you can't exceed the window).
+  if (totalInput != null && totalInput > 200_000) return 1_000_000;
   return 200_000;
 }

@@ -151,7 +151,7 @@ export const SessionPanel = memo(function SessionPanel({ sessionId, onClose, onT
     const u = lastAssistant.usage as Record<string, number>;
     const totalInput = (u.input_tokens ?? 0) + (u.cache_creation_input_tokens ?? 0) + (u.cache_read_input_tokens ?? 0);
     if (totalInput > 0) {
-      const ctxSize = getContextWindowSize(rawModel);
+      const ctxSize = getContextWindowSize(rawModel, totalInput);
       contextPercent = Math.round(totalInput / ctxSize * 100);
     }
   }
@@ -396,6 +396,7 @@ export const SessionPanel = memo(function SessionPanel({ sessionId, onClose, onT
                   processStatus={ps}
                   workStatus={ws}
                   size="sm"
+                  errorMessage={session?.errorMessage}
                 />
               )}
               {loading && <span className="session-panel-badge" style={{ color: 'var(--fg-muted)' }}>Loading...</span>}
