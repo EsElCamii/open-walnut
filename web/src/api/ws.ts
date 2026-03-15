@@ -1,3 +1,12 @@
+/**
+ * WebSocket client — singleton, auto-reconnects, dispatches events.
+ *
+ * LOGGING: Use console.log (NOT console.debug) everywhere in this file.
+ * Browser logs are forwarded to the server log forwarder, but console.debug
+ * is filtered out by both Chrome defaults and the forwarder. Using console.log
+ * ensures WS events appear in /tmp/open-walnut/ for post-mortem debugging.
+ */
+
 /** WebSocket frame types matching the server protocol. */
 export interface WsEventFrame {
   type: 'event';
@@ -53,6 +62,9 @@ class WsClient {
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private disposed = false;
   private eventCount = 0;
+  // Distinguishes cold first-connect from subsequent reconnects.
+  // `_ws:reconnected` only fires on reconnects, not the initial page load.
+  private hasConnectedBefore = false;
 
   get state() {
     return this._state;
@@ -65,17 +77,27 @@ class WsClient {
 
     const proto = window.location.protocol === 'https:' ? 'wss' : 'ws';
     const url = `${proto}://${window.location.host}/ws`;
-    console.debug(`${logPrefix()} connecting to ${url}`);
+    console.log(`${logPrefix()} connecting to ${url}`);
     const ws = new WebSocket(url);
 
     ws.onopen = () => {
+      const isReconnect = this.hasConnectedBefore;
+      this.hasConnectedBefore = true;
       this.reconnectDelay = 1000;
       this.setState('connected');
-      console.debug(`${logPrefix()} connected`);
+      console.log(`${logPrefix()} connected${isReconnect ? ' (reconnect)' : ''}`);
+      // On reconnect, emit a synthetic event so components can re-fetch stale data.
+      // Events during the disconnect window are permanently lost — the server has
+      // no event buffer/replay; events are fire-and-forget over the live socket.
+      // This lets SessionPanel re-fetch status and SessionChatHistory re-fetch history.
+      if (isReconnect) {
+        // seq: -1 is a sentinel meaning client-synthetic event, not a server-sequenced frame.
+        this.dispatchEvent({ type: 'event', name: '_ws:reconnected', data: {}, seq: -1 });
+      }
     };
 
     ws.onclose = (ev) => {
-      console.debug(`${logPrefix()} disconnected (code=${ev.code}, reason=${ev.reason || 'none'})`);
+      console.log(`${logPrefix()} disconnected (code=${ev.code}, reason=${ev.reason || 'none'})`);
       this.ws = null;
       this.setState('disconnected');
       this.rejectPending('WebSocket disconnected');
@@ -105,7 +127,7 @@ class WsClient {
   }
 
   disconnect() {
-    console.debug(`${logPrefix()} disconnect() called`);
+    console.log(`${logPrefix()} disconnect() called`);
     this.disposed = true;
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);
@@ -126,13 +148,13 @@ class WsClient {
       this.eventListeners.set(name, set);
     }
     set.add(cb);
-    console.debug(`${logPrefix()} listener added: "${name}" (${set.size} total)`);
+    console.log(`${logPrefix()} listener added: "${name}" (${set.size} total)`);
   }
 
   offEvent(name: string, cb: EventCallback) {
     const set = this.eventListeners.get(name);
     set?.delete(cb);
-    console.debug(`${logPrefix()} listener removed: "${name}" (${set?.size ?? 0} remaining)`);
+    console.log(`${logPrefix()} listener removed: "${name}" (${set?.size ?? 0} remaining)`);
   }
 
   onConnectionChange(cb: ConnectionCallback) {
@@ -156,7 +178,7 @@ class WsClient {
         resolve: resolve as (v: unknown) => void,
         reject,
       });
-      console.debug(`${logPrefix()} RPC → ${method} (id=${id})`, payload);
+      console.log(`${logPrefix()} RPC → ${method} (id=${id})`, payload);
       this.ws.send(JSON.stringify(frame));
     });
   }
@@ -165,7 +187,8 @@ class WsClient {
     if (this._state === state) return;
     const prev = this._state;
     this._state = state;
-    console.debug(`${logPrefix()} state: ${prev} → ${state}`);
+    // Use console.log (not debug) so state transitions are captured by browser log forwarder
+    console.log(`${logPrefix()} state: ${prev} → ${state}`);
     for (const cb of this.connectionListeners) {
       try { cb(state); } catch (err) {
         console.error(`${logPrefix()} connectionChange callback error`, err);
@@ -179,12 +202,11 @@ class WsClient {
     const listenerCount = cbs?.size ?? 0;
 
     if (!SUPPRESSED_EVENTS.has(frame.name)) {
-      // Log all non-streaming events with their data
       const summary = this.summarizeEventData(frame.name, frame.data);
       if (listenerCount === 0) {
-        console.debug(`${logPrefix()} #${frame.seq} "${frame.name}" — NO LISTENERS`, summary);
+        console.log(`${logPrefix()} #${frame.seq} "${frame.name}" — NO LISTENERS`, summary);
       } else {
-        console.debug(`${logPrefix()} #${frame.seq} "${frame.name}" → ${listenerCount} listener(s)`, summary);
+        console.log(`${logPrefix()} #${frame.seq} "${frame.name}" → ${listenerCount} listener(s)`, summary);
       }
     }
 
@@ -234,7 +256,7 @@ class WsClient {
     }
     this.pendingRpc.delete(frame.id);
     if (frame.ok) {
-      console.debug(`${logPrefix()} RPC ← ${frame.id} OK`, frame.payload);
+      console.log(`${logPrefix()} RPC ← ${frame.id} OK`, frame.payload);
       pending.resolve(frame.payload);
     } else {
       console.warn(`${logPrefix()} RPC ← ${frame.id} ERROR: ${frame.error}`);
@@ -254,7 +276,7 @@ class WsClient {
 
   private scheduleReconnect() {
     if (this.reconnectTimer) return;
-    console.debug(`${logPrefix()} reconnecting in ${this.reconnectDelay}ms`);
+    console.log(`${logPrefix()} reconnecting in ${this.reconnectDelay}ms`);
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null;
       this.connect();

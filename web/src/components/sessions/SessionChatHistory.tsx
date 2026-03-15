@@ -599,6 +599,15 @@ export const SessionChatHistory = memo(function SessionChatHistory({ sessionId, 
     }
   });
 
+  // WebSocket reconnect: re-fetch history to recover events lost during disconnect.
+  // Without this, a turn that completed during disconnect would be invisible.
+  // awaitingRefresh tells the useLayoutEffect below to clear streaming blocks and
+  // trigger scroll-to-bottom when the re-fetched history arrives with new messages.
+  useEvent('_ws:reconnected', () => {
+    awaitingRefresh.current = true;
+    setHistoryVersion((v) => v + 1);
+  });
+
   // Agent-sent messages: create synthetic optimistic message so it appears in the queue
   useEvent('session:message-queued', (data) => {
     const d = data as { sessionId?: string; messageId?: string; message?: string; source?: string };

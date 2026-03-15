@@ -122,6 +122,8 @@ export function SessionsPage() {
   useEvent('session:started', () => { loadTree(); });
   useEvent('session:ended', () => { loadTree(); });
   useEvent('session:result', () => { loadTree(); });
+  // Re-fetch tree on WebSocket reconnect — events during disconnect are lost
+  useEvent('_ws:reconnected', () => { loadTree(); });
   useEvent('session:error', (data: unknown) => {
     // Optimistically patch errorMessage so SessionDetailPanel shows it immediately
     const d = data as { sessionId?: string; error?: string };

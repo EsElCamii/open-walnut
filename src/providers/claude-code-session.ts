@@ -1303,13 +1303,13 @@ export class ClaudeCodeSession {
           }
 
           // Capture model from init event for in-memory state (used by emitStatusChanged below)
-          // Strip ANSI escape codes first — Claude CLI's --verbose mode embeds ANSI bold/color
-          // sequences in the sys.model JSON field (e.g. "global.anthropic.claude-opus-4-6-v1\x1b[1m").
-          // Without stripping, the "[1m]" suffix triggers the 1M context window detection path
-          // (stripModelSuffix), and the model display shows garbage characters in the UI.
+          // Strip ANSI escape codes — Claude CLI's --verbose mode may embed ANSI bold/color
+          // sequences in the sys.model JSON field (e.g. "\x1b[1m" for bold).
+          // Only strip sequences that start with the ESC character (\x1b).  A bare "[1m]"
+          // suffix is the legitimate 1M context window marker and must NOT be stripped.
           const rawModel = typeof sys.model === 'string' && sys.model
             // eslint-disable-next-line no-control-regex
-            ? sys.model.replace(/\x1b\[[0-9;]*m/g, '').replace(/\[[\d;]*m/g, '')
+            ? sys.model.replace(/\x1b\[[0-9;]*m/g, '')
             : undefined
           if (rawModel) {
             this._initModel = rawModel

@@ -250,6 +250,22 @@ export const SessionPanel = memo(function SessionPanel({ sessionId, onClose, onT
     }
   });
 
+  // Keep sessionTask in sync with real-time task events (phase changes, completions)
+  useEvent('task:updated', (data) => {
+    const d = data as { task?: import('@open-walnut/core').Task };
+    if (d.task && session?.taskId && d.task.id === session.taskId) {
+      setSessionTask(d.task);
+      setTaskTitle(d.task.title);
+    }
+  });
+  useEvent('task:completed', (data) => {
+    const d = data as { task?: import('@open-walnut/core').Task };
+    if (d.task && session?.taskId && d.task.id === session.taskId) {
+      setSessionTask(d.task);
+      setTaskTitle(d.task.title);
+    }
+  });
+
   useEvent('session:result', (data) => {
     const d = data as { sessionId?: string };
     if (d.sessionId === sessionId) {
@@ -264,6 +280,16 @@ export const SessionPanel = memo(function SessionPanel({ sessionId, onClose, onT
       if (d.error) {
         setSession(prev => prev ? { ...prev, work_status: 'error' as const, errorMessage: d.error!.slice(0, 500) } : prev);
       }
+      fetchSession(sessionId).then((s) => { if (s) setSession(s); }).catch(() => {});
+    }
+  });
+
+  // Re-fetch session state on WebSocket reconnect.
+  // Events during disconnect (e.g. session:status-changed, session:result) are lost;
+  // without this, the UI can show stale "Resuming session..." indefinitely.
+  // Typical trigger: a `dev:prod` server restart drops the WS connection briefly.
+  useEvent('_ws:reconnected', () => {
+    if (sessionId) {
       fetchSession(sessionId).then((s) => { if (s) setSession(s); }).catch(() => {});
     }
   });
