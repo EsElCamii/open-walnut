@@ -157,9 +157,12 @@ function BedrockConfig({
   );
 }
 
+// Protocols where the global available_models list (Bedrock/Anthropic IDs) is relevant
+const CLAUDE_PROTOCOLS = new Set(['bedrock', 'anthropic-messages']);
+
 // ── Model config inside the active provider card ──
 function ModelConfig({
-  config,
+  providerApi,
   mainModel,
   sessionModel,
   availableModels,
@@ -171,7 +174,7 @@ function ModelConfig({
   onMaxTokensChange,
   onToggleModels,
 }: {
-  config: Config;
+  providerApi: string;
   mainModel: string;
   sessionModel: string;
   availableModels: string[];
@@ -183,10 +186,13 @@ function ModelConfig({
   onMaxTokensChange: (v: number | undefined) => void;
   onToggleModels: () => void;
 }) {
+  // Only show Model dropdown + Session Model for Claude-compatible protocols
+  const isClaude = CLAUDE_PROTOCOLS.has(providerApi);
+
   return (
     <div className="provider-model-config">
       <div className="provider-config-row">
-        {availableModels.length > 0 && (
+        {isClaude && availableModels.length > 0 && (
           <div className="form-group" style={{ margin: 0, flex: 1 }}>
             <label htmlFor="main-model">Model</label>
             <select
@@ -201,18 +207,20 @@ function ModelConfig({
             </select>
           </div>
         )}
-        <div className="form-group" style={{ margin: 0, flex: 1 }}>
-          <label htmlFor="session-model">Session Model</label>
-          <select
-            id="session-model"
-            value={sessionModel}
-            onChange={(e) => onSessionModelChange(e.target.value)}
-          >
-            <option value="opus">Opus</option>
-            <option value="sonnet">Sonnet</option>
-            <option value="haiku">Haiku</option>
-          </select>
-        </div>
+        {isClaude && (
+          <div className="form-group" style={{ margin: 0, flex: 1 }}>
+            <label htmlFor="session-model">Session Model</label>
+            <select
+              id="session-model"
+              value={sessionModel}
+              onChange={(e) => onSessionModelChange(e.target.value)}
+            >
+              <option value="opus">Opus</option>
+              <option value="sonnet">Sonnet</option>
+              <option value="haiku">Haiku</option>
+            </select>
+          </div>
+        )}
         <div className="form-group" style={{ margin: 0, flex: 1, maxWidth: 160 }}>
           <label htmlFor="max-tokens">Max Tokens</label>
           <NumberInput
@@ -438,7 +446,7 @@ function ProviderCard({
           {/* Model config — only shown for the active provider */}
           {isActive && (
             <ModelConfig
-              config={config}
+              providerApi={def.api}
               mainModel={mainModel}
               sessionModel={sessionModel}
               availableModels={availableModels}
