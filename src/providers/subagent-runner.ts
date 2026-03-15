@@ -242,10 +242,12 @@ export class SubagentRunner {
     const title = `${agentDef.name}: ${data.task.slice(0, 80)}`;
     try {
       const { createSessionRecord } = await import('../core/session-tracker.js');
+      const sessionType: import('../core/types.js').SessionType = TRIAGE_AGENT_IDS.has(agentId) ? 'triage' : 'subagent';
       await createSessionRecord(runId, data.taskId ?? '', taskProject, process.cwd(), {
         provider: 'embedded',
         title,
         mode: 'default',
+        type: sessionType,
       });
     } catch (err) {
       log.subagent.warn('failed to create session record for embedded run', {

@@ -416,6 +416,7 @@ export type ProcessStatus = 'running' | 'idle' | 'stopped';
 export type WorkStatus = 'in_progress' | 'agent_complete' | 'await_human_action' | 'completed' | 'error';
 export type SessionMode = 'bypass' | 'accept' | 'default' | 'plan';
 export type SessionProvider = 'cli' | 'sdk' | 'embedded';
+export type SessionType = 'interactive' | 'triage' | 'hook' | 'cron' | 'subagent';
 
 export interface SessionRecord {
   claudeSessionId: string;
@@ -425,6 +426,8 @@ export interface SessionRecord {
   work_status: WorkStatus;
   mode: SessionMode;
   provider?: SessionProvider;
+  /** Session type — determines lifecycle and cleanup behavior. Undefined = 'interactive'. */
+  type?: SessionType;
   activity?: string;
   last_status_change?: string;
   startedAt: string;

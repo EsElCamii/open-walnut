@@ -43,6 +43,7 @@ import { CronService } from '../core/cron/index.js'
 import { CRON_FILE } from '../constants.js'
 import { sessionRunner } from '../providers/claude-code-session.js'
 import { SessionHealthMonitor } from '../core/session-health-monitor.js'
+import { SessionReaper } from '../core/session-reaper.js'
 import { subagentRunner } from '../providers/subagent-runner.js'
 import { seedConfigDefaults } from '../core/config-manager.js'
 import { getTask, listTasks } from '../core/task-manager.js'
@@ -98,6 +99,7 @@ let httpServer: HttpServer | null = null
 let pluginSyncTimers: ReturnType<typeof setInterval>[] = []
 let cronServiceInstance: CronService | null = null
 let healthMonitor: SessionHealthMonitor | null = null
+let sessionReaper: SessionReaper | null = null
 let heartbeatHandle: HeartbeatRunnerHandle | null = null
 let memoryWatcherHandle: { stop: () => void } | null = null
 let gitAutoCommitHandle: { stop: () => void; health: GitAutoCommitHealth } | null = null
@@ -585,6 +587,10 @@ export async function startServer(options: ServerOptions = {}): Promise<HttpServ
   // -- Start session health monitor --
   healthMonitor = new SessionHealthMonitor()
   healthMonitor.start()
+
+  // -- Start session reaper (periodic cleanup of high-volume triage session records) --
+  sessionReaper = new SessionReaper()
+  sessionReaper.start()
 
   // -- Wire bus subscriber to push events to WS clients --
   bus.subscribe('web-ui', (event) => {
@@ -1690,6 +1696,10 @@ export async function stopServer(): Promise<void> {
   if (healthMonitor) {
     healthMonitor.stop()
     healthMonitor = null
+  }
+  if (sessionReaper) {
+    sessionReaper.stop()
+    sessionReaper = null
   }
   if (cronServiceInstance) {
     cronServiceInstance.stop()

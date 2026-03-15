@@ -29,7 +29,8 @@ export interface ReconcileResult {
  *     (only the agent/human can set 'completed') and clean up task references
  */
 export async function reconcileSessions(): Promise<ReconcileResult> {
-  const { listSessions, updateSessionRecord } = await import('./session-tracker.js')
+  const { listSessions, updateSessionRecord, updateSessionRecordConditionally } = await import('./session-tracker.js')
+  const reconcilerStartedAt = new Date().toISOString()
 
   let sessions: SessionRecord[]
   try {
@@ -42,63 +43,44 @@ export async function reconcileSessions(): Promise<ReconcileResult> {
   }
 
   const { TERMINAL_WORK_STATUSES } = await import('./session-tracker.js')
+  // Only reconcile interactive sessions (CLI with detached processes).
+  // Embedded types (triage/hook/cron/subagent) have no PID — no process to check.
+  // Triage/hook/cron are cleaned up by SessionReaper; subagent sessions are user-visible and persist.
+  // All sessions have type set by readStore() migration (runs inside listSessions above).
   const zombieCandidates = sessions.filter(
-    (s) => !TERMINAL_WORK_STATUSES.has(s.work_status),
+    (s) => !TERMINAL_WORK_STATUSES.has(s.work_status)
+      && s.type === 'interactive'
+      && s.process_status !== 'stopped',
   )
 
   if (zombieCandidates.length === 0) {
-    log.session.info('session reconciler: no non-terminal sessions found')
+    log.session.info('session reconciler: no non-terminal interactive sessions found')
     return { reconciled: 0, reconnectable: [] }
   }
 
   log.session.info('session reconciler: checking sessions', { count: zombieCandidates.length })
 
+  // Parallel PID liveness checks — all I/O happens concurrently
+  const results = await Promise.allSettled(zombieCandidates.map(async (session) => {
+    const processName = session.host ? 'ssh' : 'claude'
+    const alive = session.pid != null && session.outputFile
+      && await isProcessAliveAsync(session.pid, processName)
+    return { session, alive }
+  }))
+
   let reconciled = 0
   const reconnectable: SessionRecord[] = []
 
-  for (const session of zombieCandidates) {
-    // SDK and embedded sessions have no detached process to reconnect.
-    // SDK: session server clears state on restart.
-    // Embedded: in-process loop is lost when the server restarts.
-    // Mark both as agent_complete so the UI shows them as resumable.
-    if (session.provider === 'sdk' || session.provider === 'embedded') {
-      try {
-        const now = new Date().toISOString()
-        await updateSessionRecord(session.claudeSessionId, {
-          process_status: 'stopped',
-          work_status: 'agent_complete',
-          activity: undefined,
-          last_status_change: now,
-        })
-        reconciled++
-
-        bus.emit(EventNames.SESSION_STATUS_CHANGED, {
-          sessionId: session.claudeSessionId,
-          taskId: session.taskId,
-          process_status: 'stopped',
-          work_status: 'agent_complete',
-          previousWorkStatus: session.work_status,
-        }, ['*'], { source: 'reconciler', urgency: 'urgent' })
-
-        log.session.info(`session reconciler: marked ${session.provider} session agent_complete`, {
-          sessionId: session.claudeSessionId,
-          taskId: session.taskId || '(none)',
-        })
-      } catch (err) {
-        log.session.warn(`session reconciler: failed to reconcile ${session.provider} session`, {
-          sessionId: session.claudeSessionId,
-          error: err instanceof Error ? err.message : String(err),
-        })
-      }
+  // Process results — updateSessionRecord calls are serialized by the write lock
+  for (const r of results) {
+    if (r.status === 'rejected') {
+      log.session.warn('session reconciler: PID check failed', { error: String(r.reason) })
       continue
     }
+    const { session, alive } = r.value
 
-    // Check if this session has detached-mode fields and its process is still alive
-    const processName = session.host ? 'ssh' : 'claude'
-    if (session.pid != null && session.outputFile && await isProcessAliveAsync(session.pid, processName)) {
-      // Process is alive — determine correct process_status:
-      //   running = actively processing (work_status is in_progress)
-      //   idle = turn complete, waiting for input
+    if (alive) {
+      // Process survived server restart — reconnectable
       const correctProcessStatus = session.work_status === 'in_progress' ? 'running' : 'idle'
       await updateSessionRecord(session.claudeSessionId, {
         process_status: correctProcessStatus,
@@ -116,22 +98,39 @@ export async function reconcileSessions(): Promise<ReconcileResult> {
 
     // Session is dead — mark as agent_complete (not completed).
     // Only the agent or human can determine if the work is truly done.
+    // Use conditional update to prevent stale-snapshot race:
+    //   - If the record was updated after we started (new process spawned), skip.
+    //   - If the PID changed (new process), skip.
+    //   - If already stopped, skip (redundant write).
     try {
+      const snapshotPid = session.pid
       const now = new Date().toISOString()
-      await updateSessionRecord(session.claudeSessionId, {
-        process_status: 'stopped',
-        work_status: 'agent_complete',
-        activity: undefined,
-        last_status_change: now,
-      })
+      const updated = await updateSessionRecordConditionally(
+        session.claudeSessionId,
+        {
+          process_status: 'stopped',
+          work_status: 'agent_complete',
+          activity: undefined,
+          last_status_change: now,
+        },
+        (current) => {
+          if (current.last_status_change && current.last_status_change > reconcilerStartedAt) return false
+          if (current.pid !== snapshotPid) return false
+          if (current.process_status === 'stopped') return false
+          return true
+        },
+      )
 
-      // Do NOT clear session slot — agent_complete sessions are still linked
-      // to their tasks and can be resumed. Slots are only cleared when
-      // work_status transitions to 'completed' (agent/human decision).
+      if (!updated) {
+        log.session.info('session reconciler: skipped stale update (record changed since snapshot)', {
+          sessionId: session.claudeSessionId,
+          snapshotPid,
+        })
+        continue
+      }
 
       reconciled++
 
-      // Notify UI subscribers so dashboards update immediately
       bus.emit(EventNames.SESSION_STATUS_CHANGED, {
         sessionId: session.claudeSessionId,
         taskId: session.taskId,

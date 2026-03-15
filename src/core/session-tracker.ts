@@ -5,7 +5,7 @@ import { readJsonFile, writeJsonFile, ensureDir } from '../utils/fs.js';
 import { withFileLock } from '../utils/file-lock.js';
 import { isProcessAlive } from '../utils/process.js';
 import { log } from '../logging/index.js';
-import type { SessionSummary, SessionRecord, SessionMode, Task } from './types.js';
+import type { SessionSummary, SessionRecord, SessionMode, SessionType, Task } from './types.js';
 
 // ── Triage detection ──
 
@@ -29,9 +29,15 @@ const TRIAGE_NAME_PATTERNS = new Set([
 /**
  * Returns true if a session record represents a triage subagent run (auto-triggered,
  * high-frequency). These should be hidden from the user-facing session list.
- * Checks both agent IDs and display names for robustness.
+ *
+ * Uses the `type` field (set at creation or by migration). Falls back to title-prefix
+ * heuristic only for records that haven't been through migration yet (shouldn't happen
+ * in normal operation — migration runs on every readStore()).
  */
 export function isTriageSession(s: SessionRecord): boolean {
+  if (s.type) return s.type === 'triage';
+  // Actively used during readStore() migration for legacy records (type not yet set).
+  // After migration, only reached if a record is somehow written without a type field.
   if (s.provider !== 'embedded') return false;
   const prefix = s.title?.split(':')[0]?.trim() ?? '';
   return TRIAGE_AGENTS.has(prefix) || TRIAGE_NAME_PATTERNS.has(prefix);
@@ -113,6 +119,17 @@ async function readStore(): Promise<SessionStoreV2> {
       session.last_status_change ??= session.lastActiveAt;
       migrated = true;
     }
+  }
+
+  // Migrate: tag all sessions with explicit type
+  for (const session of store.sessions) {
+    if (session.type) continue;  // already has type
+    if (session.provider === 'embedded') {
+      session.type = isTriageSession(session) ? 'triage' : 'subagent';
+    } else {
+      session.type = 'interactive';
+    }
+    migrated = true;
   }
 
   if (migrated) {
@@ -407,7 +424,7 @@ export async function createSessionRecord(
   taskId: string,
   project: string,
   cwd?: string,
-  extra?: { pid?: number; outputFile?: string; title?: string; description?: string; mode?: SessionMode; planFile?: string; planCompleted?: boolean; host?: string; provider?: import('./types.js').SessionProvider; fromPlanSessionId?: string; forkedFromSessionId?: string },
+  extra?: { pid?: number; outputFile?: string; title?: string; description?: string; mode?: SessionMode; planFile?: string; planCompleted?: boolean; host?: string; provider?: import('./types.js').SessionProvider; type?: SessionType; fromPlanSessionId?: string; forkedFromSessionId?: string },
 ): Promise<SessionRecord> {
   return withWriteLock(async () => {
     const store = await readStore();
@@ -461,6 +478,7 @@ export async function createSessionRecord(
       ...(extra?.planCompleted != null ? { planCompleted: extra.planCompleted } : {}),
       ...(extra?.host ? { host: extra.host } : {}),
       ...(extra?.provider ? { provider: extra.provider } : {}),
+      type: extra?.type ?? 'interactive',
       ...(extra?.fromPlanSessionId ? { fromPlanSessionId: extra.fromPlanSessionId } : {}),
       ...(extra?.forkedFromSessionId ? { forkedFromSessionId: extra.forkedFromSessionId } : {}),
     };
@@ -511,6 +529,7 @@ export async function importSessionRecord(opts: {
       startedAt: opts.startedAt ?? now,
       lastActiveAt: opts.lastActiveAt ?? now,
       messageCount: opts.messageCount ?? 0,
+      type: 'interactive',
       ...(opts.cwd ? { cwd: opts.cwd } : {}),
       ...(opts.host ? { host: opts.host } : {}),
       ...(opts.title ? { title: opts.title } : {}),
@@ -555,6 +574,38 @@ export async function updateSessionRecord(
     session.lastActiveAt = new Date().toISOString();
     await writeStore(store);
     log.session.info('session record updated', { sessionId: claudeSessionId, fields: Object.keys(updates) });
+    return session;
+  });
+}
+
+/**
+ * Conditionally update an existing session's fields.
+ * Re-reads the record inside the write lock and calls `shouldUpdate(current)` before writing.
+ * Returns the updated record, or null if the predicate returned false (update skipped).
+ */
+export async function updateSessionRecordConditionally(
+  claudeSessionId: string,
+  updates: Partial<Omit<SessionRecord, 'claudeSessionId'>>,
+  shouldUpdate: (current: SessionRecord) => boolean,
+): Promise<SessionRecord | null> {
+  return withWriteLock(async () => {
+    const store = await readStore();
+    const session = store.sessions.find((s) => s.claudeSessionId === claudeSessionId);
+    if (!session) return null;
+
+    if (!shouldUpdate(session)) return null;
+
+    Object.assign(session, updates);
+
+    if (updates.work_status && TERMINAL_WORK_STATUSES.has(updates.work_status) && session.pid != null) {
+      log.session.info('clearing stale PID on terminal transition (conditional)', {
+        sessionId: claudeSessionId, pid: session.pid, work_status: updates.work_status,
+      });
+      session.pid = undefined;
+    }
+    session.lastActiveAt = new Date().toISOString();
+    await writeStore(store);
+    log.session.info('session record updated (conditional)', { sessionId: claudeSessionId, fields: Object.keys(updates) });
     return session;
   });
 }
@@ -640,6 +691,21 @@ export async function completeTaskSessions(sessionIds: string[]): Promise<number
       }
     }
     return updated;
+  });
+}
+
+/**
+ * Remove session records by ID. Used by Session Reaper for cleanup.
+ * Returns the number of records removed.
+ */
+export async function deleteSessionRecords(ids: Set<string>): Promise<number> {
+  return withWriteLock(async () => {
+    const store = await readStore();
+    const before = store.sessions.length;
+    store.sessions = store.sessions.filter(s => !ids.has(s.claudeSessionId));
+    const removed = before - store.sessions.length;
+    if (removed > 0) await writeStore(store);
+    return removed;
   });
 }
 

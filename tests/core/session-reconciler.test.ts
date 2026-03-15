@@ -58,13 +58,13 @@ describe('reconcileSessions', () => {
     expect(sessions[0].process_status).toBe('stopped')
   })
 
-  it('re-marks idle sessions without pid/outputFile as agent_complete', async () => {
+  it('skips already-stopped sessions (no redundant reconciliation)', async () => {
     await createSessionRecord('idle-1', 'task-1', 'proj')
     await updateSessionRecord('idle-1', { work_status: 'agent_complete', process_status: 'stopped' })
 
     const result = await reconcileSessions()
-    // agent_complete is non-terminal, so reconciler processes it again
-    expect(result.reconciled).toBe(1)
+    // Already stopped — reconciler skips (no point re-marking)
+    expect(result.reconciled).toBe(0)
     expect(result.reconnectable).toEqual([])
 
     const sessions = await listSessions()
@@ -103,7 +103,8 @@ describe('reconcileSessions', () => {
     await updateSessionRecord('already-done', { work_status: 'completed', process_status: 'stopped' })
 
     const result = await reconcileSessions()
-    expect(result.reconciled).toBe(2)
+    // Only zombie-active is reconciled; zombie-idle is already stopped (skipped)
+    expect(result.reconciled).toBe(1)
     expect(result.reconnectable).toEqual([])
 
     const sessions = await listSessions()
@@ -171,16 +172,16 @@ describe('reconcileSessions', () => {
     expect(sessions[0].work_status).toBe('agent_complete')
   })
 
-  it('re-reconciles agent_complete sessions (non-terminal) on second run', async () => {
+  it('does not re-reconcile already-stopped sessions on second run', async () => {
     await createSessionRecord('s1', 'task-1', 'proj')
     await createSessionRecord('s2', 'task-2', 'proj')
 
     const first = await reconcileSessions()
     expect(first.reconciled).toBe(2)
 
-    // agent_complete is non-terminal, so second run processes them again
+    // After first run: both are stopped + agent_complete → second run skips them
     const second = await reconcileSessions()
-    expect(second.reconciled).toBe(2)
+    expect(second.reconciled).toBe(0)
 
     const sessions = await listSessions()
     for (const s of sessions) {
