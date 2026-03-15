@@ -6,19 +6,55 @@ import { StatusIndicator } from '../inputs/StatusIndicator';
 import { fetchProviders, testProvider, type ProviderStatus, type TestConnectionResult } from '@/api/config';
 
 // All known providers — shown as a catalog. User fills in API key to enable.
-const ALL_PROVIDERS: { name: string; label: string; api: string; base_url?: string; needsKey: boolean }[] = [
-  { name: 'bedrock', label: 'AWS Bedrock', api: 'bedrock', needsKey: false },
-  { name: 'anthropic', label: 'Anthropic', api: 'anthropic-messages', needsKey: true },
-  { name: 'openai', label: 'OpenAI', api: 'openai-chat', needsKey: true },
-  { name: 'openrouter', label: 'OpenRouter', api: 'openai-chat', base_url: 'https://openrouter.ai/api/v1', needsKey: true },
-  { name: 'deepseek', label: 'DeepSeek', api: 'openai-chat', base_url: 'https://api.deepseek.com/v1', needsKey: true },
-  { name: 'together', label: 'Together AI', api: 'openai-chat', base_url: 'https://api.together.xyz/v1', needsKey: true },
-  { name: 'gemini', label: 'Google Gemini', api: 'google-generative-ai', needsKey: true },
-  { name: 'ollama', label: 'Ollama (Local)', api: 'ollama', needsKey: false },
-  { name: 'moonshot', label: 'Moonshot', api: 'openai-chat', base_url: 'https://api.moonshot.cn/v1', needsKey: true },
-  { name: 'qwen', label: 'Qwen (Tongyi)', api: 'openai-chat', base_url: 'https://dashscope.aliyuncs.com/compatible-mode/v1', needsKey: true },
-  { name: 'doubao', label: 'Doubao (ByteDance)', api: 'openai-chat', base_url: 'https://ark.cn-beijing.volces.com/api/v3', needsKey: true },
-  { name: 'nvidia', label: 'NVIDIA NIM', api: 'openai-chat', base_url: 'https://integrate.api.nvidia.com/v1', needsKey: true },
+// models: verified from official docs + OpenRouter live API (March 2026)
+const ALL_PROVIDERS: {
+  name: string; label: string; api: string; base_url?: string; needsKey: boolean;
+  models?: string[]; modelsHint?: string;
+}[] = [
+  { name: 'bedrock', label: 'AWS Bedrock', api: 'bedrock', needsKey: false, models: [
+    'anthropic.claude-opus-4-6-v1', 'anthropic.claude-sonnet-4-6',
+    'anthropic.claude-haiku-4-5-20251001-v1:0',
+    'anthropic.claude-sonnet-4-5-20250929-v1:0', 'anthropic.claude-opus-4-5-20251101-v1:0',
+    'anthropic.claude-sonnet-4-20250514-v1:0',
+  ] },
+  { name: 'anthropic', label: 'Anthropic', api: 'anthropic-messages', needsKey: true, models: [
+    'claude-opus-4-6', 'claude-sonnet-4-6', 'claude-haiku-4-5-20251001',
+    'claude-sonnet-4-5-20250929', 'claude-opus-4-5-20251101', 'claude-sonnet-4-20250514',
+  ] },
+  { name: 'openai', label: 'OpenAI', api: 'openai-chat', needsKey: true, models: [
+    'gpt-5.4', 'gpt-5.2', 'gpt-5-mini', 'gpt-5-nano',
+    'gpt-4.1', 'gpt-4.1-mini', 'gpt-4.1-nano',
+    'gpt-4o', 'gpt-4o-mini',
+    'o4-mini', 'o3', 'o3-pro',
+  ] },
+  { name: 'openrouter', label: 'OpenRouter', api: 'openai-chat', base_url: 'https://openrouter.ai/api/v1', needsKey: true, models: [
+    'anthropic/claude-sonnet-4.6', 'anthropic/claude-opus-4.6',
+    'openai/gpt-5.4', 'google/gemini-2.5-flash',
+    'deepseek/deepseek-chat', 'moonshotai/kimi-k2.5',
+  ], modelsHint: 'Browse all 600+ models at openrouter.ai/models' },
+  { name: 'deepseek', label: 'DeepSeek', api: 'openai-chat', base_url: 'https://api.deepseek.com/v1', needsKey: true, models: [
+    'deepseek-chat', 'deepseek-reasoner',
+  ], modelsHint: 'V3.2 — deepseek-chat (non-thinking) / deepseek-reasoner (thinking)' },
+  { name: 'together', label: 'Together AI', api: 'openai-chat', base_url: 'https://api.together.xyz/v1', needsKey: true, models: [
+    'meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8',
+    'deepseek-ai/DeepSeek-R1', 'Qwen/Qwen3.5-397B-A17B',
+  ], modelsHint: 'Browse all models at api.together.ai/models' },
+  { name: 'gemini', label: 'Google Gemini', api: 'google-generative-ai', needsKey: true, models: [
+    'gemini-2.5-pro', 'gemini-2.5-flash', 'gemini-2.5-flash-lite',
+    'gemini-3.1-pro-preview', 'gemini-3-flash-preview', 'gemini-3.1-flash-lite-preview',
+  ] },
+  { name: 'ollama', label: 'Ollama (Local)', api: 'ollama', needsKey: false,
+    modelsHint: 'Run "ollama list" to see installed models.' },
+  { name: 'moonshot', label: 'Moonshot', api: 'openai-chat', base_url: 'https://api.moonshot.cn/v1', needsKey: true, models: [
+    'kimi-k2.5', 'moonshot-v1-128k',
+  ] },
+  { name: 'qwen', label: 'Qwen (Tongyi)', api: 'openai-chat', base_url: 'https://dashscope.aliyuncs.com/compatible-mode/v1', needsKey: true, models: [
+    'qwen3.5-plus', 'qwen3.5-flash', 'qwen3-max',
+  ] },
+  { name: 'doubao', label: 'Doubao (ByteDance)', api: 'openai-chat', base_url: 'https://ark.cn-beijing.volces.com/api/v3', needsKey: true,
+    modelsHint: 'Model IDs are endpoint-specific. Create an endpoint in the Doubao console.' },
+  { name: 'nvidia', label: 'NVIDIA NIM', api: 'openai-chat', base_url: 'https://integrate.api.nvidia.com/v1', needsKey: true,
+    modelsHint: 'Check build.nvidia.com for available models.' },
 ];
 
 const PROTOCOL_LABELS: Record<string, string> = {
@@ -130,6 +166,22 @@ function ProviderCard({
             <span>Protocol: {PROTOCOL_LABELS[def.api] ?? def.api}</span>
             {def.base_url && <span>URL: {def.base_url}</span>}
           </div>
+
+          {(def.models || def.modelsHint) && (
+            <div className="provider-card-models">
+              <span className="provider-card-models-label">Models</span>
+              {def.models && (
+                <div className="provider-card-models-list">
+                  {def.models.map((m) => (
+                    <code key={m} className="provider-model-chip">{m}</code>
+                  ))}
+                </div>
+              )}
+              {def.modelsHint && (
+                <p className="text-sm text-muted" style={{ margin: 0 }}>{def.modelsHint}</p>
+              )}
+            </div>
+          )}
 
           {def.needsKey && (
             <div className="provider-card-key-row">
