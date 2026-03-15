@@ -17,6 +17,12 @@ import { createMockConstants } from '../helpers/mock-constants.js';
 // Mock constants to use temp dir
 vi.mock('../../src/constants.js', () => createMockConstants('sync-reconciler'));
 
+// Mock session tracker — controls which sessions appear as "in_progress"
+const mockSessions: Array<{ claudeSessionId: string; work_status: string }> = [];
+vi.mock('../../src/core/session-tracker.js', () => ({
+  listSessions: vi.fn(async () => mockSessions),
+}));
+
 import { SYNC_DIR, WALNUT_HOME } from '../../src/constants.js';
 import { SyncReconciler } from '../../src/core/sync-reconciler.js';
 import type { RegisteredPlugin, RemoteSyncItem, SyncPollContext } from '../../src/core/integration-types.js';
@@ -350,7 +356,11 @@ describe('SyncReconciler', () => {
       expect(ctx.deletedIds).toHaveLength(0);
     });
 
-    it('does not remove tasks with active session_id', async () => {
+    it('does not remove tasks with in_progress session', async () => {
+      // Simulate an actively-running session
+      mockSessions.length = 0;
+      mockSessions.push({ claudeSessionId: 'sess-123', work_status: 'in_progress' });
+
       const localTask = makeTask({
         id: 'has-session',
         session_id: 'sess-123',
@@ -362,12 +372,17 @@ describe('SyncReconciler', () => {
       await reconciler.tick(plugin, ctx);
 
       expect(ctx.deletedIds).not.toContain('has-session');
+      mockSessions.length = 0;
     });
 
-    it('does not remove tasks with active plan_session_id', async () => {
+    it('removes tasks with completed session (not actively running)', async () => {
+      // Session exists but is agent_complete — not blocking
+      mockSessions.length = 0;
+      mockSessions.push({ claudeSessionId: 'sess-done', work_status: 'agent_complete' });
+
       const localTask = makeTask({
-        id: 'has-plan-session',
-        plan_session_id: 'plan-123',
+        id: 'has-done-session',
+        session_id: 'sess-done',
         ext: { 'test-plugin': { remote_id: 'r-gone' } },
       });
       const plugin = makePlugin({ fullPullResult: [] });
@@ -375,7 +390,8 @@ describe('SyncReconciler', () => {
 
       await reconciler.tick(plugin, ctx);
 
-      expect(ctx.deletedIds).not.toContain('has-plan-session');
+      expect(ctx.deletedIds).toContain('has-done-session');
+      mockSessions.length = 0;
     });
 
     it('protects local-only fields from being overwritten', async () => {

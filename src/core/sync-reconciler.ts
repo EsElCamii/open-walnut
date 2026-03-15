@@ -302,10 +302,10 @@ export class SyncReconciler {
       }
     }
 
-    // Apply removals — skip tasks with active sessions
+    // Apply removals — skip tasks with actively-running sessions
     for (const task of diff.toRemove) {
       try {
-        if (this.hasActiveSession(task)) {
+        if (await this.hasActiveSession(task)) {
           log.web.info('sync-reconciler: skipping removal of task with active session', {
             pluginId,
             taskId: task.id,
@@ -330,12 +330,24 @@ export class SyncReconciler {
     }
   }
 
-  /** Check if a task has any active (non-terminal) sessions. */
-  private hasActiveSession(task: Task): boolean {
-    // Check new unified session_id
-    if (task.session_id) return true;
-    // Check deprecated fields
-    if (task.plan_session_id || task.exec_session_id) return true;
+  /** Check if a task has any actively-running sessions (process alive, work in progress). */
+  private async hasActiveSession(task: Task): Promise<boolean> {
+    const sessionIds = [task.session_id, task.plan_session_id, task.exec_session_id].filter(Boolean) as string[];
+    if (sessionIds.length === 0) return false;
+
+    // Look up actual session status — only block if work is actively in progress
+    try {
+      const { listSessions } = await import('./session-tracker.js');
+      const sessions = await listSessions();
+      for (const sid of sessionIds) {
+        const session = sessions.find(s => s.claudeSessionId === sid);
+        if (session && session.work_status === 'in_progress') return true;
+      }
+    } catch {
+      // If we can't check, be conservative — block removal if session_id is set
+      return sessionIds.length > 0;
+    }
+
     return false;
   }
 
