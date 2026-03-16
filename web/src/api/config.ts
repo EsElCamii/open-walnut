@@ -27,12 +27,21 @@ export async function testConnection(
 
 // ── Multi-provider API ──
 
+export interface ModelEntry {
+  id: string;
+  provider: string;
+  label?: string;
+  max_tokens?: number;
+  context_window?: number;
+}
+
 export interface ProviderStatus {
   api: string;
   base_url?: string;
   status: 'ready' | 'no_key' | 'not_implemented';
   key_hint?: string;
   auto_detected: boolean;
+  models: ModelEntry[];
 }
 
 export async function fetchProviders(): Promise<Record<string, ProviderStatus>> {

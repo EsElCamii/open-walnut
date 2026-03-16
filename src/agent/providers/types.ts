@@ -44,6 +44,9 @@ export interface ProviderConfig {
   bearer_token?: string;       // Bedrock-specific
   auth_header?: boolean;       // Use Authorization header instead of x-api-key
   headers?: Record<string, string>;  // Extra headers (e.g., OpenRouter site headers)
+  /** User-defined model overrides. Merged with code-level MODEL_CATALOG at runtime.
+   *  Matching IDs override catalog entries; new IDs are appended. */
+  models?: ModelEntry[];
 }
 
 // ── Model catalog ──

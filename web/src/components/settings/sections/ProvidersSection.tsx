@@ -3,9 +3,8 @@ import type { Config } from '@open-walnut/core';
 import { SectionCard } from '../inputs/SectionCard';
 import { SecretInput } from '../inputs/SecretInput';
 import { StatusIndicator } from '../inputs/StatusIndicator';
-import { ListEditor } from '../inputs/ListEditor';
 import { NumberInput } from '../inputs/NumberInput';
-import { fetchProviders, testProvider, testConnection, type ProviderStatus, type TestConnectionResult } from '@/api/config';
+import { fetchProviders, testProvider, testConnection, type ProviderStatus, type TestConnectionResult, type ModelEntry } from '@/api/config';
 
 // All known providers — shown as a catalog. User fills in API key to enable.
 const ALL_PROVIDERS: { name: string; label: string; api: string; base_url?: string; needsKey: boolean }[] = [
@@ -37,25 +36,9 @@ const PROTOCOL_LABELS: Record<string, string> = {
   'ollama': 'Local Ollama',
 };
 
-/** Extract a human-readable label from a model ID. */
-function modelDisplayName(modelId: string): string {
-  const is1M = modelId.endsWith('[1m]');
-  const ctx = is1M ? '1M' : '200K';
-  const lower = modelId.toLowerCase();
-
-  let name: string;
-  if (lower.includes('opus') && lower.includes('4-6')) name = 'Opus 4.6';
-  else if (lower.includes('opus') && lower.includes('4-')) name = 'Opus 4';
-  else if (lower.includes('sonnet') && lower.includes('4-6')) name = 'Sonnet 4.6';
-  else if (lower.includes('sonnet') && lower.includes('4-5')) name = 'Sonnet 4.5';
-  else if (lower.includes('sonnet')) name = 'Sonnet';
-  else if (lower.includes('haiku') && lower.includes('4-5')) name = 'Haiku 4.5';
-  else if (lower.includes('haiku')) name = 'Haiku';
-  else if (lower.includes('opus')) name = 'Opus';
-  else return modelId.length > 40 ? modelId.slice(0, 37) + '...' : modelId;
-
-  if (lower.includes('haiku')) return name;
-  return `${name} (${ctx})`;
+/** Display label for a model entry — use label if available, else truncated ID. */
+function modelLabel(m: ModelEntry): string {
+  return m.label ?? (m.id.length > 40 ? m.id.slice(0, 37) + '...' : m.id);
 }
 
 // Truncate long error messages (e.g. raw JSON from 401 responses)
@@ -157,42 +140,38 @@ function BedrockConfig({
   );
 }
 
-// Protocols where the global available_models list (Bedrock/Anthropic IDs) is relevant
-const CLAUDE_PROTOCOLS = new Set(['bedrock', 'anthropic-messages']);
-
 // ── Model config inside the active provider card ──
 function ModelConfig({
-  providerApi,
+  models,
   mainModel,
   sessionModel,
-  availableModels,
   maxTokens,
   showModels,
   onMainModelChange,
   onSessionModelChange,
-  onModelsChange,
   onMaxTokensChange,
+  onAddModel,
+  onRemoveModel,
   onToggleModels,
 }: {
-  providerApi: string;
+  models: ModelEntry[];
   mainModel: string;
   sessionModel: string;
-  availableModels: string[];
   maxTokens: number | undefined;
   showModels: boolean;
   onMainModelChange: (v: string) => void;
   onSessionModelChange: (v: string) => void;
-  onModelsChange: (v: string[]) => void;
   onMaxTokensChange: (v: number | undefined) => void;
+  onAddModel: (id: string) => void;
+  onRemoveModel: (id: string) => void;
   onToggleModels: () => void;
 }) {
-  // Only show Model dropdown + Session Model for Claude-compatible protocols
-  const isClaude = CLAUDE_PROTOCOLS.has(providerApi);
+  const [newModelId, setNewModelId] = useState('');
 
   return (
     <div className="provider-model-config">
       <div className="provider-config-row">
-        {isClaude && availableModels.length > 0 && (
+        {models.length > 0 && (
           <div className="form-group" style={{ margin: 0, flex: 1 }}>
             <label htmlFor="main-model">Model</label>
             <select
@@ -201,26 +180,24 @@ function ModelConfig({
               onChange={(e) => onMainModelChange(e.target.value)}
             >
               <option value="">Default</option>
-              {availableModels.map((id) => (
-                <option key={id} value={id}>{modelDisplayName(id)}</option>
+              {models.map((m) => (
+                <option key={m.id} value={m.id}>{modelLabel(m)}</option>
               ))}
             </select>
           </div>
         )}
-        {isClaude && (
-          <div className="form-group" style={{ margin: 0, flex: 1 }}>
-            <label htmlFor="session-model">Session Model</label>
-            <select
-              id="session-model"
-              value={sessionModel}
-              onChange={(e) => onSessionModelChange(e.target.value)}
-            >
-              <option value="opus">Opus</option>
-              <option value="sonnet">Sonnet</option>
-              <option value="haiku">Haiku</option>
-            </select>
-          </div>
-        )}
+        <div className="form-group" style={{ margin: 0, flex: 1 }}>
+          <label htmlFor="session-model">Session Model</label>
+          <select
+            id="session-model"
+            value={sessionModel}
+            onChange={(e) => onSessionModelChange(e.target.value)}
+          >
+            <option value="opus">Opus</option>
+            <option value="sonnet">Sonnet</option>
+            <option value="haiku">Haiku</option>
+          </select>
+        </div>
         <div className="form-group" style={{ margin: 0, flex: 1, maxWidth: 160 }}>
           <label htmlFor="max-tokens">Max Tokens</label>
           <NumberInput
@@ -233,19 +210,42 @@ function ModelConfig({
         </div>
       </div>
 
-      {/* Collapsible available models editor */}
+      {/* Collapsible model list with add/remove */}
       <div className="provider-models-toggle" onClick={onToggleModels}>
         <span className="provider-card-arrow">{showModels ? '▾' : '▸'}</span>
-        <span>Available Models ({availableModels.length})</span>
+        <span>Available Models ({models.length})</span>
       </div>
       {showModels && (
         <div className="provider-models-editor">
-          <ListEditor
-            items={availableModels}
-            onChange={onModelsChange}
-            placeholder="Add model ID..."
-            vertical
-          />
+          {models.map((m) => (
+            <div key={m.id} className="provider-model-chip">
+              <span>{m.label ? `${m.label} — ${m.id}` : m.id}</span>
+              <button type="button" className="chip-remove" onClick={() => onRemoveModel(m.id)}>×</button>
+            </div>
+          ))}
+          <div style={{ display: 'flex', gap: 6, marginTop: 4 }}>
+            <input
+              type="text"
+              value={newModelId}
+              onChange={(e) => setNewModelId(e.target.value)}
+              placeholder="Add model ID..."
+              style={{ flex: 1 }}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' && newModelId.trim()) {
+                  onAddModel(newModelId.trim());
+                  setNewModelId('');
+                }
+              }}
+            />
+            <button
+              type="button"
+              className="btn btn-sm"
+              disabled={!newModelId.trim()}
+              onClick={() => { onAddModel(newModelId.trim()); setNewModelId(''); }}
+            >
+              Add
+            </button>
+          </div>
         </div>
       )}
     </div>
@@ -261,14 +261,17 @@ function ProviderCard({
   config,
   mainModel,
   sessionModel,
-  availableModels,
   maxTokens,
   showModels,
   onSelectActive,
   onSave,
   onSaveKey,
-  onSaveModelConfig,
+  onSaveMainModel,
+  onSaveSessionModel,
+  onSaveMaxTokens,
+  onSaveProviderModels,
   onToggleModels,
+  onReloadProviders,
 }: {
   def: typeof ALL_PROVIDERS[number];
   isActive: boolean;
@@ -277,14 +280,17 @@ function ProviderCard({
   config: Config;
   mainModel: string;
   sessionModel: string;
-  availableModels: string[];
   maxTokens: number | undefined;
   showModels: boolean;
   onSelectActive: (name: string) => void;
   onSave: (partial: Partial<Config>) => Promise<void>;
   onSaveKey: (name: string, key: string) => Promise<void>;
-  onSaveModelConfig: (partial: { mainModel?: string; sessionModel?: string; availableModels?: string[]; maxTokens?: number | undefined }) => Promise<void>;
+  onSaveMainModel: (v: string) => void;
+  onSaveSessionModel: (v: string) => void;
+  onSaveMaxTokens: (v: number | undefined) => void;
+  onSaveProviderModels: (providerName: string, models: ModelEntry[]) => Promise<void>;
   onToggleModels: () => void;
+  onReloadProviders: () => void;
 }) {
   const [expanded, setExpanded] = useState(isActive);
   const [apiKey, setApiKey] = useState(configApiKey ?? '');
@@ -446,16 +452,23 @@ function ProviderCard({
           {/* Model config — only shown for the active provider */}
           {isActive && (
             <ModelConfig
-              providerApi={def.api}
+              models={serverInfo?.models ?? []}
               mainModel={mainModel}
               sessionModel={sessionModel}
-              availableModels={availableModels}
               maxTokens={maxTokens}
               showModels={showModels}
-              onMainModelChange={(v) => onSaveModelConfig({ mainModel: v })}
-              onSessionModelChange={(v) => onSaveModelConfig({ sessionModel: v })}
-              onModelsChange={(v) => onSaveModelConfig({ availableModels: v })}
-              onMaxTokensChange={(v) => onSaveModelConfig({ maxTokens: v })}
+              onMainModelChange={onSaveMainModel}
+              onSessionModelChange={onSaveSessionModel}
+              onMaxTokensChange={onSaveMaxTokens}
+              onAddModel={async (id) => {
+                const current = serverInfo?.models ?? [];
+                const newEntry: ModelEntry = { id, provider: def.name };
+                await onSaveProviderModels(def.name, [...current, newEntry]);
+              }}
+              onRemoveModel={async (id) => {
+                const current = serverInfo?.models ?? [];
+                await onSaveProviderModels(def.name, current.filter(m => m.id !== id));
+              }}
               onToggleModels={onToggleModels}
             />
           )}
@@ -471,21 +484,14 @@ export function ProvidersSection({ config, onSave }: Props) {
   const activeProvider = config.agent?.main_provider ?? 'bedrock';
   const [showModels, setShowModels] = useState(false);
 
-  // Model config state (from former ModelsSection)
-  const rawModels = config.agent?.available_models ?? [];
-  const modelIds = rawModels.map((m) => (typeof m === 'string' ? m : m.id));
+  // Global model selection state (lives in config.agent, not per-provider)
   const [mainModel, setMainModel] = useState(config.agent?.main_model ?? '');
   const [sessionModel, setSessionModel] = useState(config.agent?.session_model ?? 'opus');
-  const [availableModels, setAvailableModels] = useState<string[]>(modelIds);
   const [maxTokens, setMaxTokens] = useState<number | undefined>(config.agent?.maxTokens);
-  const [pendingSave, setPendingSave] = useState(false);
 
-  // Sync model state from config
   useEffect(() => {
-    const ids = (config.agent?.available_models ?? []).map((m) => (typeof m === 'string' ? m : m.id));
     setMainModel(config.agent?.main_model ?? '');
     setSessionModel(config.agent?.session_model ?? 'opus');
-    setAvailableModels(ids);
     setMaxTokens(config.agent?.maxTokens);
   }, [config]);
 
@@ -494,7 +500,7 @@ export function ProvidersSection({ config, onSave }: Props) {
       const data = await fetchProviders();
       setProviders(data);
     } catch {
-      // API not available yet (old server) — show all as unconfigured
+      // API not available yet
     } finally {
       setLoading(false);
     }
@@ -523,38 +529,36 @@ export function ProvidersSection({ config, onSave }: Props) {
     await onSave({ agent: { ...config.agent, main_provider: name } });
   };
 
-  // Save model config with debounce-like behavior — batches changes
-  const handleSaveModelConfig = async (partial: {
-    mainModel?: string;
-    sessionModel?: string;
-    availableModels?: string[];
-    maxTokens?: number | undefined;
-  }) => {
-    const newMainModel = partial.mainModel ?? mainModel;
-    const newSessionModel = partial.sessionModel ?? sessionModel;
-    const newModels = partial.availableModels ?? availableModels;
-    const newMaxTokens = 'maxTokens' in partial ? partial.maxTokens : maxTokens;
+  // Save global agent-level settings (main_model, session_model, maxTokens)
+  const handleSaveMainModel = async (v: string) => {
+    setMainModel(v);
+    await onSave({ agent: { ...config.agent, main_model: v || undefined } });
+  };
+  const handleSaveSessionModel = async (v: string) => {
+    setSessionModel(v);
+    await onSave({ agent: { ...config.agent, session_model: v || undefined } });
+  };
+  const handleSaveMaxTokens = async (v: number | undefined) => {
+    setMaxTokens(v);
+    await onSave({ agent: { ...config.agent, maxTokens: v } });
+  };
 
-    // Update local state immediately
-    if (partial.mainModel !== undefined) setMainModel(partial.mainModel);
-    if (partial.sessionModel !== undefined) setSessionModel(partial.sessionModel);
-    if (partial.availableModels !== undefined) setAvailableModels(partial.availableModels);
-    if ('maxTokens' in partial) setMaxTokens(partial.maxTokens);
-
-    setPendingSave(true);
-    try {
-      await onSave({
-        agent: {
-          ...config.agent,
-          main_model: newMainModel || undefined,
-          session_model: newSessionModel || undefined,
-          available_models: newModels,
-          maxTokens: newMaxTokens,
+  // Save per-provider model overrides to config.providers[name].models
+  const handleSaveProviderModels = async (providerName: string, models: ModelEntry[]) => {
+    const existing = config.providers ?? {};
+    const current = existing[providerName] ?? {};
+    const template = ALL_PROVIDERS.find(p => p.name === providerName);
+    await onSave({
+      providers: {
+        ...existing,
+        [providerName]: {
+          ...current,
+          api: template?.api ?? current.api ?? 'openai-chat',
+          models,
         },
-      });
-    } finally {
-      setPendingSave(false);
-    }
+      },
+    });
+    await loadProviders();
   };
 
   return (
@@ -578,20 +582,20 @@ export function ProvidersSection({ config, onSave }: Props) {
               config={config}
               mainModel={mainModel}
               sessionModel={sessionModel}
-              availableModels={availableModels}
               maxTokens={maxTokens}
               showModels={showModels}
               onSelectActive={handleSetActive}
               onSave={onSave}
               onSaveKey={handleSaveKey}
-              onSaveModelConfig={handleSaveModelConfig}
+              onSaveMainModel={handleSaveMainModel}
+              onSaveSessionModel={handleSaveSessionModel}
+              onSaveMaxTokens={handleSaveMaxTokens}
+              onSaveProviderModels={handleSaveProviderModels}
               onToggleModels={() => setShowModels(prev => !prev)}
+              onReloadProviders={loadProviders}
             />
           ))}
         </div>
-      )}
-      {pendingSave && (
-        <p className="text-sm text-muted" style={{ marginTop: 8 }}>Saving...</p>
       )}
     </SectionCard>
   );

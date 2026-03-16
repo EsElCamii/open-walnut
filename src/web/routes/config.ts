@@ -9,6 +9,8 @@ import { VALID_PRIORITIES } from '../../core/types.js'
 import { log } from '../../logging/index.js'
 import { buildProviderMap, resolveProvider, type ProviderConfig } from '../../agent/providers/index.js'
 import { autoDetectApiKey } from '../../agent/providers/secret.js'
+import { getModelsForProvider, MODEL_CATALOG } from '../../agent/providers/model-catalog.js'
+import { KNOWN_PROVIDERS } from '../../agent/providers/defaults.js'
 
 export const configRouter = Router()
 
@@ -88,6 +90,7 @@ configRouter.get('/providers', async (_req: Request, res: Response, next: NextFu
       status: 'ready' | 'no_key' | 'not_implemented'
       key_hint?: string  // last 4 chars of resolved key
       auto_detected: boolean
+      models: import('../../agent/providers/types.js').ModelEntry[]
     }> = {}
 
     for (const [name, prov] of Object.entries(merged)) {
@@ -112,6 +115,21 @@ configRouter.get('/providers', async (_req: Request, res: Response, next: NextFu
         status: !implemented ? 'not_implemented' : (hasKey || keyNotRequired) ? 'ready' : 'no_key',
         key_hint: keyHint,
         auto_detected: !explicitNames.has(name),
+        models: getModelsForProvider(name, prov.models),
+      }
+    }
+
+    // Also include catalog-only providers not in the merged map (no key yet)
+    for (const name of Object.keys(KNOWN_PROVIDERS)) {
+      if (!providers[name]) {
+        const template = KNOWN_PROVIDERS[name]
+        providers[name] = {
+          api: template.api,
+          base_url: template.base_url,
+          status: 'no_key',
+          auto_detected: false,
+          models: getModelsForProvider(name),
+        }
       }
     }
 
