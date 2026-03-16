@@ -256,7 +256,6 @@ function ProviderCard({
   mainModel,
   sessionModel,
   maxTokens,
-  showModels,
   onSelectActive,
   onSave,
   onSaveKey,
@@ -264,8 +263,6 @@ function ProviderCard({
   onSaveSessionModel,
   onSaveMaxTokens,
   onSaveProviderModels,
-  onToggleModels,
-  onReloadProviders,
 }: {
   def: typeof ALL_PROVIDERS[number];
   isActive: boolean;
@@ -275,7 +272,6 @@ function ProviderCard({
   mainModel: string;
   sessionModel: string;
   maxTokens: number | undefined;
-  showModels: boolean;
   onSelectActive: (name: string) => void;
   onSave: (partial: Partial<Config>) => Promise<void>;
   onSaveKey: (name: string, key: string) => Promise<void>;
@@ -283,14 +279,13 @@ function ProviderCard({
   onSaveSessionModel: (v: string) => void;
   onSaveMaxTokens: (v: number | undefined) => void;
   onSaveProviderModels: (providerName: string, models: ModelEntry[]) => Promise<void>;
-  onToggleModels: () => void;
-  onReloadProviders: () => void;
 }) {
   const [expanded, setExpanded] = useState(isActive);
   const [apiKey, setApiKey] = useState(configApiKey ?? '');
   const [saving, setSaving] = useState(false);
   const [testStatus, setTestStatus] = useState<'idle' | 'testing' | 'ok' | 'error'>('idle');
   const [testMsg, setTestMsg] = useState<string | undefined>();
+  const [showModels, setShowModels] = useState(false);
 
   // Auto-expand when becoming active
   useEffect(() => { if (isActive) setExpanded(true); }, [isActive]);
@@ -454,15 +449,15 @@ function ProviderCard({
             onSessionModelChange={onSaveSessionModel}
             onMaxTokensChange={onSaveMaxTokens}
             onAddModel={async (id) => {
-              const current = serverInfo?.models ?? [];
+              const configModels = (config.providers as Record<string, { models?: ModelEntry[] }> | undefined)?.[def.name]?.models ?? [];
               const newEntry: ModelEntry = { id, provider: def.name };
-              await onSaveProviderModels(def.name, [...current, newEntry]);
+              await onSaveProviderModels(def.name, [...configModels, newEntry]);
             }}
             onRemoveModel={async (id) => {
-              const current = serverInfo?.models ?? [];
-              await onSaveProviderModels(def.name, current.filter(m => m.id !== id));
+              const configModels = (config.providers as Record<string, { models?: ModelEntry[] }> | undefined)?.[def.name]?.models ?? [];
+              await onSaveProviderModels(def.name, configModels.filter(m => m.id !== id));
             }}
-            onToggleModels={onToggleModels}
+            onToggleModels={() => setShowModels(prev => !prev)}
           />
         </div>
       )}
@@ -474,7 +469,6 @@ export function ProvidersSection({ config, onSave }: Props) {
   const [providers, setProviders] = useState<Record<string, ProviderStatus>>({});
   const [loading, setLoading] = useState(true);
   const activeProvider = config.agent?.main_provider ?? 'bedrock';
-  const [showModels, setShowModels] = useState(false);
 
   // Global model selection state (lives in config.agent, not per-provider)
   const [mainModel, setMainModel] = useState(config.agent?.main_model ?? '');
@@ -575,7 +569,6 @@ export function ProvidersSection({ config, onSave }: Props) {
               mainModel={mainModel}
               sessionModel={sessionModel}
               maxTokens={maxTokens}
-              showModels={showModels}
               onSelectActive={handleSetActive}
               onSave={onSave}
               onSaveKey={handleSaveKey}
@@ -583,8 +576,6 @@ export function ProvidersSection({ config, onSave }: Props) {
               onSaveSessionModel={handleSaveSessionModel}
               onSaveMaxTokens={handleSaveMaxTokens}
               onSaveProviderModels={handleSaveProviderModels}
-              onToggleModels={() => setShowModels(prev => !prev)}
-              onReloadProviders={loadProviders}
             />
           ))}
         </div>

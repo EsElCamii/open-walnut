@@ -9,7 +9,7 @@ import { VALID_PRIORITIES } from '../../core/types.js'
 import { log } from '../../logging/index.js'
 import { buildProviderMap, resolveProvider, type ProviderConfig } from '../../agent/providers/index.js'
 import { autoDetectApiKey } from '../../agent/providers/secret.js'
-import { getModelsForProvider, MODEL_CATALOG } from '../../agent/providers/model-catalog.js'
+import { getModelsForProvider } from '../../agent/providers/model-catalog.js'
 import { KNOWN_PROVIDERS } from '../../agent/providers/defaults.js'
 
 export const configRouter = Router()
@@ -101,7 +101,7 @@ configRouter.get('/providers', async (_req: Request, res: Response, next: NextFu
       // Some protocols don't need a key
       const keyNotRequired = prov.api === 'bedrock' || prov.api === 'ollama'
 
-      // Check if adapter is implemented
+      // Must match adapter implementations in registry.ts getOrCreateAdapter()
       const implemented = prov.api === 'bedrock' || prov.api === 'anthropic-messages'
         || prov.api === 'openai-chat' || prov.api === 'google-generative-ai'
 
@@ -119,7 +119,7 @@ configRouter.get('/providers', async (_req: Request, res: Response, next: NextFu
       }
     }
 
-    // Also include catalog-only providers not in the merged map (no key yet)
+    // Include catalog-only providers not in merged map so UI shows all known providers
     for (const name of Object.keys(KNOWN_PROVIDERS)) {
       if (!providers[name]) {
         const template = KNOWN_PROVIDERS[name]

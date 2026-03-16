@@ -13033,12 +13033,6 @@ img[data-lightbox-src],
   color: var(--success);
 }
 
-.provider-badge.active {
-  background: rgba(0, 122, 255, 0.15);
-  color: var(--accent);
-  font-weight: 600;
-}
-
 .provider-card-body {
   padding: 0 14px 14px 34px;
 }
@@ -13132,6 +13126,31 @@ img[data-lightbox-src],
 
 .provider-models-editor {
   padding: 4px 0 0 0;
+}
+
+.provider-model-chip {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 4px 8px;
+  background: var(--tag-bg, rgba(0,0,0,0.05));
+  border-radius: 6px;
+  font-size: 13px;
+  margin-bottom: 4px;
+}
+
+.chip-remove {
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: var(--fg-muted);
+  font-size: 16px;
+  padding: 0 4px;
+  line-height: 1;
+}
+
+.chip-remove:hover {
+  color: var(--danger, #e53e3e);
 }
 
 /* ── Question Popover (ask_question tool — floating above chat input) ── */

@@ -5,7 +5,7 @@
  * Users can override/extend via config.providers[name].models.
  * Merge: code catalog + user overrides (user wins for same ID, appended for new IDs).
  */
-import type { ModelEntry, ProviderConfig } from './types.js';
+import type { ModelEntry } from './types.js';
 
 /** Baseline model catalog. Provider name → known models.
  *  Only includes providers we actively test. Users can add more via config. */
@@ -88,14 +88,3 @@ export function getModelsForProvider(
   return merged;
 }
 
-/**
- * Get models for a provider from a full providers map.
- * Convenience wrapper for use in route handlers.
- */
-export function getProviderModels(
-  providerName: string,
-  providers: Record<string, ProviderConfig>,
-): ModelEntry[] {
-  const prov = providers[providerName];
-  return getModelsForProvider(providerName, prov?.models);
-}
