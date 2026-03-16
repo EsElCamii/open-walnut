@@ -167,52 +167,48 @@ function ModelConfig({
   onToggleModels: () => void;
 }) {
   const [newModelId, setNewModelId] = useState('');
-  const isActive = mainModel !== undefined;
 
   return (
     <div className="provider-model-config">
-      {/* Global model controls — only for the active provider */}
-      {isActive && (
-        <div className="provider-config-row">
-          {models.length > 0 && (
-            <div className="form-group" style={{ margin: 0, flex: 1 }}>
-              <label htmlFor="main-model">Model</label>
-              <select
-                id="main-model"
-                value={mainModel}
-                onChange={(e) => onMainModelChange(e.target.value)}
-              >
-                <option value="">Default</option>
-                {models.map((m) => (
-                  <option key={m.id} value={m.id}>{modelLabel(m)}</option>
-                ))}
-              </select>
-            </div>
-          )}
+      <div className="provider-config-row">
+        {models.length > 0 && (
           <div className="form-group" style={{ margin: 0, flex: 1 }}>
-            <label htmlFor="session-model">Session Model</label>
+            <label htmlFor="main-model">Model</label>
             <select
-              id="session-model"
-              value={sessionModel}
-              onChange={(e) => onSessionModelChange(e.target.value)}
+              id="main-model"
+              value={mainModel ?? ''}
+              onChange={(e) => onMainModelChange(e.target.value)}
             >
-              <option value="opus">Opus</option>
-              <option value="sonnet">Sonnet</option>
-              <option value="haiku">Haiku</option>
+              <option value="">Default</option>
+              {models.map((m) => (
+                <option key={m.id} value={m.id}>{modelLabel(m)}</option>
+              ))}
             </select>
           </div>
-          <div className="form-group" style={{ margin: 0, flex: 1, maxWidth: 160 }}>
-            <label htmlFor="max-tokens">Max Tokens</label>
-            <NumberInput
-              id="max-tokens"
-              value={maxTokens}
-              onChange={onMaxTokensChange}
-              placeholder="16384"
-              min={1}
-            />
-          </div>
+        )}
+        <div className="form-group" style={{ margin: 0, flex: 1 }}>
+          <label htmlFor="session-model">Session Model</label>
+          <select
+            id="session-model"
+            value={sessionModel ?? 'opus'}
+            onChange={(e) => onSessionModelChange(e.target.value)}
+          >
+            <option value="opus">Opus</option>
+            <option value="sonnet">Sonnet</option>
+            <option value="haiku">Haiku</option>
+          </select>
         </div>
-      )}
+        <div className="form-group" style={{ margin: 0, flex: 1, maxWidth: 160 }}>
+          <label htmlFor="max-tokens">Max Tokens</label>
+          <NumberInput
+            id="max-tokens"
+            value={maxTokens}
+            onChange={onMaxTokensChange}
+            placeholder="16384"
+            min={1}
+          />
+        </div>
+      </div>
 
       {/* Model list — always visible when card is expanded */}
       <div className="provider-models-toggle" onClick={onToggleModels}>
