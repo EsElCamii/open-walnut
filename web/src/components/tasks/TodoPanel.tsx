@@ -18,6 +18,7 @@ import { PriorityPicker } from '../common/PriorityPicker';
 import type { TaskPriority } from '@walnut/core';
 import { TodoSearchBar } from './TodoSearchBar';
 import { useTaskSearch } from '@/hooks/useTaskSearch';
+import { usePhaseHooks } from '@/hooks/usePhaseHooks';
 import {
   DndContext,
   DragOverlay,
@@ -296,6 +297,7 @@ interface SortableTaskItemProps {
 
 function SortableTaskItem({ task, isFocused, isRecentlyDone, depth = 0, childCount, isExpanded, onToggleExpand, onClick, onSetPhase, onStar, onSetPriority, onUpdateTitle, onOpenSession, openSessionIds, onPinTask, onUnpinTask, isPinned, searchContext, searchMatchField, searchScore, searchKeywordScore, searchSemanticScore }: SortableTaskItemProps) {
   const integrations = useIntegrations();
+  const hookPhases = usePhaseHooks();
   const {
     attributes,
     listeners,
@@ -500,6 +502,9 @@ function SortableTaskItem({ task, isFocused, isRecentlyDone, depth = 0, childCou
                   {PHASE_ICON[phase]}
                 </span>
                 <span>{PHASE_LABEL[phase]}</span>
+                {hookPhases.has(phase) && (
+                  <span className="phase-hook-indicator" title={hookPhases.get(phase)}>⚡</span>
+                )}
                 {task.phase === phase && <span className="phase-picker-check">✓</span>}
               </button>
             ))}
@@ -1699,20 +1704,23 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
 
   const [activeTabId, setActiveTabId] = useState<string | null>(null);
 
-  // Recently completed: tracks tasks completed in the last 10s for visual styling
-  // (isRecentlyDone green tint). NOT used for filtering — the filter unconditionally
-  // hides done tasks when showCompleted is false.
+  // Recently completed: tracks tasks completed in the last few seconds.
+  // Used for BOTH visual styling (isRecentlyDone green tint) AND filtering —
+  // recently completed tasks stay visible briefly before being hidden, giving
+  // the user visual feedback that the completion took effect.
   const recentlyCompletedRef = useRef<Set<string>>(new Set());
   const timersRef = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
   const [, setRecentTick] = useState(0);
 
   useEffect(() => {
-    const GRACE_MS = 10_000;
+    const GRACE_MS = 3_000; // keep visible for 3s after completion
+    let added = false;
     for (const task of tasks) {
       if (task.status === 'done' && task.completed_at && !recentlyCompletedRef.current.has(task.id)) {
         const elapsed = Date.now() - new Date(task.completed_at).getTime();
         if (elapsed >= 0 && elapsed < GRACE_MS) {
           recentlyCompletedRef.current.add(task.id);
+          added = true;
           const timerId = setTimeout(() => {
             recentlyCompletedRef.current.delete(task.id);
             timersRef.current.delete(task.id);
@@ -1722,6 +1730,8 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
         }
       }
     }
+    // Trigger re-render so the filter re-runs with the new grace entries
+    if (added) setRecentTick((n) => n + 1);
     // Clean up timers for tasks that are no longer done (reopened)
     for (const [taskId, timerId] of timersRef.current) {
       const task = tasks.find((t) => t.id === taskId);
@@ -1779,7 +1789,8 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
     // First pass: apply all filters to get directly-matching tasks
     const directList = tasks.filter((t) => {
       if (!showCompleted && t.status === 'done' && phaseFilter !== 'COMPLETE') {
-        return false;
+        // Keep recently-completed tasks visible briefly for visual feedback
+        if (!recentlyCompletedRef.current.has(t.id)) return false;
       }
       if (priorityFilter && effectivePriority(t.priority) !== priorityFilter) return false;
       if (phaseFilter && t.phase !== phaseFilter) return false;
@@ -1822,8 +1833,8 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
       for (const t of tasks) {
         if (directlyMatched.has(t.id)) continue; // already included
         if (!t.parent_task_id) continue; // not a child task
-        // Respect completed filter even for children
-        if (!showCompleted && t.status === 'done' && phaseFilter !== 'COMPLETE') continue;
+        // Respect completed filter even for children (but keep recently-completed visible)
+        if (!showCompleted && t.status === 'done' && phaseFilter !== 'COMPLETE' && !recentlyCompletedRef.current.has(t.id)) continue;
         // parent_task_id uses a prefix convention: check if any visible task's id
         // starts with this task's parent_task_id (handles composite/prefixed IDs)
         const parentVisible = result.some(p => p.id.startsWith(t.parent_task_id!));
@@ -1847,8 +1858,8 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
 
     // Same filter logic as `filtered` — search results are a subset of what's visible.
     const applySearchFilters = (t: Task): boolean => {
-      // Show/hide completed
-      if (!showCompleted && t.status === 'done' && phaseFilter !== 'COMPLETE') return false;
+      // Show/hide completed (keep recently-completed visible briefly)
+      if (!showCompleted && t.status === 'done' && phaseFilter !== 'COMPLETE' && !recentlyCompletedRef.current.has(t.id)) return false;
       // Priority
       if (priorityFilter && effectivePriority(t.priority) !== priorityFilter) return false;
       // Phase
@@ -1886,7 +1897,11 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
           (t.summary && t.summary.toLowerCase().includes(lowerQuery)) ||
           t.category.toLowerCase().includes(lowerQuery) ||
           t.project.toLowerCase().includes(lowerQuery) ||
-          (t.tags && t.tags.some(tag => tag.toLowerCase().includes(lowerQuery)))
+          (t.tags && t.tags.some(tag => tag.toLowerCase().includes(lowerQuery))) ||
+          t.id.toLowerCase().includes(lowerQuery) ||
+          (t.session_id && t.session_id.toLowerCase().includes(lowerQuery)) ||
+          (t.session_ids && t.session_ids.some(sid => sid.toLowerCase().includes(lowerQuery))) ||
+          (t.external_url && t.external_url.toLowerCase().includes(lowerQuery))
         )
       );
     }

@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect, type ReactNode } from 'react';
+import { useState, useCallback, useEffect, useRef, type ReactNode } from 'react';
 import { useLocation } from 'react-router-dom';
 import { Sidebar } from './Sidebar';
 import { CronToast } from '../common/CronToast';
@@ -36,6 +36,14 @@ function AppShellInner({ children }: AppShellProps) {
   const location = useLocation();
   const isMainPage = location.pathname === '/';
   const focusBar = useFocusBarContext();
+  const contentRef = useRef<HTMLDivElement>(null);
+
+  // Scroll content area to top on route change (non-home pages)
+  useEffect(() => {
+    if (!isMainPage && contentRef.current) {
+      contentRef.current.scrollTop = 0;
+    }
+  }, [location.pathname, isMainPage]);
 
   // Print perf waterfall 3s after mount (all initial fetches should be settled)
   useEffect(() => {
@@ -74,6 +82,7 @@ function AppShellInner({ children }: AppShellProps) {
       {sidebarOpen && <div className="sidebar-overlay" onClick={closeSidebar} />}
       <main className="main-content">
         <div
+          ref={contentRef}
           className="app-content-area"
           style={isMainPage ? { padding: 0, overflow: 'hidden' } : undefined}
         >

@@ -14,6 +14,7 @@ import { AgentsPage } from './pages/AgentsPage';
 import { CommandsPage } from './pages/CommandsPage';
 import { TimelinePage } from './pages/TimelinePage';
 import { MemoryPage } from './pages/MemoryPage';
+import { HooksPage } from './pages/HooksPage';
 
 /**
  * Memoized MainPage — only re-renders when `visible` prop changes.
@@ -52,6 +53,7 @@ export function App() {
         <Route path="/usage" element={<UsagePage />} />
         <Route path="/agents" element={<AgentsPage />} />
         <Route path="/commands" element={<CommandsPage />} />
+        <Route path="/hooks" element={<HooksPage />} />
         <Route path="/timeline" element={<TimelinePage />} />
         <Route path="/chat" element={<Navigate to="/" replace />} />
         <Route path="/settings" element={<SettingsPage />} />

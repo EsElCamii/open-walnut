@@ -1,8 +1,10 @@
-import { useState, useEffect, useRef, useCallback, type ReactNode } from 'react';
+import { useState, useEffect, useRef, useCallback, useMemo, type ReactNode } from 'react';
 import type { Task, TaskPhase, TaskPriority } from '@open-walnut/core';
 import { fetchTask, updateTask, starTask } from '@/api/tasks';
+import { ApiError } from '@/api/client';
 import { useEvent } from '@/hooks/useWebSocket';
 import { PriorityPicker } from '@/components/common/PriorityPicker';
+import { usePhaseHooks } from '@/hooks/usePhaseHooks';
 
 /* ── Phase constants (shared with TodoPanel) ─────────────────────── */
 
@@ -48,6 +50,7 @@ export function TaskQuickActions({ taskId, task: externalTask }: TaskQuickAction
   const [task, setTask] = useState<Task | null>(externalTask ?? null);
   const [phaseMenuOpen, setPhaseMenuOpen] = useState(false);
   const [menuPos, setMenuPos] = useState<{ top: number; left: number } | null>(null);
+  const hookPhases = usePhaseHooks();
   const phaseRef = useRef<HTMLDivElement>(null);
   const phaseBtnRef = useRef<HTMLButtonElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
@@ -64,6 +67,10 @@ export function TaskQuickActions({ taskId, task: externalTask }: TaskQuickAction
 
   // Keep in sync via WS events
   useEvent('task:updated', (data) => {
+    const d = data as { task?: Task };
+    if (d.task && d.task.id === taskId) setTask(d.task);
+  });
+  useEvent('task:completed', (data) => {
     const d = data as { task?: Task };
     if (d.task && d.task.id === taskId) setTask(d.task);
   });
@@ -93,13 +100,38 @@ export function TaskQuickActions({ taskId, task: externalTask }: TaskQuickAction
 
   const handlePhaseChange = useCallback((phase: string) => {
     if (!task || task.phase === phase) { setPhaseMenuOpen(false); return; }
-    // Optimistic
-    setTask(prev => prev ? { ...prev, phase: phase as TaskPhase } : prev);
-    setPhaseMenuOpen(false);
-    updateTask(taskId, { phase }).catch(() => {
-      // Revert on error
-      fetchTask(taskId).then(setTask).catch(() => {});
+    const now = new Date().toISOString();
+    const completing = phase === 'COMPLETE';
+    // Full optimistic update — match server-side applyPhase behavior
+    setTask(prev => {
+      if (!prev) return prev;
+      return {
+        ...prev,
+        phase: phase as TaskPhase,
+        status: completing ? 'done' as const : phase === 'TODO' ? 'todo' as const : 'in_progress' as const,
+        ...(completing ? { completed_at: now, session_id: undefined, plan_session_id: undefined, exec_session_id: undefined, session_status: undefined, plan_session_status: undefined, exec_session_status: undefined, needs_attention: undefined } : {}),
+        updated_at: now,
+      };
     });
+    setPhaseMenuOpen(false);
+    // Local-first: retry on network errors, only revert on 4xx client errors
+    const attempt = (retries: number) => {
+      updateTask(taskId, { phase }).catch((err) => {
+        if (err instanceof ApiError && err.status >= 400 && err.status < 500) {
+          // Client error (validation, conflict) — revert to server truth
+          fetchTask(taskId).then(setTask).catch(() => {});
+          return;
+        }
+        // Network or server error — keep optimistic state and retry
+        if (retries > 0) {
+          setTimeout(() => attempt(retries - 1), 2000);
+        } else {
+          // All retries exhausted — fetch server truth as last resort
+          fetchTask(taskId).then(setTask).catch(() => {});
+        }
+      });
+    };
+    attempt(5);
   }, [task, taskId]);
 
   const handleSetPriority = useCallback((priority: TaskPriority) => {
@@ -173,6 +205,9 @@ export function TaskQuickActions({ taskId, task: externalTask }: TaskQuickAction
                   {PHASE_ICON[phase]}
                 </span>
                 <span>{PHASE_LABEL[phase]}</span>
+                {hookPhases.has(phase) && (
+                  <span className="phase-hook-indicator" title={hookPhases.get(phase)}>⚡</span>
+                )}
                 {task.phase === phase && <span className="phase-picker-check">✓</span>}
               </button>
             ))}

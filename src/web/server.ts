@@ -395,6 +395,11 @@ export async function startServer(options: ServerOptions = {}): Promise<HttpServ
   app.use('/api/push', pushRouter)
   app.use('/api/auth', authRouter)
   app.use('/api/browser-logs', browserLogsRouter)
+  app.get('/api/task-phase-hooks', async (_req, res) => {
+    const { getHookInfoList } = await import('../core/task-phase-hooks/index.js')
+    res.json(getHookInfoList())
+  })
+
   app.get('/api/git-sync/status', (_req, res) => {
     const health = gitAutoCommitHandle?.health ?? { protected: false, error: 'not started', consecutiveFailures: 0 }
     res.json(health)

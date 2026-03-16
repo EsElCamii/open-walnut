@@ -5495,9 +5495,15 @@ img[data-lightbox-src],
   flex-direction: column;
 }
 
+/* flex: 0 0 0px + min-height: 0 are both needed because the parent
+   .main-page-wrapper has flex: 1, which in a flex column overrides
+   height: 0 alone — the item would still grow to fill available space.
+   Explicitly zeroing the flex basis and min-height collapses it. */
 .main-page-wrapper-hidden {
   visibility: hidden !important;
   height: 0 !important;
+  min-height: 0 !important;
+  flex: 0 0 0px !important;
   overflow: hidden !important;
   pointer-events: none !important;
 }
@@ -10839,6 +10845,91 @@ img[data-lightbox-src],
   font-weight: 600;
   color: var(--accent);
   margin-top: 4px;
+}
+
+/* ===== Hooks Page ===== */
+
+.hooks-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.hook-card {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 16px;
+}
+.hook-card-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+.hook-card-icon {
+  font-size: 18px;
+}
+.hook-card-name {
+  font-weight: 600;
+  font-size: 15px;
+  flex: 1;
+}
+.hook-card-priority {
+  font-size: 12px;
+  color: var(--fg-muted);
+  font-variant-numeric: tabular-nums;
+}
+.hook-card-description {
+  color: var(--fg-muted);
+  font-size: 13px;
+  margin-bottom: 12px;
+  line-height: 1.4;
+}
+.hook-card-details {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px;
+  margin-bottom: 12px;
+}
+.hook-card-detail {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.hook-card-detail-label {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--fg-muted);
+}
+.hook-card-detail-value {
+  font-size: 13px;
+}
+.hook-card-phase {
+  font-weight: 600;
+  color: var(--accent);
+}
+.hook-card-message {
+  margin-top: 4px;
+}
+.hook-card-message-label {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--fg-muted);
+  margin-bottom: 4px;
+}
+.hook-card-message-content {
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 10px 12px;
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+  margin: 0;
+  font-family: var(--font-mono, 'SF Mono', 'Fira Code', 'Menlo', monospace);
 }
 
 /* ===== Commands Page ===== */

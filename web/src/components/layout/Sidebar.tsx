@@ -66,6 +66,10 @@ export function Sidebar({ open, collapsed, onToggleCollapse }: SidebarProps) {
           <CommandsIcon />
           <span className="sidebar-label">Commands</span>
         </NavLink>
+        <NavLink to="/hooks" className={navLinkClass} title={collapsed ? 'Hooks' : undefined}>
+          <HooksIcon />
+          <span className="sidebar-label">Hooks</span>
+        </NavLink>
         <NavLink to="/timeline" className={navLinkClass} title={collapsed ? 'Timeline' : undefined}>
           <TimelineIcon />
           <span className="sidebar-label">Timeline</span>
@@ -201,6 +205,14 @@ function CommandsIcon() {
   );
 }
 
+function HooksIcon() {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2" />
+    </svg>
+  );
+}
+
 function TimelineIcon() {
   return (
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -229,9 +241,9 @@ function MemoryIcon() {
 function WalnutIcon() {
   return (
     <svg viewBox="0 0 24 24" fill="none" strokeLinecap="round" strokeLinejoin="round" className="sidebar-open-walnut-icon">
-      <ellipse cx="11.5" cy="12" rx="7.5" ry="10" fill="currentColor" />
-      <ellipse cx="12.5" cy="12" rx="7.5" ry="10" fill="currentColor" />
-      <line x1="12" y1="2" x2="12" y2="22" stroke="var(--bg-secondary)" strokeWidth="1.5" />
+      <ellipse cx="11.5" cy="12" rx="7.5" ry="8.5" fill="currentColor" />
+      <ellipse cx="12.5" cy="12" rx="7.5" ry="8.5" fill="currentColor" />
+      <line x1="12" y1="3.5" x2="12" y2="20.5" stroke="var(--bg-secondary)" strokeWidth="1.5" />
     </svg>
   );
 }
