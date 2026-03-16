@@ -155,9 +155,9 @@ function ModelConfig({
   onToggleModels,
 }: {
   models: ModelEntry[];
-  mainModel: string;
-  sessionModel: string;
-  maxTokens: number | undefined;
+  mainModel?: string;           // undefined = non-active provider, hide global controls
+  sessionModel?: string;
+  maxTokens?: number | undefined;
   showModels: boolean;
   onMainModelChange: (v: string) => void;
   onSessionModelChange: (v: string) => void;
@@ -167,50 +167,54 @@ function ModelConfig({
   onToggleModels: () => void;
 }) {
   const [newModelId, setNewModelId] = useState('');
+  const isActive = mainModel !== undefined;
 
   return (
     <div className="provider-model-config">
-      <div className="provider-config-row">
-        {models.length > 0 && (
+      {/* Global model controls — only for the active provider */}
+      {isActive && (
+        <div className="provider-config-row">
+          {models.length > 0 && (
+            <div className="form-group" style={{ margin: 0, flex: 1 }}>
+              <label htmlFor="main-model">Model</label>
+              <select
+                id="main-model"
+                value={mainModel}
+                onChange={(e) => onMainModelChange(e.target.value)}
+              >
+                <option value="">Default</option>
+                {models.map((m) => (
+                  <option key={m.id} value={m.id}>{modelLabel(m)}</option>
+                ))}
+              </select>
+            </div>
+          )}
           <div className="form-group" style={{ margin: 0, flex: 1 }}>
-            <label htmlFor="main-model">Model</label>
+            <label htmlFor="session-model">Session Model</label>
             <select
-              id="main-model"
-              value={mainModel}
-              onChange={(e) => onMainModelChange(e.target.value)}
+              id="session-model"
+              value={sessionModel}
+              onChange={(e) => onSessionModelChange(e.target.value)}
             >
-              <option value="">Default</option>
-              {models.map((m) => (
-                <option key={m.id} value={m.id}>{modelLabel(m)}</option>
-              ))}
+              <option value="opus">Opus</option>
+              <option value="sonnet">Sonnet</option>
+              <option value="haiku">Haiku</option>
             </select>
           </div>
-        )}
-        <div className="form-group" style={{ margin: 0, flex: 1 }}>
-          <label htmlFor="session-model">Session Model</label>
-          <select
-            id="session-model"
-            value={sessionModel}
-            onChange={(e) => onSessionModelChange(e.target.value)}
-          >
-            <option value="opus">Opus</option>
-            <option value="sonnet">Sonnet</option>
-            <option value="haiku">Haiku</option>
-          </select>
+          <div className="form-group" style={{ margin: 0, flex: 1, maxWidth: 160 }}>
+            <label htmlFor="max-tokens">Max Tokens</label>
+            <NumberInput
+              id="max-tokens"
+              value={maxTokens}
+              onChange={onMaxTokensChange}
+              placeholder="16384"
+              min={1}
+            />
+          </div>
         </div>
-        <div className="form-group" style={{ margin: 0, flex: 1, maxWidth: 160 }}>
-          <label htmlFor="max-tokens">Max Tokens</label>
-          <NumberInput
-            id="max-tokens"
-            value={maxTokens}
-            onChange={onMaxTokensChange}
-            placeholder="16384"
-            min={1}
-          />
-        </div>
-      </div>
+      )}
 
-      {/* Collapsible model list with add/remove */}
+      {/* Model list — always visible when card is expanded */}
       <div className="provider-models-toggle" onClick={onToggleModels}>
         <span className="provider-card-arrow">{showModels ? '▾' : '▸'}</span>
         <span>Available Models ({models.length})</span>
@@ -449,29 +453,27 @@ function ProviderCard({
             </p>
           )}
 
-          {/* Model config — only shown for the active provider */}
-          {isActive && (
-            <ModelConfig
-              models={serverInfo?.models ?? []}
-              mainModel={mainModel}
-              sessionModel={sessionModel}
-              maxTokens={maxTokens}
-              showModels={showModels}
-              onMainModelChange={onSaveMainModel}
-              onSessionModelChange={onSaveSessionModel}
-              onMaxTokensChange={onSaveMaxTokens}
-              onAddModel={async (id) => {
-                const current = serverInfo?.models ?? [];
-                const newEntry: ModelEntry = { id, provider: def.name };
-                await onSaveProviderModels(def.name, [...current, newEntry]);
-              }}
-              onRemoveModel={async (id) => {
-                const current = serverInfo?.models ?? [];
-                await onSaveProviderModels(def.name, current.filter(m => m.id !== id));
-              }}
-              onToggleModels={onToggleModels}
-            />
-          )}
+          {/* Model config: active provider shows full config, others show model list only */}
+          <ModelConfig
+            models={serverInfo?.models ?? []}
+            mainModel={isActive ? mainModel : undefined}
+            sessionModel={isActive ? sessionModel : undefined}
+            maxTokens={isActive ? maxTokens : undefined}
+            showModels={showModels}
+            onMainModelChange={onSaveMainModel}
+            onSessionModelChange={onSaveSessionModel}
+            onMaxTokensChange={onSaveMaxTokens}
+            onAddModel={async (id) => {
+              const current = serverInfo?.models ?? [];
+              const newEntry: ModelEntry = { id, provider: def.name };
+              await onSaveProviderModels(def.name, [...current, newEntry]);
+            }}
+            onRemoveModel={async (id) => {
+              const current = serverInfo?.models ?? [];
+              await onSaveProviderModels(def.name, current.filter(m => m.id !== id));
+            }}
+            onToggleModels={onToggleModels}
+          />
         </div>
       )}
     </div>
