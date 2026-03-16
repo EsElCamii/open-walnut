@@ -6,20 +6,14 @@ import { StatusIndicator } from '../inputs/StatusIndicator';
 import { NumberInput } from '../inputs/NumberInput';
 import { fetchProviders, testProvider, testConnection, type ProviderStatus, type TestConnectionResult, type ModelEntry } from '@/api/config';
 
-// All known providers — shown as a catalog. User fills in API key to enable.
+// Providers we actively test and support.
 const ALL_PROVIDERS: { name: string; label: string; api: string; base_url?: string; needsKey: boolean }[] = [
   { name: 'bedrock', label: 'AWS Bedrock', api: 'bedrock', needsKey: false },
   { name: 'anthropic', label: 'Anthropic', api: 'anthropic-messages', needsKey: true },
   { name: 'openai', label: 'OpenAI', api: 'openai-chat', needsKey: true },
   { name: 'openrouter', label: 'OpenRouter', api: 'openai-chat', base_url: 'https://openrouter.ai/api/v1', needsKey: true },
-  { name: 'deepseek', label: 'DeepSeek', api: 'openai-chat', base_url: 'https://api.deepseek.com/v1', needsKey: true },
-  { name: 'together', label: 'Together AI', api: 'openai-chat', base_url: 'https://api.together.xyz/v1', needsKey: true },
   { name: 'gemini', label: 'Google Gemini', api: 'google-generative-ai', needsKey: true },
   { name: 'ollama', label: 'Ollama (Local)', api: 'ollama', needsKey: false },
-  { name: 'moonshot', label: 'Moonshot', api: 'openai-chat', base_url: 'https://api.moonshot.cn/v1', needsKey: true },
-  { name: 'qwen', label: 'Qwen (Tongyi)', api: 'openai-chat', base_url: 'https://dashscope.aliyuncs.com/compatible-mode/v1', needsKey: true },
-  { name: 'doubao', label: 'Doubao (ByteDance)', api: 'openai-chat', base_url: 'https://ark.cn-beijing.volces.com/api/v3', needsKey: true },
-  { name: 'nvidia', label: 'NVIDIA NIM', api: 'openai-chat', base_url: 'https://integrate.api.nvidia.com/v1', needsKey: true },
 ];
 
 const BEDROCK_REGIONS = [
