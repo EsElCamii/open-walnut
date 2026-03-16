@@ -638,6 +638,14 @@ export class ClaudeCodeSession {
     session.planFile = record.planFile ?? null
     session.planCompleted = record.planCompleted ?? false
     session._host = record.host ?? null
+    // Restore model from session record so context % works after server restart.
+    // _initModel is in-memory only (set from init events); old init events aren't
+    // re-processed since the JSONL tailer starts from current offset.
+    if (record.model) {
+      session._initModel = record.model
+      const shortModel = record.model.replace(/^.*\./, '').replace(/[-_]v\d+.*$/, '') || record.model
+      session._model = shortModel
+    }
 
     // ── resultEmitted recovery after server restart ──
     // `resultEmitted` is ephemeral — it lives only on the ClaudeCodeSession instance
