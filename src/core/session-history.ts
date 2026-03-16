@@ -747,6 +747,8 @@ function mapPermissionModeFromJsonl(permMode: string): string | null {
 /** State recovered from CloudCode canonical JSONL for crash recovery. */
 export interface RecoveredSessionState {
   mode?: string;
+  /** Full model string from the last init event (e.g. "global.anthropic.claude-opus-4-6-v1[1m]"). */
+  model?: string;
   planFile?: string;
   planCompleted?: boolean;
   activity?: string;
@@ -806,6 +808,22 @@ export async function recoverStateFromJsonl(sessionId: string, cwd?: string, hos
       }
 
       const type = parsed.type as string | undefined;
+
+      // ── model: extract from system init events only ──
+      // Init events have the full model ID (e.g. "global.anthropic.claude-opus-4-6-v1[1m]").
+      // NEVER use assistant message model — subagents use different models (e.g. Haiku).
+      // Multiple init events = multiple --resume cycles. Prefer the version with [1m]
+      // suffix — later resumes may have lost it due to the processNext default bug.
+      // If no [1m] version exists, use the last init event's model as fallback.
+      if (type === 'system' && parsed.subtype === 'init' && typeof parsed.model === 'string') {
+        const initModel = parsed.model as string;
+        if (initModel.endsWith('[1m]')) {
+          state.model = initModel;  // [1m] found — lock it in
+        } else if (!state.model?.endsWith('[1m]')) {
+          state.model = initModel;  // no [1m] yet — use this as fallback
+        }
+        // else: already have a [1m] version, don't overwrite with non-[1m]
+      }
 
       // ── permissionMode: CLI ground truth for session mode ──
       // The `permissionMode` field appears on 'user' type lines (set at send time)

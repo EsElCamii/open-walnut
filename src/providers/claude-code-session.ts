@@ -699,6 +699,11 @@ export class ClaudeCodeSession {
       const recovered = await recoverStateFromJsonl(record.claudeSessionId, record.cwd, record.host)
       if (recovered) {
         if (recovered.mode) session._mode = recovered.mode as SessionMode
+        if (recovered.model) {
+          session._initModel = recovered.model
+          const shortModel = recovered.model.replace(/^.*\./, '').replace(/[-_]v\d+.*$/, '') || recovered.model
+          session._model = shortModel
+        }
         if (recovered.planFile) session.planFile = recovered.planFile
         if (recovered.planCompleted != null) session.planCompleted = recovered.planCompleted
         if (recovered.activity) session._activity = recovered.activity
@@ -716,6 +721,7 @@ export class ClaudeCodeSession {
         // (reconciler, API responses) see the corrected values immediately.
         // The next updateSessionRecord() call from any code path will persist these.
         if (recovered.mode) record.mode = recovered.mode as SessionRecord['mode']
+        if (recovered.model) record.model = recovered.model
         if (recovered.planFile) record.planFile = recovered.planFile
         if (recovered.planCompleted != null) record.planCompleted = recovered.planCompleted
       }
@@ -2715,7 +2721,8 @@ export class SessionRunner {
         const { shouldRollbackToInProgress } = await import('../core/phase.js')
         const task = await getTask(record.taskId)
         if (task && shouldRollbackToInProgress(task.phase)) {
-          await updateTask(record.taskId, { phase: 'IN_PROGRESS' })
+          const result = await updateTask(record.taskId, { phase: 'IN_PROGRESS' })
+          bus.emit(EventNames.TASK_UPDATED, { task: result.task }, ['web-ui'], { source: 'phase-rollback' })
           log.session.info('handleSendSdk: rolled back phase to IN_PROGRESS', { taskId: record.taskId, oldPhase: task.phase })
         }
       }
@@ -2794,7 +2801,8 @@ export class SessionRunner {
           const { shouldRollbackToInProgress } = await import('../core/phase.js')
           const task = await getTask(record.taskId)
           if (task && shouldRollbackToInProgress(task.phase)) {
-            await updateTask(record.taskId, { phase: 'IN_PROGRESS' })
+            const result = await updateTask(record.taskId, { phase: 'IN_PROGRESS' })
+            bus.emit(EventNames.TASK_UPDATED, { task: result.task }, ['web-ui'], { source: 'phase-rollback' })
             log.session.info('handleSend: rolled back phase to IN_PROGRESS', { taskId: record.taskId, oldPhase: task.phase })
           }
         }
