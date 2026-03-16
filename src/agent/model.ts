@@ -43,9 +43,10 @@ function is1MModel(model?: string): boolean {
 /**
  * Get the context window size for a model string.
  * Models with `[1m]` suffix have a 1M token context window; all others default to 200K.
- * When totalInput is provided and exceeds 200K, auto-upgrades to 1M — Claude CLI resumes
- * sometimes drop the `[1m]` suffix (the resumed session restores from stored state that
- * doesn't persist the CLI --model flag's context variant), so observed usage is the truth.
+ * When totalInput is provided and exceeds 200K, auto-upgrades to 1M as a safety net.
+ * Root cause: Walnut's processNext() previously didn't pass the stored record.model on
+ * resume, falling back to a default without [1m]. That's now fixed, but totalInput
+ * auto-upgrade remains as defense-in-depth for any other path that loses the suffix.
  */
 export function getContextWindowSize(model?: string, totalInput?: number): number {
   if (is1MModel(model)) return CONTEXT_WINDOW_1M;

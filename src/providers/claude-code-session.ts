@@ -1640,8 +1640,9 @@ export class ClaudeCodeSession {
               + (usage.cache_read_input_tokens ?? 0)
             // Detect context window size:
             //   1) init model string contains [1m] → 1M
-            //   2) totalInput > 200K → must be 1M (Claude CLI resumes sometimes
-            //      drop the [1m] suffix — auto-upgrade based on observed usage)
+            //   2) totalInput > 200K → must be 1M (defense-in-depth: processNext
+            //      now preserves record.model on resume, but this catches any
+            //      other code path that might lose the [1m] suffix)
             //   3) default → 200K
             const is1M = (this._initModel?.includes('[1m]') ?? false)
               || totalInput > CONTEXT_WINDOW_DEFAULT
@@ -1670,6 +1671,10 @@ export class ClaudeCodeSession {
 
       case 'user': {
         const msg = event as StreamMessageEvent
+        // Skip synthetic walnut-injected user events (content is a plain string).
+        // Only process Claude Code's canonical user events (content is an array
+        // of tool_result blocks). Synthetic events exist in the streams file for
+        // history reads — emitting them here would duplicate the optimistic copy.
         if (!Array.isArray(msg.message?.content)) break
         const userParentToolUseId = msg.parent_tool_use_id ?? undefined
         for (const block of msg.message.content) {
@@ -2930,6 +2935,16 @@ export class SessionRunner {
           // Clear pending fields
           await updateRecord(sessionId, { pendingModel: undefined, pendingMode: undefined })
           log.session.info('processNext: consuming pending model/mode switch', { sessionId, model: resolvedModel, mode: resolvedMode })
+        }
+        // Fall back to the stored model from the last init event so --resume
+        // preserves the original context variant (e.g. [1m] for 1M window).
+        // Without this, resume defaults to "opus" which may lose the [1m] suffix.
+        // Skip malformed model strings (e.g. orphan "]" from old ANSI stripping bug).
+        // "[1m]" suffix is valid (1M context marker); bare "]" is not.
+        const storedModel = record?.model
+        if (!resolvedModel && storedModel
+          && (!storedModel.endsWith(']') || storedModel.endsWith('[1m]'))) {
+          resolvedModel = storedModel
         }
       } catch (err) {
         log.session.warn('processNext: failed to read pending model/mode', { sessionId, error: err instanceof Error ? err.message : String(err) })
