@@ -200,16 +200,12 @@ const FOCUS_DOCK_MAX_VISIBLE = 3;
 
 export function FocusDock({ focusBar }: FocusDockProps) {
   const { pinnedTasks: allPinnedTasks, unpin } = focusBar;
-  // Sort: attention-needed tasks (AGENT_COMPLETE, AWAIT_HUMAN_ACTION) first,
-  // then take the first N visible (UI space limited).
-  const pinnedTasks = useMemo(() => {
-    const sorted = [...allPinnedTasks].sort((a, b) => {
-      const aAttn = a.phase === 'AGENT_COMPLETE' || a.phase === 'AWAIT_HUMAN_ACTION' ? 0 : 1;
-      const bAttn = b.phase === 'AGENT_COMPLETE' || b.phase === 'AWAIT_HUMAN_ACTION' ? 0 : 1;
-      return aAttn - bAttn;
-    });
-    return sorted.slice(0, FOCUS_DOCK_MAX_VISIBLE);
-  }, [allPinnedTasks]);
+  // Preserve user's pin order — only human drag-reorder may change position.
+  // Attention-needed tasks are highlighted via CSS (.dock-task-attention), not reordering.
+  const pinnedTasks = useMemo(
+    () => allPinnedTasks.slice(0, FOCUS_DOCK_MAX_VISIBLE),
+    [allPinnedTasks],
+  );
 
   // Self-manage active state by listening to custom events
   const [activeTaskId, setActiveTaskId] = useState<string | null>(null);
