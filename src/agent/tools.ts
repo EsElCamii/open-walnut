@@ -744,31 +744,25 @@ For projects (type='project'): set default_host and default_cwd for remote sessi
           }
         }
 
-        // Text fields — these use separate helper functions (not updateTask()), so manual
-        // bus.emit(TASK_UPDATED) is required here and is NOT redundant.
+        // Text fields — each helper auto-emits TASK_UPDATED internally.
         if (params.description !== undefined) {
-          const { task } = await updateDescription(id, params.description as string);
-          bus.emit(EventNames.TASK_UPDATED, { task }, ['web-ui'], { source: 'agent' });
+          await updateDescription(id, params.description as string);
           results.push('description set');
         }
         if (params.summary !== undefined) {
-          const { task } = await updateSummary(id, params.summary as string);
-          bus.emit(EventNames.TASK_UPDATED, { task }, ['web-ui'], { source: 'agent' });
+          await updateSummary(id, params.summary as string);
           results.push('summary set');
         }
         if (params.note !== undefined) {
-          const { task } = await updateNote(id, params.note as string);
-          bus.emit(EventNames.TASK_UPDATED, { task }, ['web-ui'], { source: 'agent' });
+          await updateNote(id, params.note as string);
           results.push('note replaced');
         }
         if (params.append_note !== undefined) {
-          const { task } = await addNote(id, params.append_note as string);
-          bus.emit(EventNames.TASK_UPDATED, { task }, ['web-ui'], { source: 'agent' });
+          await addNote(id, params.append_note as string);
           results.push('note appended');
         }
         if (params.append_conversation_log !== undefined) {
-          const { task } = await appendConversationLog(id, params.append_conversation_log as string);
-          bus.emit(EventNames.TASK_UPDATED, { task }, ['web-ui'], { source: 'agent' });
+          await appendConversationLog(id, params.append_conversation_log as string);
           results.push('conversation log appended');
         }
 

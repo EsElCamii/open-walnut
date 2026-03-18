@@ -530,8 +530,6 @@ tasksRouter.post('/:id/toggle-complete', async (req: Request, res: Response, nex
   try {
     const id = param(req.params.id)
     const result = await toggleComplete(id)
-    const eventName = result.task.status === 'done' ? EventNames.TASK_COMPLETED : EventNames.TASK_UPDATED
-    bus.emit(eventName, { task: result.task }, ['web-ui', 'main-agent'], { source: 'api' })
     res.json(result)
   } catch (err) {
     if (err instanceof ActiveChildrenError) {
@@ -580,7 +578,6 @@ tasksRouter.post('/:id/notes', async (req: Request, res: Response, next: NextFun
     const id = param(req.params.id)
     const { content } = req.body as { content: string }
     const result = await addNote(id, content)
-    bus.emit(EventNames.TASK_UPDATED, { task: result.task }, ['web-ui'], { source: 'api' })
     res.json(result)
   } catch (err) {
     next(err)
@@ -593,7 +590,6 @@ tasksRouter.put('/:id/note', async (req: Request, res: Response, next: NextFunct
     const id = param(req.params.id)
     const { content } = req.body as { content: string }
     const result = await updateNote(id, content)
-    bus.emit(EventNames.TASK_UPDATED, { task: result.task }, ['web-ui'], { source: 'api' })
     res.json(result)
   } catch (err) {
     next(err)
@@ -606,7 +602,6 @@ tasksRouter.put('/:id/description', async (req: Request, res: Response, next: Ne
     const id = param(req.params.id)
     const { content } = req.body as { content: string }
     const result = await updateDescription(id, content)
-    bus.emit(EventNames.TASK_UPDATED, { task: result.task }, ['web-ui'], { source: 'api' })
     res.json(result)
   } catch (err) {
     next(err)
@@ -619,7 +614,6 @@ tasksRouter.put('/:id/summary', async (req: Request, res: Response, next: NextFu
     const id = param(req.params.id)
     const { content } = req.body as { content: string }
     const result = await updateSummary(id, content)
-    bus.emit(EventNames.TASK_UPDATED, { task: result.task }, ['web-ui'], { source: 'api' })
     res.json(result)
   } catch (err) {
     next(err)

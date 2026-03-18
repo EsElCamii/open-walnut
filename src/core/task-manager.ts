@@ -1161,6 +1161,8 @@ export async function toggleComplete(idPrefix: string): Promise<{ task: Task }> 
   });
   if (task.phase === 'COMPLETE') autoCompleteTaskSessions(task);
 
+  const eventName = task.phase === 'COMPLETE' ? EventNames.TASK_COMPLETED : EventNames.TASK_UPDATED;
+  bus.emit(eventName, { task }, ['web-ui', 'main-agent'], { source: 'internal' });
   return { task };
   });
 }
@@ -1506,8 +1508,8 @@ export async function updateTask(
   if (task.phase === 'COMPLETE') autoCompleteTaskSessions(task);
 
   // Centralized event emission — every updateTask() call notifies the UI.
-  // Note: text-field helpers (addNote, updateDescription, etc.) are separate
-  // functions and still require callers to emit TASK_UPDATED manually.
+  // All other task-mutating functions (addNote, updateDescription, toggleComplete,
+  // etc.) also auto-emit internally. Only updateTaskRaw() is silent (by design).
   const targets = ['web-ui', ...(eventOptions?.extraTargets ?? [])];
   bus.emit(EventNames.TASK_UPDATED, { task }, targets, { source: eventOptions?.source ?? 'internal' });
 
@@ -1546,6 +1548,7 @@ export async function addNote(idPrefix: string, content: string): Promise<{ task
     log.task.warn('sync push rejected (fire-and-forget)', { taskId: task.id, source: task.source, error: err instanceof Error ? err.message : String(err) });
   });
 
+  bus.emit(EventNames.TASK_UPDATED, { task }, ['web-ui'], { source: 'internal' });
   return { task };
   });
 }
@@ -1592,6 +1595,7 @@ export async function appendConversationLog(idPrefix: string, entry: string): Pr
     log.task.warn('sync push rejected (fire-and-forget)', { taskId: task.id, source: task.source, error: err instanceof Error ? err.message : String(err) });
   });
 
+  bus.emit(EventNames.TASK_UPDATED, { task }, ['web-ui'], { source: 'internal' });
   return { task };
   });
 }
@@ -1624,6 +1628,7 @@ export async function updateNote(idPrefix: string, content: string): Promise<{ t
   }).catch(err => {
     log.task.warn('sync push rejected (fire-and-forget)', { taskId: task.id, source: task.source, error: err instanceof Error ? err.message : String(err) });
   });
+  bus.emit(EventNames.TASK_UPDATED, { task }, ['web-ui'], { source: 'internal' });
   return { task };
   });
 }
@@ -1656,6 +1661,7 @@ export async function updateDescription(idPrefix: string, content: string): Prom
   }).catch(err => {
     log.task.warn('sync push rejected (fire-and-forget)', { taskId: task.id, source: task.source, error: err instanceof Error ? err.message : String(err) });
   });
+  bus.emit(EventNames.TASK_UPDATED, { task }, ['web-ui'], { source: 'internal' });
   return { task };
   });
 }
@@ -1688,6 +1694,7 @@ export async function updateSummary(idPrefix: string, content: string): Promise<
   }).catch(err => {
     log.task.warn('sync push rejected (fire-and-forget)', { taskId: task.id, source: task.source, error: err instanceof Error ? err.message : String(err) });
   });
+  bus.emit(EventNames.TASK_UPDATED, { task }, ['web-ui'], { source: 'internal' });
   return { task };
   });
 }
@@ -2484,7 +2491,7 @@ export async function togglePin(taskId: string): Promise<{ pinned: boolean; pinn
     }
 
     await writeStore(store);
-    bus.emit(EventNames.TASK_UPDATED, { task }, ['web-ui']);
+    bus.emit(EventNames.TASK_UPDATED, { task }, ['web-ui'], { source: 'internal' });
     const ordered = store.tasks.filter((t) => t.pinned).sort((a, b) => (a.pin_order ?? 0) - (b.pin_order ?? 0));
     return { pinned: !!task.pinned, pinned_tasks: ordered.map((t) => t.id) };
   });
