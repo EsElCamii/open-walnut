@@ -78,7 +78,8 @@ configRouter.post('/test-connection', async (req: Request, res: Response, next: 
 
 /** Cached Ollama model list — refreshed at most once per 30s. */
 let _ollamaCache: { models: ModelEntry[]; ts: number } = { models: [], ts: 0 }
-const OLLAMA_CACHE_TTL = 30_000 // 30 seconds
+// 30s balances model freshness after `ollama pull` vs avoiding repeated /api/tags I/O on every settings page load.
+const OLLAMA_CACHE_TTL = 30_000
 
 /** Fetch installed models from a running Ollama server. Cached for 30s. Returns [] on any error. */
 async function fetchOllamaModels(baseUrl?: string): Promise<ModelEntry[]> {
@@ -86,9 +87,9 @@ async function fetchOllamaModels(baseUrl?: string): Promise<ModelEntry[]> {
   const url = (baseUrl ?? DEFAULT_BASE_URLS['ollama'] ?? 'http://localhost:11434') + '/api/tags'
   try {
     const resp = await fetch(url, { signal: AbortSignal.timeout(2000) })
-    if (!resp.ok) { _ollamaCache = { models: [], ts: Date.now() }; return [] }
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
     const data = await resp.json() as { models?: { name: string; size?: number; modified_at?: string }[] }
-    if (!Array.isArray(data.models)) { _ollamaCache = { models: [], ts: Date.now() }; return [] }
+    if (!Array.isArray(data.models)) throw new Error('Unexpected response: models is not an array')
     const models = data.models.map(m => ({
       id: m.name,
       provider: 'ollama' as const,
@@ -96,7 +97,8 @@ async function fetchOllamaModels(baseUrl?: string): Promise<ModelEntry[]> {
     }))
     _ollamaCache = { models, ts: Date.now() }
     return models
-  } catch {
+  } catch (err) {
+    log.warn('fetchOllamaModels failed', { url, error: (err as Error).message })
     _ollamaCache = { models: [], ts: Date.now() }
     return []
   }
@@ -121,7 +123,8 @@ configRouter.get('/providers', async (_req: Request, res: Response, next: NextFu
     }> = {}
 
     for (const [name, prov] of Object.entries(merged)) {
-      // Ollama: dynamically fetch models from running server
+      // Ollama models are runtime-discovered from /api/tags (empty code catalog).
+      // Merge dynamic results with user config overrides.
       if (prov.api === 'ollama') {
         const dynamicModels = await fetchOllamaModels(prov.base_url)
         const isReachable = dynamicModels.length > 0
@@ -223,7 +226,7 @@ configRouter.post('/test-provider', async (req: Request, res: Response, next: Ne
       'anthropic-messages': { '*': 'claude-haiku-4-5-20251001' },
       'openai-chat': {
         'openai': 'gpt-4o-mini',
-        'openrouter': 'nvidia/nemotron-3-nano-30b-a3b:free',
+        'openrouter': 'nvidia/nemotron-3-nano-30b-a3b:free', // Uses :free model to test connectivity without requiring paid credits
         'deepseek': 'deepseek-chat',
         '*': 'gpt-4o-mini',
       },
