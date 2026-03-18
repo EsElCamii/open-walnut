@@ -1287,12 +1287,14 @@ defaults (same resolution chain as start_session).`,
           }
         }
 
-        // ⑤ Validate JSONL exists at CANONICAL path only (no fallback search).
-        //    Fallback search (glob/find) caused a real bug: it found the JSONL in a
-        //    different project dir, then extractCwdFromJsonlContent() read a wrong CWD
-        //    from compacted entries, and the mismatch error helpfully suggested the wrong
-        //    CWD as a fix — leading to a broken import. Strict = canonical path only.
-        const { canonicalJsonlPath, remoteJsonlPath, encodeProjectPath, RemoteFileReader } = await import('../core/session-file-reader.js');
+        // ⑤ Validate JSONL exists — try canonical path first, then fallback search.
+        //    Canonical path uses CWD to compute the encoded project dir.
+        //    If that fails (SSH issue, path mismatch), we fallback to `find` (remote)
+        //    or directory scan (local) to locate the session JSONL.
+        //    The resolved CWD is still used for the session record regardless of where
+        //    the JSONL was found — unlike readSessionJsonlContent() which extracts CWD
+        //    from JSONL content, import uses the task/param CWD which is authoritative.
+        const { canonicalJsonlPath, remoteJsonlPath, encodeProjectPath, RemoteFileReader, findLocalJsonlPath } = await import('../core/session-file-reader.js');
 
         if (!resolvedCwd) {
           return `Error: No working directory resolved for session ${sessionId}. Provide working_directory explicitly.`;
@@ -1301,30 +1303,53 @@ defaults (same resolution chain as start_session).`,
         let jsonlContent: string | null = null;
 
         if (resolvedHost) {
-          // Remote: SSH check canonical path only (no glob/find fallback)
+          // Remote: SSH — try canonical path first, then `find` fallback
           const reader = new RemoteFileReader(resolvedHost);
           const exactPath = remoteJsonlPath(sessionId, resolvedCwd);
           jsonlContent = await reader.readFile(exactPath);
           if (!jsonlContent) {
-            return `Error: JSONL not found at canonical path for session ${sessionId}.\n` +
-              `  Expected: ${resolvedHost}:${exactPath}\n` +
+            // Canonical path missed — try `find` on the remote host
+            jsonlContent = await reader.findSession(sessionId);
+            if (jsonlContent) {
+              log.session.info('import_session: JSONL found via remote find fallback', {
+                sessionId, host: resolvedHost, triedPath: exactPath,
+              });
+            }
+          }
+          if (!jsonlContent) {
+            return `Error: JSONL not found for session ${sessionId} on ${resolvedHost}.\n` +
+              `  Tried canonical: ${exactPath}\n` +
+              `  Also ran: find ~/.claude/projects -name '${sessionId}.jsonl'\n` +
               `  CWD used: ${resolvedCwd}\n` +
-              `Check ~/.claude/projects/ on ${resolvedHost} for the correct directory name, then re-run with the correct working_directory.`;
+              `Verify the session exists on ${resolvedHost}.`;
           }
         } else {
-          // Local: check canonical path only (no fallback search)
+          // Local: check canonical path first, then search all project dirs
           const expectedPath = canonicalJsonlPath(sessionId, resolvedCwd);
           try {
             jsonlContent = await fsp.readFile(expectedPath, 'utf-8');
           } catch {
-            // File not found
+            // File not found at canonical path
+          }
+          if (!jsonlContent) {
+            // Canonical path missed — search all project directories
+            const foundPath = await findLocalJsonlPath(sessionId);
+            if (foundPath) {
+              try {
+                jsonlContent = await fsp.readFile(foundPath, 'utf-8');
+                log.session.info('import_session: JSONL found via local fallback search', {
+                  sessionId, triedPath: expectedPath, foundPath,
+                });
+              } catch { /* still not readable */ }
+            }
           }
           if (!jsonlContent) {
             const encoded = encodeProjectPath(resolvedCwd);
-            return `Error: JSONL not found at canonical path for session ${sessionId}.\n` +
-              `  Expected: ~/.claude/projects/${encoded}/${sessionId}.jsonl\n` +
+            return `Error: JSONL not found for session ${sessionId}.\n` +
+              `  Tried canonical: ~/.claude/projects/${encoded}/${sessionId}.jsonl\n` +
+              `  Also searched all directories under ~/.claude/projects/\n` +
               `  CWD used: ${resolvedCwd}\n` +
-              `Check ~/.claude/projects/ for the correct directory name, then re-run with the correct working_directory.`;
+              `Verify the session JSONL file exists.`;
           }
         }
 
@@ -1470,7 +1495,8 @@ defaults (same resolution chain as start_session).`,
             try {
               const task = await getTask(record.taskId);
               if (task && shouldRollbackToInProgress(task.phase)) {
-                await updateTask(record.taskId, { phase: 'IN_PROGRESS' });
+                const result = await updateTask(record.taskId, { phase: 'IN_PROGRESS' });
+                bus.emit(EventNames.TASK_UPDATED, { task: result.task }, ['web-ui'], { source: 'phase-rollback' });
                 log.agent.info('send_to_session: rolled back phase to IN_PROGRESS', { taskId: record.taskId, oldPhase: task.phase });
               }
             } catch { /* best-effort */ }

@@ -184,8 +184,37 @@ describe('import_session tool E2E', () => {
       working_directory: '/some/nonexistent/path',
     });
 
-    expect(result).toContain('JSONL file not found');
+    expect(result).toContain('JSONL not found');
     expect(result).toContain('nonexistent-session-id');
+  });
+
+  it('finds JSONL via fallback when canonical path misses (different CWD)', async () => {
+    const task = await createTask('Fallback search test', 'Work', 'AuthService');
+
+    const fallbackId = 'fallback-00000000-0000-0000-0000';
+    const actualCwd = '/home/user/actual-project';
+    const wrongCwd = '/home/user/wrong-project';
+
+    // Write JSONL under actualCwd's encoded path
+    await writeMockJsonl(fallbackId, actualCwd);
+
+    const { tools } = await import('../../src/agent/tools.js');
+    const importTool = tools.find(t => t.name === 'import_session')!;
+
+    // Import with wrongCwd — canonical path won't match, but fallback should find it
+    const result = await importTool.execute({
+      session_id: fallbackId,
+      task_id: task.id,
+      working_directory: wrongCwd,
+    });
+
+    // Should succeed via fallback search
+    expect(result).toContain('Imported session');
+    expect(result).toContain(fallbackId);
+
+    const session = await getSessionByClaudeId(fallbackId);
+    expect(session).not.toBeNull();
+    expect(session!.cwd).toBe(wrongCwd); // CWD in record is the resolved one, not the found one
   });
 
   it('supports custom title and work_status', async () => {
