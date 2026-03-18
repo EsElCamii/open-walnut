@@ -114,7 +114,7 @@ export function SettingsPage() {
           </div>
           <SectionErrorBoundary name="AI Provider"><ProvidersSection config={config} onSave={saveSection} /></SectionErrorBoundary>
           <SectionErrorBoundary name="General"><GeneralSection config={config} onSave={saveSection} /></SectionErrorBoundary>
-          <SectionErrorBoundary name="Sessions"><SessionsSection config={config} onSave={saveSection} /></SectionErrorBoundary>
+          <SectionErrorBoundary name="Claude Code Session"><SessionsSection config={config} onSave={saveSection} /></SectionErrorBoundary>
           <SectionErrorBoundary name="Integrations"><IntegrationsSection config={config} onSave={saveSection} /></SectionErrorBoundary>
           <SectionErrorBoundary name="Search"><SearchSection config={config} onSave={saveSection} /></SectionErrorBoundary>
           <SectionErrorBoundary name="Heartbeat"><HeartbeatSection config={config} onSave={saveSection} /></SectionErrorBoundary>

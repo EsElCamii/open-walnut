@@ -126,7 +126,7 @@ describe('readPlanFromSession', () => {
       });
       mockCreateReader.mockReturnValue(reader);
       mockGetSession.mockResolvedValue(makeRecord({ cwd: '/work' }) as never);
-      mockFindJsonl.mockReturnValue('/home/user/.claude/projects/-work/sess-123.jsonl');
+      mockFindJsonl.mockResolvedValue('/home/user/.claude/projects/-work/sess-123.jsonl');
 
       const result = await readPlanFromSession('sess-123');
       expect(result).toEqual({

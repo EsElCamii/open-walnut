@@ -29,7 +29,10 @@ export interface ReconcileResult {
  *     (only the agent/human can set 'completed') and clean up task references
  */
 export async function reconcileSessions(): Promise<ReconcileResult> {
-  const { listSessions, updateSessionRecord, updateSessionRecordConditionally } = await import('./session-tracker.js')
+  const { listSessions, updateSessionRecord, updateSessionRecordConditionally, TERMINAL_WORK_STATUSES } = await import('./session-tracker.js')
+  // Captured before listSessions() so any concurrent write that occurs after our snapshot
+  // is detectable: if current.last_status_change > reconcilerStartedAt, the record was
+  // modified after we read it and we must skip our stale update.
   const reconcilerStartedAt = new Date().toISOString()
 
   let sessions: SessionRecord[]
@@ -41,8 +44,6 @@ export async function reconcileSessions(): Promise<ReconcileResult> {
     })
     return { reconciled: 0, reconnectable: [] }
   }
-
-  const { TERMINAL_WORK_STATUSES } = await import('./session-tracker.js')
   // Only reconcile interactive sessions (CLI with detached processes).
   // Embedded types (triage/hook/cron/subagent) have no PID — no process to check.
   // Triage/hook/cron are cleaned up by SessionReaper; subagent sessions are user-visible and persist.
@@ -103,6 +104,10 @@ export async function reconcileSessions(): Promise<ReconcileResult> {
     //   - If the PID changed (new process), skip.
     //   - If already stopped, skip (redundant write).
     try {
+      // snapshotPid is from the pre-lock snapshot. Inside the predicate below, `current`
+      // is the record freshly re-read under the write lock. Comparing the two detects
+      // whether a new process was spawned (or the session replaced) between our snapshot
+      // and when we acquired the lock.
       const snapshotPid = session.pid
       const now = new Date().toISOString()
       const updated = await updateSessionRecordConditionally(

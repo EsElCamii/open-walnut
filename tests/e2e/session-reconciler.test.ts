@@ -135,7 +135,8 @@ beforeAll(async () => {
           lastActiveAt: now,
           messageCount: 5,
         },
-        // Zombie 2: agent_complete with no PID
+        // Zombie 2: agent_complete with no PID — already stopped, so reconciler skips it.
+        // last_status_change is pre-set (realistic: a stopped session always has this).
         {
           claudeSessionId: ZOMBIE_SESSION_TURN_COMPLETED,
           taskId: 'task-with-zombie',
@@ -143,6 +144,7 @@ beforeAll(async () => {
           process_status: 'stopped',
           work_status: 'agent_complete',
           mode: 'bypass',
+          last_status_change: now,
           startedAt: now,
           lastActiveAt: now,
           messageCount: 3,
@@ -358,12 +360,21 @@ describe('Zombie session reconciliation on startup', () => {
       }>
     }
 
-    // All zombie sessions should have last_status_change set (proving updateSessionRecord ran)
-    for (const id of [ZOMBIE_SESSION_IN_PROGRESS, ZOMBIE_SESSION_TURN_COMPLETED, ZOMBIE_SESSION_DEAD_PID, ZOMBIE_TASKLESS]) {
+    // Sessions that were reconciled (dead processes): reconciler set work_status=agent_complete
+    // and last_status_change, proving updateSessionRecordConditionally ran.
+    for (const id of [ZOMBIE_SESSION_IN_PROGRESS, ZOMBIE_SESSION_DEAD_PID, ZOMBIE_TASKLESS]) {
       const s = raw.sessions.find((s) => s.claudeSessionId === id)
       expect(s).toBeDefined()
       expect(s!.work_status).toBe('agent_complete')
       expect(s!.last_status_change).toBeTruthy()
     }
+
+    // ZOMBIE_SESSION_TURN_COMPLETED was seeded as process_status='stopped' so the reconciler
+    // correctly skipped it (predicate: current.process_status === 'stopped' → return false).
+    // We verify the seed state is preserved unchanged — this is NOT a reconciler output.
+    const skipped = raw.sessions.find((s) => s.claudeSessionId === ZOMBIE_SESSION_TURN_COMPLETED)
+    expect(skipped).toBeDefined()
+    expect(skipped!.work_status).toBe('agent_complete')
+    expect(skipped!.process_status).toBe('stopped')
   })
 })

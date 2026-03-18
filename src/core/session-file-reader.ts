@@ -4,11 +4,10 @@
  * Provides a single interface for reading session JSONL files and subagent
  * directories, whether the session ran locally or on a remote host via SSH.
  *
- * Local sessions:  fs.readFile / fs.readdir
+ * Local sessions:  fs.readFile / fs.readdir (async — non-blocking)
  * Remote sessions: ssh cat / ssh ls (batched where possible)
  */
 
-import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
 import { execSync } from 'node:child_process';
@@ -54,6 +53,17 @@ export function remoteSubagentDirPath(sessionId: string, cwd?: string): string {
     return `~/.claude/projects/${encoded}/${sessionId}/subagents`;
   }
   return `~/.claude/projects/*/${sessionId}/subagents`;
+}
+
+// ── Async file-existence check ──
+
+async function fileExists(filePath: string): Promise<boolean> {
+  try {
+    await fsp.access(filePath);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 // ── JSONL content helpers ──
@@ -228,24 +238,24 @@ export function createFileReader(host?: string): SessionFileReader {
 // ── High-level helpers ──
 
 /**
- * Find the local JSONL file for a session.
+ * Find the local JSONL file for a session (async — non-blocking).
  * If cwd provided, check the exact encoded path.
  * Fallback: search all project dirs for the session ID.
  */
-export function findLocalJsonlPath(sessionId: string, cwd?: string): string | null {
+export async function findLocalJsonlPath(sessionId: string, cwd?: string): Promise<string | null> {
   const projectsDir = path.join(CLAUDE_HOME, 'projects');
 
   if (cwd) {
     const filePath = canonicalJsonlPath(sessionId, cwd);
-    if (fs.existsSync(filePath)) return filePath;
+    if (await fileExists(filePath)) return filePath;
   }
 
   // Fallback: search all project directories
   try {
-    const dirs = fs.readdirSync(projectsDir);
+    const dirs = await fsp.readdir(projectsDir);
     for (const dir of dirs) {
       const filePath = path.join(projectsDir, dir, `${sessionId}.jsonl`);
-      if (fs.existsSync(filePath)) return filePath;
+      if (await fileExists(filePath)) return filePath;
     }
   } catch (err) {
     log.session.debug('failed to scan projects dir for session', {
@@ -287,50 +297,34 @@ export async function readSessionJsonlContent(
     return { content, source, ...(foundCwd ? { foundCwd } : {}) };
   };
 
-  // Helper: extract synthetic walnut-injected user events from local streams file.
+  // Helper: extract synthetic walnut-injected user events from the local streams file.
   // Remote sessions write synthetic events to the local streams capture, but the
   // remote canonical JSONL never sees them. Merge them so user messages appear.
-  const mergeSyntheticFromLocalStreams = (remoteContent: string): string => {
+  // Uses direct filename lookup (streams files are renamed to {sessionId}.jsonl;
+  // see SessionIO.renameForSession() in session-io.ts).
+  const mergeSyntheticFromLocalStreams = async (remoteContent: string): Promise<string> => {
+    const streamFilePath = path.join(SESSION_STREAMS_DIR, `${sessionId}.jsonl`);
     try {
-      const files = fs.readdirSync(SESSION_STREAMS_DIR);
-      for (const file of files) {
-        if (!file.endsWith('.jsonl')) continue;
-        const filePath = path.join(SESSION_STREAMS_DIR, file);
+      const streamContent = await fsp.readFile(streamFilePath, 'utf-8');
+      const syntheticLines: string[] = [];
+      for (const line of streamContent.split('\n')) {
+        if (!line.trim()) continue;
         try {
-          const firstLine = fs.readFileSync(filePath, 'utf-8').split('\n')[0];
-          if (!firstLine) continue;
-          const parsed = JSON.parse(firstLine);
-          if (parsed.sessionId !== sessionId && parsed.session_id !== sessionId) continue;
-          // Found the matching streams file — extract synthetic user events
-          const streamContent = fs.readFileSync(filePath, 'utf-8');
-          const syntheticLines: string[] = [];
-          for (const line of streamContent.split('\n')) {
-            if (!line.trim()) continue;
-            try {
-              const evt = JSON.parse(line);
-              if (evt.type === 'user' && evt.subtype === 'walnut-injected') {
-                syntheticLines.push(line);
-              }
-            } catch (err) {
-              log.session.debug('failed to parse stream event line', {
-                error: err instanceof Error ? err.message : String(err),
-              });
-            }
+          const evt = JSON.parse(line);
+          if (evt.type === 'user' && evt.subtype === 'walnut-injected') {
+            syntheticLines.push(line);
           }
-          if (syntheticLines.length > 0) {
-            return remoteContent + '\n' + syntheticLines.join('\n');
-          }
-          break; // found the file, no synthetic events
         } catch (err) {
-          log.session.debug('failed to read stream file for synthetic merge', {
+          log.session.debug('failed to parse stream event line', {
             error: err instanceof Error ? err.message : String(err),
           });
         }
       }
-    } catch (err) {
-      log.session.debug('streams dir not accessible for synthetic merge', {
-        error: err instanceof Error ? err.message : String(err),
-      });
+      if (syntheticLines.length > 0) {
+        return remoteContent + '\n' + syntheticLines.join('\n');
+      }
+    } catch {
+      // File doesn't exist or can't be read — no synthetic events to merge
     }
     return remoteContent;
   };
@@ -346,15 +340,15 @@ export async function readSessionJsonlContent(
     try {
       if (exactPath) {
         const content = await reader.readFile(exactPath);
-        if (content) return withFoundCwd(mergeSyntheticFromLocalStreams(content), 'remote');
+        if (content) return withFoundCwd(await mergeSyntheticFromLocalStreams(content), 'remote');
       }
       // Exact path missed or no cwd — try glob
       const content = await reader.readFile(globPath);
-      if (content) return withFoundCwd(mergeSyntheticFromLocalStreams(content), 'remote');
+      if (content) return withFoundCwd(await mergeSyntheticFromLocalStreams(content), 'remote');
 
       // Glob also missed — try `find` (more robust than shell glob)
       const findContent = await reader.findSession(sessionId);
-      if (findContent) return withFoundCwd(mergeSyntheticFromLocalStreams(findContent), 'remote');
+      if (findContent) return withFoundCwd(await mergeSyntheticFromLocalStreams(findContent), 'remote');
     } catch (err) {
       log.session.debug('remote JSONL read failed', {
         host, sessionId,
@@ -363,10 +357,12 @@ export async function readSessionJsonlContent(
       // Fall through to stream/outputFile fallbacks
     }
   } else {
-    const localPath = findLocalJsonlPath(sessionId, cwd);
+    // Local session: read canonical JSONL (source of truth).
+    // Streams file is only used as a fallback (step 2 below).
+    const localPath = await findLocalJsonlPath(sessionId, cwd);
     if (localPath) {
       try {
-        const content = fs.readFileSync(localPath, 'utf-8');
+        const content = await fsp.readFile(localPath, 'utf-8');
         if (content) return withFoundCwd(content, 'local');
       } catch (err) {
         log.session.debug('failed to read local JSONL file', {
@@ -378,45 +374,26 @@ export async function readSessionJsonlContent(
   }
 
   // 2. Local streaming capture (SESSION_STREAMS_DIR) — fallback
-  //    Useful when canonical is unavailable (remote SSH down, local file missing)
-  try {
-    const files = fs.readdirSync(SESSION_STREAMS_DIR);
-    for (const file of files) {
-      if (!file.endsWith('.jsonl')) continue;
-      const filePath = path.join(SESSION_STREAMS_DIR, file);
-      try {
-        const firstLine = fs.readFileSync(filePath, 'utf-8').split('\n')[0];
-        if (firstLine) {
-          const parsed = JSON.parse(firstLine);
-          if (parsed.sessionId === sessionId || parsed.session_id === sessionId) {
-            const content = fs.readFileSync(filePath, 'utf-8');
-            if (content) return withFoundCwd(content, 'stream');
-          }
-        }
-      } catch (err) {
-        log.session.debug('failed to read stream capture file', {
-          error: err instanceof Error ? err.message : String(err),
-        });
-      }
+  //    Useful when canonical is unavailable (remote SSH down, local file missing).
+  //    Direct filename lookup: streams files are renamed to {sessionId}.jsonl
+  //    (see SessionIO.renameForSession() in session-io.ts).
+  {
+    const streamFilePath = path.join(SESSION_STREAMS_DIR, `${sessionId}.jsonl`);
+    try {
+      const content = await fsp.readFile(streamFilePath, 'utf-8');
+      if (content) return withFoundCwd(content, 'stream');
+    } catch {
+      // File doesn't exist — no stream capture for this session
     }
-  } catch (err) {
-    log.session.debug('streams dir not accessible', {
-      error: err instanceof Error ? err.message : String(err),
-    });
   }
 
   // 3. Direct outputFile path (tmp file not yet renamed)
   if (outputFile) {
     try {
-      if (fs.existsSync(outputFile)) {
-        const content = fs.readFileSync(outputFile, 'utf-8');
-        if (content) return withFoundCwd(content, 'outputFile');
-      }
-    } catch (err) {
-      log.session.debug('failed to read output file', {
-        outputFile,
-        error: err instanceof Error ? err.message : String(err),
-      });
+      const content = await fsp.readFile(outputFile, 'utf-8');
+      if (content) return withFoundCwd(content, 'outputFile');
+    } catch {
+      // File doesn't exist or can't be read
     }
   }
 
@@ -441,7 +418,7 @@ export async function readSubagentContents(
   return readLocalSubagentContents(sessionId, cwd);
 }
 
-function readLocalSubagentContents(sessionId: string, cwd?: string): Map<string, string> {
+async function readLocalSubagentContents(sessionId: string, cwd?: string): Promise<Map<string, string>> {
   const result = new Map<string, string>();
   const projectsDir = path.join(CLAUDE_HOME, 'projects');
 
@@ -451,7 +428,7 @@ function readLocalSubagentContents(sessionId: string, cwd?: string): Map<string,
   }
   // Fallback: search all project directories
   try {
-    for (const dir of fs.readdirSync(projectsDir)) {
+    for (const dir of await fsp.readdir(projectsDir)) {
       const candidate = path.join(projectsDir, dir, sessionId, 'subagents');
       if (!candidates.includes(candidate)) candidates.push(candidate);
     }
@@ -463,14 +440,14 @@ function readLocalSubagentContents(sessionId: string, cwd?: string): Map<string,
   }
 
   for (const subDir of candidates) {
-    if (!fs.existsSync(subDir)) continue;
+    if (!(await fileExists(subDir))) continue;
     try {
-      const files = fs.readdirSync(subDir);
+      const files = await fsp.readdir(subDir);
       for (const file of files) {
         if (!file.startsWith('agent-') || !file.endsWith('.jsonl')) continue;
         const agentId = file.slice('agent-'.length, -'.jsonl'.length);
         try {
-          const content = fs.readFileSync(path.join(subDir, file), 'utf-8');
+          const content = await fsp.readFile(path.join(subDir, file), 'utf-8');
           if (content) result.set(agentId, content);
         } catch (err) {
           log.session.debug('failed to read subagent file', {

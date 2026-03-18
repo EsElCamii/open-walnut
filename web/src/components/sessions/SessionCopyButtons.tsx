@@ -8,7 +8,7 @@ interface SessionCopyButtonsProps {
   taskId?: string;
   taskTitle?: string;
   onForkStarted?: (cwd: string, host?: string) => void;
-  onForkComplete?: (taskId: string, sessionId?: string) => void;
+  onForkComplete?: (taskId: string) => void;
   onForkFailed?: () => void;
 }
 
@@ -86,7 +86,7 @@ export function SessionCopyButtons({ sessionId, cwd, project, taskId, taskTitle,
       clearTimeout(timerRef.current);
       timerRef.current = setTimeout(() => setForkResult(null), 2000);
       if (result.taskId) {
-        onForkComplete?.(result.taskId, result.sessionId);
+        onForkComplete?.(result.taskId);
       }
     } catch (err) {
       setForkResult('error');

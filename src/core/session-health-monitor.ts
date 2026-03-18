@@ -370,6 +370,13 @@ export class SessionHealthMonitor {
    * and accumulate over time, eventually exhausting OS resources.
    */
   private async killOrphanedProcesses(): Promise<void> {
+    // Grace period: don't kill processes whose session record changed very recently.
+    // The reconciler or other subsystems may have just updated the record, and the
+    // current state may be transient. Real orphans are always older than 2 minutes.
+    // 2 min = worst-case reconciler duration + a few HEALTH_CHECK_INTERVAL_MS (30s each)
+    // cycles to handle transient states created during server startup.
+    const ORPHAN_GRACE_MS = 2 * 60 * 1000
+
     try {
       const { listSessions, TERMINAL_WORK_STATUSES } = await import('./session-tracker.js')
       const sessions = await listSessions()
@@ -387,6 +394,7 @@ export class SessionHealthMonitor {
         }
       }
 
+      const now = Date.now()
       let killed = 0
       for (const s of sessions) {
         if (s.pid == null) continue
@@ -396,6 +404,11 @@ export class SessionHealthMonitor {
         const isTerminal = TERMINAL_WORK_STATUSES.has(s.work_status)
         const isStopped = s.process_status === 'stopped'
         if (!isTerminal && !isStopped) continue
+
+        // Grace period: skip sessions whose record was recently changed.
+        // Prevents killing processes during transient reconciler/startup race windows.
+        const lastChange = s.last_status_change ?? s.lastActiveAt
+        if (lastChange && (now - new Date(lastChange).getTime()) < ORPHAN_GRACE_MS) continue
 
         // PID reuse protection: skip if this PID is used by an active session
         if (activePids.has(s.pid)) {
@@ -529,7 +542,9 @@ export class SessionHealthMonitor {
           if (!line.trim()) continue
           try {
             const event = JSON.parse(line)
-            if (event.type === 'result') return true
+            // A result with is_error:true (e.g. --resume "No conversation found")
+            // is NOT a successful completion — treat it as no result.
+            if (event.type === 'result') return !event.is_error
           } catch { continue }  // expected: partial JSON lines in tail buffer
         }
       } finally {

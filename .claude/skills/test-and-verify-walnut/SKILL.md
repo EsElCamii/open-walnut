@@ -1,281 +1,220 @@
 ---
 name: test-and-verify-walnut
-description: "E2E verification for Walnut features — design real user-workflow tests, execute via Playwright + API + unit tests, and report results. Always reads walnut-console-ops first."
-requires:
-  bins: []
+description: "4-agent pipeline: design + implement code tests + Playwright UI tests + quality gate. Reads walnut-console-ops first."
 ---
 
-# /verify — Walnut End-to-End Verification
+# /test-and-verify-walnut
 
-**FIRST ACTION**: Read `walnut-console-ops` skill (`.claude/skills/walnut-console-ops/SKILL.md` relative to project root) for the UI layout and interaction patterns. Every verification session needs this context.
+Every test must answer: **"If I reverted my code changes, would this test fail?"** NO → delete it.
 
-## The Core Problem This Skill Solves
-
-Generic verification ("load the page, see it works") is useless. Real verification exercises the **actual user workflow end-to-end**. For every feature, ask: "If I were the user, what would I do? What would I see? What could go wrong?"
-
-## Phase 0: Classify the Change
-
-Before designing tests, classify what changed:
-
-| Change Type | Primary Test Method | Example |
-|---|---|---|
-| **Frontend-only** (component, CSS, layout) | Playwright UI interaction | Task pill styling, panel toggle |
-| **Backend-only** (API, session, provider) | API calls + unit tests + server logs | SCP transfer, session resume |
-| **Full-stack** (new feature visible in UI) | Chat workflow → observe UI + API | New tool, session mode, triage |
-| **Bug fix** | Reproduce bug first → fix → verify gone | Status not updating, missing data |
-
-**Critical insight**: If the feature is backend-only, don't waste time taking screenshots of the homepage. Instead, test the actual backend behavior through API calls, server logs, or integration tests.
-
-## Phase 1: Design Real User Workflows (THINK HARD)
-
-For each change, trace the **complete user journey**:
-
-### Template: How Would a User Exercise This Feature?
+**FIRST**: Read `.claude/skills/walnut-console-ops/SKILL.md` for UI layout and interaction patterns.
 
 ```
-1. USER does X (types in chat, clicks button, attaches image...)
-2. SYSTEM does Y internally (API call, session spawn, SCP transfer...)
-3. USER sees Z in the UI (status change, session output, error message...)
-4. USER can VERIFY by doing W (clicking session, reading output, checking file...)
+Main Agent (context) → Agent 1 (design) → Agent 2 (code) ∥ Agent 3 (Playwright) → Agent 4 (quality gate)
 ```
 
-### Design 2-5 Scenarios Per Feature
+---
 
-For every scenario, define:
-- **Trigger**: What user action starts the workflow?
-- **Observable effect**: What should the user see/verify?
-- **Verification method**: How do we confirm it worked?
-  - UI check (Playwright screenshot + DOM snapshot)
-  - API check (`curl` endpoint, check response)
-  - Log check (grep server logs for expected entries)
-  - File check (verify file exists, content correct)
-  - Session output check (session history contains expected content)
+## Phase 0: Main Agent — Context
 
-### Example: SCP Image Transfer Feature
+1. `git diff --stat HEAD~1` + `git log --oneline -5`
+2. Read plan files: `.plan`, `~/.claude/plans/`, `.tasks/*/TASK.md`
+3. Classify change type:
 
-**BAD test design** (what NOT to do):
+| Change Type | Primary Tests |
+|---|---|
+| Frontend-only | Playwright UI |
+| Backend-only | API + unit + server logs |
+| Full-stack | Console E2E + Playwright + unit |
+| Bug fix | Reproduce → fix → re-verify |
+
+4. Bundle context → pass to all agents.
+
+---
+
+## Phase 1: Agent 1 — Test Designer (read-only)
+
+Design tests in 2 categories. Do NOT implement.
+
+**Category A — UI (Playwright)**: 2-4 scenarios. For each: pre-conditions, steps (real clicks, NO `page.goto()` SPA nav), assertions (must include downstream verification — see below), screenshot points.
+
+**Category B — Code (vitest)**: 2-4 tests, as E2E as possible. For each: name, tier, setup, exercise, assert (HTTP response + WS event + persisted data).
+
+**Self-check each test**: "Would this pass with code reverted?" YES = delete.
+
+**E2E means full consequence**: Every test must verify the **downstream effect** of the action, not just the immediate UI change. If the action triggers a backend round-trip, the test must wait for and verify the backend result.
+
+Anti-patterns (test is SHALLOW or WORTHLESS if it only checks these):
+- "page loads", "component renders", "no console errors"
+- "API returns 200" without checking response body
+- "clicked button and UI closed" without verifying the backend outcome
+- "status badge changed" without verifying the underlying operation succeeded
+- Testing mock config instead of production code
+
+---
+
+## Phase 2: Agent 2 — Code Test Writer (∥ Agent 3)
+
+Implement Category B. Rules:
+- Real server: `startServer({ port: 0, dev: true })`. Only mock Claude CLI (`tests/providers/mock-claude.mjs`).
+- Assert on HTTP responses, WS events, file contents — not internal state.
+- Place: `tests/e2e/` (pipeline), `tests/web/routes/` (API), `tests/core/` (logic), `tests/e2e/browser/` (Playwright code).
+- Run and iterate until green.
+
+---
+
+## Phase 3: Agent 3 — Playwright Executor (∥ Agent 2)
+
+**First**: Read `.claude/skills/walnut-console-ops/SKILL.md`.
+
+Execute Category A:
+- `mkdir -p /tmp/test-and-verify/`, build SPA: `cd web && npx vite build`
+- Real UI clicks only. Screenshot every step to `/tmp/test-and-verify/<scenario>-step<N>.png`
+- DOM snapshot before each action. Verify screenshots with `Read` tool.
+- Act → Wait (5-20s) → Screenshot → Snapshot → verify.
+
+**CRITICAL — Verify full consequence, not just UI reaction**:
+
+Every UI action that triggers backend work must be verified **through to the downstream effect**. The test is NOT done when the UI element changes — it's done when the **outcome is confirmed**.
+
+The question: **"Did the thing I triggered actually work?"** — not **"Did the UI react to my click?"**
+
+**BAD (shallow)** — stops at UI reaction:
 ```
-1. Navigate to homepage → screenshot → "PASS" (proves nothing)
-2. Navigate to sessions page → screenshot → "PASS" (still proves nothing)
-```
+# Testing model switch:
+Click "Opus 1M" → picker closes → screenshot → ✅ DONE
+# WRONG: only proved the picker UI works. Did the session actually restart
+# with the new model? Did the next message succeed? No idea.
 
-**GOOD test design**:
-```
-Scenario 1: Happy Path — Image transferred to remote session
-  Trigger: Chat with main agent: "Start a session on remote-host to analyze /path/to/image.png"
-  Verify:
-    - Server log shows "image transfer: transferred and rewrote paths"
-    - Session prompt contains /tmp/walnut-images/{hash}/image.png (not local path)
+# Testing task creation:
+Click "Add" → task appears in list → screenshot → ✅ DONE
+# WRONG: only proved the React component rendered. Did the task persist
+# to disk? Can you reload and still see it? No idea.
 
-Scenario 2: No images — Zero overhead
-  Trigger: Start remote session with text-only prompt (no image paths)
-  Verify:
-    - Server log does NOT show "image transfer" entries
-    - Session starts normally
-
-Scenario 3: SCP failure — Graceful degradation
-  Trigger: Start remote session with image, but mock SCP failure
-  Verify:
-    - Server log shows warning "scp failed — proceeding without images"
-    - Session still starts (not blocked)
-    - Prompt still contains original local path (not rewritten)
-
-Scenario 4: Unit test confirmation
-  Trigger: Run npx vitest tests/providers/session-io*.test.ts
-  Verify: All N tests pass
-```
-
-## Phase 2: Build
-
-```bash
-npm run build                    # server TypeScript
-cd web && npx vite build         # React SPA (only if frontend changed)
-```
-
-Report build status. If either fails, stop and show the error.
-
-## Phase 3: Execute Tests
-
-### Test Method 1: Unit Tests (fastest, most reliable)
-
-```bash
-npx vitest run tests/path/to/relevant.test.ts
-```
-
-**When to use**: Always. Unit tests are the foundation. Run them first.
-
-### Test Method 2: API Tests (backend behavior without UI)
-
-Use an **ephemeral server** to avoid polluting production:
-
-```bash
-result=$(walnut web --ephemeral)
-port=$(echo "$result" | jq -r .port)
-pid=$(echo "$result" | jq -r .pid)
-
-# Test API endpoints
-curl -s http://localhost:$port/api/sessions | jq 'length'
-curl -s -X POST http://localhost:$port/api/tasks -H 'Content-Type: application/json' \
-  -d '{"title":"Test task","category":"Test","project":"Test"}'
-
-# When done
-kill $pid
-```
-
-**When to use**: Backend features, API changes, data model changes.
-
-### Test Method 3: Server Log Verification
-
-For features that don't have UI output but produce server logs:
-
-```bash
-# Check recent server logs for expected entries
-tail -100 /tmp/walnut/walnut-$(date +%Y-%m-%d).log | grep "image transfer"
+# Testing session start:
+Click "Start session" → status shows "Running" → screenshot → ✅ DONE
+# WRONG: only proved the status badge updated. Did the session actually
+# produce output? Did the CLI process spawn? No idea.
 ```
 
-**When to use**: Background processes, hooks, transfers, cleanup operations.
-
-### Test Method 4: Chat Workflow (full-stack via main agent)
-
-Talk to the main agent through the chat input to trigger the feature:
-
-1. Navigate to `http://localhost:3456`
-2. Read `walnut-console-ops` to understand input boxes
-3. Type in the **main chat input** (placeholder: "Type a message...")
-4. Wait for agent response (Act → Wait 10-30s → Screenshot → Snapshot)
-5. If agent creates a session, click the session link to open SessionPanel
-6. Verify session status, output, work_status in **three places**:
-   - SessionPanel header
-   - TodoPanel SessionPill
-   - TodoDetailPanel sessions list
-
-**When to use**: Full-stack features, session-related changes, agent tool changes.
-
-### Test Method 5: Playwright UI Verification
-
-Use Playwright MCP tools for pure frontend verification:
-
+**GOOD (full consequence)** — verifies the downstream effect:
 ```
-1. browser_navigate to http://localhost:3456
-2. browser_snapshot — get clickable refs
-3. browser_click — interact with UI elements
-4. browser_take_screenshot — capture visual state
-5. browser_snapshot — verify DOM attributes
+# Testing model switch:
+Click "Opus 1M" → picker closes → send a message in session input →
+wait for response → verify response text appears (no "API Error",
+no "invalid model") → screenshot response → ✅ DONE
+
+# Testing task creation:
+Click "Add" → task appears in list → click the task → verify detail
+panel shows correct title/category/project → ✅ DONE
+
+# Testing session start:
+Click "Start session" → status shows "Running" → wait for first
+assistant message to appear in chat → verify message content →
+screenshot → ✅ DONE
 ```
 
-**Key rules from walnut-console-ops**:
-- **Stay on `/`** — panels open inline, don't navigate to separate pages
-- **Disambiguate inputs by placeholder** — multiple input boxes coexist
-- **Act → Wait → Verify** — every action triggers async work
-- **Screenshot is ground truth** — when DOM and visual disagree, trust screenshot
-- **Refs are ephemeral** — re-snapshot before interacting after any change
+The pattern: **Action → UI reacts → wait for backend round-trip → verify outcome → screenshot proof**. If you stop at "UI reacts", the test is SHALLOW.
 
-**When to use**: Frontend changes, layout changes, visual bugs, state persistence.
+---
 
-### Test Method 6: Console-Driven Full E2E (the gold standard)
+## Phase 4: Agent 4 — Quality Verifier (after 2+3)
 
-**This is the highest-fidelity test.** You operate the Walnut console exactly as a human would — talk to the main agent, let it create tasks and sessions, then verify the outcome through the UI and the real infrastructure. No API shortcuts, no mocks.
+For each test, ask TWO questions:
+1. "Would this pass if feature was reverted?" YES = **WORTHLESS**, delete it.
+2. "Does this verify the **downstream effect**, or just the immediate UI change?" UI-only = **SHALLOW**, must extend.
 
-**When to use**: Any feature that touches the session pipeline, agent tools, or cross-machine behavior. This is mandatory for features involving remote sessions, image handling, or agent-orchestrated workflows.
+- **GENUINE**: Triggers action AND verifies the full backend/system consequence
+- **SHALLOW**: Verifies UI reacted (button clicked, picker closed, badge changed) but NOT that the triggered operation succeeded. Must be extended to verify downstream.
+- **WORTHLESS**: Would pass without code changes
 
-**How it works**:
+A Playwright test that clicks a button and screenshots is **SHALLOW** unless it also waits for and verifies what that button *caused* (response arrived, status updated, data persisted, no errors).
 
-1. **Prepare test data** — create any files, images, or state the feature needs
-   ```bash
-   # Example: create a test image for SCP transfer verification
-   echo "test-data" > ~/.open-walnut/images/verify-test.png
-   ```
+Overall: PASS / NEEDS WORK / FAIL
 
-2. **Talk to the main agent via console chat** — use the main chat input (placeholder: "Type a message...") to ask the agent to exercise the feature. Be explicit about what you want:
-   > "Create a task 'Verify SCP Transfer' in Projects/Walnut. Start a bypass session on remote-host. In the session prompt, include a reference to the image ~/.open-walnut/images/verify-test.png and ask the session to confirm what path it sees for that file."
+---
 
-3. **Wait for the agent to respond** — the agent will create the task, start the session, and reply with a session link. Screenshot the response.
-
-4. **Click the session link** — SessionPanel opens inline on the same page. Screenshot to confirm it's running.
-
-5. **Verify in the SessionPanel** — read the session's conversation. Check that:
-   - The prompt the session received has the **rewritten path** (e.g., `/tmp/walnut-images/{hash}/verify-test.png`) not the original local path
-   - The session is actually running on the remote host
-
-6. **Verify on the remote machine** — SSH to confirm the file actually arrived:
-   ```bash
-   ssh remote-host "ls -la /tmp/walnut-images/*/verify-test.png"
-   ```
-
-7. **Verify server logs** — confirm the transfer was logged:
-   ```bash
-   grep "image transfer" /tmp/walnut/walnut-$(date +%Y-%m-%d).log | tail -5
-   ```
-
-8. **Clean up** — stop the test session, delete the test task if desired.
-
-**Key principles**:
-- **You are the user** — interact through the console, not through direct API calls
-- **The main agent is the orchestrator** — let it create tasks and sessions for you
-- **Verify at every layer**: UI (screenshot) → server logs → remote machine state
-- **Screenshot every step** — evidence chain from trigger to outcome
-- **If the session can't read the file, the feature is broken** — that's the ultimate litmus test
-
-## Phase 4: Report
-
-Use the same narrative format as `/verify`:
+## Phase 5: Report
 
 ```markdown
-## Verification Report: <Feature/Fix Name>
+## Test & Verify Report: <Feature>
+### Build — Server: PASS/FAIL, Frontend: PASS/FAIL
+### Code Tests — <N> tests, <N> genuine
+### UI Tests — <N> scenarios, <N> genuine
+### Overall — PASS / NEEDS WORK / FAIL
+```
 
-### Build
-- **Server build**: PASS/FAIL
-- **Frontend build**: PASS/FAIL (or "N/A — no frontend changes")
+## Phase 6: Learning Loop
+
+New patterns → append to Learned Patterns below. Console-related → also update `walnut-console-ops/SKILL.md`.
 
 ---
 
-### Scenario 1: <Name>
+## Test Reference
 
-**Goal**: <what this validates from user perspective>
-**Test method**: <unit test / API / log check / chat workflow / Playwright>
+```bash
+npm test                    # Unit + Integration (~5s)
+npm run test:e2e            # E2E real server (~15s)
+npm run test:all            # Everything
+npx vitest run <file>       # Single test
+cd web && npx vite build    # Build SPA before Playwright
+npx playwright test         # Browser tests
+```
 
-#### Step 1 — <Action>
-- **Action**: <what was done>
-- **Expected**: <what should happen>
-- **Actual**: <what happened — quote logs, API responses, DOM content>
-- **Result**: PASS/FAIL
-- **Evidence**: <screenshot path, log excerpt, test output, API response>
+**Pyramid**: Live → Playwright → **E2E** (most important) → Integration → Unit
 
-**Scenario Result**: PASS/FAIL
+**Mock only**: Claude CLI. Everything else real.
+
+**Production safety**: `OPEN_WALNUT_HOME=/tmp/walnut-test-*/`. Never `~/.open-walnut/`. Port 3456 = production, never touch.
+
+**Open source**: No internal tool names, employer references, or personal usernames.
+
+### E2E Template
+```typescript
+vi.mock('../../src/constants.js', () => createMockConstants('walnut-e2e-FEATURE'));
+import { startServer, stopServer } from '../../src/web/server.js';
+
+let server, port;
+beforeAll(async () => {
+  server = await startServer({ port: 0, dev: true });
+  port = (server.address() as any).port;
+});
+afterAll(() => stopServer());
+
+it('REST → Core → Bus → WS', async () => {
+  const ws = await connectWs();
+  const event = waitForWsEvent(ws, 'task:created');
+  const res = await fetch(`http://localhost:${port}/api/tasks`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ title: 'test' }),
+  });
+  expect(res.status).toBe(201);
+  expect((await event).data.task.title).toBe('test');
+  ws.close();
+});
+```
+
+### Session E2E: Mock CLI wrapper
+```typescript
+const MOCK_CLI = path.resolve(import.meta.dirname, '../providers/mock-claude.mjs');
+sessionRunner.setCliCommand(MOCK_WRAPPER); // before startServer
+```
+
+### Architecture (for test design)
+- **Event Bus**: backbone — test WS delivery for entity CRUD
+- **Phases**: TODO → IN_PROGRESS → AGENT_COMPLETE → AWAIT_HUMAN_ACTION → COMPLETE
+- **Sessions**: 2-slot (plan + exec), PID monitoring, FIFO stall
+- **Concurrency**: 2-layer locks. Test concurrent writes.
+- **WS**: `{ type: 'event', name, data }` / RPC: `{ type: 'req', id, method, payload }`
+
+### Gotchas
+- WS events async — use `waitForWsEvent()` with timeout
+- Build SPA before Playwright or you test stale HTML
+- Click sidebar links, don't `page.goto('/route')` in SPA
+- Concurrent tests need separate WALNUT_HOME dirs
 
 ---
 
-### Overall Summary
-- **Scenarios**: N passed / M total
-- **Test methods used**: unit tests, API, logs, Playwright
-- **Blocking issues**: <list or "none">
-- **Manual verification needed**: <list items that can't be auto-tested>
-- **Overall**: PASS/FAIL
-```
+## Learned Patterns
 
-## Decision Guide: What Tests For What Feature?
-
-```
-Feature involves... → Test with...
-─────────────────────────────────────────────────
-New UI component     → Playwright (render, click, state)
-API endpoint change  → curl ephemeral + unit tests
-Session behavior     → Console E2E + server logs + unit tests
-Background process   → Server logs + unit tests
-Data model change    → API test + unit tests
-SSH/remote feature   → Console E2E (talk to agent → start remote session → verify remote) + unit tests
-Agent tool change    → Console E2E (ask agent to use the tool → verify outcome)
-Bug fix              → Reproduce via console → fix → re-verify same way
-```
-
-**Rule of thumb**: If a human would trigger this feature by talking to Walnut in the console, your test should do the same.
-
-## Anti-Patterns (DO NOT)
-
-1. **"Homepage loads, PASS"** — Loading the homepage proves nothing about your feature
-2. **Skipping unit tests** — They're the fastest, most reliable verification
-3. **Playwright for backend features** — If nothing changed in the UI, don't test the UI
-4. **Not checking server logs** — Many features only manifest in logs, not UI
-5. **Not using ephemeral server** — Testing against production risks side effects
-6. **Testing with `page.goto()` for SPA nav** — Use sidebar clicks, button clicks
-7. **Not designing scenarios first** — If you can't describe what to test, you can't test it
+*(None yet.)*

@@ -11,6 +11,7 @@ interface Props {
 }
 
 export function SessionsSection({ config, onSave }: Props) {
+  const [sessionModel, setSessionModel] = useState(config.agent?.session_model ?? 'opus');
   const [idleTimeout, setIdleTimeout] = useState<number | undefined>(config.session?.idle_timeout_minutes ?? 30);
   const [maxIdle, setMaxIdle] = useState<number | undefined>(config.session?.max_idle);
   const [sessionLimits, setSessionLimits] = useState<Record<string, string | number>>(config.session_limits ?? {});
@@ -18,6 +19,7 @@ export function SessionsSection({ config, onSave }: Props) {
   const [sdkPort, setSdkPort] = useState<number | undefined>(config.session_server?.port ?? 7890);
 
   useEffect(() => {
+    setSessionModel(config.agent?.session_model ?? 'opus');
     setIdleTimeout(config.session?.idle_timeout_minutes ?? 30);
     setMaxIdle(config.session?.max_idle);
     setSessionLimits(config.session_limits ?? {});
@@ -33,6 +35,7 @@ export function SessionsSection({ config, onSave }: Props) {
     }
 
     await onSave({
+      agent: { ...config.agent, session_model: sessionModel },
       session: {
         idle_timeout_minutes: idleTimeout,
         max_idle: maxIdle,
@@ -47,7 +50,26 @@ export function SessionsSection({ config, onSave }: Props) {
   };
 
   return (
-    <SectionCard id="sessions" title="Sessions" description="Claude Code session behavior and limits." onSave={handleSave}>
+    <SectionCard id="sessions" title="Claude Code Session" description="Default model, timeouts, and limits for Claude Code sessions." onSave={handleSave}>
+      <div className="form-group">
+        <label htmlFor="session-model">Session Model</label>
+        <select
+          id="session-model"
+          value={sessionModel}
+          onChange={(e) => setSessionModel(e.target.value)}
+          style={{ maxWidth: 200 }}
+        >
+          <option value="opus">Opus</option>
+          <option value="sonnet">Sonnet</option>
+          <option value="haiku">Haiku</option>
+        </select>
+        <p className="text-sm text-muted" style={{ marginTop: 2 }}>
+          Controls the <code style={{ fontSize: 11 }}>--model</code> flag for Claude Code CLI sessions.
+        </p>
+      </div>
+
+      <div className="settings-divider" />
+
       <div className="form-row">
         <div className="form-group">
           <label htmlFor="idle-timeout">Idle Timeout</label>

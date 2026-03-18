@@ -1,11 +1,11 @@
 /**
  * WebSocket client — singleton, auto-reconnects, dispatches events.
  *
- * LOGGING: Use console.log (NOT console.debug) everywhere in this file.
- * Browser logs are forwarded to the server log forwarder, but console.debug
- * is filtered out by both Chrome defaults and the forwarder. Using console.log
- * ensures WS events appear in /tmp/open-walnut/ for post-mortem debugging.
+ * Uses the structured `log` helper so every WS log line can be traced
+ * across browser ↔ server by grepping a full sessionId / rpcId.
  */
+
+import { log } from '@/utils/log';
 
 /** WebSocket frame types matching the server protocol. */
 export interface WsEventFrame {
@@ -41,16 +41,12 @@ function nextReqId(): string {
   return `r${++reqCounter}-${Date.now().toString(36)}`;
 }
 
-// Compact event log — suppress noisy high-frequency streaming events
+// Suppress noisy high-frequency streaming events from logging
 const SUPPRESSED_EVENTS = new Set([
   'session:text-delta',
   'agent:text-delta',
   'agent:thinking',
 ]);
-
-function logPrefix(): string {
-  return `[ws ${new Date().toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' })}]`;
-}
 
 class WsClient {
   private ws: WebSocket | null = null;
@@ -77,7 +73,7 @@ class WsClient {
 
     const proto = window.location.protocol === 'https:' ? 'wss' : 'ws';
     const url = `${proto}://${window.location.host}/ws`;
-    console.log(`${logPrefix()} connecting to ${url}`);
+    log.info('ws', 'connecting', { url });
     const ws = new WebSocket(url);
 
     ws.onopen = () => {
@@ -85,7 +81,7 @@ class WsClient {
       this.hasConnectedBefore = true;
       this.reconnectDelay = 1000;
       this.setState('connected');
-      console.log(`${logPrefix()} connected${isReconnect ? ' (reconnect)' : ''}`);
+      log.info('ws', isReconnect ? 'connected (reconnect)' : 'connected');
       // On reconnect, emit a synthetic event so components can re-fetch stale data.
       // Events during the disconnect window are permanently lost — the server has
       // no event buffer/replay; events are fire-and-forget over the live socket.
@@ -97,15 +93,15 @@ class WsClient {
     };
 
     ws.onclose = (ev) => {
-      console.log(`${logPrefix()} disconnected (code=${ev.code}, reason=${ev.reason || 'none'})`);
+      log.info('ws', 'disconnected', { code: ev.code, reason: ev.reason || 'none' });
       this.ws = null;
       this.setState('disconnected');
       this.rejectPending('WebSocket disconnected');
       if (!this.disposed) this.scheduleReconnect();
     };
 
-    ws.onerror = (ev) => {
-      console.warn(`${logPrefix()} error`, ev);
+    ws.onerror = () => {
+      log.warn('ws', 'error');
     };
 
     ws.onmessage = (ev) => {
@@ -116,10 +112,10 @@ class WsClient {
         } else if (frame.type === 'res') {
           this.handleResponse(frame);
         } else {
-          console.warn(`${logPrefix()} unknown frame type`, frame);
+          log.warn('ws', 'unknown frame type', { frame: frame as Record<string, unknown> });
         }
-      } catch (err) {
-        console.warn(`${logPrefix()} malformed frame`, ev.data, err);
+      } catch {
+        log.warn('ws', 'malformed frame');
       }
     };
 
@@ -127,7 +123,7 @@ class WsClient {
   }
 
   disconnect() {
-    console.log(`${logPrefix()} disconnect() called`);
+    log.info('ws', 'disconnect() called');
     this.disposed = true;
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);
@@ -148,13 +144,13 @@ class WsClient {
       this.eventListeners.set(name, set);
     }
     set.add(cb);
-    console.log(`${logPrefix()} listener added: "${name}" (${set.size} total)`);
+    log.debug('ws', `listener added: "${name}"`, { count: set.size });
   }
 
   offEvent(name: string, cb: EventCallback) {
     const set = this.eventListeners.get(name);
     set?.delete(cb);
-    console.log(`${logPrefix()} listener removed: "${name}" (${set?.size ?? 0} remaining)`);
+    log.debug('ws', `listener removed: "${name}"`, { remaining: set?.size ?? 0 });
   }
 
   onConnectionChange(cb: ConnectionCallback) {
@@ -168,7 +164,7 @@ class WsClient {
   sendRpc<T = unknown>(method: string, payload: unknown): Promise<T> {
     return new Promise((resolve, reject) => {
       if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
-        console.warn(`${logPrefix()} RPC failed — not connected: ${method}`);
+        log.warn('ws', 'RPC failed — not connected', { method });
         reject(new Error('WebSocket not connected'));
         return;
       }
@@ -178,7 +174,14 @@ class WsClient {
         resolve: resolve as (v: unknown) => void,
         reject,
       });
-      console.log(`${logPrefix()} RPC → ${method} (id=${id})`, payload);
+      // Extract IDs from payload for traceability
+      const rpcLog: Record<string, unknown> = { rpcId: id, method };
+      if (payload && typeof payload === 'object') {
+        const p = payload as Record<string, unknown>;
+        if (p.sessionId) rpcLog.sessionId = p.sessionId;
+        if (p.taskId) rpcLog.taskId = p.taskId;
+      }
+      log.info('ws', `RPC:${id} →`, rpcLog);
       this.ws.send(JSON.stringify(frame));
     });
   }
@@ -187,11 +190,10 @@ class WsClient {
     if (this._state === state) return;
     const prev = this._state;
     this._state = state;
-    // Use console.log (not debug) so state transitions are captured by browser log forwarder
-    console.log(`${logPrefix()} state: ${prev} → ${state}`);
+    log.info('ws', `state ${prev} → ${state}`);
     for (const cb of this.connectionListeners) {
       try { cb(state); } catch (err) {
-        console.error(`${logPrefix()} connectionChange callback error`, err);
+        log.error('ws', 'connectionChange callback error', { error: String(err) });
       }
     }
   }
@@ -203,11 +205,7 @@ class WsClient {
 
     if (!SUPPRESSED_EVENTS.has(frame.name)) {
       const summary = this.summarizeEventData(frame.name, frame.data);
-      if (listenerCount === 0) {
-        console.log(`${logPrefix()} #${frame.seq} "${frame.name}" — NO LISTENERS`, summary);
-      } else {
-        console.log(`${logPrefix()} #${frame.seq} "${frame.name}" → ${listenerCount} listener(s)`, summary);
-      }
+      log.info('ws', `event "${frame.name}"`, { seq: frame.seq, listeners: listenerCount, ...summary });
     }
 
     if (!cbs) return;
@@ -215,7 +213,7 @@ class WsClient {
       try {
         cb(frame.data);
       } catch (err) {
-        console.error(`${logPrefix()} event callback error for "${frame.name}"`, err);
+        log.error('ws', `event callback error for "${frame.name}"`, { error: String(err) });
       }
     }
   }
@@ -227,7 +225,7 @@ class WsClient {
     // For session events, show the most useful fields
     if (name.startsWith('session:')) {
       const summary: Record<string, unknown> = {};
-      if (d.sessionId) summary.sessionId = (d.sessionId as string).slice(0, 12) + '…';
+      if (d.sessionId) summary.sessionId = d.sessionId;
       if (d.taskId) summary.taskId = d.taskId;
       if (d.process_status) summary.process_status = d.process_status;
       if (d.work_status) summary.work_status = d.work_status;
@@ -251,22 +249,22 @@ class WsClient {
   private handleResponse(frame: WsResFrame) {
     const pending = this.pendingRpc.get(frame.id);
     if (!pending) {
-      console.warn(`${logPrefix()} RPC response for unknown id=${frame.id}`, frame);
+      log.warn('ws', `RPC:${frame.id} ← orphan response`);
       return;
     }
     this.pendingRpc.delete(frame.id);
     if (frame.ok) {
-      console.log(`${logPrefix()} RPC ← ${frame.id} OK`, frame.payload);
+      log.info('ws', `RPC:${frame.id} ← OK`);
       pending.resolve(frame.payload);
     } else {
-      console.warn(`${logPrefix()} RPC ← ${frame.id} ERROR: ${frame.error}`);
+      log.warn('ws', `RPC:${frame.id} ← ERROR`, { error: frame.error });
       pending.reject(new Error(frame.error ?? 'RPC error'));
     }
   }
 
   private rejectPending(reason: string) {
     if (this.pendingRpc.size > 0) {
-      console.warn(`${logPrefix()} rejecting ${this.pendingRpc.size} pending RPCs: ${reason}`);
+      log.warn('ws', 'rejecting pending RPCs', { count: this.pendingRpc.size, reason });
     }
     for (const [, p] of this.pendingRpc) {
       p.reject(new Error(reason));
@@ -276,7 +274,7 @@ class WsClient {
 
   private scheduleReconnect() {
     if (this.reconnectTimer) return;
-    console.log(`${logPrefix()} reconnecting in ${this.reconnectDelay}ms`);
+    log.info('ws', 'reconnecting', { delayMs: this.reconnectDelay });
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null;
       this.connect();

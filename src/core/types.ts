@@ -215,9 +215,6 @@ export interface Config {
     categories?: string[];
     projects?: string[];
   };
-  focus_bar?: {
-    pinned_tasks?: string[];
-  };
   ordering?: {
     categories?: string[];
     projects?: Record<string, string[]>;

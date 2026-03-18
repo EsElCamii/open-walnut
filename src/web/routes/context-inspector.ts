@@ -6,6 +6,7 @@
 import { Router, type Request, type Response, type NextFunction } from 'express'
 import { getConfig } from '../../core/config-manager.js'
 import { DEFAULT_MODEL } from '../../agent/model.js'
+import { DEFAULT_MAX_TOKENS } from '../../agent/providers/defaults.js'
 import { buildRoleSection, buildSystemPrompt, buildTaskCategoriesSection } from '../../agent/context.js'
 import { buildSkillsPrompt } from '../../core/skill-loader.js'
 import { getCompactionSummary, getModelContext } from '../../core/chat-history.js'
@@ -58,7 +59,7 @@ contextInspectorRouter.get('/', async (_req: Request, res: Response, next: NextF
     // Model config — mirror what the agent loop actually uses (loop.ts lines 146-150)
     const modelConfig = {
       model: config.agent?.main_model ?? config.agent?.model ?? DEFAULT_MODEL,
-      max_tokens: config.agent?.maxTokens ?? 32768,
+      max_tokens: config.agent?.maxTokens ?? DEFAULT_MAX_TOKENS,
       region: config.agent?.region ?? config.provider?.bedrock_region ?? 'us-west-2',
     }
     const modelConfigText = JSON.stringify(modelConfig)

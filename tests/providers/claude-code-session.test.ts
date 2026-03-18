@@ -29,11 +29,12 @@ import { createMockConstants } from '../helpers/mock-constants.js';
 // ── Mock constants (isolate file I/O to temp dir) ──
 vi.mock('../../src/constants.js', () => createMockConstants());
 
-import { ClaudeCodeSession, SessionRunner, shellQuote, buildRemoteCommand } from '../../src/providers/claude-code-session.js';
+import { ClaudeCodeSession, SessionRunner, shellQuote, buildRemoteCommand, outputFileCheckResult } from '../../src/providers/claude-code-session.js';
 import { bus, EventNames } from '../../src/core/event-bus.js';
 import type { BusEvent } from '../../src/core/event-bus.js';
 import { WALNUT_HOME, SESSION_STREAMS_DIR } from '../../src/constants.js';
 import { enqueueMessage, resetCache as resetQueueCache } from '../../src/core/session-message-queue.js';
+import fs from 'node:fs';
 
 // Retrieve the actual tmpBase from the mocked module (single source of truth)
 const tmpBase = WALNUT_HOME;
@@ -61,6 +62,67 @@ afterEach(async () => {
   await new Promise((r) => setTimeout(r, 200));
   await fsp.rm(tmpBase, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 }).catch(() => {});
 });
+
+// ── outputFileCheckResult tests ──
+
+describe('outputFileCheckResult', () => {
+  const tmpFile = path.join(tmpBase, 'test-result.jsonl')
+
+  it('returns hasResult:true for a successful result event', () => {
+    fs.writeFileSync(tmpFile, JSON.stringify({ type: 'result', is_error: false, session_id: 'abc' }) + '\n')
+    expect(outputFileCheckResult(tmpFile)).toEqual({ hasResult: true })
+  })
+
+  it('returns hasResult:false with errorMessage for is_error:true result', () => {
+    const event = {
+      type: 'result',
+      is_error: true,
+      errors: ['No conversation found with session ID: adcfa486'],
+    }
+    fs.writeFileSync(tmpFile, JSON.stringify(event) + '\n')
+    const result = outputFileCheckResult(tmpFile)
+    expect(result.hasResult).toBe(false)
+    expect(result.errorMessage).toContain('No conversation found')
+  })
+
+  it('returns hasResult:false when file has no result event', () => {
+    fs.writeFileSync(tmpFile, JSON.stringify({ type: 'assistant', text: 'hello' }) + '\n')
+    expect(outputFileCheckResult(tmpFile)).toEqual({ hasResult: false })
+  })
+
+  it('returns hasResult:false for empty file', () => {
+    fs.writeFileSync(tmpFile, '')
+    expect(outputFileCheckResult(tmpFile)).toEqual({ hasResult: false })
+  })
+
+  it('returns hasResult:false for nonexistent file', () => {
+    expect(outputFileCheckResult('/tmp/does-not-exist-walnut-test.jsonl')).toEqual({ hasResult: false })
+  })
+
+  it('respects fromOffset — ignores old result events before offset', () => {
+    const oldResult = JSON.stringify({ type: 'result', is_error: false }) + '\n'
+    const newData = JSON.stringify({ type: 'assistant', text: 'new turn' }) + '\n'
+    fs.writeFileSync(tmpFile, oldResult + newData)
+    // Offset past the old result — should not find it
+    expect(outputFileCheckResult(tmpFile, oldResult.length)).toEqual({ hasResult: false })
+  })
+
+  it('returns hasResult:true for result after offset', () => {
+    const oldData = JSON.stringify({ type: 'assistant', text: 'old' }) + '\n'
+    const newResult = JSON.stringify({ type: 'result', is_error: false }) + '\n'
+    fs.writeFileSync(tmpFile, oldData + newResult)
+    expect(outputFileCheckResult(tmpFile, oldData.length)).toEqual({ hasResult: true })
+  })
+
+  it('returns errorMessage from is_error result after offset', () => {
+    const oldData = JSON.stringify({ type: 'assistant', text: 'old' }) + '\n'
+    const errorResult = JSON.stringify({ type: 'result', is_error: true, errors: ['Session expired'] }) + '\n'
+    fs.writeFileSync(tmpFile, oldData + errorResult)
+    const result = outputFileCheckResult(tmpFile, oldData.length)
+    expect(result.hasResult).toBe(false)
+    expect(result.errorMessage).toBe('Session expired')
+  })
+})
 
 // ── Helpers ──
 

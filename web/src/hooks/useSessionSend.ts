@@ -1,5 +1,6 @@
 import { useState, useCallback, useEffect } from 'react';
 import { wsClient } from '@/api/ws';
+import { log } from '@/utils/log';
 import type { OptimisticMessage } from '@/components/sessions/SessionChatHistory';
 import type { ImageAttachment } from '@/api/chat';
 
@@ -23,22 +24,18 @@ interface UseSessionSendReturn {
  *
  * ## State machine: optimisticMsgs[]
  *
- *   pending → received → delivered → committed → (removed by dedup or handleBatchCompleted)
+ *   pending → received → delivered → (removed by handleBatchCompleted)
  *
  *   - send()                   → appends as 'pending', then RPC resolves → 'received'
  *   - handleMessagesDelivered  → first N pending/received → 'delivered'
- *   - handleBatchCompleted     → (1) removes old committed, (2) first N remaining → 'committed'
- *   - clearCommitted           → removes all committed (called externally if needed)
+ *   - handleBatchCompleted     → removes first N messages (count-based, authoritative)
  *
- * ## handleBatchCompleted — why it removes old committed first
+ * ## handleBatchCompleted — count-based removal
  *
- * In a multi-turn conversation, the user may send messages across multiple turns.
- * When batch N+1 completes, the committed messages from batch N are already in
- * persisted JSONL history. If we kept them and promoted new messages, the array
- * would accumulate stale committed entries. The dedup in SessionChatHistory
- * uses prevMsgLen-based scanning — once prevMsgLen advances past the persisted
- * entry for an old committed message, that committed message can't be deduped
- * anymore and would appear as a duplicate. So we clean them here.
+ * The backend's batch count is authoritative. When a turn completes, the first
+ * `count` optimistic messages are removed outright — the re-fetched persisted
+ * history already contains them (possibly combined with \n\n when multiple
+ * messages are delivered together; see claude-code-session.ts processNext).
  *
  * See SessionChatHistory.tsx top-of-file doc block for the full lifecycle.
  */
@@ -56,6 +53,7 @@ export function useSessionSend(activeSessionId: string | null): UseSessionSendRe
     setSendError(null);
 
     const tempId = `temp-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+    log.info('send', 'dispatching', { sessionId, queueId: tempId });
     const optimistic: OptimisticMessage = {
       role: 'user',
       text: message,
@@ -79,6 +77,7 @@ export function useSessionSend(activeSessionId: string | null): UseSessionSendRe
         }
       })
       .catch((e: Error) => {
+        log.error('send', 'RPC failed', { sessionId, error: e.message });
         setSendError(e.message);
         setOptimisticMsgs((prev) => prev.filter((m) => m.queueId !== tempId));
       });
@@ -88,6 +87,7 @@ export function useSessionSend(activeSessionId: string | null): UseSessionSendRe
     setSendError(null);
 
     const tempId = `temp-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+    log.info('send', 'dispatching (interrupt)', { sessionId, queueId: tempId });
     const optimistic: OptimisticMessage = {
       role: 'user',
       text: message,
@@ -111,12 +111,14 @@ export function useSessionSend(activeSessionId: string | null): UseSessionSendRe
         }
       })
       .catch((e: Error) => {
+        log.error('send', 'RPC failed (interrupt)', { sessionId, error: e.message });
         setSendError(e.message);
         setOptimisticMsgs((prev) => prev.filter((m) => m.queueId !== tempId));
       });
   }, []);
 
   const handleMessagesDelivered = useCallback((count: number) => {
+    log.info('send', 'delivered', { count });
     setOptimisticMsgs((prev) => {
       let remaining = count;
       return prev.map((m) => {
@@ -130,22 +132,20 @@ export function useSessionSend(activeSessionId: string | null): UseSessionSendRe
   }, []);
 
   const handleBatchCompleted = useCallback((count: number) => {
+    log.info('send', 'batch completed', { count });
     setOptimisticMsgs((prev) => {
-      // 1. Remove previously committed messages — they're from an earlier batch
-      //    and are now in the persisted history. Keeping them causes duplicates
-      //    because the dedup scan (prevMsgLen-based) has already advanced past
-      //    their corresponding persisted entries.
-      const withoutOldCommitted = prev.filter(m => m.status !== 'committed');
-      // 2. Promote the first `count` messages to 'committed'.
-      //    Committed messages render as normal user messages and persist in the UI
-      //    until the JSONL history refresh deduplicates them away.
-      const updated = [...withoutOldCommitted];
+      // Remove the first `count` messages outright — the backend's batch count is
+      // authoritative and the re-fetched persisted history already contains them
+      // (possibly combined with \n\n when multiple messages are delivered together —
+      // see claude-code-session.ts handleSend / processNext).
       let remaining = count;
-      for (let i = 0; i < updated.length && remaining > 0; i++) {
-        updated[i] = { ...updated[i], status: 'committed' as const };
-        remaining--;
-      }
-      return updated;
+      return prev.filter(m => {
+        if (remaining > 0) {
+          remaining--;
+          return false; // remove this message
+        }
+        return true; // keep
+      });
     });
   }, []);
 
@@ -155,14 +155,14 @@ export function useSessionSend(activeSessionId: string | null): UseSessionSendRe
     ));
     wsClient.sendRpc('session:edit-queued', {
       sessionId, messageId: queueId, text: newText,
-    }).catch(() => { /* best-effort */ });
+    }).catch((e: Error) => { log.warn('send', 'edit-queued failed', { sessionId, queueId, error: e.message }); });
   }, []);
 
   const handleDeleteQueued = useCallback((sessionId: string, queueId: string) => {
     setOptimisticMsgs((prev) => prev.filter((m) => m.queueId !== queueId));
     wsClient.sendRpc('session:delete-queued', {
       sessionId, messageId: queueId,
-    }).catch(() => { /* best-effort */ });
+    }).catch((e: Error) => { log.warn('send', 'delete-queued failed', { sessionId, queueId, error: e.message }); });
   }, []);
 
   // Handle messages queued externally (e.g. by the agent via send_to_session)
@@ -187,6 +187,8 @@ export function useSessionSend(activeSessionId: string | null): UseSessionSendRe
     setSendError(null);
   }, []);
 
+  // No-op: 'committed' status is no longer assigned (handleBatchCompleted removes
+  // messages directly). Kept for interface compatibility with prop-threaded callers.
   const clearCommitted = useCallback(() => {
     setOptimisticMsgs((prev) => prev.filter((m) => m.status !== 'committed'));
   }, []);

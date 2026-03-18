@@ -14,7 +14,7 @@
  *     → On page unload: sendBeacon POST /api/browser-logs (fallback)
  *
  * Safety:
- *   - Does NOT intercept console.debug (used by WS client — would cause recursion)
+ *   - Does NOT intercept console.debug (invisible to Chrome defaults and this forwarder by design)
  *   - Internal logging uses saved originals, never triggers interception
  *   - All serialization wrapped in try-catch — failures silently skipped
  *   - Ring buffer capped at 200 entries — no unbounded memory growth

@@ -138,11 +138,9 @@ function BedrockConfig({
 function ModelConfig({
   models,
   mainModel,
-  sessionModel,
   maxTokens,
   showModels,
   onMainModelChange,
-  onSessionModelChange,
   onMaxTokensChange,
   onAddModel,
   onRemoveModel,
@@ -150,11 +148,9 @@ function ModelConfig({
 }: {
   models: ModelEntry[];
   mainModel?: string;           // undefined = non-active provider, hide global controls
-  sessionModel?: string;
   maxTokens?: number | undefined;
   showModels: boolean;
   onMainModelChange: (v: string) => void;
-  onSessionModelChange: (v: string) => void;
   onMaxTokensChange: (v: number | undefined) => void;
   onAddModel: (id: string) => void;
   onRemoveModel: (id: string) => void;
@@ -180,18 +176,6 @@ function ModelConfig({
             </select>
           </div>
         )}
-        <div className="form-group" style={{ margin: 0, flex: 1 }}>
-          <label htmlFor="session-model">Session Model</label>
-          <select
-            id="session-model"
-            value={sessionModel ?? 'opus'}
-            onChange={(e) => onSessionModelChange(e.target.value)}
-          >
-            <option value="opus">Opus</option>
-            <option value="sonnet">Sonnet</option>
-            <option value="haiku">Haiku</option>
-          </select>
-        </div>
         <div className="form-group" style={{ margin: 0, flex: 1, maxWidth: 160 }}>
           <label htmlFor="max-tokens">Max Tokens</label>
           <NumberInput
@@ -254,13 +238,11 @@ function ProviderCard({
   configApiKey,
   config,
   mainModel,
-  sessionModel,
   maxTokens,
   onSelectActive,
   onSave,
   onSaveKey,
   onSaveMainModel,
-  onSaveSessionModel,
   onSaveMaxTokens,
   onSaveProviderModels,
 }: {
@@ -270,13 +252,11 @@ function ProviderCard({
   configApiKey?: string;
   config: Config;
   mainModel: string;
-  sessionModel: string;
   maxTokens: number | undefined;
   onSelectActive: (name: string) => void;
   onSave: (partial: Partial<Config>) => Promise<void>;
   onSaveKey: (name: string, key: string) => Promise<void>;
   onSaveMainModel: (v: string) => void;
-  onSaveSessionModel: (v: string) => void;
   onSaveMaxTokens: (v: number | undefined) => void;
   onSaveProviderModels: (providerName: string, models: ModelEntry[]) => Promise<void>;
 }) {
@@ -353,6 +333,7 @@ function ProviderCard({
   else if (testStatus === 'error') { statusDot = 'error'; statusLabel = testMsg!; }
   else if (testStatus === 'testing') { statusDot = 'unknown'; statusLabel = 'Testing...'; }
   else if (isConfigured) { statusDot = 'connected'; statusLabel = isEnv ? 'Ready (env)' : 'Ready'; }
+  else if (!def.needsKey && def.api === 'ollama') { statusDot = 'error'; statusLabel = 'Offline'; }
   else if (!def.needsKey) { statusDot = 'connected'; statusLabel = 'Available'; }
 
   const envKeyName = `${def.name.toUpperCase().replace(/-/g, '_')}_API_KEY`;
@@ -442,11 +423,9 @@ function ProviderCard({
           <ModelConfig
             models={serverInfo?.models ?? []}
             mainModel={isActive ? mainModel : undefined}
-            sessionModel={isActive ? sessionModel : undefined}
             maxTokens={isActive ? maxTokens : undefined}
             showModels={showModels}
             onMainModelChange={onSaveMainModel}
-            onSessionModelChange={onSaveSessionModel}
             onMaxTokensChange={onSaveMaxTokens}
             onAddModel={async (id) => {
               const configModels = (config.providers as Record<string, { models?: ModelEntry[] }> | undefined)?.[def.name]?.models ?? [];
@@ -472,12 +451,10 @@ export function ProvidersSection({ config, onSave }: Props) {
 
   // Global model selection state (lives in config.agent, not per-provider)
   const [mainModel, setMainModel] = useState(config.agent?.main_model ?? '');
-  const [sessionModel, setSessionModel] = useState(config.agent?.session_model ?? 'opus');
   const [maxTokens, setMaxTokens] = useState<number | undefined>(config.agent?.maxTokens);
 
   useEffect(() => {
     setMainModel(config.agent?.main_model ?? '');
-    setSessionModel(config.agent?.session_model ?? 'opus');
     setMaxTokens(config.agent?.maxTokens);
   }, [config]);
 
@@ -519,10 +496,6 @@ export function ProvidersSection({ config, onSave }: Props) {
   const handleSaveMainModel = async (v: string) => {
     setMainModel(v);
     await onSave({ agent: { ...config.agent, main_model: v || undefined } });
-  };
-  const handleSaveSessionModel = async (v: string) => {
-    setSessionModel(v);
-    await onSave({ agent: { ...config.agent, session_model: v || undefined } });
   };
   const handleSaveMaxTokens = async (v: number | undefined) => {
     setMaxTokens(v);
@@ -567,13 +540,11 @@ export function ProvidersSection({ config, onSave }: Props) {
               configApiKey={(config.providers as Record<string, { api_key?: string }> | undefined)?.[def.name]?.api_key}
               config={config}
               mainModel={mainModel}
-              sessionModel={sessionModel}
               maxTokens={maxTokens}
               onSelectActive={handleSetActive}
               onSave={onSave}
               onSaveKey={handleSaveKey}
               onSaveMainModel={handleSaveMainModel}
-              onSaveSessionModel={handleSaveSessionModel}
               onSaveMaxTokens={handleSaveMaxTokens}
               onSaveProviderModels={handleSaveProviderModels}
             />

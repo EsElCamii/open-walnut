@@ -305,7 +305,11 @@ export class LocalIO implements SessionIO {
       message: { role: 'user', content: message },
     })
     try {
-      const fd = fs.openSync(this.pipePath, fs.constants.O_WRONLY | fs.constants.O_NONBLOCK)
+      // Open WITHOUT O_NONBLOCK — large payloads (> PIPE_BUF = 512 bytes on macOS)
+      // are NOT atomic under O_NONBLOCK and can produce partial writes that truncate
+      // the JSON line, crashing the Claude CLI parser.  Blocking mode guarantees the
+      // full payload is written.  If the reader (Claude CLI) dies, we get EPIPE.
+      const fd = fs.openSync(this.pipePath, fs.constants.O_WRONLY)
       fs.writeSync(fd, Buffer.from(payload + '\n'))
       fs.closeSync(fd)
       log.session.debug('LocalIO write ok', { pipePath: this.pipePath, messageLength: message.length })

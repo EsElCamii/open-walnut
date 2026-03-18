@@ -14,6 +14,9 @@ import { resolveProviderSecrets, autoDetectApiKey } from './secret.js';
 import { KNOWN_PROVIDERS } from './defaults.js';
 import { BedrockAdapter } from './adapter-bedrock.js';
 import { AnthropicAdapter } from './adapter-anthropic.js';
+import { OpenAIAdapter } from './adapter-openai.js';
+import { GoogleAdapter } from './adapter-google.js';
+import { OllamaAdapter } from './adapter-ollama.js';
 import { log } from '../../logging/index.js';
 
 // ── Adapter factory ──
@@ -32,14 +35,14 @@ function getOrCreateAdapter(protocol: ApiProtocol): ProtocolAdapter {
       adapter = new AnthropicAdapter();
       break;
     case 'openai-chat':
-      // Phase 2: will be OpenAIAdapter
-      throw new Error(`Protocol adapter "openai-chat" not yet implemented. Coming in Phase 2.`);
+      adapter = new OpenAIAdapter();
+      break;
     case 'google-generative-ai':
-      // Phase 3: will be GoogleAdapter
-      throw new Error(`Protocol adapter "google-generative-ai" not yet implemented. Coming in Phase 3.`);
+      adapter = new GoogleAdapter();
+      break;
     case 'ollama':
-      // Phase 3: will be OllamaAdapter
-      throw new Error(`Protocol adapter "ollama" not yet implemented. Coming in Phase 3.`);
+      adapter = new OllamaAdapter();
+      break;
     default:
       throw new Error(`Unknown protocol: ${protocol}`);
   }
@@ -94,6 +97,15 @@ export function buildProviderMap(
   if (explicitProviders) {
     for (const [name, config] of Object.entries(explicitProviders)) {
       result[name] = config;
+    }
+  }
+
+  // 3. Inject Bedrock bearer token from env if not already set.
+  //    Supports Identity Center (SSO) bearer-token auth for Bedrock.
+  if (result.bedrock && !result.bedrock.bearer_token) {
+    const envToken = process.env.AWS_BEARER_TOKEN_BEDROCK;
+    if (envToken) {
+      result.bedrock = { ...result.bedrock, bearer_token: envToken };
     }
   }
 

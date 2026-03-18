@@ -86,8 +86,8 @@ interface SessionPanelProps {
   onSessionReplaced?: (oldSessionId: string, newSessionId: string) => void;
   /** Called immediately when Fork is clicked — parent can show a pending panel. */
   onForkPending?: (cwd: string, host?: string) => void;
-  /** Called when fork API returns — parent can replace the pending panel with the real session. */
-  onForkResolved?: (taskId: string, sessionId?: string) => void;
+  /** Called when fork API returns — parent stores taskId for WS-based session resolution. */
+  onForkResolved?: (taskId: string) => void;
   /** Called when fork API fails — parent should remove the pending panel. */
   onForkFailed?: () => void;
 }
@@ -475,11 +475,10 @@ export const SessionPanel = memo(function SessionPanel({ sessionId, onClose, onT
               onForkStarted={(cwd, host) => {
                 onForkPending?.(cwd, host);
               }}
-              onForkComplete={(newTaskId, newSessionId) => {
-                onForkResolved?.(newTaskId, newSessionId);
-                // Select the new child task, then open its session
+              onForkComplete={(newTaskId) => {
+                onForkResolved?.(newTaskId);
+                // Select the new child task (session will be opened via WS event)
                 onTaskClick?.(newTaskId);
-                if (newSessionId) onSessionClick?.(newSessionId);
               }}
               onForkFailed={onForkFailed}
             />

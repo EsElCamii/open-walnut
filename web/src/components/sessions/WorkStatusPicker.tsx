@@ -12,11 +12,13 @@ interface WorkStatusPickerProps {
   workStatus: WorkStatus;
   /** Badge size variant. */
   size?: 'sm' | 'md';
+  /** Error detail shown on hover when work_status is 'error'. */
+  errorMessage?: string;
   /** Called after a successful status change so parent can update local state. */
   onChanged?: (newStatus: WorkStatus) => void;
 }
 
-export function WorkStatusPicker({ sessionId, processStatus, workStatus, size = 'md', onChanged }: WorkStatusPickerProps) {
+export function WorkStatusPicker({ sessionId, processStatus, workStatus, size = 'md', errorMessage, onChanged }: WorkStatusPickerProps) {
   const [open, setOpen] = useState(false);
   const [saving, setSaving] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -102,7 +104,7 @@ export function WorkStatusPicker({ sessionId, processStatus, workStatus, size = 
           cursor: canChange ? 'pointer' : 'default',
         }}
         onClick={canChange ? () => setOpen(!open) : undefined}
-        title={canChange ? 'Click to change work status' : wsLabel}
+        title={ws === 'error' && errorMessage ? errorMessage : (canChange ? 'Click to change work status' : wsLabel)}
         role={canChange ? 'button' : undefined}
         tabIndex={canChange ? 0 : undefined}
         onKeyDown={canChange ? (e) => { if (e.key === 'Enter' || e.key === ' ') setOpen(!open); } : undefined}

@@ -1,12 +1,11 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import fsp from 'node:fs/promises';
-import fs from 'node:fs';
 import path from 'node:path';
 import { createMockConstants } from '../helpers/mock-constants.js';
 
 vi.mock('../../src/constants.js', () => createMockConstants());
 
-import { CLAUDE_HOME } from '../../src/constants.js';
+import { CLAUDE_HOME, SESSION_STREAMS_DIR } from '../../src/constants.js';
 import {
   encodeProjectPath,
   canonicalJsonlPath,
@@ -18,16 +17,20 @@ import {
   readSessionJsonlContent,
   readSubagentContents,
 } from '../../src/core/session-file-reader.js';
+import { readSessionHistory } from '../../src/core/session-history.js';
 
 const tmpBase = CLAUDE_HOME;
 
 beforeEach(async () => {
   await fsp.rm(tmpBase, { recursive: true, force: true });
   await fsp.mkdir(tmpBase, { recursive: true });
+  // Also clean SESSION_STREAMS_DIR (sibling to CLAUDE_HOME, not inside it)
+  await fsp.rm(SESSION_STREAMS_DIR, { recursive: true, force: true }).catch(() => {});
 });
 
 afterEach(async () => {
   await fsp.rm(tmpBase, { recursive: true, force: true }).catch(() => {});
+  await fsp.rm(SESSION_STREAMS_DIR, { recursive: true, force: true }).catch(() => {});
 });
 
 // ── Path helpers ──
@@ -124,7 +127,7 @@ describe('findLocalJsonlPath', () => {
     await fsp.mkdir(dir, { recursive: true });
     await fsp.writeFile(path.join(dir, 'sess-123.jsonl'), '{}');
 
-    const result = findLocalJsonlPath('sess-123', cwd);
+    const result = await findLocalJsonlPath('sess-123', cwd);
     expect(result).toBe(path.join(dir, 'sess-123.jsonl'));
   });
 
@@ -133,12 +136,12 @@ describe('findLocalJsonlPath', () => {
     await fsp.mkdir(dir, { recursive: true });
     await fsp.writeFile(path.join(dir, 'sess-456.jsonl'), '{}');
 
-    const result = findLocalJsonlPath('sess-456');
+    const result = await findLocalJsonlPath('sess-456');
     expect(result).toBe(path.join(dir, 'sess-456.jsonl'));
   });
 
-  it('returns null when file does not exist', () => {
-    expect(findLocalJsonlPath('nonexistent')).toBeNull();
+  it('returns null when file does not exist', async () => {
+    expect(await findLocalJsonlPath('nonexistent')).toBeNull();
   });
 });
 
@@ -172,6 +175,66 @@ describe('readSessionJsonlContent', () => {
     const result = await readSessionJsonlContent('missing', '/test', undefined, tmpFile);
     expect(result).not.toBeNull();
     expect(result!.source).toBe('outputFile');
+  });
+
+  it('returns canonical content when no streams file exists', async () => {
+    const sessionId = 'no-streams-test';
+    const cwd = '/test';
+
+    // Only canonical JSONL, no streams file
+    const canonicalContent = [
+      JSON.stringify({ type: 'user', timestamp: '2025-01-01T00:00:00Z', message: { id: 'u1', role: 'user', content: 'Hello' }, cwd }),
+      JSON.stringify({ type: 'assistant', timestamp: '2025-01-01T00:00:01Z', message: { id: 'a1', role: 'assistant', content: [{ type: 'text', text: 'Hi' }] } }),
+    ].join('\n');
+    await writeJsonl(sessionId, cwd, canonicalContent);
+
+    // SESSION_STREAMS_DIR does not exist (not created) — should not crash
+    const result = await readSessionJsonlContent(sessionId, cwd);
+
+    expect(result).not.toBeNull();
+    expect(result!.source).toBe('local');
+    expect(result!.content).toContain('"id":"u1"');
+    expect(result!.content).toContain('"id":"a1"');
+  });
+});
+
+// ── Full pipeline: readSessionHistory → readSessionJsonlContent + parseSessionMessages ──
+
+describe('readSessionHistory', () => {
+  /** Helper: write JSONL to the standard Claude Code path. */
+  async function writeJsonl(sessionId: string, cwd: string, content: string) {
+    const encoded = encodeProjectPath(cwd);
+    const dir = path.join(tmpBase, 'projects', encoded);
+    await fsp.mkdir(dir, { recursive: true });
+    await fsp.writeFile(path.join(dir, `${sessionId}.jsonl`), content);
+  }
+
+  it('parses canonical JSONL into user/assistant messages', async () => {
+    const sessionId = 'pipeline-test-1';
+    const cwd = '/test';
+
+    const canonicalContent = [
+      JSON.stringify({
+        type: 'user',
+        timestamp: '2025-01-01T00:00:00Z',
+        message: { id: 'u1', role: 'user', content: 'Original question' },
+        cwd,
+      }),
+      JSON.stringify({
+        type: 'assistant',
+        timestamp: '2025-01-01T00:00:01Z',
+        message: { id: 'a1', role: 'assistant', content: [{ type: 'text', text: 'Response' }] },
+      }),
+    ].join('\n');
+    await writeJsonl(sessionId, cwd, canonicalContent);
+
+    const messages = await readSessionHistory(sessionId, cwd);
+
+    expect(messages.length).toBeGreaterThanOrEqual(2);
+    const userMsg = messages.find(m => m.role === 'user' && m.text.includes('Original question'));
+    expect(userMsg).toBeDefined();
+    const assistantMsg = messages.find(m => m.role === 'assistant' && m.text.includes('Response'));
+    expect(assistantMsg).toBeDefined();
   });
 });
 

@@ -447,7 +447,8 @@ export function MainPage({ visible = true, navigateRef }: MainPageProps) {
   const pendingQuickStartMetaRef = useRef<{ id: string; cwd: string; host?: string; hostLabel?: string; realTaskId?: string } | null>(null);
 
   // Fork: pending panel metadata (same pattern as quick-start)
-  const pendingForkMetaRef = useRef<{ id: string; cwd: string; host?: string } | null>(null);
+  const pendingForkMetaRef = useRef<{ id: string; cwd: string; host?: string; realTaskId?: string } | null>(null);
+  const pendingForkTaskRef = useRef<string | null>(null);
 
   // Path selector → select handler
   const handlePathSelect = useCallback((path: QuickStartPath) => {
@@ -455,27 +456,45 @@ export function MainPage({ visible = true, navigateRef }: MainPageProps) {
     setPathSelectorOpen(false);
   }, []);
 
-  // Auto-open session panel when a quick-start session resolves.
+  // Auto-open session panel when a quick-start or fork session resolves.
   // Strategy: listen to task:updated events (fires after linkSession persists the
   // session record). Also poll as fallback in case the WS event is missed.
-  const openQuickStartSession = useCallback((data: unknown) => {
-    if (!pendingQuickStartRef.current) return;
+  const openPendingSession = useCallback((data: unknown) => {
     const d = data as Record<string, unknown>;
     const task = d.task as { id?: string; exec_session_id?: string; plan_session_id?: string } | undefined;
-    if (!task?.id || task.id !== pendingQuickStartRef.current) return;
+    if (!task?.id) return;
     const sessionId = task.exec_session_id ?? task.plan_session_id;
     if (!sessionId) return;
-    const pendingMeta = pendingQuickStartMetaRef.current;
-    pendingQuickStartRef.current = null;
-    pendingQuickStartMetaRef.current = null;
-    if (pendingPollRef.current) { clearInterval(pendingPollRef.current); pendingPollRef.current = null; }
-    if (pendingMeta) {
-      setSessionColumns(prev => replaceSessionColumn(prev, pendingMeta.id, sessionId));
-    } else {
-      setSessionColumns(prev => addSessionColumn(prev, sessionId, triageOpenRef.current));
+
+    // Check quick-start pending
+    if (pendingQuickStartRef.current && task.id === pendingQuickStartRef.current) {
+      const pendingMeta = pendingQuickStartMetaRef.current;
+      pendingQuickStartRef.current = null;
+      pendingQuickStartMetaRef.current = null;
+      if (pendingPollRef.current) { clearInterval(pendingPollRef.current); pendingPollRef.current = null; }
+      if (pendingMeta) {
+        setSessionColumns(prev => replaceSessionColumn(prev, pendingMeta.id, sessionId));
+      } else {
+        setSessionColumns(prev => addSessionColumn(prev, sessionId, triageOpenRef.current));
+      }
+      return;
+    }
+
+    // Check fork pending
+    if (pendingForkTaskRef.current && task.id === pendingForkTaskRef.current) {
+      const meta = pendingForkMetaRef.current;
+      pendingForkTaskRef.current = null;
+      pendingForkMetaRef.current = null;
+      if (pendingPollRef.current) { clearInterval(pendingPollRef.current); pendingPollRef.current = null; }
+      if (meta) {
+        setSessionColumns(prev => replaceSessionColumn(prev, meta.id, sessionId));
+      } else {
+        setSessionColumns(prev => addSessionColumn(prev, sessionId, triageOpenRef.current));
+      }
+      return;
     }
   }, []);
-  useEvent('task:updated', openQuickStartSession);
+  useEvent('task:updated', openPendingSession);
 
   // Fallback poll: if WS events are missed, poll for the session ID every 2s
   const pendingPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -487,24 +506,48 @@ export function MainPage({ visible = true, navigateRef }: MainPageProps) {
     const hasPending = sessionColumns.some(s => s.startsWith('pending:'));
     if (!hasPending || pendingPollRef.current) return;
     pendingPollRef.current = setInterval(async () => {
-      const taskId = pendingQuickStartRef.current;
-      if (!taskId || taskId.startsWith('pending-')) { /* ref not yet updated to real taskId */ return; }
-      try {
-        const sessions = await fetchSessionsForTask(taskId);
-        const active = sessions.find(s => s.claudeSessionId);
-        if (active) {
-          const pendingMeta = pendingQuickStartMetaRef.current;
-          pendingQuickStartRef.current = null;
-          pendingQuickStartMetaRef.current = null;
-          clearInterval(pendingPollRef.current!);
-          pendingPollRef.current = null;
-          if (pendingMeta) {
-            setSessionColumns(prev => replaceSessionColumn(prev, pendingMeta.id, active.claudeSessionId));
-          } else {
-            setSessionColumns(prev => addSessionColumn(prev, active.claudeSessionId, triageOpenRef.current));
+      // Try quick-start pending
+      const qsTaskId = pendingQuickStartRef.current;
+      if (qsTaskId && !qsTaskId.startsWith('pending-')) {
+        try {
+          const sessions = await fetchSessionsForTask(qsTaskId);
+          const active = sessions.find(s => s.claudeSessionId);
+          if (active) {
+            const pendingMeta = pendingQuickStartMetaRef.current;
+            pendingQuickStartRef.current = null;
+            pendingQuickStartMetaRef.current = null;
+            clearInterval(pendingPollRef.current!);
+            pendingPollRef.current = null;
+            if (pendingMeta) {
+              setSessionColumns(prev => replaceSessionColumn(prev, pendingMeta.id, active.claudeSessionId));
+            } else {
+              setSessionColumns(prev => addSessionColumn(prev, active.claudeSessionId, triageOpenRef.current));
+            }
+            return;
           }
-        }
-      } catch { /* retry on next tick */ }
+        } catch { /* retry on next tick */ }
+      }
+      // Try fork pending
+      const forkTaskId = pendingForkTaskRef.current;
+      if (forkTaskId) {
+        try {
+          const sessions = await fetchSessionsForTask(forkTaskId);
+          const active = sessions.find(s => s.claudeSessionId);
+          if (active) {
+            const meta = pendingForkMetaRef.current;
+            pendingForkTaskRef.current = null;
+            pendingForkMetaRef.current = null;
+            clearInterval(pendingPollRef.current!);
+            pendingPollRef.current = null;
+            if (meta) {
+              setSessionColumns(prev => replaceSessionColumn(prev, meta.id, active.claudeSessionId));
+            } else {
+              setSessionColumns(prev => addSessionColumn(prev, active.claudeSessionId, triageOpenRef.current));
+            }
+            return;
+          }
+        } catch { /* retry on next tick */ }
+      }
     }, 2000);
   }, [sessionColumns]);
 
@@ -515,14 +558,11 @@ export function MainPage({ visible = true, navigateRef }: MainPageProps) {
     setSessionColumns(prev => addSessionColumn(prev, pendingColId, triageOpenRef.current));
   }, []);
 
-  const handleForkResolved = useCallback((_taskId: string, sessionId?: string) => {
-    const meta = pendingForkMetaRef.current;
-    pendingForkMetaRef.current = null;
-    if (meta && sessionId) {
-      setSessionColumns(prev => replaceSessionColumn(prev, meta.id, sessionId));
-    } else if (meta) {
-      // No sessionId returned — remove pending panel
-      setSessionColumns(prev => removeSessionColumn(prev, meta.id));
+  const handleForkResolved = useCallback((taskId: string) => {
+    // Store the real taskId so WS events + polling can resolve the pending panel
+    pendingForkTaskRef.current = taskId;
+    if (pendingForkMetaRef.current) {
+      pendingForkMetaRef.current = { ...pendingForkMetaRef.current, realTaskId: taskId };
     }
   }, []);
 
@@ -644,7 +684,7 @@ export function MainPage({ visible = true, navigateRef }: MainPageProps) {
         cwd: qsp.cwd,
         host: qsp.host ?? undefined,
         message: text,
-        category: qsp.category,
+        category: 'Inbox',
         images,
       }).then((result) => {
         // Update ref with real taskId (WS events use this to match)
@@ -660,7 +700,7 @@ export function MainPage({ visible = true, navigateRef }: MainPageProps) {
           `[Quick Start] Session created and running.`,
           `- Task ID: ${result.taskId}`,
           `- Path: ${qsp.cwd}`,
-          `- Category: ${qsp.category} / Quick Start`,
+          `- Category: Inbox / Quick Start`,
           `- User prompt: "${text}"`,
           ``,
           `Please update the task:`,

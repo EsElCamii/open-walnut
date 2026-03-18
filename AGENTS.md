@@ -125,6 +125,10 @@ Before a feature is done, verify:
 - [ ] **Playwright screenshot** — if the feature has UI, capture it in a real browser
 - [ ] **All tests pass** — `npm test && npm run test:e2e`
 
+## Hidden Knowledge Documentation
+
+If you spent time investigating something non-obvious (race conditions, dependency quirks, why approach A over B, what a catch block guards against), write it as a comment at the code site — not just in the commit message. The next agent reads code, not git log.
+
 ## Production Data Protection (4-Layer Defense)
 
 Tests MUST NOT touch `~/.open-walnut/`. Four layers enforce this:

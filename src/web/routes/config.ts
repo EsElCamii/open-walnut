@@ -10,7 +10,8 @@ import { log } from '../../logging/index.js'
 import { buildProviderMap, resolveProvider, type ProviderConfig } from '../../agent/providers/index.js'
 import { autoDetectApiKey } from '../../agent/providers/secret.js'
 import { getModelsForProvider } from '../../agent/providers/model-catalog.js'
-import { KNOWN_PROVIDERS } from '../../agent/providers/defaults.js'
+import { KNOWN_PROVIDERS, DEFAULT_BASE_URLS } from '../../agent/providers/defaults.js'
+import type { ModelEntry } from '../../agent/providers/types.js'
 
 export const configRouter = Router()
 
@@ -75,6 +76,32 @@ configRouter.post('/test-connection', async (req: Request, res: Response, next: 
   }
 })
 
+/** Cached Ollama model list — refreshed at most once per 30s. */
+let _ollamaCache: { models: ModelEntry[]; ts: number } = { models: [], ts: 0 }
+const OLLAMA_CACHE_TTL = 30_000 // 30 seconds
+
+/** Fetch installed models from a running Ollama server. Cached for 30s. Returns [] on any error. */
+async function fetchOllamaModels(baseUrl?: string): Promise<ModelEntry[]> {
+  if (Date.now() - _ollamaCache.ts < OLLAMA_CACHE_TTL) return _ollamaCache.models
+  const url = (baseUrl ?? DEFAULT_BASE_URLS['ollama'] ?? 'http://localhost:11434') + '/api/tags'
+  try {
+    const resp = await fetch(url, { signal: AbortSignal.timeout(2000) })
+    if (!resp.ok) { _ollamaCache = { models: [], ts: Date.now() }; return [] }
+    const data = await resp.json() as { models?: { name: string; size?: number; modified_at?: string }[] }
+    if (!Array.isArray(data.models)) { _ollamaCache = { models: [], ts: Date.now() }; return [] }
+    const models = data.models.map(m => ({
+      id: m.name,
+      provider: 'ollama' as const,
+      label: m.name,
+    }))
+    _ollamaCache = { models, ts: Date.now() }
+    return models
+  } catch {
+    _ollamaCache = { models: [], ts: Date.now() }
+    return []
+  }
+}
+
 // GET /api/config/providers — list all providers with status
 configRouter.get('/providers', async (_req: Request, res: Response, next: NextFunction) => {
   try {
@@ -94,12 +121,34 @@ configRouter.get('/providers', async (_req: Request, res: Response, next: NextFu
     }> = {}
 
     for (const [name, prov] of Object.entries(merged)) {
+      // Ollama: dynamically fetch models from running server
+      if (prov.api === 'ollama') {
+        const dynamicModels = await fetchOllamaModels(prov.base_url)
+        const isReachable = dynamicModels.length > 0
+        // Dynamic models as base, user config overrides on top (same-ID wins)
+        const userOverrides = prov.models ?? []
+        const ollamaModels: ModelEntry[] = [...dynamicModels]
+        for (const override of userOverrides) {
+          const idx = ollamaModels.findIndex(m => m.id === override.id)
+          if (idx >= 0) ollamaModels[idx] = { ...ollamaModels[idx], ...override }
+          else ollamaModels.push({ ...override, provider: 'ollama' })
+        }
+        providers[name] = {
+          api: prov.api,
+          base_url: prov.base_url,
+          status: isReachable ? 'ready' : 'no_key',
+          auto_detected: !explicitNames.has(name),
+          models: ollamaModels,
+        }
+        continue
+      }
+
       // Try to resolve the key from env
       const envKey = autoDetectApiKey(name)
       const hasKey = !!(prov.api_key || prov.bearer_token || envKey)
 
       // Some protocols don't need a key
-      const keyNotRequired = prov.api === 'bedrock' || prov.api === 'ollama'
+      const keyNotRequired = prov.api === 'bedrock'
 
       // Must match adapter implementations in registry.ts getOrCreateAdapter()
       const implemented = prov.api === 'bedrock' || prov.api === 'anthropic-messages'
@@ -174,11 +223,11 @@ configRouter.post('/test-provider', async (req: Request, res: Response, next: Ne
       'anthropic-messages': { '*': 'claude-haiku-4-5-20251001' },
       'openai-chat': {
         'openai': 'gpt-4o-mini',
-        'openrouter': 'anthropic/claude-haiku-4-5-20251001',
+        'openrouter': 'nvidia/nemotron-3-nano-30b-a3b:free',
         'deepseek': 'deepseek-chat',
         '*': 'gpt-4o-mini',
       },
-      'google-generative-ai': { '*': 'gemini-2.5-flash' },
+      'google-generative-ai': { '*': 'gemini-3-flash-preview' },
     }
     const protocolModels = TEST_MODELS[protocol]
     if (!protocolModels) {

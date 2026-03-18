@@ -73,7 +73,7 @@ describe('findSessionJsonlPath', () => {
     await fsp.mkdir(dir, { recursive: true });
     await fsp.writeFile(path.join(dir, 'sess-123.jsonl'), '{}');
 
-    const result = findSessionJsonlPath('sess-123', cwd);
+    const result = await findSessionJsonlPath('sess-123', cwd);
     expect(result).toBe(path.join(dir, 'sess-123.jsonl'));
   });
 
@@ -82,17 +82,17 @@ describe('findSessionJsonlPath', () => {
     await fsp.mkdir(dir, { recursive: true });
     await fsp.writeFile(path.join(dir, 'sess-456.jsonl'), '{}');
 
-    const result = findSessionJsonlPath('sess-456');
+    const result = await findSessionJsonlPath('sess-456');
     expect(result).toBe(path.join(dir, 'sess-456.jsonl'));
   });
 
-  it('returns null when file does not exist', () => {
-    const result = findSessionJsonlPath('nonexistent');
+  it('returns null when file does not exist', async () => {
+    const result = await findSessionJsonlPath('nonexistent');
     expect(result).toBeNull();
   });
 
-  it('returns null when projects dir does not exist', () => {
-    const result = findSessionJsonlPath('anything', '/no/such/path');
+  it('returns null when projects dir does not exist', async () => {
+    const result = await findSessionJsonlPath('anything', '/no/such/path');
     expect(result).toBeNull();
   });
 });

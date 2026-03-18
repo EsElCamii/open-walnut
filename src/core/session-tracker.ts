@@ -597,6 +597,7 @@ export async function updateSessionRecordConditionally(
 
     Object.assign(session, updates);
 
+    // Keep in sync with updateSessionRecord — duplicated because this path bypasses it.
     if (updates.work_status && TERMINAL_WORK_STATUSES.has(updates.work_status) && session.pid != null) {
       log.session.info('clearing stale PID on terminal transition (conditional)', {
         sessionId: claudeSessionId, pid: session.pid, work_status: updates.work_status,

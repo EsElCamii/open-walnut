@@ -81,6 +81,6 @@ Every feature needs 1+ real E2E test through `startServer({ port: 0, dev: true }
 
 Plans: architecture diagrams first → UX scenarios → pseudocode. No detailed implementation code in plans.
 
-### Frontend logging: `console.log` not `console.debug`
+### Frontend logging: `import { log } from '@/utils/log'`
 
-Browser logs are forwarded to the server log (`subsystem: "browser"`). `console.debug` is invisible to both Chrome's default filter and the log forwarder. **Always use `console.log`** in frontend code so logs appear in `/tmp/open-walnut/` for post-mortem debugging.
+Use the structured logger (`log.info('subsystem', 'message', { sessionId, taskId })`) — never raw `console.log`. IDs must be **full, never truncated** so `grep <sessionId>` traces across browser + server. The logger routes through `console.log`/`warn`/`error` which the browser-logger monkey-patch forwards to `/tmp/open-walnut/`. Never use `console.debug` (invisible to forwarder).

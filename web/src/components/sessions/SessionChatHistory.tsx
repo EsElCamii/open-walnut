@@ -29,17 +29,16 @@ import { renderMarkdownWithRefs, findImagePaths, resolveImagePath } from '@/util
  *
  * ## Optimistic message status lifecycle
  *
- *   pending → received → delivered → committed → (deduped away)
+ *   pending → received → delivered → (removed by handleBatchCompleted)
  *
  *   - **pending**: User hit send. Message exists only in React state. Grey styling.
  *   - **received**: Server acknowledged the WS RPC. queueId updated to real messageId.
  *     Shows "Queued" badge with Edit/Delete actions.
  *   - **delivered**: Server wrote to FIFO or spawned --resume. Message is in Claude's
- *     stdin. Shows "Delivered ✓" badge.
- *   - **committed**: Turn completed (session:batch-completed). The CLI has consumed
- *     the message. Renders as a normal user message in the timeline.
- *   - **deduped**: When the re-fetched persisted history contains this message,
- *     the dedup filter removes the optimistic copy. The persisted copy takes over.
+ *     stdin. Shows "Delivered" badge.
+ *   - **removed**: When the turn completes (session:batch-completed), the first N
+ *     optimistic messages are removed outright (count-based). The re-fetched
+ *     persisted history already contains them.
  *
  * ## How Claude Code JSONL records user messages
  *
@@ -138,6 +137,7 @@ import { renderMarkdownWithRefs, findImagePaths, resolveImagePath } from '@/util
 
 export interface OptimisticMessage extends SessionHistoryMessage {
   queueId: string;
+  /** 'committed' is legacy — no longer assigned. Kept for type compat. */
   status: 'pending' | 'received' | 'delivered' | 'committed';
   images?: ImageAttachment[];
 }
@@ -893,21 +893,15 @@ export const SessionChatHistory = memo(function SessionChatHistory({ sessionId, 
 
   // ── Deduplicate optimistic messages against persisted history ──
   //
-  // Two-layer dedup:
-  // 1. walnutMessageId match (deterministic): persisted msg has walnutMessageId matching
-  //    optimistic queueId → exact match, works for ANY status (pending/received/delivered/committed).
-  //    This is the primary dedup path — written by writeSyntheticUserEvent() on delivery.
-  // 2. Text-based fallback (legacy): for messages without walnutMessageId (canonical JSONL,
-  //    queue-operation entries). Uses count-based multiset matching with prevMsgLen windowing.
+  // handleBatchCompleted now removes consumed messages outright (count-based),
+  // so committed messages no longer exist here. The remaining dedup handles
+  // edge cases where persisted history grows and matches a pending/delivered msg.
+  //
+  // Text-based dedup uses newly-appeared persisted messages (prevMsgLen windowing)
+  // to avoid false matches against old history.
   const allOptimistic = optimisticMessages ?? [];
 
-  // Layer 1: Build set of walnutMessageIds present in persisted history
-  const persistedWalnutIds = new Set<string>();
-  for (const m of messages) {
-    if (m.walnutMessageId) persistedWalnutIds.add(m.walnutMessageId);
-  }
-
-  // Layer 2: Text-based counts (legacy fallback)
+  // Build text counts from newly-appeared persisted user messages
   const newUserTextCounts = new Map<string, number>();
   for (let i = prevMsgLen.current; i < messages.length; i++) {
     if (messages[i].role === 'user') {
@@ -915,28 +909,9 @@ export const SessionChatHistory = memo(function SessionChatHistory({ sessionId, 
       newUserTextCounts.set(t, (newUserTextCounts.get(t) ?? 0) + 1);
     }
   }
-  const allUserTextCounts = new Map<string, number>();
-  for (const m of messages) {
-    if (m.role === 'user') {
-      allUserTextCounts.set(m.text, (allUserTextCounts.get(m.text) ?? 0) + 1);
-    }
-  }
 
   const deduped = allOptimistic.filter(m => {
-    // Layer 1: deterministic ID match — works for ANY optimistic status
-    if (persistedWalnutIds.has(m.queueId)) {
-      return false; // exact match, remove optimistic copy
-    }
-
-    // Layer 2: text-based fallback
-    if (m.status === 'committed') {
-      const c = allUserTextCounts.get(m.text);
-      if (c && c > 0) {
-        allUserTextCounts.set(m.text, c - 1);
-        return false;
-      }
-      return true;
-    }
+    // Text-based: match against newly-appeared persisted user messages
     const c = newUserTextCounts.get(m.text);
     if (c && c > 0) {
       newUserTextCounts.set(m.text, c - 1);
@@ -945,9 +920,7 @@ export const SessionChatHistory = memo(function SessionChatHistory({ sessionId, 
     return true;
   });
 
-  // ── Assign blockIndex for ALL non-deduped optimistic messages (set once, never updated) ──
-  // Both active AND committed messages stay in the timeline to preserve their interleaved
-  // positions. Committed messages keep their blockIndex from when they were created.
+  // ── Assign blockIndex for non-deduped optimistic messages (set once, never updated) ──
   for (const msg of deduped) {
     if (!blockIndexMap.current.has(msg.queueId)) {
       blockIndexMap.current.set(msg.queueId, blocks.length);
@@ -960,10 +933,9 @@ export const SessionChatHistory = memo(function SessionChatHistory({ sessionId, 
   }
 
   // ── Build interleaved timeline ──
-  // All optimistic messages (active + committed) participate in the timeline
-  // so committed messages keep their correct visual position until deduped.
+  // All remaining optimistic messages participate in the timeline.
   const isResuming = !isStreaming && workStatus === 'in_progress'
-    && deduped.some(m => m.status !== 'committed');
+    && deduped.length > 0;
   const timeline = buildTimeline(blocks, deduped, blockIndexMap.current, isStreaming, isResuming);
 
   const hasContent = messages.length > 0 || timeline.length > 0 || isStreaming

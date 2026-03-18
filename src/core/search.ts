@@ -305,6 +305,8 @@ async function vectorSearchAll(
 
 // ── BM25 keyword scoring ──
 
+// Weights: 3 = title/id/session_id (exact identifiers), 2-2.5 = description/tags/url,
+//           1.5 = note, 1 = category/project (broad metadata)
 function bm25ScoreTasks(tasks: Task[], query: string): SearchResult[] {
   const results: SearchResult[] = [];
   for (const task of tasks) {
@@ -341,12 +343,36 @@ function bm25ScoreTasks(tasks: Task[], query: string): SearchResult[] {
       if (tagScore > bestScore) { bestScore = tagScore; matchField = 'tags'; }
     }
 
+    // Searchable IDs and links — exact-match friendly with high weight
+    const idScore = scoreMatch(task.id, query, 3);
+    if (idScore > bestScore) { bestScore = idScore; matchField = 'id'; }
+
+    if (task.session_id) {
+      const sessionScore = scoreMatch(task.session_id, query, 3);
+      if (sessionScore > bestScore) { bestScore = sessionScore; matchField = 'session_id'; }
+    }
+
+    // Legacy session_ids array — may still hold older session IDs
+    if (task.session_ids?.length) {
+      const legacyText = task.session_ids.join(' ');
+      const legacyScore = scoreMatch(legacyText, query, 3);
+      if (legacyScore > bestScore) { bestScore = legacyScore; matchField = 'session_id'; }
+    }
+
+    if (task.external_url) {
+      const extScore = scoreMatch(task.external_url, query, 2);
+      if (extScore > bestScore) { bestScore = extScore; matchField = 'external_url'; }
+    }
+
     if (bestScore > 0) {
       const snippetSource =
         matchField === 'description' ? task.description
         : matchField === 'summary' ? task.summary
         : matchField === 'note' ? task.note
         : matchField === 'tags' ? (task.tags ?? []).join(', ')
+        : matchField === 'id' ? task.id
+        : matchField === 'session_id' ? (task.session_id ?? (task.session_ids ?? []).join(', '))
+        : matchField === 'external_url' ? task.external_url!
         : task.title;
       results.push({
         type: 'task',

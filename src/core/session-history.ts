@@ -10,7 +10,7 @@
  * SessionFileReader (session-file-reader.ts).
  */
 
-import fs from 'node:fs';
+import fsp from 'node:fs/promises';
 import { log } from '../logging/index.js';
 import {
   encodeProjectPath,
@@ -293,34 +293,15 @@ function parseSessionMessages(content: string): SessionHistoryMessage[] {
     }
   }
 
-  // ── Dedup synthetic vs canonical user messages ──
-  // When a FIFO-delivered message succeeds (Pattern A), the JSONL may contain BOTH:
-  //   1. A synthetic walnut-injected event (with walnutMessageId, written by Walnut)
-  //   2. A canonical user event (written by Claude CLI after processing the FIFO input)
-  // Keep the synthetic one (has walnutMessageId for frontend dedup) and remove the canonical.
-  const syntheticTexts = new Set<string>();
-  for (const [, msg] of messageMap) {
+  // ── Skip synthetic walnut-injected user messages ──
+  // writeSyntheticUserEvent() appends user events to the streams file for real-time display.
+  // When the streams file is used as the history source (canonical unavailable), these
+  // synthetic entries duplicate the canonical user entries already in the file (from Claude
+  // stdout capture). Remove synthetic copies — the canonical entries are at the correct
+  // chronological position; synthetic entries may be offset due to async append timing.
+  for (const [key, msg] of messageMap) {
     if (msg.role === 'user' && msg.walnutMessageId) {
-      const text = msg.contentBlocks
-        .filter(b => b.type === 'text' && b.text)
-        .map(b => b.text!)
-        .join('\n')
-        .trim();
-      if (text) syntheticTexts.add(text);
-    }
-  }
-  if (syntheticTexts.size > 0) {
-    for (const [key, msg] of messageMap) {
-      if (msg.role === 'user' && !msg.walnutMessageId) {
-        const text = msg.contentBlocks
-          .filter(b => b.type === 'text' && b.text)
-          .map(b => b.text!)
-          .join('\n')
-          .trim();
-        if (text && syntheticTexts.has(text)) {
-          messageMap.delete(key);
-        }
-      }
+      messageMap.delete(key);
     }
   }
 
@@ -586,7 +567,7 @@ export async function readSessionHistory(sessionId: string, cwd?: string, host?:
     }
     if (planFilePath) {
       try {
-        const diskContent = fs.readFileSync(planFilePath, 'utf-8');
+        const diskContent = await fsp.readFile(planFilePath, 'utf-8');
         if (diskContent) {
           for (const msg of messages) {
             if (!msg.tools) continue;
@@ -655,12 +636,12 @@ export function formatForkHistory(messages: SessionHistoryMessage[], tokenBudget
  */
 export async function extractPlanContent(sessionId: string, cwd?: string, host?: string): Promise<string | null> {
   // Try local first (fast path)
-  const localPath = findLocalJsonlPath(sessionId, cwd);
+  const localPath = await findLocalJsonlPath(sessionId, cwd);
   let content: string | undefined;
 
   if (localPath) {
     try {
-      content = fs.readFileSync(localPath, 'utf-8');
+      content = await fsp.readFile(localPath, 'utf-8');
     } catch (err) {
       log.session.debug('failed to read local JSONL for plan extraction', {
         localPath,
@@ -769,12 +750,12 @@ export interface RecoveredSessionState {
  */
 export async function recoverStateFromJsonl(sessionId: string, cwd?: string, host?: string): Promise<RecoveredSessionState | null> {
   // Try local first (fast path — most common case for crash recovery)
-  const localPath = findLocalJsonlPath(sessionId, cwd);
+  const localPath = await findLocalJsonlPath(sessionId, cwd);
   let content: string | undefined;
 
   if (localPath) {
     try {
-      content = fs.readFileSync(localPath, 'utf-8');
+      content = await fsp.readFile(localPath, 'utf-8');
     } catch (err) {
       log.session.debug('failed to read local JSONL for state recovery', {
         localPath,

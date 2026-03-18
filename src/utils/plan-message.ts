@@ -40,7 +40,7 @@ export async function readPlanFromSession(planSessionId: string): Promise<{ cont
     let jsonlContent: string | null = null;
 
     if (!record.host) {
-      const jsonlPath = findSessionJsonlPath(planSessionId, record.cwd);
+      const jsonlPath = await findSessionJsonlPath(planSessionId, record.cwd);
       if (jsonlPath) {
         jsonlContent = await reader.readFile(jsonlPath);
       }

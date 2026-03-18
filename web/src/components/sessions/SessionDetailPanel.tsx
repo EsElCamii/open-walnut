@@ -323,6 +323,7 @@ export function SessionDetailPanel({ session, taskTitle, summary, onTitleChanged
             {session.lastActiveAt && (
               <span title={new Date(session.lastActiveAt).toLocaleString()}>{timeAgo(session.lastActiveAt)}</span>
             )}
+            {/* onForkComplete omitted: fork resolves asynchronously, new session appears via list refresh */}
             {sessionId && (
               <SessionCopyButtons
                 sessionId={sessionId}
@@ -330,9 +331,6 @@ export function SessionDetailPanel({ session, taskTitle, summary, onTitleChanged
                 project={session.project}
                 taskId={session.taskId}
                 taskTitle={taskTitle}
-                onForkComplete={(_newTaskId, newSessionId) => {
-                  if (newSessionId) onSessionReplaced?.(newSessionId);
-                }}
               />
             )}
             {ps === 'stopped' && !session.archived && (
