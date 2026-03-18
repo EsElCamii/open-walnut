@@ -1850,13 +1850,13 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
   }, [tasks, showCompleted, priorityFilter, phaseFilter, sessionFilter, sourceFilter, tagFilter, activeCategory, favorites, isDescendantVisibleInStarred]);
 
   // --- Search filtering: intersect search results with active filters ---
-  // Search respects ALL current filters (show/hide completed, category tab,
-  // priority, phase, source, tag, session) so results stay consistent with
-  // the visible task list context.
+  // Search bypasses category tab so results span ALL categories (the whole
+  // point of search is to find things you can't see in the current view).
+  // Explicit toolbar filters (priority, phase, source, tag, session) are
+  // still respected because the user toggled those intentionally.
   const searchFiltered = useMemo(() => {
     if (!isSearchMode) return filtered;
 
-    // Same filter logic as `filtered` — search results are a subset of what's visible.
     const applySearchFilters = (t: Task): boolean => {
       // Show/hide completed (keep recently-completed visible briefly)
       if (!showCompleted && t.status === 'done' && phaseFilter !== 'COMPLETE' && !recentlyCompletedRef.current.has(t.id)) return false;
@@ -1875,15 +1875,9 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
       }
       // Tag
       if (tagFilter && (!t.tags || !t.tags.includes(tagFilter))) return false;
-      // Category tab
-      if (activeCategory === STARRED_TAB) {
-        const isStarred = !!t.starred;
-        const isCatFavorite = favorites?.isCategoryFavorite(t.category) ?? false;
-        const isProjFavorite = favorites?.isProjectFavorite(t.project) ?? false;
-        if (!(isStarred || isCatFavorite || isProjFavorite || isDescendantVisibleInStarred(t))) return false;
-      } else if (activeCategory && t.category !== activeCategory) {
-        return false;
-      }
+      // NOTE: category tab filter is intentionally skipped in search mode.
+      // Search should find tasks across ALL categories — scoping to the
+      // active tab defeats the purpose of searching.
       return true;
     };
 
@@ -1915,7 +1909,8 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
         if (!t) return false;
         return applySearchFilters(t);
       });
-  }, [tasks, filtered, isSearchMode, searchQuery, searchResults, showCompleted, priorityFilter, phaseFilter, sessionFilter, sourceFilter, tagFilter, activeCategory, favorites, isDescendantVisibleInStarred]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- activeCategory/favorites/isDescendantVisibleInStarred intentionally omitted: search bypasses category tab
+  }, [tasks, filtered, isSearchMode, searchQuery, searchResults, showCompleted, priorityFilter, phaseFilter, sessionFilter, sourceFilter, tagFilter]);
 
   // Count of search results (for display)
   const searchResultCount = isSearchMode ? searchFiltered.length : null;
