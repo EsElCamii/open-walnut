@@ -175,16 +175,21 @@ export class RemoteFileReader implements SessionFileReader {
   async readFile(remotePath: string): Promise<string | null> {
     await this.resolve();
     const useGlob = remotePath.includes('*');
+    // Replace ~ with $HOME so the path expands correctly on the remote shell.
+    // Tilde expansion is suppressed in both single AND double quotes; $HOME expands
+    // in double quotes. execSsh's escaping (\$) passes $ through to the remote shell.
+    const safePath = remotePath.replace(/^~/, '$HOME');
     const cmd = useGlob
-      ? `for f in ${remotePath}; do [ -f "$f" ] && cat "$f" && exit 0; done; exit 1`
-      : `cat '${remotePath}'`;
+      ? `for f in ${safePath}; do [ -f "$f" ] && cat "$f" && exit 0; done; exit 1`
+      : `cat "${safePath}"`;
     const result = this.execSsh(cmd);
     return result || null;
   }
 
   async listDir(remotePath: string): Promise<string[]> {
     await this.resolve();
-    const result = this.execSsh(`ls '${remotePath}' 2>/dev/null`);
+    const safePath = remotePath.replace(/^~/, '$HOME');
+    const result = this.execSsh(`ls "${safePath}" 2>/dev/null`);
     if (!result) return [];
     return result.split('\n').filter(Boolean);
   }
@@ -208,7 +213,8 @@ export class RemoteFileReader implements SessionFileReader {
     await this.resolve();
     // Use a single SSH command that prints each file with a delimiter
     const delimiter = '___WALNUT_FILE_BOUNDARY___';
-    const cmd = `cd '${remoteDirPath}' 2>/dev/null && for f in agent-*.jsonl; do [ -f "$f" ] && echo "${delimiter}$f" && cat "$f"; done`;
+    const safeDirPath = remoteDirPath.replace(/^~/, '$HOME');
+    const cmd = `cd "${safeDirPath}" 2>/dev/null && for f in agent-*.jsonl; do [ -f "$f" ] && echo "${delimiter}$f" && cat "$f"; done`;
     const result = this.execSsh(cmd, 30000);
     if (!result) return new Map();
 
