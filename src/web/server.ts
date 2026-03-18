@@ -1198,7 +1198,7 @@ export async function startServer(options: ServerOptions = {}): Promise<HttpServ
               const task = await getTask(taskId)
               if (task && task.phase === 'AGENT_COMPLETE') {
                 const { updateTask } = await import('../core/task-manager.js')
-                await updateTask(taskId, { phase: 'AWAIT_HUMAN_ACTION', needs_attention: true })
+                await updateTask(taskId, { phase: 'AWAIT_HUMAN_ACTION', needs_attention: true }, { source: 'triage-safety-net' })
                 log.web.warn('triage safety net: task still AGENT_COMPLETE after triage, falling back to AWAIT_HUMAN_ACTION', { taskId })
               }
             } catch (err) {

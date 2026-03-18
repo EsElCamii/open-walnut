@@ -358,8 +358,9 @@ sessionsRouter.post('/quick-start', async (req: Request, res: Response, next: Ne
       }
     }
 
-    const config = await getConfig()
-    const taskCategory = category || config.defaults?.category || 'Inbox'
+    // Quick Start tasks always go to Inbox — ignore the category param from the
+    // path selector (which carries the historical category of the working directory).
+    const taskCategory = 'Inbox'
     const title = `Session: ${path.basename(cwd.replace(/\/+$/, '') || '/')}`
 
     // Create task in "Quick Start" project under the determined category
@@ -370,7 +371,7 @@ sessionsRouter.post('/quick-start', async (req: Request, res: Response, next: Ne
     })
 
     // Star the task and set cwd
-    await updateTask(task.id, { starred: true, cwd })
+    await updateTask(task.id, { starred: true, cwd }, { source: 'quick-start' })
 
     // Re-read to get updated fields
     const updatedTask = await getTask(task.id)
@@ -382,7 +383,7 @@ sessionsRouter.post('/quick-start', async (req: Request, res: Response, next: Ne
       '<quick_start_task>',
       'This task was created via Quick Start. When your work is complete:',
       '1. Update the task title to be descriptive (replace the generic "Session: ..." title) using update_task',
-      `2. If "${taskCategory} / Quick Start" is not the right project, move the task to the correct project within the same category "${taskCategory}" using update_task with the project field`,
+      '2. If "Inbox / Quick Start" is not the right project, move the task to the correct category and project using update_task',
       '</quick_start_task>',
     ].join('\n')
 
@@ -1026,39 +1027,11 @@ sessionsRouter.post('/:sessionId/fork', async (req: Request, res: Response, next
       return
     }
 
-    // Build fork context from source session history
-    const { formatForkHistory } = await import('../../core/session-history.js')
-    const sourceMessages = await readSessionHistory(
-      sourceSessionId, sourceRecord.cwd, sourceRecord.host, sourceRecord.outputFile,
-    )
-    let appendSystemPrompt: string | undefined
-    if (sourceMessages.length > 0) {
-      const historyText = formatForkHistory(sourceMessages)
-      appendSystemPrompt = `<forked_session_context>\nThis session was forked from session ${sourceSessionId}.\nBelow is the conversation history from the source session:\n\n${historyText}\n</forked_session_context>`
-    }
-
     const forkMessage = message || `Continue working on: ${task.title}`
 
-    // Wait for the new session to start (up to 30s)
-    const WAIT_TIMEOUT_MS = 30_000
-    const subName = `fork-wait-${sourceSessionId}`
-    const newSessionPromise = new Promise<string | undefined>((resolve) => {
-      const timer = setTimeout(() => {
-        bus.unsubscribe(subName)
-        resolve(undefined)
-      }, WAIT_TIMEOUT_MS)
-
-      bus.subscribe(subName, (event) => {
-        if (event.name !== EventNames.SESSION_STATUS_CHANGED) return
-        const d = eventData<'session:status-changed'>(event)
-        if (d.forkedFromSessionId === sourceSessionId && d.sessionId) {
-          clearTimeout(timer)
-          bus.unsubscribe(subName)
-          resolve(d.sessionId)
-        }
-      }, { global: true })
-    })
-
+    // Emit SESSION_START with forkedFromSessionId — handleStart() uses Claude Code's
+    // native --resume + --fork-session to transfer conversation context efficiently.
+    // No need to read source history or wait for session start; return immediately.
     bus.emit(EventNames.SESSION_START, {
       taskId: task.id,
       message: forkMessage,
@@ -1068,18 +1041,14 @@ sessionsRouter.post('/:sessionId/fork', async (req: Request, res: Response, next
       model,
       title: title ?? `Fork of ${sourceRecord.title ?? sourceSessionId.slice(0, 16)}`,
       host: sourceRecord.host,
-      appendSystemPrompt,
       forkedFromSessionId: sourceSessionId,
     }, ['session-runner'], { source: 'web-api' })
 
-    const newSessionId = await newSessionPromise
-
     res.json({
-      status: 'started',
+      status: 'pending',
       sourceSessionId,
       taskId: task.id,
       ...(childTaskCreated ? { childTaskCreated: true } : {}),
-      ...(newSessionId ? { sessionId: newSessionId } : {}),
       ...(sourceRecord.host ? { host: sourceRecord.host } : {}),
     })
   } catch (err) {

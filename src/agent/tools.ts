@@ -730,8 +730,7 @@ For projects (type='project'): set default_host and default_cwd for remote sessi
               remove_depends_on: params.remove_depends_on as string[] | undefined,
               set_depends_on: params.set_depends_on as string[] | undefined,
               cwd: params.cwd as string | undefined,
-            });
-            bus.emit(EventNames.TASK_UPDATED, { task }, ['web-ui'], { source: 'agent' });
+            }, { source: 'agent' });
             if (params.phase === 'AGENT_COMPLETE') {
               bus.emit(EventNames.TASK_COMPLETED, { task }, ['web-ui'], { source: 'agent' });
             }
@@ -745,7 +744,8 @@ For projects (type='project'): set default_host and default_cwd for remote sessi
           }
         }
 
-        // Text fields
+        // Text fields — these use separate helper functions (not updateTask()), so manual
+        // bus.emit(TASK_UPDATED) is required here and is NOT redundant.
         if (params.description !== undefined) {
           const { task } = await updateDescription(id, params.description as string);
           bus.emit(EventNames.TASK_UPDATED, { task }, ['web-ui'], { source: 'agent' });
@@ -1495,8 +1495,7 @@ defaults (same resolution chain as start_session).`,
             try {
               const task = await getTask(record.taskId);
               if (task && shouldRollbackToInProgress(task.phase)) {
-                const result = await updateTask(record.taskId, { phase: 'IN_PROGRESS' });
-                bus.emit(EventNames.TASK_UPDATED, { task: result.task }, ['web-ui'], { source: 'phase-rollback' });
+                await updateTask(record.taskId, { phase: 'IN_PROGRESS' }, { source: 'phase-rollback' });
                 log.agent.info('send_to_session: rolled back phase to IN_PROGRESS', { taskId: record.taskId, oldPhase: task.phase });
               }
             } catch { /* best-effort */ }

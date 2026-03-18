@@ -466,25 +466,23 @@ tasksRouter.patch('/:id', async (req: Request, res: Response, next: NextFunction
         }
       }
     }
-    const result = await updateTask(id, req.body)
-    log.web.info('task updated via REST', { taskId: id, fields: Object.keys(req.body) })
-    bus.emit(EventNames.TASK_UPDATED, { task: result.task }, ['web-ui', 'main-agent'], { source: 'api' })
+    // Capture full task before update (for hook condition checks — needs session_id which updateTask doesn't return)
+    const taskBeforeUpdate = req.body.phase ? await getTask(id) : undefined
+    const previousPhase = taskBeforeUpdate?.phase
 
-    // HUMAN_VERIFIED: auto-push session to run code review + commit.
+    const result = await updateTask(id, req.body, { source: 'api', extraTargets: ['main-agent'] })
+    log.web.info('task updated via REST', { taskId: id, fields: Object.keys(req.body) })
+
+    // Phase hooks: declarative automation triggered by phase transitions.
     // Only fires via REST (UI phase picker) — agent update_task calls bypass this intentionally.
-    // No process_status guard — SESSION_SEND handler resumes stopped sessions via --resume.
-    if (req.body.phase === 'HUMAN_VERIFIED' && result.task.session_id) {
-      const pushMessage = 'User has verified this work and approved it. Please proceed:\n1. Run /code-review to review all changes\n2. After review, run /close-session-with-commit to commit and close'
-      const { enqueueMessage } = await import('../../core/session-message-queue.js')
-      await enqueueMessage(result.task.session_id, pushMessage)
-      bus.emit(EventNames.SESSION_SEND, {
-        sessionId: result.task.session_id,
-        taskId: result.task.id,
-        message: pushMessage,
-      }, ['session-runner'], { source: 'api' })
-      log.web.info('HUMAN_VERIFIED: auto-pushing session', {
-        taskId: result.task.id, sessionId: result.task.session_id,
-      })
+    // Uses taskBeforeUpdate for session_id (result.task is storage-only, lacks runtime fields).
+    if (req.body.phase && previousPhase && req.body.phase !== previousPhase && taskBeforeUpdate) {
+      const { executePhaseHooks } = await import('../../core/task-phase-hooks/index.js')
+      const hookTask = { ...taskBeforeUpdate, ...result.task, session_id: taskBeforeUpdate.session_id }
+      const hookResults = await executePhaseHooks(hookTask, req.body.phase, previousPhase)
+      if (hookResults.some(r => r.executed)) {
+        log.web.info('phase hooks executed', { taskId: id, phase: req.body.phase, hookResults })
+      }
     }
 
     res.json(result)
@@ -637,8 +635,7 @@ tasksRouter.put('/:id/depends-on', async (req: Request, res: Response, next: Nex
       res.status(400).json({ error: 'depends_on must be an array of strings' })
       return
     }
-    const result = await updateTask(id, { set_depends_on: depends_on })
-    bus.emit(EventNames.TASK_UPDATED, { task: result.task }, ['web-ui', 'main-agent'], { source: 'api' })
+    const result = await updateTask(id, { set_depends_on: depends_on }, { source: 'api', extraTargets: ['main-agent'] })
     res.json(result)
   } catch (err) {
     if (err instanceof CircularDependencyError) {

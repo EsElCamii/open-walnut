@@ -392,6 +392,7 @@ export class ClaudeCodeSession {
     appendSystemPrompt?: string,
     host?: string,
     sshTarget?: SshTarget,
+    forkSession?: boolean,
   ): void {
     const args = ['-p', '--output-format', 'stream-json', '--verbose']
 
@@ -412,21 +413,25 @@ export class ClaudeCodeSession {
     }
     // Map picker short IDs → full CLI model identifiers.
     // The CLI understands [1m] suffix for 1M context window.
-    // Use full Bedrock model IDs for explicit control (short names like 'opus'
-    // let the CLI choose the context variant, which may change between versions).
+    // Map picker keys to CLI aliases. Non-1M models (opus, sonnet, haiku)
+    // pass through as-is via fallback — CLI resolves them per provider.
     const MODEL_CLI_MAP: Record<string, string> = {
-      'opus':      'global.anthropic.claude-opus-4-6-v1',
-      'opus-1m':   'global.anthropic.claude-opus-4-6-v1[1m]',
-      'sonnet':    'us.anthropic.claude-sonnet-4-5-20250929-v1:0',
-      'sonnet-1m': 'us.anthropic.claude-sonnet-4-5-20250929-v1:0[1m]',
-      'haiku':     'us.anthropic.claude-haiku-4-5-20251001-v1:0',
+      'opus-1m':   'opus[1m]',
+      'sonnet-1m': 'sonnet[1m]',
     }
-    const cliModel = MODEL_CLI_MAP[model ?? ''] ?? (model || 'global.anthropic.claude-opus-4-6-v1[1m]')
+    const cliModel = MODEL_CLI_MAP[model ?? ''] ?? (model || 'opus[1m]')
     args.push('--model', cliModel)
     if (resumeSessionId) {
-      this.claudeSessionId = resumeSessionId
-      this._expectedSessionId = resumeSessionId  // track expected ID to detect resume failure
       args.push('--resume', resumeSessionId)
+      if (forkSession) {
+        // Fork creates a NEW session ID — don't claim the source ID as ours
+        args.push('--fork-session')
+        this.claudeSessionId = null
+        this._expectedSessionId = null
+      } else {
+        this.claudeSessionId = resumeSessionId
+        this._expectedSessionId = resumeSessionId  // track expected ID to detect resume failure
+      }
     } else {
       this.claudeSessionId = null
       this._expectedSessionId = null
@@ -472,7 +477,8 @@ export class ClaudeCodeSession {
     // On resume, use the session ID as tmpId so the output file path already matches
     // the existing JSONL file. This avoids renameForSession() overwriting the file
     // (which would lose all previous turns' JSONL data).
-    const isResume = !!resumeSessionId
+    // For forks: use a fresh tmpId — the fork creates a new session with its own file.
+    const isResume = !!resumeSessionId && !forkSession
     const tmpId = isResume ? resumeSessionId : crypto.randomBytes(8).toString('hex')
     this.io = createSessionIO(tmpId, host ?? undefined, sshTarget)
 
@@ -517,6 +523,7 @@ export class ClaudeCodeSession {
         pid: proc.pid,
         outputFile: this.io.outputFile,
         resume: !!resumeSessionId,
+        fork: !!forkSession,
         setupMs: setupElapsed,
         spawnMs: Date.now() - this._spawnTs,
       })
@@ -546,6 +553,7 @@ export class ClaudeCodeSession {
         outputFile: this.io.outputFile,
         hasPipe: this.io.hasPipe,
         resume: !!resumeSessionId,
+        fork: !!forkSession,
       })
     }
 
@@ -2392,7 +2400,7 @@ export class SessionRunner {
     if (taskId) {
       try {
         const { updateTask, getTask } = await import('../core/task-manager.js')
-        await updateTask(taskId, { phase: 'IN_PROGRESS' })
+        await updateTask(taskId, { phase: 'IN_PROGRESS' }, { source: 'session-start' })
         const task = await getTask(taskId)
         taskTitle = task?.title
         taskCategory = task?.category
@@ -2419,10 +2427,12 @@ export class SessionRunner {
     session.pendingDescription = message.slice(0, 500)
 
     let appendSystemPrompt: string | undefined
+    const isFork = !!data.forkedFromSessionId
 
     // If caller provided an appendSystemPrompt (e.g. custom context), use it.
+    // Skip for forks — Claude Code's --fork-session handles conversation context natively.
     // Note: plan content is no longer injected here — it's passed as a file path in the message.
-    if (data.appendSystemPrompt) {
+    if (data.appendSystemPrompt && !isFork) {
       appendSystemPrompt = data.appendSystemPrompt
       log.session.info('using caller-provided system prompt', { taskId, promptLength: data.appendSystemPrompt.length })
     }
@@ -2489,7 +2499,10 @@ export class SessionRunner {
     }
 
     const sessionTitle = session.pendingTitle ?? message.slice(0, 120)
-    session.send(message, cwd, undefined, mode, resolvedModel, appendSystemPrompt, data.host, sshTarget)
+    // For forks: pass source session ID as resumeSessionId with forkSession=true.
+    // Claude Code's --resume + --fork-session creates a new session with full context.
+    const resumeId = isFork ? data.forkedFromSessionId : undefined
+    session.send(message, cwd, resumeId, mode, resolvedModel, appendSystemPrompt, data.host, sshTarget, isFork)
 
     // Record directory usage for the frequent-dirs persistent store (fire-and-forget)
     if (cwd) {
@@ -2595,7 +2608,7 @@ export class SessionRunner {
     if (taskId) {
       try {
         const { updateTask, getTask } = await import('../core/task-manager.js')
-        await updateTask(taskId, { phase: 'IN_PROGRESS' })
+        await updateTask(taskId, { phase: 'IN_PROGRESS' }, { source: 'session-start' })
         const task = await getTask(taskId)
         taskTitle = task?.title
         sdkTaskCategory = task?.category
@@ -2721,8 +2734,7 @@ export class SessionRunner {
         const { shouldRollbackToInProgress } = await import('../core/phase.js')
         const task = await getTask(record.taskId)
         if (task && shouldRollbackToInProgress(task.phase)) {
-          const result = await updateTask(record.taskId, { phase: 'IN_PROGRESS' })
-          bus.emit(EventNames.TASK_UPDATED, { task: result.task }, ['web-ui'], { source: 'phase-rollback' })
+          await updateTask(record.taskId, { phase: 'IN_PROGRESS' }, { source: 'phase-rollback' })
           log.session.info('handleSendSdk: rolled back phase to IN_PROGRESS', { taskId: record.taskId, oldPhase: task.phase })
         }
       }
@@ -2801,8 +2813,7 @@ export class SessionRunner {
           const { shouldRollbackToInProgress } = await import('../core/phase.js')
           const task = await getTask(record.taskId)
           if (task && shouldRollbackToInProgress(task.phase)) {
-            const result = await updateTask(record.taskId, { phase: 'IN_PROGRESS' })
-            bus.emit(EventNames.TASK_UPDATED, { task: result.task }, ['web-ui'], { source: 'phase-rollback' })
+            await updateTask(record.taskId, { phase: 'IN_PROGRESS' }, { source: 'phase-rollback' })
             log.session.info('handleSend: rolled back phase to IN_PROGRESS', { taskId: record.taskId, oldPhase: task.phase })
           }
         }

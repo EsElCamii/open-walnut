@@ -1257,7 +1257,11 @@ function migrateTaskSource(
 /**
  * Update fields on a task by partial ID match.
  */
-export async function updateTask(idPrefix: string, updates: UpdateTaskInput): Promise<{ task: Task }> {
+export async function updateTask(
+  idPrefix: string,
+  updates: UpdateTaskInput,
+  eventOptions?: { source?: string; extraTargets?: string[] },
+): Promise<{ task: Task }> {
   return withWriteLock(async () => {
   const store = await readStore();
   const matches = store.tasks.filter((t) => t.id.startsWith(idPrefix));
@@ -1486,7 +1490,8 @@ export async function updateTask(idPrefix: string, updates: UpdateTaskInput): Pr
           error: err instanceof Error ? err.message : String(err),
         }));
 
-      // 3. Notify UI for each migrated task
+      // 3. Notify UI for each migrated task (primary task gets a second emit from the centralized
+      //    emission below — harmless because the frontend mergeTask is idempotent).
       bus.emit(EventNames.TASK_UPDATED, { task: m.task }, ['web-ui'], { source: 'migration' });
     }
   } else {
@@ -1499,6 +1504,12 @@ export async function updateTask(idPrefix: string, updates: UpdateTaskInput): Pr
   }
   if (parentChangeAction) parentChangeAction();
   if (task.phase === 'COMPLETE') autoCompleteTaskSessions(task);
+
+  // Centralized event emission — every updateTask() call notifies the UI.
+  // Note: text-field helpers (addNote, updateDescription, etc.) are separate
+  // functions and still require callers to emit TASK_UPDATED manually.
+  const targets = ['web-ui', ...(eventOptions?.extraTargets ?? [])];
+  bus.emit(EventNames.TASK_UPDATED, { task }, targets, { source: eventOptions?.source ?? 'internal' });
 
   return { task };
   });
