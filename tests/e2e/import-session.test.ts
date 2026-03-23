@@ -163,13 +163,13 @@ describe('import_session tool E2E', () => {
     });
     expect(r1).toContain('Imported session');
 
-    // Second import of same session fails
+    // Second import of same session to same task fails (task already has a session)
     const r2 = await importTool.execute({
       session_id: dupId,
       task_id: task.id,
       working_directory: MOCK_CWD,
     });
-    expect(r2).toContain('already tracked');
+    expect(r2).toContain('already has a session');
   });
 
   it('returns error when JSONL not found', async () => {
@@ -239,5 +239,39 @@ describe('import_session tool E2E', () => {
     const session = await getSessionByClaudeId(customId);
     expect(session!.title).toBe('My Custom Title');
     expect(session!.work_status).toBe('completed');
+  });
+
+  it('rejects import when task already has a non-archived session', async () => {
+    const task = await createTask('One session rule test', 'Work', 'AuthService');
+
+    // First import succeeds
+    const firstId = 'first-sess-00000000-0000-0000-0000';
+    await writeMockJsonl(firstId, MOCK_CWD);
+
+    const { tools } = await import('../../src/agent/tools.js');
+    const importTool = tools.find(t => t.name === 'import_session')!;
+
+    const r1 = await importTool.execute({
+      session_id: firstId,
+      task_id: task.id,
+      working_directory: MOCK_CWD,
+    });
+    expect(r1).toContain('Imported session');
+
+    // Second import to the same task should be blocked
+    const secondId = 'second-sess-0000000-0000-0000-0000';
+    await writeMockJsonl(secondId, MOCK_CWD);
+
+    const r2 = await importTool.execute({
+      session_id: secondId,
+      task_id: task.id,
+      working_directory: MOCK_CWD,
+    });
+    expect(r2).toContain('already has a session');
+    expect(r2).toContain('only ONE session');
+
+    // Verify second session was NOT created
+    const session2 = await getSessionByClaudeId(secondId);
+    expect(session2).toBeNull();
   });
 });

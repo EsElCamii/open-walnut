@@ -1260,6 +1260,15 @@ defaults (same resolution chain as start_session).`,
         // ① Resolve task
         const task = await getTask(taskIdPrefix);
 
+        // ①b Strict 1-session-per-task: block if task already has a non-archived session
+        const existingSessions = await getSessionsForTask(task.id);
+        const activeSessions = existingSessions.filter(s => !s.archived);
+        if (activeSessions.length > 0) {
+          const latest = activeSessions[activeSessions.length - 1];
+          return `Error: Task ${task.id} already has a session (${latest.claudeSessionId}). Each task allows only ONE session. ` +
+            `Use send_to_session to interact with the existing session, or create a subtask for a new session.`;
+        }
+
         // ② Check if session is already tracked
         const existing = await getSessionByClaudeId(sessionId);
         if (existing) {
@@ -1797,6 +1806,16 @@ defaults (same resolution chain as start_session).`,
           } else {
             // Re-associate to a different task
             const newTask = await getTask(newTaskId);
+
+            // Strict 1-session-per-task: block if target task already has a non-archived session
+            const targetSessions = await getSessionsForTask(newTask.id);
+            const targetActive = targetSessions.filter(s => !s.archived);
+            if (targetActive.length > 0) {
+              const latest = targetActive[targetActive.length - 1];
+              return `Error: Target task ${newTask.id} already has a session (${latest.claudeSessionId}). Each task allows only ONE session. ` +
+                `Use send_to_session to interact with the existing session, or create a subtask for a new session.`;
+            }
+
             await updateSessionRecord(sessionId, { taskId: newTask.id, project: newTask.project });
             await linkSession(newTask.id, sessionId);
             bus.emit(EventNames.TASK_UPDATED, { taskId: newTask.id }, [], { source: 'agent' });
