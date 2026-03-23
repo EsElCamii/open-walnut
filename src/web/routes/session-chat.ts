@@ -6,15 +6,12 @@
  * SessionRunner (subscribed to the bus) handles the actual session management.
  */
 
-import crypto from 'node:crypto'
 import { registerMethod } from '../ws/handler.js'
 import { bus, EventNames } from '../../core/event-bus.js'
 import { getSessionByClaudeId, updateSessionRecord } from '../../core/session-tracker.js'
-import { enqueueMessage, editMessage, deleteMessage, getQueue } from '../../core/session-message-queue.js'
+import { sendMessageToSession, editMessage, deleteMessage, getQueue } from '../../core/session-message-queue.js'
 import { sessionStreamBuffer } from '../session-stream-buffer.js'
 import { saveImageToDisk } from './images.js'
-import { transferImagesForRemoteSession } from '../../providers/session-io.js'
-import type { SshTarget } from '../../providers/session-io.js'
 import { log } from '../../logging/index.js'
 import { sessionRunner } from '../../providers/claude-code-session.js'
 import { readTeamConfig, findTeammateJsonlPaths, writeToInbox, extractTeamsFromLeadJsonl, findSubagentJsonlByPrompt, getLeadSessionJsonlPath, findAllSubagentJsonlsForAgent } from '../../core/team-reader.js'
@@ -95,26 +92,8 @@ export function registerSessionChatRpc(): void {
     // Check if this is an embedded session — route to SubagentRunner instead of CLI queue
     const record = await getSessionByClaudeId(data.sessionId)
 
-    // For remote sessions: transfer locally-saved images to the remote host via SCP
-    // and rewrite paths so the remote Claude can Read them.
-    if (record?.host && augmentedMessage !== data.message) {
-      try {
-        const { getConfig } = await import('../../core/config-manager.js')
-        const config = await getConfig()
-        const hostDef = config.hosts?.[record.host]
-        const hostname = hostDef?.hostname ?? (hostDef as Record<string, unknown> | undefined)?.ssh as string | undefined
-        if (hostname) {
-          const sshTarget: SshTarget = { hostname, user: hostDef?.user, port: hostDef?.port }
-          const remoteDir = `/tmp/open-walnut-images/${crypto.randomBytes(8).toString('hex')}`
-          augmentedMessage = await transferImagesForRemoteSession(augmentedMessage, sshTarget, remoteDir)
-        }
-      } catch (err) {
-        log.web.warn('session:send image transfer to remote failed — sending with local paths', {
-          sessionId: data.sessionId, host: record.host,
-          error: err instanceof Error ? err.message : String(err),
-        })
-      }
-    }
+    // Remote image transfer is handled by RemoteSessionManager.prepareOutbound() inside send().
+    // No manual SCP/SSH transfer needed here.
 
     if (record?.provider === 'embedded') {
       const messageId = `emb-${Date.now()}`
@@ -150,27 +129,17 @@ export function registerSessionChatRpc(): void {
       log.web.info('session:send RPC saved pending model/mode', { sessionId: data.sessionId, model, mode: data.mode })
     }
 
-    // Enqueue the (potentially augmented) message — this is the source of truth.
-    // The bus event below is just a wake-up signal; SessionRunner reads from the queue.
+    // Enqueue and notify in one call. augmentedMessage may include image refs;
+    // original data.message is used for bus events (UI display).
     log.web.info('session message via RPC', { sessionId: data.sessionId, taskId: record?.taskId, messageLength: augmentedMessage.length })
-    const msg = await enqueueMessage(data.sessionId, augmentedMessage)
-
-    bus.emit(EventNames.SESSION_SEND, {
-      sessionId: data.sessionId,
+    const msg = await sendMessageToSession(data.sessionId, data.message as string, {
+      source: 'ui',
       taskId: record?.taskId,
-      message: data.message as string,
       mode: typeof data.mode === 'string' ? data.mode : undefined,
       model,
       interrupt: data.interrupt === true ? true : undefined,
-    }, ['session-runner'], { source: 'web-ui' })
-
-    // Notify main-ai (which forwards to web-ui) that a message was queued
-    bus.emit(EventNames.SESSION_MESSAGE_QUEUED, {
-      sessionId: data.sessionId,
-      messageId: msg.id,
-      message: data.message as string,
-      source: 'ui',
-    }, ['main-ai'], { source: 'web-ui' })
+      enqueueMessage: augmentedMessage,
+    })
 
     return { messageId: msg.id }
   })
@@ -357,7 +326,6 @@ export function registerSessionChatRpc(): void {
         allPaths: allJsonlPaths,
         mainJsonlPath: jsonlPath,
         cwd: cwd!,
-        remote: !!record?.host,
       })
     }
 
@@ -407,7 +375,6 @@ function startTeamAgentPolling(sessionId: string, agentName: string, opts: {
   allPaths: string[];
   mainJsonlPath: string | null;
   cwd: string;
-  remote: boolean;
 }): void {
   let poller = teamPollers.get(sessionId)
   if (!poller) {
@@ -425,8 +392,7 @@ function startTeamAgentPolling(sessionId: string, agentName: string, opts: {
   // Subscribe with multi-file tracking and discovery context
   poller.subscribe(agentName, {
     filePaths: opts.allPaths,
-    remote: opts.remote,
-    discovery: opts.remote ? undefined : {
+    discovery: {
       sessionId,
       cwd: opts.cwd,
       agentName,

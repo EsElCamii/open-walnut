@@ -684,7 +684,7 @@ export function MainPage({ visible = true, navigateRef }: MainPageProps) {
         cwd: qsp.cwd,
         host: qsp.host ?? undefined,
         message: text,
-        category: 'Inbox',
+        category: qsp.category,
         images,
       }).then((result) => {
         // Update ref with real taskId (WS events use this to match)
@@ -700,7 +700,7 @@ export function MainPage({ visible = true, navigateRef }: MainPageProps) {
           `[Quick Start] Session created and running.`,
           `- Task ID: ${result.taskId}`,
           `- Path: ${qsp.cwd}`,
-          `- Category: Inbox / Quick Start`,
+          `- Category: ${qsp.category} / Quick Start`,
           `- User prompt: "${text}"`,
           ``,
           `Please update the task:`,

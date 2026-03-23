@@ -140,3 +140,14 @@ export const GLOBAL_NOTES_FILE = path.join(WALNUT_HOME, 'global-notes.md');
 export const TIMELINE_DIR = path.join(WALNUT_HOME, 'timeline');
 export const LOG_DIR = '/tmp/open-walnut';
 export const LOG_PREFIX = 'open-walnut-';
+/** Directory containing pre-compiled daemon binaries (built by scripts/build-daemon.sh). */
+export const DAEMON_BINARIES_DIR = (() => {
+  let dir = path.dirname(fileURLToPath(import.meta.url));
+  for (let i = 0; i < 5; i++) {
+    const candidate = path.join(dir, 'dist', 'daemon-binaries');
+    try { if (fs.statSync(candidate).isDirectory()) return candidate; } catch {}
+    dir = path.dirname(dir);
+  }
+  // Fallback: relative from project root
+  return path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'dist', 'daemon-binaries');
+})();

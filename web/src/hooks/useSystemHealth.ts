@@ -21,8 +21,15 @@ export interface GitSyncHealth {
   consecutiveFailures: number;
 }
 
+export interface DaemonHealth {
+  host: string;
+  label?: string;
+  connected: boolean;
+}
+
 export interface SystemHealth {
   embedding: EmbeddingHealth;
+  daemons?: DaemonHealth[];
 }
 
 const defaultHealth: SystemHealth = {

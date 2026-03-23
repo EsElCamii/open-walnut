@@ -11,6 +11,12 @@ interface UseSessionHistoryReturn {
   error: string | null;
   /** Index in messages[] where the fork boundary is (source messages end, forked messages start) */
   forkBoundaryIndex?: number;
+  /**
+   * Total message count before tail slicing. When tail is used and history is long,
+   * total > messages.length. Used by SessionChatHistory for dedup: the dedup logic
+   * must detect history growth even when messages.length stays constant (capped by tail).
+   */
+  total: number;
 }
 
 /** Diagnostic: count user text messages and check if they're interleaved or bunched */
@@ -40,6 +46,7 @@ function diagnoseOrdering(phase: string, sid: string, msgs: SessionHistoryMessag
  */
 export function useSessionHistory(sessionId: string | null, version = 0): UseSessionHistoryReturn {
   const [messages, setMessages] = useState<SessionHistoryMessage[]>([]);
+  const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(false);
   const [phase2Pending, setPhase2Pending] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -48,6 +55,7 @@ export function useSessionHistory(sessionId: string | null, version = 0): UseSes
   useEffect(() => {
     if (!sessionId) {
       setMessages([]);
+      setTotal(0);
       setLoading(false);
       setPhase2Pending(false);
       setError(null);
@@ -62,14 +70,17 @@ export function useSessionHistory(sessionId: string | null, version = 0): UseSes
     setForkBoundaryIndex(undefined);
     const sid = sessionId.substring(0, 8);
 
-    // Phase 1: Fast local read (streams file, ~1ms)
+    // Phase 1: Fast local read (streams file, ~1ms). Tail-limited to reduce payload.
     const endP1 = perf.start(`session:streams:${sid}`);
-    fetchSessionHistory(sessionId, { source: 'streams' })
+    fetchSessionHistory(sessionId, { source: 'streams', tail: 30 })
       .then((result) => {
         if (cancelled) return;
         endP1(`${result.messages.length} msgs`);
         diagnoseOrdering('P1:streams', sid, result.messages);
-        if (result.messages.length > 0) setMessages(result.messages);
+        if (result.messages.length > 0) {
+          setMessages(result.messages);
+          setTotal(result.total);
+        }
         if (result.forkBoundaryIndex != null) setForkBoundaryIndex(result.forkBoundaryIndex);
         setLoading(false); // Always clear loading — even if empty, don't block on Phase 2
       })
@@ -78,14 +89,15 @@ export function useSessionHistory(sessionId: string | null, version = 0): UseSes
       })
       .finally(() => {
         if (cancelled) return;
-        // Phase 2: Full fetch (source of truth, may SSH for remote sessions)
+        // Phase 2: Full fetch (source of truth, may SSH for remote sessions). Tail-limited.
         const endP2 = perf.start(`session:full:${sid}`);
-        fetchSessionHistory(sessionId)
+        fetchSessionHistory(sessionId, { tail: 30 })
           .then((result) => {
             if (!cancelled) {
               endP2(`${result.messages.length} msgs`);
               diagnoseOrdering('P2:full', sid, result.messages);
               setMessages(result.messages);
+              setTotal(result.total);
               setForkBoundaryIndex(result.forkBoundaryIndex);
             }
           })
@@ -100,5 +112,5 @@ export function useSessionHistory(sessionId: string | null, version = 0): UseSes
     return () => { cancelled = true; };
   }, [sessionId, version]);
 
-  return { messages, loading, phase2Pending, error, forkBoundaryIndex };
+  return { messages, loading, phase2Pending, error, forkBoundaryIndex, total };
 }

@@ -1288,7 +1288,7 @@ defaults (same resolution chain as start_session).`,
         //    The resolved CWD is still used for the session record regardless of where
         //    the JSONL was found — unlike readSessionJsonlContent() which extracts CWD
         //    from JSONL content, import uses the task/param CWD which is authoritative.
-        const { canonicalJsonlPath, remoteJsonlPath, encodeProjectPath, RemoteFileReader, findLocalJsonlPath } = await import('../core/session-file-reader.js');
+        const { canonicalJsonlPath, remoteJsonlPath, encodeProjectPath, findLocalJsonlPath } = await import('../core/session-file-reader.js');
 
         if (!resolvedCwd) {
           return `Error: No working directory resolved for session ${sessionId}. Provide working_directory explicitly.`;
@@ -1297,8 +1297,9 @@ defaults (same resolution chain as start_session).`,
         let jsonlContent: string | null = null;
 
         if (resolvedHost) {
-          // Remote: SSH — try canonical path first, then `find` fallback
-          const reader = new RemoteFileReader(resolvedHost);
+          // Remote: daemon — try canonical path first, then `find` fallback
+          const { DaemonFileReader } = await import('../core/daemon-file-reader.js');
+          const reader = new DaemonFileReader(resolvedHost);
           const exactPath = remoteJsonlPath(sessionId, resolvedCwd);
           jsonlContent = await reader.readFile(exactPath);
           if (!jsonlContent) {
@@ -1458,29 +1459,14 @@ defaults (same resolution chain as start_session).`,
         }
 
         if (sessionId) {
-          // Enqueue message so it persists and SessionRunner can process it
-          const { enqueueMessage } = await import('../core/session-message-queue.js');
-          const msg = await enqueueMessage(sessionId, message);
-
-          // Look up session record for taskId and title
+          const { sendMessageToSession } = await import('../core/session-message-queue.js');
           const record = await getSessionByClaudeId(sessionId);
-
-          // Resume a CLI session (with optional mode/interrupt override)
-          bus.emit(EventNames.SESSION_SEND, {
-            sessionId,
+          await sendMessageToSession(sessionId, message, {
+            source: 'agent',
             taskId: record?.taskId,
-            message,
             mode,
             interrupt: interrupt || undefined,
-          }, ['session-runner'], { source: 'agent' });
-
-          // Notify main-ai (which forwards to web-ui) that a message was queued
-          bus.emit(EventNames.SESSION_MESSAGE_QUEUED, {
-            sessionId,
-            messageId: msg.id,
-            message,
-            source: 'agent',
-          }, ['main-ai'], { source: 'agent' });
+          });
           const sessionLabel = record?.title ?? sessionId.slice(0, 16);
           const sRef = sessionRef(sessionId, sessionLabel);
 

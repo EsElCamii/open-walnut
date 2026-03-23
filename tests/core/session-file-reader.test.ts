@@ -13,7 +13,6 @@ import {
   subagentDirPath,
   remoteSubagentDirPath,
   LocalFileReader,
-  RemoteFileReader,
   findLocalJsonlPath,
   readSessionJsonlContent,
   readSubagentContents,
@@ -283,16 +282,10 @@ describe('readSubagentContents', () => {
   });
 });
 
-// ── RemoteFileReader — tilde → $HOME expansion ──
-//
-// We can't spy on execSync directly (non-configurable property), so we test
-// the path transformation by accessing the private `execSsh` results indirectly.
-// Instead, we unit-test the safePath logic extracted into a describe block that
-// verifies the string replacement without needing to mock SSH.
+// ── Tilde expansion logic ──
 
-describe('RemoteFileReader tilde expansion', () => {
-  // Test the ~ → $HOME replacement logic directly.
-  // This is the same transform applied in readFile/listDir/batchReadSubagents.
+describe('tilde expansion', () => {
+  // Test the ~ → $HOME replacement logic used in remote path handling.
   const tildeToHome = (p: string) => p.replace(/^~/, '$HOME');
 
   it('replaces leading ~ with $HOME', () => {

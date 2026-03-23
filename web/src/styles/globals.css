@@ -2135,6 +2135,32 @@ input:focus, textarea:focus, select:focus {
   cursor: not-allowed;
 }
 
+/* "Show earlier messages" button — truncation control */
+.session-show-earlier-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  width: 100%;
+  padding: 8px 16px;
+  margin: 4px 0 8px;
+  background: var(--bg-tertiary, #f5f5f5);
+  border: 1px dashed var(--border);
+  border-radius: 8px;
+  color: var(--text-tertiary, #888);
+  font-size: 12px;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+.session-show-earlier-btn:hover {
+  background: var(--bg-secondary, #eee);
+  color: var(--text-primary, #333);
+}
+.session-show-earlier-count {
+  opacity: 0.6;
+  font-size: 11px;
+}
+
 /* Fork divider in session chat history */
 .session-fork-divider {
   display: flex;

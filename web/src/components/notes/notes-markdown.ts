@@ -7,6 +7,18 @@
 import { marked } from 'marked';
 import DOMPurify from 'dompurify';
 
+/**
+ * Isolated DOMPurify instance for notes rendering.
+ * Hooks are added once at module init — no global mutations, no race conditions.
+ */
+const notesPurify = DOMPurify();
+notesPurify.addHook('afterSanitizeAttributes', (node) => {
+  if (node.tagName === 'A') {
+    node.setAttribute('target', '_blank');
+    node.setAttribute('rel', 'noopener noreferrer');
+  }
+});
+
 export function renderNotesMarkdown(text: string): string {
   if (!text.trim()) return '';
   let html: string;
@@ -21,26 +33,14 @@ export function renderNotesMarkdown(text: string): string {
     return `<p>${escaped}</p>`;
   }
 
-  // Allow checkbox inputs and open links in new tab
-  DOMPurify.addHook('afterSanitizeAttributes', (node) => {
-    if (node.tagName === 'A') {
-      node.setAttribute('target', '_blank');
-      node.setAttribute('rel', 'noopener noreferrer');
-    }
+  const clean = notesPurify.sanitize(html, {
+    ADD_TAGS: ['input'],
+    ADD_ATTR: ['checked', 'type', 'target'],
   });
 
-  try {
-    const clean = DOMPurify.sanitize(html, {
-      ADD_TAGS: ['input'],
-      ADD_ATTR: ['checked', 'type', 'target'],
-    });
-
-    // Remove 'disabled' from checkboxes so click events fire.
-    // marked adds disabled="" by default; we handle toggling in React.
-    return clean.replace(/\s+disabled(?:="")?/g, '');
-  } finally {
-    DOMPurify.removeHook('afterSanitizeAttributes');
-  }
+  // Remove 'disabled' from checkboxes so click events fire.
+  // marked adds disabled="" by default; we handle toggling in React.
+  return clean.replace(/\s+disabled(?:="")?/g, '');
 }
 
 /**

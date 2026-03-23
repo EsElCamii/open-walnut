@@ -68,11 +68,11 @@ export async function runStart(
         console.log(chalk.yellow(`Resuming session: ${existing.claudeSessionId.slice(0, 16)}`));
       }
 
-      bus.emit(EventNames.SESSION_SEND, {
-        sessionId: existing.claudeSessionId,
+      const { sendMessageToSession } = await import('../core/session-message-queue.js');
+      await sendMessageToSession(existing.claudeSessionId, prompt, {
+        source: 'cli',
         taskId: task.id,
-        message: prompt,
-      }, ['session-runner'], { source: 'cli' });
+      });
       return;
     }
 

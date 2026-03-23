@@ -172,6 +172,8 @@ export function SessionsPage() {
               if (d.process_status) s.process_status = d.process_status as SessionRecord['process_status'];
               if (d.work_status) s.work_status = d.work_status as SessionRecord['work_status'];
               if ('activity' in d) s.activity = d.activity;
+              // Clear stale error when session recovers from error state
+              if (d.work_status && d.work_status !== 'error') s.errorMessage = undefined;
               return true;
             }
           }

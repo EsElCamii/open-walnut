@@ -76,7 +76,7 @@ describe('readPlanFromSession', () => {
   describe('Strategy 1: planFile from session record', () => {
     it('reads local plan file via LocalFileReader', async () => {
       const reader = makeReader({ '/home/user/.claude/plans/my-plan.md': '# Plan\nDo stuff' });
-      mockCreateReader.mockReturnValue(reader);
+      mockCreateReader.mockResolvedValue(reader);
       mockGetSession.mockResolvedValue(makeRecord({
         planFile: '/home/user/.claude/plans/my-plan.md',
       }) as never);
@@ -89,9 +89,9 @@ describe('readPlanFromSession', () => {
       expect(mockCreateReader).toHaveBeenCalledWith(undefined); // no host = local
     });
 
-    it('reads remote plan file via RemoteFileReader (SSH)', async () => {
+    it('reads remote plan file via DaemonFileReader', async () => {
       const reader = makeReader({ '/home/remoteuser/.claude/plans/remote-plan.md': '# Remote Plan' });
-      mockCreateReader.mockReturnValue(reader);
+      mockCreateReader.mockResolvedValue(reader);
       mockGetSession.mockResolvedValue(makeRecord({
         host: 'clouddev',
         planFile: '/home/remoteuser/.claude/plans/remote-plan.md',
@@ -107,7 +107,7 @@ describe('readPlanFromSession', () => {
 
     it('falls through when planFile content is empty', async () => {
       const reader = makeReader({ '/home/user/.claude/plans/empty.md': '   ' });
-      mockCreateReader.mockReturnValue(reader);
+      mockCreateReader.mockResolvedValue(reader);
       mockGetSession.mockResolvedValue(makeRecord({
         planFile: '/home/user/.claude/plans/empty.md',
       }) as never);
@@ -124,7 +124,7 @@ describe('readPlanFromSession', () => {
         '/home/user/.claude/projects/-work/sess-123.jsonl': '{"slug":"my-cool-plan"}\n',
         '/home/user/.claude/plans/my-cool-plan.md': '# Cool Plan\nStep 1',
       });
-      mockCreateReader.mockReturnValue(reader);
+      mockCreateReader.mockResolvedValue(reader);
       mockGetSession.mockResolvedValue(makeRecord({ cwd: '/work' }) as never);
       mockFindJsonl.mockResolvedValue('/home/user/.claude/projects/-work/sess-123.jsonl');
 
@@ -162,7 +162,7 @@ describe('readPlanFromSession', () => {
   describe('Strategy 3: extractPlanContent fallback', () => {
     it('extracts plan from JSONL tool_use blocks when file not found', async () => {
       const reader = makeReader(); // no files
-      mockCreateReader.mockReturnValue(reader);
+      mockCreateReader.mockResolvedValue(reader);
       mockGetSession.mockResolvedValue(makeRecord({
         host: 'clouddev',
         cwd: '/remote/project',
@@ -180,7 +180,7 @@ describe('readPlanFromSession', () => {
 
     it('uses record.planFile as planFile hint when extracting', async () => {
       const reader = makeReader(); // readFile returns null for the planFile path
-      mockCreateReader.mockReturnValue(reader);
+      mockCreateReader.mockResolvedValue(reader);
       mockGetSession.mockResolvedValue(makeRecord({
         host: 'clouddev',
         planFile: '/remote/.claude/plans/x.md',
@@ -198,7 +198,7 @@ describe('readPlanFromSession', () => {
 
   it('returns error when all strategies fail', async () => {
     const reader = makeReader();
-    mockCreateReader.mockReturnValue(reader);
+    mockCreateReader.mockResolvedValue(reader);
     mockGetSession.mockResolvedValue(makeRecord({ host: 'clouddev' }) as never);
     mockReadJsonl.mockResolvedValue(null);
     mockExtractPlan.mockResolvedValue(null);

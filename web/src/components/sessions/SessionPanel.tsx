@@ -165,6 +165,11 @@ export const SessionPanel = memo(function SessionPanel({ sessionId, onClose, onT
       target.scrollIntoView({ behavior: 'smooth', block: 'center' });
       target.classList.add('user-messages-highlight');
       setTimeout(() => target.classList.remove('user-messages-highlight'), 1500);
+    } else {
+      // Message is truncated — ask SessionChatHistory to expand and scroll to it
+      container.dispatchEvent(new CustomEvent('expand-to-message', {
+        detail: { messageIndex }, bubbles: false,
+      }));
     }
   }, []);
 
@@ -245,6 +250,8 @@ export const SessionPanel = memo(function SessionPanel({ sessionId, onClose, onT
         activity: d.activity ?? prev.activity,
         mode: (d.mode ?? prev.mode) as SessionRecord['mode'],
         ...(d.planCompleted ? { planCompleted: true } : {}),
+        // Clear stale error when session recovers from error state
+        ...(d.work_status && d.work_status !== 'error' ? { errorMessage: undefined } : {}),
         lastActiveAt: new Date().toISOString(),
       } : prev);
     }

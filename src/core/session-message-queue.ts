@@ -119,6 +119,56 @@ export async function enqueueMessage(sessionId: string, message: string): Promis
 }
 
 /**
+ * Enqueue a message AND notify session-runner + UI in one call.
+ * This is the preferred entry point for sending messages to sessions.
+ * Callers should use this instead of manually emitting SESSION_SEND + SESSION_MESSAGE_QUEUED.
+ *
+ * @param opts.source - identifies who sent the message (e.g. 'ui', 'agent', 'phase-hook')
+ * @param opts.taskId - optional task ID associated with the session
+ * @param opts.mode - optional permission mode override for the session
+ * @param opts.model - optional model override (triggers --resume with new model)
+ * @param opts.interrupt - if true, interrupt the current turn before sending
+ * @param opts.enqueueMessage - if provided, enqueue this text (may include image refs);
+ *   the original `message` is used for bus events (UI display). Defaults to `message`.
+ */
+export async function sendMessageToSession(
+  sessionId: string,
+  message: string,
+  opts?: {
+    source?: string;
+    taskId?: string;
+    mode?: string;
+    model?: string;
+    interrupt?: boolean;
+    enqueueMessage?: string;
+  },
+): Promise<QueuedMessage> {
+  const { bus, EventNames } = await import('./event-bus.js');
+  const msg = await enqueueMessage(sessionId, opts?.enqueueMessage ?? message);
+  const source = opts?.source ?? 'unknown';
+
+  // Tell session-runner to process the queued message
+  bus.emit(EventNames.SESSION_SEND, {
+    sessionId,
+    taskId: opts?.taskId,
+    message,
+    mode: opts?.mode,
+    model: opts?.model,
+    interrupt: opts?.interrupt || undefined,
+  }, ['session-runner'], { source });
+
+  // Tell UI so the message appears immediately in the session panel
+  bus.emit(EventNames.SESSION_MESSAGE_QUEUED, {
+    sessionId,
+    messageId: msg.id,
+    message,
+    source,
+  }, ['main-ai'], { source });
+
+  return msg;
+}
+
+/**
  * Mark all 'pending' messages for a session as 'processing'.
  * Returns the messages that were marked (the batch to send to Claude).
  * Returns empty array if no pending messages.

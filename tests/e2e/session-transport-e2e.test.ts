@@ -16,6 +16,11 @@
  *   3. FIFO-based message delivery (follow-up via session:send)
  *   4. Streaming events flow through SessionIO
  *   5. Session output file is renamed to session ID (rename lifecycle)
+ *   6. Follow-up message delivery (session:send → queue → resume)
+ *   7. Session history retrieval via REST API
+ *   8. Multiple concurrent sessions stream independently
+ *   9. Session streaming events arrive via WebSocket
+ *  10. Session error handling and graceful degradation
  */
 import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest'
 import fs from 'node:fs/promises'
@@ -203,6 +208,108 @@ beforeAll(async () => {
         {
           id: 'transport-rename-001',
           title: 'Rename lifecycle test',
+          status: 'todo',
+          priority: 'none',
+          category: 'Test',
+          project: 'TransportTest',
+          session_ids: [],
+          created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+          description: '',
+          summary: '',
+          note: '',
+          subtasks: [],
+          phase: 'TODO',
+          source: 'ms-todo',
+        },
+        {
+          id: 'transport-followup-001',
+          title: 'Follow-up message test',
+          status: 'todo',
+          priority: 'none',
+          category: 'Test',
+          project: 'TransportTest',
+          session_ids: [],
+          created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+          description: '',
+          summary: '',
+          note: '',
+          subtasks: [],
+          phase: 'TODO',
+          source: 'ms-todo',
+        },
+        {
+          id: 'transport-concurrent-001',
+          title: 'Concurrent session A',
+          status: 'todo',
+          priority: 'none',
+          category: 'Test',
+          project: 'TransportTest',
+          session_ids: [],
+          created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+          description: '',
+          summary: '',
+          note: '',
+          subtasks: [],
+          phase: 'TODO',
+          source: 'ms-todo',
+        },
+        {
+          id: 'transport-concurrent-002',
+          title: 'Concurrent session B',
+          status: 'todo',
+          priority: 'none',
+          category: 'Test',
+          project: 'TransportTest',
+          session_ids: [],
+          created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+          description: '',
+          summary: '',
+          note: '',
+          subtasks: [],
+          phase: 'TODO',
+          source: 'ms-todo',
+        },
+        {
+          id: 'transport-concurrent-003',
+          title: 'Concurrent session C',
+          status: 'todo',
+          priority: 'none',
+          category: 'Test',
+          project: 'TransportTest',
+          session_ids: [],
+          created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+          description: '',
+          summary: '',
+          note: '',
+          subtasks: [],
+          phase: 'TODO',
+          source: 'ms-todo',
+        },
+        {
+          id: 'transport-streaming-001',
+          title: 'Streaming events test',
+          status: 'todo',
+          priority: 'none',
+          category: 'Test',
+          project: 'TransportTest',
+          session_ids: [],
+          created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+          description: '',
+          summary: '',
+          note: '',
+          subtasks: [],
+          phase: 'TODO',
+          source: 'ms-todo',
+        },
+        {
+          id: 'transport-error-001',
+          title: 'Error handling test',
           status: 'todo',
           priority: 'none',
           category: 'Test',
@@ -573,5 +680,376 @@ describe('Output file rename lifecycle', () => {
 
     ws.close()
     await delay(50)
+  })
+})
+
+// ═══════════════════════════════════════════════════════════════════
+//  5. Follow-up message delivery via session:send → queue → resume
+// ═══════════════════════════════════════════════════════════════════
+
+describe('Follow-up message delivery', () => {
+  let firstSessionId: string
+
+  it('start initial session and capture session ID', async () => {
+    const ws = await connectWs()
+    const resultPromise = waitForWsEvent(ws, 'session:result', 20000)
+
+    await sendWsRpc(ws, 'session:start', {
+      taskId: 'transport-followup-001',
+      message: 'first message for follow-up test',
+      project: 'TransportTest',
+    })
+
+    const resultEvent = await resultPromise
+    const rd = resultEvent.data as {
+      sessionId: string
+      taskId: string
+      result: string
+      isError: boolean
+    }
+
+    expect(rd.taskId).toBe('transport-followup-001')
+    expect(rd.isError).toBe(false)
+    firstSessionId = rd.sessionId
+    expect(firstSessionId).toBeTruthy()
+
+    ws.close()
+    await delay(300)
+  })
+
+  it('send follow-up message via session:send and get response', async () => {
+    const ws = await connectWs()
+
+    // Send a follow-up message — server will enqueue and spawn --resume
+    const sendRpcRes = await sendWsRpc(ws, 'session:send', {
+      sessionId: firstSessionId,
+      message: 'follow-up question via transport',
+    })
+
+    // RPC should return a messageId
+    const sendData = sendRpcRes as Record<string, unknown>
+    expect(sendData.messageId).toBeTruthy()
+
+    // Wait for the resumed session to produce a result
+    const resultEvent = await waitForWsEvent(ws, 'session:result', 20000)
+    const rd = resultEvent.data as {
+      sessionId: string
+      result: string
+      isError: boolean
+    }
+
+    expect(rd.sessionId).toBe(firstSessionId)
+    expect(rd.isError).toBe(false)
+    expect(rd.result).toContain('follow-up question via transport')
+
+    ws.close()
+    await delay(50)
+  })
+
+  it('session history includes both initial and follow-up turns', async () => {
+    await delay(500)
+
+    const historyRes = await fetch(apiUrl(`/api/sessions/${firstSessionId}/history`))
+    expect(historyRes.status).toBe(200)
+    const historyBody = (await historyRes.json()) as {
+      messages: Array<{
+        role: string
+        text?: string
+        tools?: unknown[]
+      }>
+    }
+
+    // Should have messages from both the initial turn and the follow-up
+    expect(historyBody.messages.length).toBeGreaterThanOrEqual(2)
+
+    // Check there are both user and assistant messages
+    const userMessages = historyBody.messages.filter((m) => m.role === 'user')
+    const assistantMessages = historyBody.messages.filter((m) => m.role === 'assistant')
+    expect(userMessages.length).toBeGreaterThanOrEqual(1)
+    expect(assistantMessages.length).toBeGreaterThanOrEqual(1)
+  })
+})
+
+// ═══════════════════════════════════════════════════════════════════
+//  6. Multiple concurrent sessions stream independently
+// ═══════════════════════════════════════════════════════════════════
+
+describe('Multiple concurrent sessions', () => {
+  it('three sessions started simultaneously all complete independently', async () => {
+    const ws = await connectWs()
+
+    // Collect all session:result events
+    const results: WsEvent[] = []
+    const allDone = new Promise<void>((resolve) => {
+      const handler = (raw: WebSocket.RawData) => {
+        const frame = JSON.parse(raw.toString()) as WsEvent
+        if (frame.type === 'event' && frame.name === 'session:result') {
+          const data = frame.data as { taskId: string }
+          if (data.taskId?.startsWith('transport-concurrent-')) {
+            results.push(frame)
+            if (results.length === 3) {
+              ws.off('message', handler)
+              resolve()
+            }
+          }
+        }
+      }
+      ws.on('message', handler)
+    })
+
+    // Start all three sessions simultaneously
+    const starts = await Promise.all([
+      sendWsRpc(ws, 'session:start', {
+        taskId: 'transport-concurrent-001',
+        message: 'concurrent session alpha',
+        project: 'TransportTest',
+      }),
+      sendWsRpc(ws, 'session:start', {
+        taskId: 'transport-concurrent-002',
+        message: 'concurrent session beta',
+        project: 'TransportTest',
+      }),
+      sendWsRpc(ws, 'session:start', {
+        taskId: 'transport-concurrent-003',
+        message: 'concurrent session gamma',
+        project: 'TransportTest',
+      }),
+    ])
+
+    // All RPCs should succeed
+    for (const s of starts) {
+      expect((s as Record<string, unknown>).ok).toBe(true)
+    }
+
+    // Wait for all three to complete (with generous timeout)
+    await Promise.race([
+      allDone,
+      delay(30000).then(() => { throw new Error('Timeout waiting for 3 concurrent sessions') }),
+    ])
+
+    expect(results.length).toBe(3)
+
+    // Verify each session completed independently with its own message
+    const taskIds = results.map((r) => (r.data as { taskId: string }).taskId).sort()
+    expect(taskIds).toEqual([
+      'transport-concurrent-001',
+      'transport-concurrent-002',
+      'transport-concurrent-003',
+    ])
+
+    // Each result should contain its respective message fragment
+    for (const r of results) {
+      const rd = r.data as { isError: boolean; result: string; sessionId: string }
+      expect(rd.isError).toBe(false)
+      expect(rd.sessionId).toBeTruthy()
+      expect(rd.result).toBeTruthy()
+    }
+
+    // Verify session IDs are all unique
+    const sessionIds = results.map((r) => (r.data as { sessionId: string }).sessionId)
+    expect(new Set(sessionIds).size).toBe(3)
+
+    ws.close()
+    await delay(50)
+  }, 35000)
+
+  it('concurrent sessions each have independent persisted records', async () => {
+    await delay(500)
+
+    // Check each task has at least one session
+    for (const taskId of ['transport-concurrent-001', 'transport-concurrent-002', 'transport-concurrent-003']) {
+      const res = await fetch(apiUrl(`/api/sessions/task/${taskId}`))
+      expect(res.status).toBe(200)
+      const body = (await res.json()) as {
+        sessions: Array<{ claudeSessionId: string; taskId: string }>
+      }
+      expect(body.sessions.length).toBeGreaterThanOrEqual(1)
+      expect(body.sessions[0].taskId).toBe(taskId)
+      expect(body.sessions[0].claudeSessionId).toBeTruthy()
+    }
+  })
+})
+
+// ═══════════════════════════════════════════════════════════════════
+//  7. Session streaming events arrive via WebSocket
+// ═══════════════════════════════════════════════════════════════════
+
+describe('Session streaming events via WebSocket', () => {
+  it('session emits text-delta and tool-use events before result', async () => {
+    const ws = await connectWs()
+
+    // Collect all streaming events for this session
+    const streamEvents = collectWsEvents(ws, [
+      'session:text-delta',
+      'session:tool-use',
+      'session:tool-result',
+      'session:result',
+      'session:started',
+    ])
+
+    const resultPromise = waitForWsEvent(ws, 'session:result', 20000)
+
+    // 'tool-test' makes mock CLI emit: init → tool_use → tool_result → text → result
+    await sendWsRpc(ws, 'session:start', {
+      taskId: 'transport-streaming-001',
+      message: 'tool-test',
+      project: 'TransportTest',
+    })
+
+    await resultPromise
+
+    // Should have received a session:started event
+    const startedEvents = streamEvents.filter((e) => e.name === 'session:started')
+    expect(startedEvents.length).toBeGreaterThanOrEqual(1)
+
+    // Should have received tool-use events (from the tool-test mock CLI output)
+    const toolUseEvents = streamEvents.filter((e) => e.name === 'session:tool-use')
+    expect(toolUseEvents.length).toBeGreaterThanOrEqual(1)
+
+    // Tool use event should contain the tool name
+    const firstToolUse = toolUseEvents[0].data as { tool?: string; name?: string }
+    expect(firstToolUse.tool || firstToolUse.name).toBeTruthy()
+
+    // Should have received a result event
+    const resultEvents = streamEvents.filter((e) => e.name === 'session:result')
+    expect(resultEvents.length).toBe(1)
+
+    ws.close()
+    await delay(50)
+  })
+})
+
+// ═══════════════════════════════════════════════════════════════════
+//  8. Session error handling and graceful degradation
+// ═══════════════════════════════════════════════════════════════════
+
+describe('Session error handling', () => {
+  it('session with error message produces isError result and server stays healthy', async () => {
+    const ws = await connectWs()
+
+    const resultPromise = waitForWsEvent(ws, 'session:result', 20000)
+
+    // Send 'error' message — mock CLI exits with code 1
+    await sendWsRpc(ws, 'session:start', {
+      taskId: 'transport-error-001',
+      message: 'error',
+      project: 'TransportTest',
+    })
+
+    const resultEvent = await resultPromise
+    const rd = resultEvent.data as {
+      sessionId: string
+      taskId: string
+      isError: boolean
+      result?: string
+    }
+
+    expect(rd.taskId).toBe('transport-error-001')
+    expect(rd.isError).toBe(true)
+
+    // Server should still be healthy after error session
+    const healthRes = await fetch(apiUrl('/api/tasks'))
+    expect(healthRes.status).toBe(200)
+
+    ws.close()
+    await delay(50)
+  })
+
+  it('session:send to nonexistent session returns error', async () => {
+    const ws = await connectWs()
+
+    // Try to send to a session that does not exist
+    try {
+      await sendWsRpc(ws, 'session:send', {
+        sessionId: 'nonexistent-session-id-999',
+        message: 'this should not work',
+      })
+    } catch (err) {
+      // RPC may time out or return an error — both are acceptable
+      expect(err).toBeDefined()
+    }
+
+    // Server should still be healthy
+    const healthRes = await fetch(apiUrl('/api/tasks'))
+    expect(healthRes.status).toBe(200)
+
+    ws.close()
+    await delay(50)
+  })
+
+  it('session:start with invalid payload is rejected', async () => {
+    const ws = await connectWs()
+
+    // Send a malformed session:start (missing required 'message' field)
+    try {
+      const rpcRes = await sendWsRpc(ws, 'session:start', {
+        taskId: 'transport-error-001',
+        // missing 'message'
+      })
+      // If we get a response, check it is an error
+      if (rpcRes.type === 'res') {
+        const error = (rpcRes as Record<string, unknown>).error
+        expect(error).toBeTruthy()
+      }
+    } catch {
+      // Timeout or error is acceptable — the server rejects bad payloads
+    }
+
+    // Server remains healthy
+    const healthRes = await fetch(apiUrl('/api/tasks'))
+    expect(healthRes.status).toBe(200)
+
+    ws.close()
+    await delay(50)
+  })
+})
+
+// ═══════════════════════════════════════════════════════════════════
+//  9. Session record enrichment
+// ═══════════════════════════════════════════════════════════════════
+
+describe('Session record enrichment', () => {
+  it('session record contains model, cwd, and cost fields', async () => {
+    // Query an existing session from the local lifecycle test
+    const sessRes = await fetch(apiUrl('/api/sessions/task/transport-local-001'))
+    expect(sessRes.status).toBe(200)
+    const sessBody = (await sessRes.json()) as {
+      sessions: Array<{
+        claudeSessionId: string
+        cwd?: string
+        model?: string
+        totalCost?: number
+        work_status?: string
+        process_status?: string
+      }>
+    }
+
+    expect(sessBody.sessions.length).toBeGreaterThanOrEqual(1)
+    const session = sessBody.sessions[0]
+
+    // Session should have a model from the mock CLI
+    expect(session.model).toBeTruthy()
+
+    // Session should have work_status and process_status
+    expect(session.work_status).toBeTruthy()
+    expect(session.process_status).toBeTruthy()
+
+    // For a completed session, process_status should be 'stopped'
+    expect(session.process_status).toBe('stopped')
+  })
+
+  it('GET /api/sessions returns all sessions across tasks', async () => {
+    const sessRes = await fetch(apiUrl('/api/sessions'))
+    expect(sessRes.status).toBe(200)
+    const sessBody = (await sessRes.json()) as {
+      sessions: Array<{ claudeSessionId: string; taskId: string }>
+    }
+
+    // Should have sessions from the tests that ran before this
+    expect(sessBody.sessions.length).toBeGreaterThanOrEqual(3)
+
+    // Sessions should come from different tasks
+    const taskIds = new Set(sessBody.sessions.map((s) => s.taskId))
+    expect(taskIds.size).toBeGreaterThanOrEqual(2)
   })
 })

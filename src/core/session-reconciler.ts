@@ -10,7 +10,7 @@
  */
 
 import { log } from '../logging/index.js'
-import { isProcessAliveAsync } from '../utils/process.js'
+import { isSessionProcessAlive } from '../utils/session-liveness.js'
 import { bus, EventNames } from './event-bus.js'
 import type { SessionRecord } from './types.js'
 
@@ -61,11 +61,9 @@ export async function reconcileSessions(): Promise<ReconcileResult> {
 
   log.session.info('session reconciler: checking sessions', { count: zombieCandidates.length })
 
-  // Parallel PID liveness checks — all I/O happens concurrently
+  // Parallel liveness checks — routes to local PID check or remote daemon check
   const results = await Promise.allSettled(zombieCandidates.map(async (session) => {
-    const processName = session.host ? 'ssh' : 'claude'
-    const alive = session.pid != null && session.outputFile
-      && await isProcessAliveAsync(session.pid, processName)
+    const alive = session.outputFile ? await isSessionProcessAlive(session) : false
     return { session, alive }
   }))
 

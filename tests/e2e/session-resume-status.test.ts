@@ -176,12 +176,17 @@ describe('Session resume status changes', () => {
     const lastFirstStatus = firstRunEvents[firstRunEvents.length - 1]
     expect(lastFirstStatus.data?.work_status).toBe('agent_complete')
 
-    // 2. Verify DB record shows stopped/agent_complete
-    const sessRes1 = await fetch(apiUrl(`/api/sessions/${sessionId}`))
-    expect(sessRes1.status).toBe(200)
-    const sessData1 = (await sessRes1.json()) as { session: { process_status: string; work_status: string } }
-    expect(sessData1.session.process_status).toBe('stopped')
-    expect(sessData1.session.work_status).toBe('agent_complete')
+    // 2. Verify DB record shows stopped/agent_complete (poll — async persist may lag)
+    let sessData1: { session: { process_status: string; work_status: string } } | null = null
+    for (let i = 0; i < 20; i++) {
+      const sessRes1 = await fetch(apiUrl(`/api/sessions/${sessionId}`))
+      expect(sessRes1.status).toBe(200)
+      sessData1 = (await sessRes1.json()) as { session: { process_status: string; work_status: string } }
+      if (sessData1.session.work_status === 'agent_complete') break
+      await delay(300)
+    }
+    expect(sessData1!.session.process_status).toBe('stopped')
+    expect(sessData1!.session.work_status).toBe('agent_complete')
 
     // 3. Resume the session by sending a new message
     const statusCountBefore = statusEvents.length
@@ -209,8 +214,10 @@ describe('Session resume status changes', () => {
     expect(inProgressEvents.length).toBeGreaterThanOrEqual(1)
     expect(completedEvents.length).toBeGreaterThanOrEqual(1)
 
-    // The in_progress event should carry process_status: 'running'
-    expect(inProgressEvents[0].data?.process_status).toBe('running')
+    // At least one in_progress event should carry process_status: 'running'
+    // (the first may have 'stopped' from handleSend before the new process starts)
+    const hasRunning = inProgressEvents.some(e => e.data?.process_status === 'running')
+    expect(hasRunning).toBe(true)
 
     ws.close()
     await delay(50)

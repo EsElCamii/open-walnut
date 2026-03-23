@@ -208,11 +208,20 @@ export function resolveImagePath(path: string, cwd?: string): string | null {
 }
 
 /**
+ * Isolated DOMPurify instance for note rendering.
+ * Hooks are added once at module init — no global mutations, no race conditions.
+ */
+const notePurify = DOMPurify();
+notePurify.addHook('afterSanitizeAttributes', (node) => {
+  if (node.tagName === 'A') {
+    node.setAttribute('target', '_blank');
+    node.setAttribute('rel', 'noopener noreferrer');
+  }
+});
+
+/**
  * Render a note string as sanitized HTML with markdown support.
  * All <a> links open in a new tab with noopener/noreferrer.
- *
- * Uses DOMPurify's afterSanitizeAttributes hook (instead of fragile regex)
- * to reliably add target="_blank" and rel="noopener noreferrer" to every link.
  */
 export function renderNoteMarkdown(text: string): string {
   let html: string;
@@ -228,19 +237,5 @@ export function renderNoteMarkdown(text: string): string {
     return `<p>${escaped}</p>`;
   }
 
-  // Use a hook to add target/rel to all anchors during sanitization,
-  // rather than post-processing with regex on the sanitized HTML.
-  DOMPurify.addHook('afterSanitizeAttributes', (node) => {
-    if (node.tagName === 'A') {
-      node.setAttribute('target', '_blank');
-      node.setAttribute('rel', 'noopener noreferrer');
-    }
-  });
-
-  const clean = DOMPurify.sanitize(html, { ADD_ATTR: ['target'] });
-
-  // Remove the hook so it doesn't affect other DOMPurify calls (e.g. ChatMessage)
-  DOMPurify.removeHook('afterSanitizeAttributes');
-
-  return clean;
+  return notePurify.sanitize(html, { ADD_ATTR: ['target'] });
 }

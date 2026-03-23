@@ -446,8 +446,10 @@ export interface SessionRecord {
   human_note?: string;
   pendingModel?: string;
   pendingMode?: string;
-  /** Claude model used by this session (e.g. "claude-opus-4-6"). */
+  /** Claude model used by this session (e.g. "claude-opus-4-6"). Display only. */
   model?: string;
+  /** CLI model string passed to --model (e.g. "opus[1m]"). Preserves [1m] suffix for resume. */
+  cliModel?: string;
   /** Archived — hidden from UI but data preserved. */
   archived?: boolean;
   /** Why this session was archived (e.g. "plan_executed", user-provided reason). */

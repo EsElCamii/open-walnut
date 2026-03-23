@@ -12,8 +12,9 @@
  * 2. Periodically re-discover new files via findAllSubagentJsonlsForAgent()
  * 3. Read new files fully and emit their events when discovered
  *
- * Local: reads from filesystem with byte offset tracking (2s interval).
- * Remote: reads via SSH with byte offset (5s interval, single-file only).
+ * Reads from local filesystem with byte offset tracking (2s interval).
+ * Remote agent streaming is handled by daemon's subscribe-agent command
+ * (pushes events via WebSocket -> RemoteSessionManager -> session-chat.ts).
  *
  * Emits parsed JSONL events tagged with agentName for the frontend.
  */
@@ -23,8 +24,7 @@ import { log } from '../logging/index.js';
 import { findAllSubagentJsonlsForAgent } from '../core/team-reader.js';
 
 const LOCAL_POLL_MS = 2000;
-const REMOTE_POLL_MS = 5000;
-/** Re-discover new files every N poll cycles (local only) */
+/** Re-discover new files every N poll cycles */
 const DISCOVERY_INTERVAL = 5; // every 10s at 2s poll
 
 export interface ParsedJsonlEvent {
@@ -82,32 +82,6 @@ export function readFullFile(filePath: string): { lines: string[]; offset: numbe
   } catch {
     return { lines: [], offset: 0 };
   }
-}
-
-/**
- * Build SSH command to read new bytes from a remote JSONL file.
- * Returns: "stat -f%z FILE && tail -c +OFFSET FILE" (macOS stat)
- * or "stat -c%s FILE && tail -c +OFFSET FILE" (Linux stat)
- */
-function buildRemotePollCmd(filePath: string, offset: number): string {
-  // Use wc -c for portable file size, then tail for new content
-  return `size=$(wc -c < '${filePath}' 2>/dev/null || echo 0) && echo "$size" && [ "$size" -gt ${offset} ] && tail -c +${offset + 1} '${filePath}'`;
-}
-
-/**
- * Parse the output of buildRemotePollCmd.
- */
-function parseRemotePollResult(output: string, currentOffset: number): { newLines: string[]; newOffset: number } {
-  const lines = output.split('\n');
-  const sizeLine = lines[0]?.trim();
-  const newSize = parseInt(sizeLine || '0', 10);
-
-  if (isNaN(newSize) || newSize <= currentOffset) {
-    return { newLines: [], newOffset: currentOffset };
-  }
-
-  const newLines = lines.slice(1).filter(Boolean);
-  return { newLines, newOffset: newSize };
 }
 
 /**
@@ -181,20 +155,14 @@ export class ActiveTabPoller {
   private currentAgent: string | null = null;
   /** Tracked files: filePath → byte offset */
   private trackedFiles = new Map<string, number>();
-  private isRemote = false;
   private _polling = false;
   private _pollCount = 0;
   private onEvent: OnSubagentEvent;
-  private sshExec?: (cmd: string) => Promise<string | null>;
-  /** Context for periodic file discovery (local only) */
+  /** Context for periodic file discovery */
   private discoveryCtx: PollerDiscoveryCtx | null = null;
-  /** Legacy single-path for remote polling */
-  private remotePath: string | null = null;
-  private remoteOffset = 0;
 
-  constructor(onEvent: OnSubagentEvent, sshExec?: (cmd: string) => Promise<string | null>) {
+  constructor(onEvent: OnSubagentEvent) {
     this.onEvent = onEvent;
-    this.sshExec = sshExec;
   }
 
   /**
@@ -206,93 +174,39 @@ export class ActiveTabPoller {
    *
    * @param agentName - The agent tab name
    * @param opts.filePaths - All known JSONL paths (pre-discovered by the RPC)
-   * @param opts.remote - Whether this is a remote session
-   * @param opts.discovery - Context for periodic new-file discovery (local only)
+   * @param opts.discovery - Context for periodic new-file discovery
    */
   subscribe(agentName: string, opts: {
     filePaths: string[];
-    remote: boolean;
     discovery?: PollerDiscoveryCtx;
   }): void {
     this.stop();
 
     this.currentAgent = agentName;
-    this.isRemote = opts.remote;
     this.trackedFiles.clear();
     this._pollCount = 0;
 
-    if (!opts.remote) {
-      // Track all known files — set offset to current EOF
-      for (const p of opts.filePaths) {
-        try {
-          const size = fs.statSync(p).size;
-          this.trackedFiles.set(p, size);
-        } catch { /* file may have been removed */ }
-      }
+    // Track all known files — set offset to current EOF
+    for (const p of opts.filePaths) {
+      try {
+        const size = fs.statSync(p).size;
+        this.trackedFiles.set(p, size);
+      } catch { /* file may have been removed */ }
+    }
 
-      // Store discovery context for finding new files
-      if (opts.discovery) {
-        this.discoveryCtx = opts.discovery;
-      }
-    } else {
-      // Remote: single-file mode (file discovery requires local fs)
-      this.remotePath = opts.filePaths[0] ?? null;
-      this.remoteOffset = 0;
-      if (!this.remotePath) {
-        log.session.warn('subagent poller: no file path for remote agent', { agentName });
-        return;
-      }
+    // Store discovery context for finding new files
+    if (opts.discovery) {
+      this.discoveryCtx = opts.discovery;
     }
 
     // Start polling timer
-    const intervalMs = opts.remote ? REMOTE_POLL_MS : LOCAL_POLL_MS;
-    this.timer = setInterval(() => this.poll(), intervalMs);
+    this.timer = setInterval(() => this.poll(), LOCAL_POLL_MS);
 
     log.session.info('subagent poller subscribed', {
       agentName,
       fileCount: opts.filePaths.length,
-      remote: opts.remote,
       hasDiscovery: !!opts.discovery,
     });
-  }
-
-  /**
-   * Async subscribe for remote agents — reads full file via SSH then starts polling.
-   */
-  async subscribeRemote(agentName: string, filePath: string): Promise<ParsedJsonlEvent[]> {
-    this.stop();
-
-    this.currentAgent = agentName;
-    this.isRemote = true;
-    this.remotePath = filePath;
-    this.remoteOffset = 0;
-    this.trackedFiles.clear();
-
-    // Read initial snapshot via SSH
-    let initialEvents: ParsedJsonlEvent[] = [];
-    if (this.sshExec) {
-      try {
-        const result = await this.sshExec(`cat '${filePath}' 2>/dev/null`);
-        if (result) {
-          const lines = result.split('\n').filter(Boolean);
-          this.remoteOffset = Buffer.byteLength(result);
-          initialEvents = parseJsonlLines(lines);
-        }
-      } catch (err) {
-        log.session.warn('remote subagent initial read failed', {
-          agentName, error: err instanceof Error ? err.message : String(err),
-        });
-      }
-    }
-
-    // Start polling timer
-    this.timer = setInterval(() => this.poll(), REMOTE_POLL_MS);
-
-    log.session.info('subagent poller subscribed (remote)', {
-      agentName, filePath: filePath.slice(-60), initialEvents: initialEvents.length,
-    });
-
-    return initialEvents;
   }
 
   /** Stop polling. */
@@ -304,8 +218,6 @@ export class ActiveTabPoller {
     this.currentAgent = null;
     this.trackedFiles.clear();
     this.discoveryCtx = null;
-    this.remotePath = null;
-    this.remoteOffset = 0;
     this._pollCount = 0;
     this._polling = false;
   }
@@ -315,17 +227,13 @@ export class ActiveTabPoller {
     return this.currentAgent;
   }
 
-  private async poll(): Promise<void> {
+  private poll(): void {
     if (!this.currentAgent) return;
-    if (this._polling) return; // Prevent overlapping polls (remote can be slow)
+    if (this._polling) return;
     this._polling = true;
 
     try {
-      if (this.isRemote) {
-        await this.pollRemote();
-      } else {
-        this.pollLocal();
-      }
+      this.pollLocal();
     } catch (err) {
       log.session.debug('subagent poll error', {
         agent: this.currentAgent,
@@ -378,23 +286,6 @@ export class ActiveTabPoller {
       log.session.info('subagent poller: discovered new file', {
         agentName, path: p.slice(-60), events: events.length,
       });
-    }
-  }
-
-  private async pollRemote(): Promise<void> {
-    if (!this.remotePath || !this.currentAgent || !this.sshExec) return;
-
-    const cmd = buildRemotePollCmd(this.remotePath, this.remoteOffset);
-    const result = await this.sshExec(cmd);
-    if (!result) return;
-
-    const { newLines, newOffset } = parseRemotePollResult(result, this.remoteOffset);
-    if (newLines.length === 0) return;
-
-    this.remoteOffset = newOffset;
-    const events = parseJsonlLines(newLines);
-    if (events.length > 0) {
-      this.onEvent(this.currentAgent, events);
     }
   }
 

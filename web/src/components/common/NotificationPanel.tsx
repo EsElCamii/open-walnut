@@ -104,6 +104,29 @@ export function NotificationPanel({ open, onClose, sidebarCollapsed }: Notificat
                 )}
               </div>
 
+              {/* Remote daemons status */}
+              {health.daemons && health.daemons.length > 0 && (
+                <div className={`notification-card ${health.daemons.some(d => d.connected) ? 'ok' : 'neutral'}`}>
+                  <div className="notification-card-row">
+                    <span className={`notification-card-icon ${health.daemons.some(d => d.connected) ? 'ok' : 'neutral'}`}>
+                      {health.daemons.some(d => d.connected) ? '\u2713' : '\u25CB'}
+                    </span>
+                    <span className="notification-card-label">Remote Hosts</span>
+                  </div>
+
+                  <div className="notification-card-details">
+                    {health.daemons.map((d) => (
+                      <div key={d.host} className="notification-detail-row">
+                        <span>{d.label ?? d.host}</span>
+                        <span className={`notification-detail-value ${d.connected ? 'ok' : 'muted'}`}>
+                          {d.connected ? 'Connected' : 'Idle'}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
               {/* Git backup status */}
               <div className={`notification-card ${gitOk ? 'ok' : 'warn'}`}>
                 <div className="notification-card-row">

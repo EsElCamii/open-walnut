@@ -5,14 +5,12 @@
  * directories, whether the session ran locally or on a remote host via SSH.
  *
  * Local sessions:  fs.readFile / fs.readdir (async — non-blocking)
- * Remote sessions: ssh cat / ssh ls (batched where possible)
+ * Remote sessions: DaemonFileReader (WebSocket via walnut-daemon)
  */
 
 import fsp from 'node:fs/promises';
 import path from 'node:path';
-import { execSync } from 'node:child_process';
 import { CLAUDE_HOME } from '../constants.js';
-import { getConfig } from './config-manager.js';
 import { log } from '../logging/index.js';
 
 // ── Path helpers ──
@@ -126,118 +124,14 @@ export class LocalFileReader implements SessionFileReader {
   }
 }
 
-// ── Remote implementation ──
-
-export class RemoteFileReader implements SessionFileReader {
-  private sshTarget: string;
-  private sshArgs: string[];
-
-  constructor(private host: string) {
-    // Resolved lazily on first use
-    this.sshTarget = '';
-    this.sshArgs = [];
-  }
-
-  private async resolve(): Promise<void> {
-    if (this.sshTarget) return;
-    const config = await getConfig();
-    const hostConfig = config.hosts?.[this.host];
-    if (!hostConfig) {
-      throw new Error(`Unknown SSH host: ${this.host}`);
-    }
-    this.sshTarget = hostConfig.user
-      ? `${hostConfig.user}@${hostConfig.hostname}`
-      : hostConfig.hostname;
-    this.sshArgs = ['-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=no'];
-    if (hostConfig.port) {
-      this.sshArgs.push('-p', String(hostConfig.port));
-    }
-  }
-
-  private execSsh(remoteCmd: string, timeout = 15000): string | null {
-    try {
-      // Escape $ and " so they survive the local shell's double-quote expansion
-      // and are interpreted by the REMOTE shell instead.
-      const escaped = remoteCmd.replace(/\$/g, '\\$').replace(/"/g, '\\"');
-      return execSync(
-        `ssh ${this.sshArgs.join(' ')} ${this.sshTarget} "${escaped}"`,
-        { encoding: 'utf-8', timeout, maxBuffer: 10 * 1024 * 1024, stdio: ['pipe', 'pipe', 'pipe'] },
-      );
-    } catch (err) {
-      log.session.debug('SSH command failed', {
-        target: this.sshTarget,
-        error: err instanceof Error ? err.message : String(err),
-      });
-      return null;
-    }
-  }
-
-  async readFile(remotePath: string): Promise<string | null> {
-    await this.resolve();
-    const useGlob = remotePath.includes('*');
-    // Replace ~ with $HOME so the path expands correctly on the remote shell.
-    // Tilde expansion is suppressed in both single AND double quotes; $HOME expands
-    // in double quotes. execSsh's escaping (\$) passes $ through to the remote shell.
-    const safePath = remotePath.replace(/^~/, '$HOME');
-    const cmd = useGlob
-      ? `for f in ${safePath}; do [ -f "$f" ] && cat "$f" && exit 0; done; exit 1`
-      : `cat "${safePath}"`;
-    const result = this.execSsh(cmd);
-    return result || null;
-  }
-
-  async listDir(remotePath: string): Promise<string[]> {
-    await this.resolve();
-    const safePath = remotePath.replace(/^~/, '$HOME');
-    const result = this.execSsh(`ls "${safePath}" 2>/dev/null`);
-    if (!result) return [];
-    return result.split('\n').filter(Boolean);
-  }
-
-  /**
-   * Search for a session JSONL using `find` — more robust than shell glob.
-   * Returns the file content if found, null otherwise.
-   */
-  async findSession(sessionId: string): Promise<string | null> {
-    await this.resolve();
-    // Single SSH call: find the file and cat it
-    const cmd = `f=$(find ~/.claude/projects -maxdepth 2 -name '${sessionId}.jsonl' -print -quit 2>/dev/null) && [ -n "$f" ] && cat "$f"`;
-    return this.execSsh(cmd, 20000);
-  }
-
-  /**
-   * Batch-read all subagent JSONL files from a remote directory.
-   * Returns a Map<filename, content> to avoid N separate SSH calls.
-   */
-  async batchReadSubagents(remoteDirPath: string): Promise<Map<string, string>> {
-    await this.resolve();
-    // Use a single SSH command that prints each file with a delimiter
-    const delimiter = '___WALNUT_FILE_BOUNDARY___';
-    const safeDirPath = remoteDirPath.replace(/^~/, '$HOME');
-    const cmd = `cd "${safeDirPath}" 2>/dev/null && for f in agent-*.jsonl; do [ -f "$f" ] && echo "${delimiter}$f" && cat "$f"; done`;
-    const result = this.execSsh(cmd, 30000);
-    if (!result) return new Map();
-
-    const fileMap = new Map<string, string>();
-    const sections = result.split(delimiter).filter(Boolean);
-    for (const section of sections) {
-      const newlineIdx = section.indexOf('\n');
-      if (newlineIdx === -1) continue;
-      const filename = section.slice(0, newlineIdx).trim();
-      const content = section.slice(newlineIdx + 1);
-      if (filename && content) {
-        fileMap.set(filename, content);
-      }
-    }
-    return fileMap;
-  }
-}
-
 // ── Factory ──
 
 /** Create the appropriate file reader for local or remote sessions. */
-export function createFileReader(host?: string): SessionFileReader {
-  if (host) return new RemoteFileReader(host);
+export async function createFileReader(host?: string): Promise<SessionFileReader> {
+  if (host) {
+    const { DaemonFileReader } = await import('./daemon-file-reader.js');
+    return new DaemonFileReader(host);
+  }
   return new LocalFileReader();
 }
 
@@ -336,10 +230,11 @@ export async function readSessionJsonlContent(
   };
 
   // 1. Canonical JSONL — source of truth.
-  //    Dispatch on host (like readSubagentContents): remote SSH first, else local fs.
-  //    Remote sessions have no local canonical file, so we must SSH first.
+  //    Dispatch on host (like readSubagentContents): remote daemon first, else local fs.
+  //    Remote sessions have no local canonical file, so we must use daemon first.
   if (host) {
-    const reader = new RemoteFileReader(host);
+    const { DaemonFileReader } = await import('./daemon-file-reader.js');
+    const reader = new DaemonFileReader(host);
     // Try exact encoded path first, then glob fallback, then find fallback.
     const exactPath = cwd ? remoteJsonlPath(sessionId, cwd) : null;
     const globPath = remoteJsonlPath(sessionId); // ~/.claude/projects/*/${sessionId}.jsonl
@@ -481,7 +376,8 @@ async function readRemoteSubagentContents(
 ): Promise<Map<string, string>> {
   if (!host) return new Map();
 
-  const reader = new RemoteFileReader(host);
+  const { DaemonFileReader } = await import('./daemon-file-reader.js');
+  const reader = new DaemonFileReader(host);
   const remotePath = remoteSubagentDirPath(sessionId, cwd);
 
   try {

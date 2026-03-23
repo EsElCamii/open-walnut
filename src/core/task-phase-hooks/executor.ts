@@ -80,12 +80,6 @@ async function executeSendMessage(hook: TaskPhaseHookDef, task: Task): Promise<v
   const { message } = hook.action
   const sessionId = task.session_id!
 
-  const { enqueueMessage } = await import('../session-message-queue.js')
-  await enqueueMessage(sessionId, message)
-
-  bus.emit(EventNames.SESSION_SEND, {
-    sessionId,
-    taskId: task.id,
-    message,
-  }, ['session-runner'], { source: 'phase-hook' })
+  const { sendMessageToSession } = await import('../session-message-queue.js')
+  await sendMessageToSession(sessionId, message, { source: 'phase-hook', taskId: task.id })
 }

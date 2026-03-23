@@ -5,6 +5,7 @@ import type { Editor } from '@tiptap/core';
 export interface UseGlobalNotesReturn {
   content: string;
   onEditorUpdate: (editor: Editor) => void;
+  /** True while a save is in-flight. Backed by a ref — reads are snapshot-only. */
   saving: boolean;
   saveError: string | null;
   collapsed: boolean;
@@ -18,7 +19,8 @@ const COLLAPSE_KEY = 'open-walnut-global-notes-collapsed';
 
 export function useGlobalNotes(): UseGlobalNotesReturn {
   const [content, setContent] = useState('');
-  const [saving, setSaving] = useState(false);
+  // saving is a ref — no re-renders during typing. We expose a snapshot via return.
+  const savingRef = useRef(false);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [collapsed, setCollapsed] = useState(() => {
     const stored = localStorage.getItem(COLLAPSE_KEY);
@@ -46,13 +48,14 @@ export function useGlobalNotes(): UseGlobalNotesReturn {
 
     if (saveTimer.current) clearTimeout(saveTimer.current);
 
-    setSaving(true);
+    // Mark saving via ref — no React state update, no re-render
+    savingRef.current = true;
 
     saveTimer.current = setTimeout(() => {
       // Serialize from the editor ref — guard against destroyed editors
       const ed = editorRef.current;
       if (!ed || ed.isDestroyed) {
-        setSaving(false);
+        savingRef.current = false;
         return;
       }
       try {
@@ -60,13 +63,16 @@ export function useGlobalNotes(): UseGlobalNotesReturn {
         saveGlobalNotes(md)
           .then(() => {
             dirty.current = false;
+            // Keep content state in sync — needed when editor remounts
+            // (collapse/expand, popup). The external sync useEffect will
+            // short-circuit because editor already has this content.
             setContent(md);
           })
           .catch((err) => { setSaveError(err instanceof Error ? err.message : 'Save failed'); })
-          .finally(() => setSaving(false));
+          .finally(() => { savingRef.current = false; });
       } catch {
         // Editor was destroyed between scheduling and firing — skip save
-        setSaving(false);
+        savingRef.current = false;
       }
     }, 500);
   }, [saveError]);
@@ -98,5 +104,5 @@ export function useGlobalNotes(): UseGlobalNotesReturn {
   const openPopup = useCallback(() => setPopupOpen(true), []);
   const closePopup = useCallback(() => setPopupOpen(false), []);
 
-  return { content, onEditorUpdate, saving, saveError, collapsed, toggleCollapse, popupOpen, openPopup, closePopup };
+  return { content, onEditorUpdate, saving: savingRef.current, saveError, collapsed, toggleCollapse, popupOpen, openPopup, closePopup };
 }

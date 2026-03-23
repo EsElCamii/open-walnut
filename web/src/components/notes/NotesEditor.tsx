@@ -62,6 +62,81 @@ function isUrl(text: string): boolean {
 }
 
 /**
+ * When sinkListItem fails (item is first in its list), try joining the
+ * current list with the nearest previous same-type list — removing any
+ * empty paragraphs between them — then retry sink.
+ *
+ * This handles the common case where blank lines in notes split a single
+ * logical task list into multiple ProseMirror taskList nodes.
+ */
+function tryJoinPreviousListAndSink(editor: Editor, listItemType: string): boolean {
+  const { state } = editor;
+  const { $from } = state.selection;
+
+  // Find the containing list node
+  let listDepth = 0;
+  for (let d = $from.depth; d > 0; d--) {
+    const n = $from.node(d).type.name;
+    if (n === 'taskList' || n === 'bulletList' || n === 'orderedList') {
+      listDepth = d;
+      break;
+    }
+  }
+  if (!listDepth || $from.index(listDepth) !== 0) return false;
+
+  const listType = $from.node(listDepth).type;
+  const parent = $from.node(listDepth - 1);
+  const listIdx = $from.index(listDepth - 1);
+  if (listIdx === 0) return false;
+
+  // Only join with the IMMEDIATELY previous sibling if it's the same list type,
+  // or if there's exactly one empty block between them (single blank line).
+  // Multiple empty blocks = intentional separation, don't join.
+  const prevSibling = parent.child(listIdx - 1);
+  let prevListIdx: number;
+
+  if (prevSibling.type === listType) {
+    // Immediately adjacent same-type list — join directly
+    prevListIdx = listIdx - 1;
+  } else if (
+    prevSibling.content.size === 0 &&
+    listIdx >= 2 &&
+    parent.child(listIdx - 2).type === listType
+  ) {
+    // One empty block gap (single blank line) — join across it
+    prevListIdx = listIdx - 2;
+  } else {
+    return false; // too far apart or non-matching
+  }
+
+  // Calculate gap: from end of prevList to start of our list
+  const contentStart = $from.start(listDepth - 1);
+  let offset = 0;
+  for (let i = 0; i <= prevListIdx; i++) offset += parent.child(i).nodeSize;
+  const gapStart = contentStart + offset; // right after prevList
+
+  let listOffset = 0;
+  for (let i = 0; i < listIdx; i++) listOffset += parent.child(i).nodeSize;
+  const gapEnd = contentStart + listOffset; // right before our list
+
+  const { tr } = state;
+
+  // Delete empty paragraphs between the two lists
+  if (gapStart < gapEnd) tr.delete(gapStart, gapEnd);
+
+  // Join the now-adjacent same-type lists
+  const joinAt = tr.mapping.map(gapStart);
+  if (!tr.doc.canJoin(joinAt)) return false;
+  tr.join(joinAt);
+  editor.view.dispatch(tr);
+
+  // Retry sink — now the item has a previous sibling
+  const sunk = editor.commands.sinkListItem(listItemType);
+  if (sunk) detachListItemChildren(editor);
+  return sunk;
+}
+
+/**
  * Detach nested child list from the list item at cursor,
  * making them siblings after the current item.
  * Enables per-line Tab indentation: only the current item moves, not children.
@@ -259,7 +334,13 @@ export function NotesEditor({ content, onDirty, placeholder, className, autoFocu
         } else {
           // Sink first (standard — moves item with children), then detach children
           const sunk = editorRef.current.commands.sinkListItem(listItemType);
-          if (sunk) detachListItemChildren(editorRef.current);
+          if (sunk) {
+            detachListItemChildren(editorRef.current);
+          } else {
+            // Sink failed — item is likely first in a split list.
+            // Join with previous same-type list, then retry.
+            tryJoinPreviousListAndSink(editorRef.current, listItemType);
+          }
         }
         return true;
       },
@@ -277,8 +358,16 @@ export function NotesEditor({ content, onDirty, placeholder, className, autoFocu
     if (!editor || editing) return;
     const currentMd = editor.storage.markdown.getMarkdown();
     if (currentMd !== content) {
+      // Save cursor position before replacing doc
+      const { from, to } = editor.state.selection;
       isExternalUpdate.current = true;
-      editor.commands.setContent(content);
+      editor.commands.setContent(content, false);
+      // Restore cursor, clamped to new doc size
+      const maxPos = editor.state.doc.content.size;
+      editor.commands.setTextSelection({
+        from: Math.min(from, maxPos),
+        to: Math.min(to, maxPos),
+      });
       isExternalUpdate.current = false;
     }
   }, [content, editor, editing]);

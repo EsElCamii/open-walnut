@@ -38,5 +38,11 @@ todo-snapshot.md
 # Playwright report artifacts
 playwright-report/
 
+# Pre-compiled daemon binaries (built by scripts/build-daemon.sh)
+dist/daemon-binaries/
+
 # Local-only Claude instructions (personal, never committed)
 CLAUDE.local.md
+
+# V8 isolate logs (contain local paths)
+isolate-*.log

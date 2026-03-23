@@ -170,6 +170,11 @@ export function SessionDetailPanel({ session, taskTitle, summary, onTitleChanged
       // Brief highlight
       target.classList.add('user-messages-highlight');
       setTimeout(() => target.classList.remove('user-messages-highlight'), 1500);
+    } else {
+      // Message is truncated — ask SessionChatHistory to expand and scroll to it
+      container.dispatchEvent(new CustomEvent('expand-to-message', {
+        detail: { messageIndex }, bubbles: false,
+      }));
     }
   }, []);
 

@@ -10,9 +10,8 @@ import { listTasks, getTask, addTask, updateTask } from '../../core/task-manager
 import { getConfig } from '../../core/config-manager.js'
 import { bus, EventNames, eventData } from '../../core/event-bus.js'
 import fs from 'node:fs'
-import { execFile } from 'node:child_process'
 import path from 'path'
-import { isProcessAliveAsync } from '../../utils/process.js'
+import { isSessionProcessAlive } from '../../utils/session-liveness.js'
 import { readPlanFromSession, buildPlanExecutionMessage } from '../../utils/plan-message.js'
 import { getFrequentDirs, compileFromSessions } from '../../core/frequent-dirs.js'
 import type { SessionRecord, Task, WorkStatus } from '../../core/types.js'
@@ -45,27 +44,27 @@ function logMessageOrdering(phase: string, sessionId: string, messages: SessionH
 /** Recompute process_status live via PID check (for GET responses).
  *  Runs all PID checks in parallel to avoid blocking the event loop. */
 async function enrichWithLiveStatus(sessions: SessionRecord[]): Promise<SessionRecord[]> {
-  // Collect sessions that need a PID liveness check
-  const checks: { index: number; pid: number; processName: string }[] = []
+  // Parallel liveness checks via unified session liveness utility.
+  // Routes to local PID check for local sessions, daemon connection check for remote.
+  const needsCheck: number[] = []
   for (let i = 0; i < sessions.length; i++) {
     const s = sessions[i]
-    if (s.provider === 'embedded' || s.provider === 'sdk') continue
-    if (s.pid != null && (s.process_status === 'running' || s.process_status === 'idle')) {
-      checks.push({ index: i, pid: s.pid, processName: s.host ? 'ssh' : 'claude' })
+    if (s.process_status === 'running' || s.process_status === 'idle') {
+      needsCheck.push(i)
     } else if (s.pid == null && (s.work_status === 'completed' || s.work_status === 'error')) {
       s.process_status = 'stopped'
     }
   }
 
-  if (checks.length > 0) {
+  if (needsCheck.length > 0) {
     const results = await Promise.allSettled(
-      checks.map(c => isProcessAliveAsync(c.pid, c.processName))
+      needsCheck.map(i => isSessionProcessAlive(sessions[i]))
     )
-    for (let i = 0; i < checks.length; i++) {
-      const r = results[i]
+    for (let j = 0; j < needsCheck.length; j++) {
+      const r = results[j]
       const alive = r.status === 'fulfilled' && r.value === true
       if (!alive) {
-        sessions[checks[i].index].process_status = 'stopped'
+        sessions[needsCheck[j]].process_status = 'stopped'
       }
     }
   }
@@ -85,7 +84,7 @@ async function enrichWithHostnames(sessions: SessionRecord[]): Promise<SessionRe
       if (s.host && !s.hostname) {
         const def = hosts[s.host]
         if (def) {
-          s.hostname = def.hostname ?? (def as Record<string, unknown>).ssh as string | undefined
+          s.hostname = def.hostname
         }
       }
     }
@@ -165,8 +164,8 @@ sessionsRouter.post('/working-dirs/recompile', async (_req: Request, res: Respon
 const dirCache = new Map<string, { dirs: string[]; ts: number }>()
 const DIR_CACHE_TTL = 60_000
 
-// GET /api/sessions/list-dirs — list subdirectories on a host (local or SSH) for path auto-complete
-// Uses SSH ControlMaster multiplexing for fast subsequent calls and multi-level preload.
+// GET /api/sessions/list-dirs — list subdirectories on a host (local or daemon) for path auto-complete
+// Remote hosts use DaemonConnection for fast directory listing.
 sessionsRouter.get('/list-dirs', async (req: Request, res: Response, next: NextFunction) => {
   try {
     const prefix = String(req.query.prefix ?? '/')
@@ -188,8 +187,7 @@ sessionsRouter.get('/list-dirs', async (req: Request, res: Response, next: NextF
     let expandedPrefix = prefix
     if (expandedPrefix === '~' || expandedPrefix.startsWith('~/')) {
       if (host) {
-        // SSH: replace ~ with $HOME for shell expansion (used inside double quotes)
-        expandedPrefix = '$HOME' + expandedPrefix.slice(1)
+        // Remote: keep ~ as-is — the daemon's fs.ls handles ~ expansion on the remote host
       } else {
         const os = await import('node:os')
         const home = os.homedir()
@@ -203,20 +201,20 @@ sessionsRouter.get('/list-dirs', async (req: Request, res: Response, next: NextF
     const dir = expandedPrefix.endsWith('/') ? expandedPrefix : path.dirname(expandedPrefix)
 
     if (host) {
-      // SSH: resolve host from config
+      // Remote: resolve host from config and use DaemonConnection for directory listing
       const config = await getConfig()
       const hostDef = config.hosts?.[host]
       if (!hostDef) {
         res.status(400).json({ error: `Unknown host: ${host}` })
         return
       }
-      const hostname = hostDef.hostname ?? (hostDef as Record<string, unknown>).ssh as string | undefined
+      const hostname = hostDef.hostname
       if (!hostname) {
         res.status(400).json({ error: `Host "${host}" has no hostname` })
         return
       }
 
-      // Check in-memory cache first (avoid re-SSHing)
+      // Check in-memory cache first
       const cacheKey = `${host}::${dir}::${depth}`
       const cached = dirCache.get(cacheKey)
       if (cached && Date.now() - cached.ts < DIR_CACHE_TTL) {
@@ -224,58 +222,72 @@ sessionsRouter.get('/list-dirs', async (req: Request, res: Response, next: NextF
         return
       }
 
-      const hostString = hostDef.user ? `${hostDef.user}@${hostname}` : hostname
+      const { getDaemonConnection } = await import('../../providers/daemon-connection.js')
+      const sshTarget = { hostname, user: hostDef.user, port: hostDef.port }
+      const conn = await getDaemonConnection(host, sshTarget)
 
-      // SSH ControlMaster: reuse persistent connection
-      const controlDir = '/tmp/open-walnut-ssh-mux'
-      fs.mkdirSync(controlDir, { recursive: true, mode: 0o700 })
-      const controlPath = `${controlDir}/%r@%h-%p`
-
-      const sshArgs = [
-        '-o', 'BatchMode=yes',
-        '-o', 'StrictHostKeyChecking=no',
-        '-o', 'ConnectTimeout=5',
-        '-o', `ControlMaster=auto`,
-        '-o', `ControlPath=${controlPath}`,
-        '-o', `ControlPersist=300`,
-      ]
-      if (hostDef.port) sshArgs.push('-p', String(hostDef.port))
-
-      // Use double quotes for $HOME paths (shell expansion needed), single quotes otherwise
-      const needsExpansion = dir.includes('$HOME')
-      const quotedDir = needsExpansion
-        ? `"${dir.replace(/"/g, '\\"')}"`
-        : `'${dir.replace(/'/g, "'\\''")}'`
-      const cmd = `find ${quotedDir} -maxdepth ${depth} -type d -not -path '*/.*' 2>/dev/null | head -500`
-
-      const output = await new Promise<string>((resolve, reject) => {
-        execFile('ssh', [...sshArgs, hostString, cmd], {
-          timeout: 10_000,
-          encoding: 'utf-8',
-        }, (err, stdout) => err ? reject(err) : resolve(stdout))
-      })
-
-      const rawLines = output.split('\n').filter(Boolean)
-
-      // find outputs the root dir first — use it to resolve $HOME expansion
+      // Recursive BFS directory listing via daemon's fs.ls command.
+      // The daemon's fs.ls expands ~ to the remote home directory.
+      const entries: string[] = []
       let resolvedDir = dir
-      if (dir.includes('$HOME') && rawLines.length > 0) {
-        // First line from find is the resolved directory itself
-        const first = rawLines[0].endsWith('/') ? rawLines[0] : rawLines[0] + '/'
-        resolvedDir = first
+
+      // First call resolves ~ and gives us the real base path
+      const rootResult = await conn.send('fs.ls', { path: dir })
+      if (!rootResult.ok) {
+        res.status(400).json({ error: `Cannot list directory: ${rootResult.error ?? dir}` })
+        return
+      }
+      if (rootResult.resolvedPath && typeof rootResult.resolvedPath === 'string') {
+        resolvedDir = (rootResult.resolvedPath as string).endsWith('/')
+          ? rootResult.resolvedPath as string
+          : rootResult.resolvedPath + '/'
       }
 
-      const allEntries = rawLines
-        .filter(p => p !== resolvedDir.replace(/\/$/, '') && p !== resolvedDir)
+      // Process root entries, then BFS walk
+      const queue: { dirPath: string; currentDepth: number }[] = []
+      const rootEntries = rootResult.entries as Array<{ name: string; type: string }>
+      for (const e of rootEntries) {
+        if (e.type !== 'dir' || e.name.startsWith('.')) continue
+        const fullPath = resolvedDir.endsWith('/')
+          ? `${resolvedDir}${e.name}`
+          : `${resolvedDir}/${e.name}`
+        entries.push(fullPath)
+        if (depth > 1) {
+          queue.push({ dirPath: fullPath, currentDepth: 1 })
+        }
+      }
 
-      // Cache using resolved dir for consistent lookup
+      while (queue.length > 0 && entries.length < 500) {
+        const batch = queue.splice(0, queue.length)
+        for (const item of batch) {
+          if (entries.length >= 500) break
+          try {
+            const result = await conn.send('fs.ls', { path: item.dirPath })
+            if (!result.ok) continue
+            const lsEntries = result.entries as Array<{ name: string; type: string }>
+            for (const e of lsEntries) {
+              if (entries.length >= 500) break
+              if (e.type !== 'dir' || e.name.startsWith('.')) continue
+              const fullPath = `${item.dirPath}/${e.name}`
+              entries.push(fullPath)
+              if (item.currentDepth + 1 < depth) {
+                queue.push({ dirPath: fullPath, currentDepth: item.currentDepth + 1 })
+              }
+            }
+          } catch {
+            // Directory unreadable or daemon error — skip
+          }
+        }
+      }
+
+      // Cache results
       const resolvedCacheKey = `${host}::${resolvedDir}::${depth}`
-      dirCache.set(cacheKey, { dirs: allEntries, ts: Date.now() })
+      dirCache.set(cacheKey, { dirs: entries, ts: Date.now() })
       if (resolvedCacheKey !== cacheKey) {
-        dirCache.set(resolvedCacheKey, { dirs: allEntries, ts: Date.now() })
+        dirCache.set(resolvedCacheKey, { dirs: entries, ts: Date.now() })
       }
 
-      res.json({ dirs: allEntries, parent: resolvedDir })
+      res.json({ dirs: entries, parent: resolvedDir })
     } else {
       // Local filesystem — also preload multiple levels
       const entries: string[] = []
@@ -358,9 +370,8 @@ sessionsRouter.post('/quick-start', async (req: Request, res: Response, next: Ne
       }
     }
 
-    // Quick Start tasks always go to Inbox — ignore the category param from the
-    // path selector (which carries the historical category of the working directory).
-    const taskCategory = 'Inbox'
+    const config = await getConfig()
+    const taskCategory = category || config.defaults?.category || 'Inbox'
     const title = `Session: ${path.basename(cwd.replace(/\/+$/, '') || '/')}`
 
     // Create task in "Quick Start" project under the determined category
@@ -383,7 +394,7 @@ sessionsRouter.post('/quick-start', async (req: Request, res: Response, next: Ne
       '<quick_start_task>',
       'This task was created via Quick Start. When your work is complete:',
       '1. Update the task title to be descriptive (replace the generic "Session: ..." title) using update_task',
-      '2. If "Inbox / Quick Start" is not the right project, move the task to the correct category and project using update_task',
+      `2. If "${taskCategory} / Quick Start" is not the right project, move the task to the correct project within the same category "${taskCategory}" using update_task with the project field`,
       '</quick_start_task>',
     ].join('\n')
 
@@ -674,6 +685,7 @@ sessionsRouter.get('/:sessionId/history', async (req: Request, res: Response, ne
   try {
     const sessionId = req.params.sessionId as string
     const source = req.query.source as string | undefined
+    const tail = req.query.tail ? parseInt(req.query.tail as string, 10) : undefined
 
     // Look up session record to get cwd
     const record = await getSessionByClaudeId(sessionId)
@@ -684,7 +696,8 @@ sessionsRouter.get('/:sessionId/history', async (req: Request, res: Response, ne
       // Skips SSH entirely — ideal for instant first paint of FocusDock cards.
       const messages = await readSessionHistory(sessionId, cwd, undefined, record?.outputFile)
       logMessageOrdering('P1:streams', sessionId, messages, record?.host)
-      res.json({ messages })
+      const sliced = tail && tail > 0 ? messages.slice(-tail) : messages
+      res.json({ messages: sliced, total: messages.length })
       return
     }
 
@@ -742,10 +755,17 @@ sessionsRouter.get('/:sessionId/history', async (req: Request, res: Response, ne
       }
     }
 
+    const total = messages.length
+    const sliced = tail && tail > 0 ? messages.slice(-tail) : messages
+    // Adjust forkBoundaryIndex for the sliced window
+    const adjustedForkBoundary = forkBoundaryIndex != null && tail && tail > 0
+      ? (forkBoundaryIndex >= total - tail ? forkBoundaryIndex - (total - tail) : undefined)
+      : forkBoundaryIndex
     res.json({
-      messages,
+      messages: sliced,
+      total,
       ...(forkedFromSessionId ? { forkedFromSessionId } : {}),
-      ...(forkBoundaryIndex != null ? { forkBoundaryIndex } : {}),
+      ...(adjustedForkBoundary != null ? { forkBoundaryIndex: adjustedForkBoundary } : {}),
     })
   } catch (err) {
     next(err)
@@ -817,17 +837,14 @@ sessionsRouter.post('/:sessionId/execute-continue', async (req: Request, res: Re
     // so it restarts with bypass permissions via --resume
     const needsInterrupt = session.process_status !== 'stopped'
 
-    // Enqueue message and emit SESSION_SEND (same pattern as send_to_session)
     const message = 'Execute the plan. Implement all steps as planned.'
-    const { enqueueMessage } = await import('../../core/session-message-queue.js')
-    await enqueueMessage(session.claudeSessionId, message)
-    bus.emit(EventNames.SESSION_SEND, {
-      sessionId: session.claudeSessionId,
+    const { sendMessageToSession } = await import('../../core/session-message-queue.js')
+    await sendMessageToSession(session.claudeSessionId, message, {
+      source: 'web-api',
       taskId: session.taskId,
-      message,
       mode: 'bypass',
-      ...(needsInterrupt ? { interrupt: true } : {}),
-    }, ['session-runner'], { source: 'web-api' })
+      interrupt: needsInterrupt || undefined,
+    })
 
     log.web.info('execute-continue: resuming plan session with bypass', { sessionId: session.claudeSessionId })
 

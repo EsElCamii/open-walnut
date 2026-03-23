@@ -23,18 +23,19 @@
  * manages active ClaudeCodeSession instances, reconnects on startup.
  */
 
-import { spawn } from 'node:child_process'
 import fs from 'node:fs'
 import fsp from 'node:fs/promises'
 import path from 'node:path'
 import crypto from 'node:crypto'
 import { bus, EventNames, eventData } from '../core/event-bus.js'
-import { isProcessAlive } from '../utils/process.js'
+import { isProcessAliveAsync } from '../utils/process.js'
 import { SESSION_STREAMS_DIR } from '../constants.js'
 import { log } from '../logging/index.js'
 import { markProcessing, removeProcessed, revertToPending, loadQueue, getAllSessionsWithPending } from '../core/session-message-queue.js'
-import { createSessionIO, LocalIO, RemoteIO, transferImagesForRemoteSession, rewriteRemoteImagePaths } from './session-io.js'
-import type { SessionIO, SshTarget } from './session-io.js'
+// Image transfer for remote sessions handled by RemoteSessionManager.prepareOutbound()
+import type { SshTarget } from './session-io.js'
+import { createSessionManager, registerSessionManager, unregisterSessionManager } from './session-manager.js'
+import type { SessionManager } from './session-manager.js'
 import { recoverStateFromJsonl, extractImageFilePathFromInput } from '../core/session-history.js'
 import type { SessionRecord, SessionMode, ProcessStatus, WorkStatus } from '../core/types.js'
 import type { SessionServerClient } from './session-server-client.js'
@@ -218,12 +219,6 @@ function isBenignSshStderr(stderr: string): boolean {
 export type { SshTarget } from './session-io.js'
 export { shellQuote } from './session-io.js'
 
-/**
- * Build the remote shell command string for SSH execution.
- * @deprecated Use RemoteIO.setupRemote() instead. Kept for backwards compatibility.
- */
-export { buildRemoteCommand } from './session-io.js'
-
 // Exported for testing
 export { outputFileCheckResult }
 
@@ -239,17 +234,20 @@ export class ClaudeCodeSession {
   private _cwd: string | null = null
   private _active = false
   private _exitCode: number | null = null
+  /** Session-lifetime flag: survives across turns, checked by handleProcessDeath and
+   *  server-restart recovery to suppress spurious events from dead/old processes.
+   *  Set true on kill/interrupt/respawn; set false when a new turn begins. */
   private resultEmitted = false
-  /** Guards against PID-death handler emitting a duplicate SESSION_RESULT
-   *  after the JSONL tailer already emitted one for the same turn.
-   *  Set to true after every emit; reset to false when a new turn starts (writeMessage). */
+  /** Per-turn flag: reset on writeMessage()/send(), prevents duplicate JSONL result
+   *  events within a single turn (e.g., tailer emits result, then PID-death handler fires). */
   private _turnResultEmitted = false
   /** Byte offset in the output file where the current turn started (for resume). */
   private _turnStartOffset = 0
-  private io: SessionIO | null = null
   private livenessTimer: ReturnType<typeof setInterval> | null = null
   private _outputFile: string | null = null
   private cliCommand: string
+  /** Direct WebSocket URL for daemon (test-only, bypasses SSH). Set by SessionRunner. */
+  _testDaemonUrl: string | undefined
   /** Host key from config.hosts — null means local execution */
   private _host: string | null = null
 
@@ -262,6 +260,8 @@ export class ClaudeCodeSession {
   private _model: string | undefined
   /** Full model string from system init (e.g. "global.anthropic.claude-opus-4-6-v1[1m]"). */
   private _initModel: string | undefined
+  /** CLI model string passed to --model (e.g. "opus[1m]"). Preserved for resume. */
+  private _cliModel: string | undefined
   /** The session ID we expect after a --resume. If Claude returns a different ID,
    *  we rename the existing record instead of creating a phantom new one. */
   private _expectedSessionId: string | null = null
@@ -283,8 +283,6 @@ export class ClaudeCodeSession {
   private _lastPlanWriteContent: string | null = null
   /** True when we've already auto-replied to AskUserQuestion this turn. Reset on new turn. */
   private _askUserIntercepted = false
-  /** Guards against concurrent handleRemoteTailDeath() calls from the liveness interval. */
-  private _handlingRemoteDeath = false
   /** Timestamp when spawn() was called — used to measure time-to-init for diagnostics. */
   private _spawnTs = 0
   /** Timestamp of the last message delivery (FIFO write or --resume spawn). */
@@ -299,6 +297,8 @@ export class ClaudeCodeSession {
   private _remoteImageCache = new Map<string, string>()
   /** Cache tool_use input file paths for image tools — used to resolve tool_result image content blocks to file paths. */
   private _toolInputFilePaths = new Map<string, string>()
+  /** Session manager for all session I/O (local + remote). Null before first send(). */
+  private _transport: SessionManager | null = null
 
   /** Resolves with the Claude session ID once the system init event arrives. */
   readonly sessionReady: Promise<string>
@@ -345,7 +345,7 @@ export class ClaudeCodeSession {
    * Clears the pipe so the next processNext() falls through to --resume.
    */
   markProcessDead(): void {
-    this.io?.deletePipe()
+    this._transport?.deletePipe()
     this._active = false
     this._processStatus = 'stopped'
   }
@@ -370,9 +370,14 @@ export class ClaudeCodeSession {
     return this._cwd
   }
 
+  /** Session manager for all session I/O. Null before first send(). */
+  get transport(): SessionManager | null {
+    return this._transport
+  }
+
   /** Whether this session has an active write pipe (FIFO). */
   get hasPipe(): boolean {
-    return !!this.io?.hasPipe
+    return this._transport?.hasPipe ?? false
   }
 
   /**
@@ -420,6 +425,7 @@ export class ClaudeCodeSession {
       'sonnet-1m': 'sonnet[1m]',
     }
     const cliModel = MODEL_CLI_MAP[model ?? ''] ?? (model || 'opus[1m]')
+    this._cliModel = cliModel
     args.push('--model', cliModel)
     if (resumeSessionId) {
       args.push('--resume', resumeSessionId)
@@ -456,11 +462,15 @@ export class ClaudeCodeSession {
       try { process.kill(this.pid, 'SIGTERM') } catch { /* already dead */ }
     }
     this.resultEmitted = true  // Suppress spurious events from old process
-    // Stop monitoring (tailer + liveness) BEFORE nulling IO
+    // Stop monitoring (tailer + liveness) BEFORE replacing transport
     this.stopMonitoring()
-    if (this.io) {
-      this.io.deletePipe()
-      this.io = null
+    if (this._transport) {
+      // Detach first to unsubscribe event listeners from the shared DaemonConnection,
+      // preventing duplicate agent_complete / result emissions from the old transport.
+      this._transport.detach()
+      this._transport.deletePipe()
+      if (this.claudeSessionId) unregisterSessionManager(this.claudeSessionId)
+      this._transport = null
     }
 
     this._active = true
@@ -473,115 +483,67 @@ export class ClaudeCodeSession {
     this.fullText = ''
     this._cwd = cwd ?? null
 
-    // Create SessionIO (handles FIFO + JSONL file creation for both local and SSH).
-    // On resume, use the session ID as tmpId so the output file path already matches
-    // the existing JSONL file. This avoids renameForSession() overwriting the file
-    // (which would lose all previous turns' JSONL data).
-    // For forks: use a fresh tmpId — the fork creates a new session with its own file.
     const isResume = !!resumeSessionId && !forkSession
     const tmpId = isResume ? resumeSessionId : crypto.randomBytes(8).toString('hex')
-    this.io = createSessionIO(tmpId, host ?? undefined, sshTarget)
 
-    // Build a clean env for child processes:
-    // - Remove CLAUDECODE to prevent "nested session" detection by Claude Code CLI.
-    //   CLAUDECODE is set by the Claude Code CLI itself when it spawns child processes
-    //   (hooks, MCP servers, etc.) to signal they're running inside a Claude session.
-    // - Add CLAUDE_CODE_DISABLE_BACKGROUND_TASKS for local spawns
-    const { CLAUDECODE: _drop, ...cleanEnv } = process.env
+    this._spawnTs = Date.now()
+    const transport = createSessionManager(tmpId, host ?? undefined, sshTarget, undefined, this.cliCommand, this._testDaemonUrl)
+    this._transport = transport
 
-    let proc: ReturnType<typeof spawn>
+    // Start asynchronously — transport.start() handles FIFO, spawn, and tailing
+    transport.start({
+      args,
+      cwd: cwd ?? process.cwd(),
+      message,
+      resume: isResume,
+      fork: forkSession,
+      onOutput: (event) => this.handleStreamLine(event.line),
+      onExit: (code) => {
+        this._exitCode = code
+        if (code !== 0) {
+          log.session.warn('session process exited with non-zero code', {
+            taskId: this.taskId, exitCode: code, host, isRemote: !!sshTarget,
+          })
+        }
+      },
+    }).then((result) => {
+      this.pid = result.pid
+      this._outputFile = result.outputFile
+      this._turnStartOffset = result.fileSize
 
-    // Capture file size BEFORE spawning — on resume, the tailer starts from here
-    // to avoid replaying old turns' events that are already in the session history.
-    const tailFromOffset = isResume ? this.io.fileSize : 0
-    this._turnStartOffset = tailFromOffset
+      // Register in the global session manager registry (for liveness checks, health monitor)
+      if (this.claudeSessionId) {
+        registerSessionManager(this.claudeSessionId, transport)
+      }
 
-    if (sshTarget) {
-      // ── Remote SSH spawn via RemoteIO ──
-      this._spawnTs = Date.now()
-      const remoteIO = this.io as RemoteIO
-      const { sshArgs, localOutputFd, localStderrFd } = remoteIO.setupRemote(args, cwd, message, isResume)
-      const setupElapsed = Date.now() - this._spawnTs
-
-      proc = spawn('ssh', sshArgs, {
-        detached: true,
-        stdio: ['pipe', localOutputFd, localStderrFd],
-        env: cleanEnv,
-      })
-
-      // SSH: close stdin immediately — message is delivered via remote FIFO
-      proc.stdin?.end()
-
-      // Close fds in parent — child process inherited copies
-      fs.closeSync(localOutputFd)
-      fs.closeSync(localStderrFd)
-
-      log.session.info('session spawned via SSH (detached)', {
+      log.session.info('session spawned via transport', {
         taskId: this.taskId,
         project: this.project,
         host,
-        pid: proc.pid,
-        outputFile: this.io.outputFile,
-        resume: !!resumeSessionId,
+        pid: result.pid,
+        outputFile: result.outputFile,
+        resume: isResume,
         fork: !!forkSession,
-        setupMs: setupElapsed,
+        isRemote: !!sshTarget,
         spawnMs: Date.now() - this._spawnTs,
       })
-    } else {
-      // ── Local spawn via LocalIO ──
-      const localIO = this.io as LocalIO
-      const { pipeFd, outputFd, stderrFd } = localIO.createFiles(isResume)
 
-      proc = spawn(this.cliCommand, args, {
-        detached: true,
-        stdio: [pipeFd, outputFd, stderrFd],
-        cwd: cwd ?? (() => { log.session.warn('spawn fallback: cwd not resolved — using process.cwd()', { taskId: this.taskId }); return process.cwd() })(),
-        env: { ...cleanEnv, CLAUDE_CODE_DISABLE_BACKGROUND_TASKS: '1' },
+      // Persist outputFile + PID for resume recovery
+      if (isResume && resumeSessionId) {
+        import('../core/session-tracker.js').then(({ updateSessionRecord }) =>
+          updateSessionRecord(resumeSessionId, {
+            outputFile: this._outputFile ?? undefined,
+            pid: this.pid ?? undefined,
+            process_status: 'running',
+            work_status: 'in_progress',
+          }).catch(() => {}),
+        ).catch(() => {})
+      }
+    }).catch((err) => {
+      log.session.error('transport start failed', {
+        taskId: this.taskId, host, isRemote: !!sshTarget,
+        error: err instanceof Error ? err.message : String(err),
       })
-
-      // Write initial message via the FIFO before closing parent's fd
-      localIO.writeInitialMessage(pipeFd, message)
-
-      // Close fds in parent — child process inherited copies
-      fs.closeSync(outputFd)
-      fs.closeSync(stderrFd)
-
-      log.session.info('session spawned (detached, FIFO stdin)', {
-        taskId: this.taskId,
-        project: this.project,
-        pid: proc.pid,
-        outputFile: this.io.outputFile,
-        hasPipe: this.io.hasPipe,
-        resume: !!resumeSessionId,
-        fork: !!forkSession,
-      })
-    }
-
-    this._outputFile = this.io.outputFile
-
-    // Store PID, unref so the server can exit without waiting
-    this.pid = proc.pid ?? null
-    proc.unref()
-
-    // On resume: immediately persist outputFile + PID + status so the record is correct
-    // even if the session dies before the init event arrives (e.g. resume failure).
-    // work_status must also be reset — otherwise sessions resumed from terminal states
-    // (completed/error) keep the old work_status, and enrichWithLiveStatus() forces
-    // process_status='stopped' without checking PID.
-    if (isResume && resumeSessionId) {
-      import('../core/session-tracker.js').then(({ updateSessionRecord }) =>
-        updateSessionRecord(resumeSessionId, {
-          outputFile: this._outputFile ?? undefined,
-          pid: this.pid ?? undefined,
-          process_status: 'running',
-          work_status: 'in_progress',
-        }).catch(() => {}),
-      ).catch(() => {})
-    }
-
-    // Handle spawn errors (e.g., binary not found)
-    proc.on('error', (err) => {
-      log.session.error('session spawn error', { taskId: this.taskId, error: err.message })
       this._rejectSessionReady(err)
       if (!this.resultEmitted) {
         this.resultEmitted = true
@@ -593,35 +555,14 @@ export class ClaudeCodeSession {
         bus.emit(EventNames.SESSION_ERROR, {
           sessionId: this.claudeSessionId,
           taskId: this.taskId,
-          error: err.message,
+          error: err instanceof Error ? err.message : String(err),
         }, ['main-ai', 'session-runner'], { source: 'session-runner' })
       }
     })
 
-    // Capture exit code for diagnostic error messages
-    proc.on('exit', (code, signal) => {
-      this._exitCode = code
-      if (code !== 0 && code !== null) {
-        log.session.warn('session process exited with non-zero code', {
-          taskId: this.taskId, pid: proc.pid, exitCode: code, signal,
-          isRemote: !!sshTarget,
-        })
-      }
-    })
-
-    // Emit status change
+    this._outputFile = transport.outputFile
     this.emitStatusChanged('in_progress')
-
-    // Start tailing the output file via SessionIO.
-    // On resume, start from the offset captured before spawn — this skips replaying
-    // old turns' events that are already in the persisted session history.
-    this.io.startTail((line) => this.handleStreamLine(line), tailFromOffset)
-
-    // Start liveness monitoring
     this.startLivenessMonitor()
-
-    // Start stall diagnostic timer — if no JSONL event arrives within 30s of spawn,
-    // log comprehensive state for debugging "Running but no response" issues.
     this.startStallDiagTimer('resume-spawn')
   }
 
@@ -632,8 +573,10 @@ export class ClaudeCodeSession {
   static async attachToExisting(
     record: SessionRecord,
     cliCommand?: string,
+    testDaemonUrl?: string,
   ): Promise<ClaudeCodeSession> {
     const session = new ClaudeCodeSession(record.taskId, record.project, cliCommand)
+    session._testDaemonUrl = testDaemonUrl
     session.claudeSessionId = record.claudeSessionId
     session.pid = record.pid ?? null
     session._outputFile = record.outputFile ?? null
@@ -653,6 +596,9 @@ export class ClaudeCodeSession {
       session._initModel = record.model
       const shortModel = record.model.replace(/^.*\./, '').replace(/[-_]v\d+.*$/, '') || record.model
       session._model = shortModel
+    }
+    if (record.cliModel) {
+      session._cliModel = record.cliModel
     }
 
     // ── resultEmitted recovery after server restart ──
@@ -685,18 +631,56 @@ export class ClaudeCodeSession {
     const terminalStatuses: WorkStatus[] = ['agent_complete', 'await_human_action', 'completed', 'error']
     session.resultEmitted = terminalStatuses.includes(record.work_status as WorkStatus)
 
-    // Create SessionIO and try to recover the FIFO pipe (survives server restart).
-    // At attach time we don't have sshTarget resolved, so we always create LocalIO
-    // for tailing the local JSONL output file (works for both local and remote sessions —
-    // remote sessions also have a local output file from SSH stdout).
-    // Pipe recovery only succeeds for local sessions (remote FIFOs live on the remote host).
+    // Create the appropriate session manager for attach:
+    //   - Local sessions → LocalSessionManager (FIFO recovery + file tailing)
+    //   - Remote sessions → RemoteSessionManager (WebSocket to remote daemon)
     //
-    // CRITICAL: Pass record.outputFile so LocalIO uses the correct path from when the
-    // session was created. Without this, SESSION_STREAMS_DIR (a module-level constant)
-    // may point to a different directory after server restart (e.g. if WALNUT_HOME changed).
+    // CRITICAL: Pass record.outputFile so LocalSessionManager uses the correct path from
+    // when the session was created. Without this, SESSION_STREAMS_DIR may point to a
+    // different directory after server restart (e.g. if WALNUT_HOME changed).
     if (record.claudeSessionId) {
-      session.io = createSessionIO(record.claudeSessionId, undefined, undefined, record.outputFile)
-      session.io.recoverPipe(record.claudeSessionId)
+      let sshTarget: SshTarget | undefined
+      if (record.host) {
+        try {
+          const { getConfig } = await import('../core/config-manager.js')
+          const config = await getConfig()
+          const hostDef = config.hosts?.[record.host]
+          if (hostDef) {
+            const hostname = hostDef.hostname ?? (hostDef as Record<string, unknown>).ssh as string | undefined
+            if (hostname) {
+              sshTarget = {
+                hostname,
+                user: hostDef.user,
+                port: hostDef.port,
+                shell_setup: hostDef.shell_setup,
+              }
+            }
+          }
+        } catch {
+          log.session.warn('failed to resolve host config for attach', {
+            sessionId: record.claudeSessionId,
+            host: record.host,
+          })
+        }
+      }
+
+      const transport = createSessionManager(
+        record.claudeSessionId,
+        record.host ?? undefined,
+        sshTarget,
+        record.outputFile ?? undefined,
+        cliCommand,
+        testDaemonUrl,
+      )
+      session._transport = transport
+
+      // Register in the global session manager registry
+      registerSessionManager(record.claudeSessionId, transport)
+
+      // Set PID on the transport before attach (LocalSessionManager needs it for liveness checks)
+      if (record.pid && 'setPid' in transport) {
+        (transport as { setPid(pid: number): void }).setPid(record.pid)
+      }
     }
 
     // Recover state from CloudCode canonical JSONL (source of truth).
@@ -745,15 +729,29 @@ export class ClaudeCodeSession {
       sessionId: record.claudeSessionId,
       pid: record.pid,
       outputFile: record.outputFile,
-      hasFifo: session.io?.hasPipe ?? false,
+      hasFifo: session._transport?.hasPipe ?? false,
     })
 
-    if (record.outputFile) {
-      // Start tailing from the current end of file — only pick up NEW data.
-      // State has already been recovered from CloudCode JSONL (above), so there's
-      // no need to replay the entire Walnut stream capture from byte 0.
-      const offset = session.io?.fileSize ?? 0
-      session.io?.startTail((line) => session.handleStreamLine(line), offset)
+    // Attach the transport: recovers FIFO (local) or reconnects WebSocket (daemon),
+    // then starts tailing from the current end of file — only pick up NEW data.
+    // State has already been recovered from CloudCode JSONL (above), so there's
+    // no need to replay the entire Walnut stream capture from byte 0.
+    if (session._transport && record.claudeSessionId) {
+      try {
+        await session._transport.attach({
+          sessionId: record.claudeSessionId,
+          fromOffset: session._transport.fileSize,
+          onOutput: (event) => session.handleStreamLine(event.line),
+          onExit: (code) => {
+            session._exitCode = code
+          },
+        })
+      } catch (err) {
+        log.session.warn('transport attach failed, session may not stream', {
+          sessionId: record.claudeSessionId,
+          error: err instanceof Error ? err.message : String(err),
+        })
+      }
     }
 
     session.startLivenessMonitor()
@@ -766,9 +764,9 @@ export class ClaudeCodeSession {
    * Stops tailing and liveness monitoring. The process continues running.
    */
   detach(): void {
-    log.session.info('session detached', { taskId: this.taskId, pid: this.pid, hasPipe: this.io?.hasPipe })
+    log.session.info('session detached', { taskId: this.taskId, pid: this.pid, hasPipe: this._transport?.hasPipe })
     this.stopMonitoring()
-    // Keep IO — named FIFO persists on disk and can be reopened after restart
+    this._transport?.detach()
     this._active = false
   }
 
@@ -780,22 +778,7 @@ export class ClaudeCodeSession {
     log.session.info('session killed', { taskId: this.taskId, pid: this.pid })
     this.resultEmitted = true
     this.stopMonitoring()
-    this.io?.deletePipe()
-
-    if (this.pid !== null) {
-      try {
-        process.kill(this.pid, 'SIGTERM')
-      } catch {
-        // Process already dead
-      }
-    }
-
-    // Also kill remote processes (fire-and-forget) — local SIGTERM only kills
-    // the SSH tunnel; remote claude/tail/sleep survive without this.
-    if (this.io instanceof RemoteIO) {
-      this.io.killRemote()
-    }
-
+    this._transport?.kill()
     this._active = false
   }
 
@@ -808,8 +791,8 @@ export class ClaudeCodeSession {
    * and any server instance can open it for writing.
    */
   writeMessage(message: string): boolean {
-    if (!this.io) return false
-    const ok = this.io.write(message)
+    if (!this._transport) return false
+    const ok = this._transport.writeMessage(message)
     if (!ok) return false
     const prevWorkStatus = this._workStatus
     this._workStatus = 'in_progress'
@@ -817,7 +800,7 @@ export class ClaudeCodeSession {
     this._activity = undefined
     this.resultEmitted = false
     this._turnResultEmitted = false  // New turn starting — allow result emission
-    this._turnStartOffset = this.io.fileSize  // Track where this turn's data begins
+    this._turnStartOffset = this._transport?.fileSize ?? 0  // Track where this turn's data begins
     this._askUserIntercepted = false
     this._toolInputFilePaths.clear()  // Fresh turn — clear stale cached tool input paths
     this.emitStatusChanged('in_progress', prevWorkStatus)
@@ -849,6 +832,11 @@ export class ClaudeCodeSession {
    * The walnutMessageId enables deterministic dedup against optimistic copies.
    */
   writeSyntheticUserEvent(message: string, walnutMessageId: string): void {
+    if (this._transport) {
+      this._transport.writeSyntheticUserEvent(message, walnutMessageId)
+      return
+    }
+    // Fallback for pre-transport sessions (e.g. during init before send())
     const outputFile = this._outputFile
     if (!outputFile) return
     const event = JSON.stringify({
@@ -886,42 +874,10 @@ export class ClaudeCodeSession {
    * creates a new session with a different ID, and activeProcessing gets permanently stuck.
    */
   async gracefulStop(): Promise<void> {
-    if (this.pid === null) return
-    const pid = this.pid
-    const processName = this.io?.processName ?? 'claude'
-    if (!isProcessAlive(pid, processName)) return
-
-    log.session.info('gracefulStop: sending SIGINT to save session state', { taskId: this.taskId, pid })
-
-    // For remote sessions, also SIGINT the remote claude process directly.
-    // The local SIGINT only kills the SSH tunnel — without this, remote
-    // claude/tail/sleep survive and become orphans.
-    if (this.io instanceof RemoteIO) {
-      this.io.gracefulStopRemote()
-    }
-
-    // Phase 1: SIGINT — Claude Code saves session state on Ctrl+C
-    try { process.kill(pid, 'SIGINT') } catch { return }
-
-    // Wait up to 5s for exit
-    const deadline1 = Date.now() + 5_000
-    while (Date.now() < deadline1 && isProcessAlive(pid, processName)) {
-      await new Promise(r => setTimeout(r, 200))
-    }
-
-    // Phase 2: SIGTERM fallback
-    if (isProcessAlive(pid, processName)) {
-      log.session.warn('gracefulStop: SIGINT timeout, sending SIGTERM', { taskId: this.taskId, pid })
-      try { process.kill(pid, 'SIGTERM') } catch { return }
-      const deadline2 = Date.now() + 2_000
-      while (Date.now() < deadline2 && isProcessAlive(pid, processName)) {
-        await new Promise(r => setTimeout(r, 200))
-      }
-    }
-
-    // Extra delay for filesystem flush
-    await new Promise(r => setTimeout(r, 300))
-    log.session.info('gracefulStop: complete', { taskId: this.taskId, pid, alive: isProcessAlive(pid, processName) })
+    if (!this._transport) return
+    log.session.info('gracefulStop: using transport', { taskId: this.taskId })
+    await this._transport.stop()
+    log.session.info('gracefulStop: complete', { taskId: this.taskId })
   }
 
   /**
@@ -939,46 +895,11 @@ export class ClaudeCodeSession {
    */
   async interrupt(): Promise<void> {
     log.session.info('session interrupted', { taskId: this.taskId, pid: this.pid })
-
-    // Delete FIFO first to prevent further input
-    this.io?.deletePipe()
     this.resultEmitted = true
     this.stopMonitoring()
-
-    if (this.pid !== null) {
-      const pid = this.pid
-      const processName = this.io?.processName ?? 'claude'
-
-      // For remote sessions, also SIGINT the remote claude process directly.
-      if (this.io instanceof RemoteIO) {
-        this.io.gracefulStopRemote()
-      }
-
-      // Phase 1: SIGINT — Claude Code saves session state on Ctrl+C
-      try { process.kill(pid, 'SIGINT') } catch { /* already dead */ }
-
-      // Wait for process to exit (poll every 200ms, up to 5s)
-      const deadline1 = Date.now() + 5_000
-      while (Date.now() < deadline1 && isProcessAlive(pid, processName)) {
-        await new Promise(r => setTimeout(r, 200))
-      }
-
-      // Phase 2: SIGTERM if SIGINT wasn't enough
-      if (isProcessAlive(pid, processName)) {
-        log.session.warn('session did not exit after SIGINT, sending SIGTERM', { taskId: this.taskId, pid })
-        try { process.kill(pid, 'SIGTERM') } catch { /* already dead */ }
-
-        const deadline2 = Date.now() + 3_000
-        while (Date.now() < deadline2 && isProcessAlive(pid, processName)) {
-          await new Promise(r => setTimeout(r, 200))
-        }
-      }
-
-      // Extra delay for filesystem flush (session JSONL write)
-      await new Promise(r => setTimeout(r, 500))
-      log.session.info('session interrupt complete', { taskId: this.taskId, pid, alive: isProcessAlive(pid) })
+    if (this._transport) {
+      await this._transport.interrupt()
     }
-
     this._active = false
     this._processStatus = 'stopped'
     this._workStatus = 'agent_complete'
@@ -988,132 +909,40 @@ export class ClaudeCodeSession {
   // ── Private ──
 
   private startLivenessMonitor(): void {
-    this.livenessTimer = setInterval(() => {
+    // Skip liveness polling for remote daemon sessions — the daemon already monitors
+    // process liveness on the remote host and reports exit events via WebSocket.
+    // Polling isAlive() over SSH is redundant and fragile: a momentary tunnel glitch
+    // or rename race causes false negatives → premature handleProcessDeath().
+    if (this._transport?.isRemote) return
+
+    this.livenessTimer = setInterval(async () => {
       if (this.pid === null || this.resultEmitted) {
         this.stopLivenessMonitor()
         return
       }
 
-      const processName = this.io?.processName ?? 'claude'
-      if (!isProcessAlive(this.pid, processName)) {
-        // ── Remote sessions: SSH tail died ≠ session died ──
-        // The SSH process is only a viewer (tail -f). The remote session runs
-        // independently via open-walnut-remote.sh. Try to reconnect instead of
-        // declaring the session dead.
-        if (this._host && this.io instanceof RemoteIO) {
-          this.handleRemoteTailDeath()
-          return
-        }
+      if (!this._transport) return
 
-        // ── Local sessions: process died — original logic ──
-        log.session.info('session process exited (PID check)', {
+      if (!await this._transport.isAlive()) {
+        log.session.info('session process exited (transport check)', {
           sessionId: this.claudeSessionId,
           taskId: this.taskId,
           pid: this.pid,
+          isRemote: this._transport.isRemote,
         })
-
         this.handleProcessDeath()
       }
     }, LIVENESS_INTERVAL_MS)
   }
 
   /**
-   * Handle the death of the SSH tail -f process for a remote session.
-   *
-   * Architecture: The SSH process is only a viewer (tail -f {jsonl}).
-   * The actual claude process runs independently on the remote machine.
-   * When SSH dies (network hiccup, ServerAlive timeout, etc.):
-   *   1. Check if the remote claude process is still alive (via PGID file)
-   *   2. If alive → reconnect tail → keep monitoring
-   *   3. If dead → fall through to normal process death handling
-   */
-  private handleRemoteTailDeath(): void {
-    // Guard: prevent concurrent invocations from the setInterval.
-    // The async checkRemoteAlive() can take up to 10s (SSH timeout),
-    // during which the interval fires again seeing the same dead PID.
-    if (this._handlingRemoteDeath) return
-    this._handlingRemoteDeath = true
-
-    const remoteIO = this.io as RemoteIO
-    const oldPid = this.pid
-
-    log.session.info('remote SSH tail died — checking remote session health', {
-      sessionId: this.claudeSessionId,
-      taskId: this.taskId,
-      pid: oldPid,
-      host: this._host,
-    })
-
-    // Async check: is the remote process still alive?
-    remoteIO.checkRemoteAlive().then((status) => {
-      if (status === 'running') {
-        // Remote session is still alive — reconnect the tail viewer
-        log.session.info('remote session still alive — reconnecting tail', {
-          sessionId: this.claudeSessionId,
-          taskId: this.taskId,
-          host: this._host,
-          remoteStatus: status,
-        })
-
-        // Get current local file offset so we don't re-read old data
-        const offset = remoteIO.fileSize
-        const newProc = remoteIO.reconnectTail(offset)
-
-        if (newProc && newProc.pid) {
-          // Update monitored PID to the new SSH tail process
-          this.pid = newProc.pid
-          log.session.info('remote tail reconnected successfully', {
-            sessionId: this.claudeSessionId,
-            taskId: this.taskId,
-            oldPid,
-            newPid: this.pid,
-            host: this._host,
-          })
-          // Continue monitoring — don't stop the liveness timer
-          this._handlingRemoteDeath = false
-          return
-        } else {
-          log.session.warn('remote tail reconnect failed — treating as dead', {
-            sessionId: this.claudeSessionId,
-            taskId: this.taskId,
-            host: this._host,
-          })
-        }
-      } else {
-        log.session.info('remote session is dead — handling process death', {
-          sessionId: this.claudeSessionId,
-          taskId: this.taskId,
-          host: this._host,
-          remoteStatus: status,
-        })
-      }
-
-      // Remote process is dead or reconnect failed — fall through to death handling
-      this._handlingRemoteDeath = false
-      this.handleProcessDeath()
-    }).catch((err) => {
-      log.session.warn('remote health check failed — treating as dead', {
-        sessionId: this.claudeSessionId,
-        taskId: this.taskId,
-        host: this._host,
-        error: err instanceof Error ? err.message : String(err),
-      })
-      this._handlingRemoteDeath = false
-      this.handleProcessDeath()
-    })
-  }
-
-  /**
-   * Handle process death (local process exit or confirmed remote process death).
-   * Extracted from the original liveness monitor for reuse by handleRemoteTailDeath().
+   * Handle process death detected by liveness monitor.
    */
   private handleProcessDeath(): void {
-    // Process is dead — clean up named FIFO
-    this.io?.deletePipe()
-
-    // Process is dead — flush any remaining data from the file
-    this.io?.flushTail()
-    this.io?.stopTail()
+    // Process is dead — clean up via transport
+    this._transport?.deletePipe()
+    this._transport?.flushTail()
+    this._transport?.stopTail()
 
     this._active = false
     this._processStatus = 'stopped'
@@ -1151,6 +980,7 @@ export class ClaudeCodeSession {
         : { hasResult: false, errorMessage: undefined }
 
       this.resultEmitted = true
+      this._turnResultEmitted = true
 
       if (hasResultInFile) {
         this._workStatus = 'agent_complete'
@@ -1242,7 +1072,7 @@ export class ClaudeCodeSession {
 
   private stopMonitoring(): void {
     this.stopLivenessMonitor()
-    this.io?.stopTail()
+    this._transport?.stopTail()
     this.clearStallDiagTimer()
   }
 
@@ -1260,17 +1090,19 @@ export class ClaudeCodeSession {
   private startStallDiagTimer(trigger: 'fifo-write' | 'resume-spawn'): void {
     this.clearStallDiagTimer()
     this._lastMessageDeliveryTs = Date.now()
-    this._fileSizeAtDelivery = this.io?.fileSize ?? 0
+    this._fileSizeAtDelivery = this._transport?.fileSize ?? 0
 
-    this._stallDiagTimer = setTimeout(() => {
+    this._stallDiagTimer = setTimeout(async () => {
       this._stallDiagTimer = null
       const now = Date.now()
-      const currentFileSize = this.io?.fileSize ?? 0
+      const currentFileSize = this._transport?.fileSize ?? 0
       const fileSizeGrew = currentFileSize > this._fileSizeAtDelivery
-      const pidAlive = this.pid !== null && isProcessAlive(this.pid, this.io?.processName ?? 'claude')
+      const pidAlive = this._transport
+        ? await this._transport.isAlive()
+        : (this.pid !== null && await isProcessAliveAsync(this.pid, 'claude'))
       const msSinceDelivery = now - this._lastMessageDeliveryTs
       const msSinceLastEvent = this._lastJsonlEventTs ? now - this._lastJsonlEventTs : -1
-      const hasTailer = !!this.io && !!(this.io as unknown as Record<string, unknown>)._onLine
+      const hasTailer = !!this._transport
 
       log.session.warn('STALL DIAGNOSTIC: no JSONL event 30s after message delivery', {
         trigger,
@@ -1281,7 +1113,7 @@ export class ClaudeCodeSession {
         host: this._host,
         processStatus: this._processStatus,
         workStatus: this._workStatus,
-        hasPipe: this.io?.hasPipe ?? false,
+        hasPipe: this._transport?.hasPipe ?? false,
         hasTailer,
         fileSizeAtDelivery: this._fileSizeAtDelivery,
         currentFileSize,
@@ -1289,6 +1121,7 @@ export class ClaudeCodeSession {
         msSinceDelivery,
         msSinceLastEvent,
         outputFile: this._outputFile,
+        usingTransport: !!this._transport,
       })
     }, 30_000)
   }
@@ -1303,13 +1136,12 @@ export class ClaudeCodeSession {
 
   /**
    * Rewrite remote image paths in text to local paths for remote sessions.
-   * No-op for local sessions or when io is not RemoteIO.
+   * No-op for local sessions. Uses transport.processInbound() for remote.
    */
   private rewriteRemoteImages(text: string): string {
-    if (!this._host || !this.io || !(this.io instanceof RemoteIO)) return text
-    const sshTarget = (this.io as RemoteIO).target
+    if (!this._transport?.isRemote) return text
     const sessionId = this.claudeSessionId ?? 'unknown'
-    return rewriteRemoteImagePaths(text, sshTarget, sessionId, this._remoteImageCache, this._cwd ?? undefined)
+    return this._transport.processInbound(text, sessionId, this._cwd ?? undefined)
   }
 
   /**
@@ -1353,6 +1185,7 @@ export class ClaudeCodeSession {
         if (sys.session_id && (sys.subtype === 'init' || !this.claudeSessionId)) {
           const newId = sys.session_id as string
           const expectedId = this._expectedSessionId
+          const oldSessionId = this.claudeSessionId
           this.claudeSessionId = newId
           this._expectedSessionId = null
           const initElapsedMs = this._spawnTs ? Date.now() - this._spawnTs : undefined
@@ -1364,10 +1197,15 @@ export class ClaudeCodeSession {
             host: this._host,
           })
 
-          // Rename output file + FIFO to use the real session ID via SessionIO
-          if (this.io) {
-            this.io.renameForSession(newId)
-            this._outputFile = this.io.outputFile
+          // Rename output file + FIFO to use the real session ID
+          if (this._transport) {
+            // Update registry: unregister old tmpId → register with real session ID
+            if (oldSessionId && oldSessionId !== newId) {
+              unregisterSessionManager(oldSessionId)
+            }
+            this._transport.renameForSession(newId)
+            this._outputFile = this._transport.outputFile
+            registerSessionManager(newId, this._transport)
           }
 
           // Capture model from init event — sanitize ANSI codes and validate.
@@ -1608,12 +1446,12 @@ export class ClaudeCodeSession {
             // In -p (non-interactive) mode, AskUserQuestion never reaches the user.
             // Claude often calls it repeatedly (7+ times), wasting tokens.
             // Auto-inject a corrective message once per turn so Claude stops trying.
-            if (block.name === 'AskUserQuestion' && !this._askUserIntercepted && this.io?.hasPipe) {
+            if (block.name === 'AskUserQuestion' && !this._askUserIntercepted && this._transport?.hasPipe) {
               this._askUserIntercepted = true
               const correction = 'You are running in non-interactive (-p) mode. '
                 + 'The user cannot see AskUserQuestion — it will always fail here. '
                 + 'Instead, print your questions or assumptions directly in your text output, and wait for user response.'
-              const injected = this.io.write(correction)
+              const injected = this._transport?.writeMessage(correction) ?? false
               log.session.info('auto-intercepted AskUserQuestion in -p mode', {
                 sessionId: this.claudeSessionId,
                 taskId: this.taskId,
@@ -1738,6 +1576,16 @@ export class ClaudeCodeSession {
       }
 
       case 'result': {
+        // Guard against duplicate result events. Daemon resume can replay old JSONL lines
+        // (e.g., if the daemon re-reads from file start), and without this check the old
+        // result would emit a second SESSION_RESULT, causing duplicate responses in the UI.
+        if (this._turnResultEmitted) {
+          log.session.debug('ignoring duplicate result event (already emitted for this turn)', {
+            sessionId: this.claudeSessionId, taskId: this.taskId,
+          })
+          break
+        }
+
         const result = event as StreamResultEvent
 
         // On error, keep the original session ID so events reach the frontend
@@ -1766,7 +1614,7 @@ export class ClaudeCodeSession {
           taskId: this.taskId,
           cost: result.total_cost_usd,
           isError: result.is_error,
-          hasFifo: this.io?.hasPipe ?? false,
+          hasFifo: this._transport?.hasPipe ?? false,
           ...(resultErrors?.length ? { errors: resultErrors } : {}),
         })
 
@@ -1776,14 +1624,43 @@ export class ClaudeCodeSession {
           })
         }
 
-        const processStillAlive = this.pid !== null && isProcessAlive(this.pid, this.io?.processName ?? 'claude')
-        if (this.io?.hasPipe && processStillAlive) {
+        // Quick non-blocking PID check (no subprocess, no execSync).
+        // process.kill(pid, 0) only checks existence — sufficient for the FIFO
+        // idle-vs-stopped decision. Full binary name validation is done lazily
+        // by the health monitor.
+        let processStillAlive = false
+        if (this.pid !== null) {
+          try { process.kill(this.pid, 0); processStillAlive = true } catch { /* dead */ }
+        }
+        if (this._transport?.hasPipe && processStillAlive) {
           // stream-json FIFO mode: process is still alive between turns
           // Keep process running, ready for next writeMessage()
           this._workStatus = result.is_error ? 'error' : 'agent_complete'
           this._processStatus = 'idle'  // Turn done, process alive, waiting for next writeMessage()
           this._activity = undefined
           this.resultEmitted = false  // Ready for next turn
+        } else if (this._transport?.isRemote && !result.is_error) {
+          // Remote daemon session: the --resume process exited, but the daemon connection
+          // is still alive and can spawn a new process for the next message. Show 'idle'
+          // instead of 'stopped' because the session is still usable — the user can send
+          // follow-up messages. process.kill(pid, 0) above fails for remote PIDs since
+          // they don't exist on the local machine, but the daemon handles process lifecycle.
+          // Remote daemon: process exited but daemon still connected → show 'idle' not 'stopped'.
+          // _active = false so processNext uses --resume (not writeMessage to dead FIFO).
+          // RemoteSessionManager.writeMessage also checks _hasPipe (cleared on exit) as a second guard.
+          this.resultEmitted = true
+          this._active = false
+          this._processStatus = 'idle'
+          this._workStatus = 'agent_complete'
+          this._activity = undefined
+          // Clear PID — the remote --resume process exited. Prevents stale local PID checks.
+          this.pid = null
+          if (this.claudeSessionId) {
+            const sid = this.claudeSessionId
+            import('../core/session-tracker.js').then(({ updateSessionRecord }) =>
+              updateSessionRecord(sid, { pid: undefined }),
+            ).catch(() => {})
+          }
         } else {
           // Process is exiting (SSH, interrupted, or natural exit)
           this.resultEmitted = true
@@ -1861,6 +1738,7 @@ export class ClaudeCodeSession {
       host: this._host ?? undefined,
       fromPlanSessionId: this.fromPlanSessionId,
       forkedFromSessionId: this.forkedFromSessionId,
+      cliModel: this._cliModel,
     })
   }
 }
@@ -1890,6 +1768,17 @@ export class SessionRunner {
    */
   setCliCommand(cmd: string): void {
     this.cliCommand = cmd
+  }
+
+  /** Direct WebSocket URL for daemon transport (test-only, bypasses SSH). */
+  private _testDaemonUrl: string | undefined
+
+  /**
+   * Set a direct WebSocket URL for RemoteSessionManager, bypassing SSH.
+   * Used by E2E tests with MockDaemon.
+   */
+  setTestDaemonUrl(url: string | undefined): void {
+    this._testDaemonUrl = url
   }
 
   /**
@@ -1953,7 +1842,7 @@ export class SessionRunner {
       if (reconnectable?.length) {
         for (const record of reconnectable) {
           try {
-            const session = await ClaudeCodeSession.attachToExisting(record, this.cliCommand)
+            const session = await ClaudeCodeSession.attachToExisting(record, this.cliCommand, this._testDaemonUrl)
             const mapKey = record.taskId || `reconnected-${record.claudeSessionId}`
             this.sessions.set(mapKey, session)
             log.session.info('reconnected to surviving session', {
@@ -2139,6 +2028,10 @@ export class SessionRunner {
       this.sdkClient.destroy()
       this.sdkClient = null
     }
+    // Disconnect all daemon connections (SSH tunnels) on server shutdown
+    import('./daemon-connection.js').then(({ disconnectAllDaemons }) => {
+      disconnectAllDaemons()
+    }).catch(() => {})
     bus.unsubscribe('session-runner')
   }
 
@@ -2209,7 +2102,7 @@ export class SessionRunner {
         if (!shouldBeDeadByStatus && !shouldBeDeadByWork) continue
 
         const processName = s.host ? 'ssh' : 'claude'
-        if (!isProcessAlive(s.pid, processName)) continue
+        if (!await isProcessAliveAsync(s.pid, processName)) continue
 
         // Process is alive but session is done — kill it
         log.session.warn('killing orphaned session process', {
@@ -2390,6 +2283,7 @@ export class SessionRunner {
       }
     }
     const session = new ClaudeCodeSession(taskId, project ?? '', this.cliCommand)
+    session._testDaemonUrl = this._testDaemonUrl
     if (data.fromPlanSessionId) session.fromPlanSessionId = data.fromPlanSessionId
     if (data.forkedFromSessionId) session.forkedFromSessionId = data.forkedFromSessionId
     this.sessions.set(mapKey, session)
@@ -2473,30 +2367,17 @@ export class SessionRunner {
       if (!hostname) {
         throw new Error(`Host "${data.host}" is missing 'hostname' field in config.yaml`)
       }
-      sshTarget = { hostname, user: hostDef.user, port: hostDef.port, shell_setup: hostDef.shell_setup }
-    }
-
-    // Transfer local images to remote host before spawning session
-    if (sshTarget) {
-      const imageTransferStart = Date.now()
-      const remoteImagesDir = `/tmp/open-walnut-images/${crypto.randomBytes(8).toString('hex')}`
-      try {
-        message = await transferImagesForRemoteSession(message, sshTarget, remoteImagesDir)
-        if (appendSystemPrompt) {
-          appendSystemPrompt = await transferImagesForRemoteSession(appendSystemPrompt, sshTarget, remoteImagesDir)
-        }
-        const imageTransferMs = Date.now() - imageTransferStart
-        if (imageTransferMs > 1000) {
-          log.session.info('remote image transfer completed', { host: data.host, imageTransferMs })
-        }
-      } catch (err) {
-        log.session.warn('image transfer to remote failed — proceeding without images', {
-          host: data.host,
-          error: err instanceof Error ? err.message : String(err),
-          imageTransferMs: Date.now() - imageTransferStart,
-        })
+      sshTarget = {
+        hostname,
+        user: hostDef.user,
+        port: hostDef.port,
+        shell_setup: hostDef.shell_setup,
       }
     }
+
+    // Transfer local images to remote host before spawning session.
+    // Image transfer for remote sessions is handled by RemoteSessionManager.prepareOutbound()
+    // inside transport.start(). No need to pre-transfer via SCP.
 
     const sessionTitle = session.pendingTitle ?? message.slice(0, 120)
     // For forks: pass source session ID as resumeSessionId with forkSession=true.
@@ -2828,6 +2709,15 @@ export class SessionRunner {
             activity: 'Processing follow-up...',
             errorMessage: undefined,  // Clear stale error on resume
           })
+          // Emit status change so frontend clears the error banner immediately
+          bus.emit(EventNames.SESSION_STATUS_CHANGED, {
+            sessionId,
+            taskId: record.taskId,
+            process_status: record.process_status,
+            work_status: 'in_progress',
+            activity: 'Processing follow-up...',
+            previousWorkStatus: record.work_status,
+          }, ['*'], { source: 'session-runner' })
         }
       }
     } catch (err) {
@@ -2963,15 +2853,31 @@ export class SessionRunner {
           await updateRecord(sessionId, { pendingModel: undefined, pendingMode: undefined })
           log.session.info('processNext: consuming pending model/mode switch', { sessionId, model: resolvedModel, mode: resolvedMode })
         }
-        // Fall back to the stored model from the last init event so --resume
-        // preserves the original context variant (e.g. [1m] for 1M window).
-        // Without this, resume defaults to "opus" which may lose the [1m] suffix.
+        // Fall back to stored CLI model for --resume so the [1m] context window
+        // marker is preserved.  record.cliModel stores the original --model arg
+        // (e.g. "opus[1m]").  record.model stores the *reported* model from init
+        // events (e.g. "global.anthropic.claude-opus-4-6-v1") which never includes
+        // [1m] — using it for resume would silently downgrade to 200K context.
         // Skip malformed model strings (e.g. orphan "]" from old ANSI stripping bug).
-        // "[1m]" suffix is valid (1M context marker); bare "]" is not.
+        const storedCliModel = record?.cliModel
         const storedModel = record?.model
-        if (!resolvedModel && storedModel
+        if (!resolvedModel && storedCliModel) {
+          resolvedModel = storedCliModel
+        } else if (!resolvedModel && storedModel
           && (!storedModel.endsWith(']') || storedModel.endsWith('[1m]'))) {
-          resolvedModel = storedModel
+          if (storedModel.endsWith('[1m]')) {
+            // Already has context marker — use as-is
+            resolvedModel = storedModel
+          } else {
+            // Backward compat: sessions created before cliModel was persisted
+            // only have the reported model (e.g. "global.anthropic.claude-opus-4-6-v1")
+            // which never includes [1m].  Infer CLI alias + [1m] from model family
+            // so resume preserves 1M context (the default for new sessions).
+            const lower = storedModel.toLowerCase()
+            if (lower.includes('sonnet')) resolvedModel = 'sonnet[1m]'
+            else if (lower.includes('haiku')) resolvedModel = 'haiku'  // haiku has no 1M variant
+            else resolvedModel = undefined  // → send() defaults to 'opus[1m]'
+          }
         }
       } catch (err) {
         log.session.warn('processNext: failed to read pending model/mode', { sessionId, error: err instanceof Error ? err.message : String(err) })
@@ -2994,7 +2900,7 @@ export class SessionRunner {
         // Without this, a dead process leaves a stale FIFO on disk — writes succeed
         // (kernel buffers them) but nobody reads, so messages are silently lost.
         const pid = targetSession.processPid
-        if (pid && !isProcessAlive(pid, targetSession.host ? 'ssh' : 'claude')) {
+        if (pid && !await isProcessAliveAsync(pid, targetSession.host ? 'ssh' : 'claude')) {
           log.session.warn('processNext: process dead before FIFO write — clearing pipe for --resume', {
             sessionId, pid, host: targetSession.host,
           })
@@ -3052,6 +2958,7 @@ export class SessionRunner {
         const record = await getSessionByClaudeId(sessionId)
         if (record) {
           const session = new ClaudeCodeSession(record.taskId, record.project, this.cliCommand)
+          session._testDaemonUrl = this._testDaemonUrl
           this.sessions.set(record.taskId, session)
 
           // Resolve SSH target if session has a stored host
@@ -3064,7 +2971,12 @@ export class SessionRunner {
               if (hostDef) {
                 const hostname = hostDef.hostname ?? (hostDef as Record<string, unknown>).ssh as string | undefined
                 if (hostname) {
-                  sshTarget = { hostname, user: hostDef.user, port: hostDef.port, shell_setup: hostDef.shell_setup }
+                  sshTarget = {
+                    hostname,
+                    user: hostDef.user,
+                    port: hostDef.port,
+                    shell_setup: hostDef.shell_setup,
+                  }
                 }
               }
             } catch {
@@ -3072,18 +2984,7 @@ export class SessionRunner {
             }
           }
 
-          // Transfer local images to remote host before resuming
-          if (sshTarget) {
-            const remoteImagesDir = `/tmp/open-walnut-images/${crypto.randomBytes(8).toString('hex')}`
-            try {
-              combined = await transferImagesForRemoteSession(combined, sshTarget, remoteImagesDir)
-            } catch (err) {
-              log.session.warn('image transfer to remote failed on resume — proceeding without images', {
-                sessionId, host: record.host,
-                error: err instanceof Error ? err.message : String(err),
-              })
-            }
-          }
+          // Image transfer handled by RemoteSessionManager.prepareOutbound() inside transport.start()
 
           log.session.info('resuming session via CLI', { sessionId, taskId: record.taskId, messageLength: combined.length, model: resolvedModel })
           session.send(combined, record.cwd ?? undefined, sessionId, resolvedMode ?? mode, resolvedModel, undefined, record.host ?? undefined, sshTarget)
@@ -3138,18 +3039,7 @@ export class SessionRunner {
         }
       }
 
-      // Transfer local images to remote host before resuming (existing target)
-      if (resumeSshTarget) {
-        const remoteImagesDir = `/tmp/open-walnut-images/${crypto.randomBytes(8).toString('hex')}`
-        try {
-          combined = await transferImagesForRemoteSession(combined, resumeSshTarget, remoteImagesDir)
-        } catch (err) {
-          log.session.warn('image transfer to remote failed on resume (existing target) — proceeding without images', {
-            sessionId, host: resumeHost,
-            error: err instanceof Error ? err.message : String(err),
-          })
-        }
-      }
+      // Image transfer handled by RemoteSessionManager.prepareOutbound() inside transport.start()
 
       // Resume the session with the combined message (with optional mode/model override)
       log.session.info('resuming session via CLI (existing target)', { sessionId, taskId: targetSession.taskId, messageLength: combined.length, host: resumeHost, model: resolvedModel })

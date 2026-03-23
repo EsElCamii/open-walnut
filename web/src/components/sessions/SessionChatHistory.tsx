@@ -83,13 +83,13 @@ import { renderMarkdownWithRefs, findImagePaths, resolveImagePath } from '@/util
  * **The fix:** Two-tier dedup based on optimistic message status:
  *
  * - **Non-committed (pending/received/delivered):** Only dedup against NEWLY APPEARED
- *   persisted messages (messages[prevMsgLen..length]). This prevents false matches
- *   against old history. `prevMsgLen` tracks the persisted message count from the
+ *   persisted messages (messages[prevTotal..length]). This prevents false matches
+ *   against old history. `prevTotal` tracks the persisted message count from the
  *   previous render, updated in useLayoutEffect.
  *
  * - **Committed:** Dedup against ALL persisted messages. Committed means the CLI has
  *   consumed this message, so its persisted counterpart exists somewhere in history.
- *   This handles multi-batch scenarios where prevMsgLen has advanced past the
+ *   This handles multi-batch scenarios where prevTotal has advanced past the
  *   committed message's corresponding persisted entry.
  *
  * Both tiers use count-based (multiset) matching: if the user sends "hi" twice and
@@ -102,26 +102,26 @@ import { renderMarkdownWithRefs, findImagePaths, resolveImagePath } from '@/util
  * Render 1 (messages grow):
  *   useLayoutEffect fires → clear() (blocks=[]), blockIndexMap.clear(),
  *   onBatchCompleted(count) → promotes optimistic to committed.
- *   prevMsgLen NOT updated here (stays at old value).
+ *   prevTotal NOT updated here (stays at old value).
  *
  * Render 2 (batched state updates from Render 1):
  *   blocks=[], optimistic now has committed messages.
  *   Dedup runs: committed messages matched against ALL persisted (removed if found).
- *   Non-committed matched against new messages only (prevMsgLen still old → correct).
- *   prevMsgLen updated in the else branch (no awaitingRefresh).
+ *   Non-committed matched against new messages only (prevTotal still old → correct).
+ *   prevTotal updated in the else branch (no awaitingRefresh).
  *
- * ## prevMsgLen update timing (critical)
+ * ## prevTotal update timing (critical)
  *
- * prevMsgLen is intentionally NOT updated in the batch-completed path of useLayoutEffect.
+ * prevTotal is intentionally NOT updated in the batch-completed path of useLayoutEffect.
  * The batch completion triggers re-renders (from clear() and onBatchCompleted()).
- * Those re-renders must still see prevMsgLen = old value so the dedup scan covers
+ * Those re-renders must still see prevTotal = old value so the dedup scan covers
  * the newly appeared messages and removes committed optimistic messages that now
  * exist in persisted history.
  *
  * ## handleBatchCompleted (useSessionSend)
  *
  * 1. Removes previously committed messages (from earlier batches — now in persisted
- *    history, keeping them causes duplicates since prevMsgLen has advanced).
+ *    history, keeping them causes duplicates since prevTotal has advanced).
  * 2. Promotes the first `count` non-committed messages to 'committed'.
  *
  * ## Unified timeline (buildTimeline)
@@ -487,8 +487,18 @@ export const SessionChatHistory = memo(function SessionChatHistory({ sessionId, 
   const [historyVersion, setHistoryVersion] = useState(0);
   const awaitingRefresh = useRef(false);
   const pendingBatchTotal = useRef(0);
-  const prevMsgLen = useRef(0);
+  // Track total message count (before tail slicing) to detect history growth.
+  // Using `total` instead of `messages.length` because tail: 30 caps the returned
+  // array length — a session with 35 msgs returns 30, and after a turn it's 37 but
+  // still returns 30. Without `total`, the dedup logic can't detect growth → blocks
+  // never clear → duplicate messages.
+  const prevTotal = useRef(0);
   const [editingId, setEditingId] = useState<string | null>(null);
+
+  // ── Message truncation — render only the tail to keep DOM count low ──
+  const INITIAL_RENDER_LIMIT = 30;
+  const LOAD_MORE_BATCH = 50;
+  const [truncationOffset, setTruncationOffset] = useState(0);
   const { lightboxSrc, openLightbox, closeLightbox } = useLightbox();
 
   // ── blockIndexMap: assigns each optimistic message a fixed position in the streaming timeline ──
@@ -508,7 +518,7 @@ export const SessionChatHistory = memo(function SessionChatHistory({ sessionId, 
     }
   }, [openLightbox]);
 
-  const { messages, loading, phase2Pending, error, forkBoundaryIndex } = useSessionHistory(sessionId, historyVersion);
+  const { messages, loading, phase2Pending, error, forkBoundaryIndex, total } = useSessionHistory(sessionId, historyVersion);
   const { blocks, isStreaming, clear } = useSessionStream(sessionId);
   const containerRef = useRef<HTMLDivElement>(null);
 
@@ -627,20 +637,20 @@ export const SessionChatHistory = memo(function SessionChatHistory({ sessionId, 
   // them. All optimistic messages live in the timeline (not a separate section) to maintain
   // their interleaved positions during the transition.
   useLayoutEffect(() => {
-    if (awaitingRefresh.current && messages.length > prevMsgLen.current) {
+    if (awaitingRefresh.current && total > prevTotal.current) {
       awaitingRefresh.current = false;
       clear();
       blockIndexMap.current.clear(); // Reset for next turn
       onBatchCompleted?.(pendingBatchTotal.current);
       pendingBatchTotal.current = 0;
-      // Do NOT update prevMsgLen here. The batch completion triggers re-renders
+      // Do NOT update prevTotal here. The batch completion triggers re-renders
       // (from clear() and onBatchCompleted()). Those re-renders must still see
-      // prevMsgLen = old value so the dedup scan covers the newly appeared messages
+      // prevTotal = old value so the dedup scan covers the newly appeared messages
       // and removes the committed optimistic message (prevents Pattern A duplicate).
     } else {
-      prevMsgLen.current = messages.length;
+      prevTotal.current = total;
     }
-  }, [messages, clear, onBatchCompleted]);
+  }, [messages, total, clear, onBatchCompleted]);
 
   // ═══════════════════════════════════════════════════════════════════════════
   // AUTO-SCROLL — Dead simple. Standard chat pattern.
@@ -685,8 +695,9 @@ export const SessionChatHistory = memo(function SessionChatHistory({ sessionId, 
     setHistoryVersion(0);
     awaitingRefresh.current = false;
     pendingBatchTotal.current = 0;
-    prevMsgLen.current = 0;
+    prevTotal.current = 0;
     setEditingId(null);
+    setTruncationOffset(0);
     blockIndexMap.current.clear();
     isAtBottom.current = true;
     firstScrollDone.current = false;
@@ -705,6 +716,33 @@ export const SessionChatHistory = memo(function SessionChatHistory({ sessionId, 
     if (scrollRafId.current !== null) cancelAnimationFrame(scrollRafId.current);
     if (resizeTimerRef.current) clearTimeout(resizeTimerRef.current);
   }, []);
+
+  // Listen for expand-to-message events from parent panels (when clicking a truncated message)
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    const handler = (e: Event) => {
+      const { messageIndex } = (e as CustomEvent).detail;
+      // Expand truncation to include the target message
+      const needed = messages.length - messageIndex;
+      if (needed > INITIAL_RENDER_LIMIT + truncationOffset) {
+        setTruncationOffset(needed - INITIAL_RENDER_LIMIT);
+      }
+      // After React re-render, scroll to the target
+      requestAnimationFrame(() => {
+        requestAnimationFrame(() => {
+          const target = el.querySelector(`[data-msg-index="${messageIndex}"]`);
+          if (target) {
+            target.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            target.classList.add('user-messages-highlight');
+            setTimeout(() => target.classList.remove('user-messages-highlight'), 1500);
+          }
+        });
+      });
+    };
+    el.addEventListener('expand-to-message', handler);
+    return () => el.removeEventListener('expand-to-message', handler);
+  }, [messages.length, truncationOffset]);
 
   // Scroll handler: track whether user is near bottom.
   // Ignores scroll events caused by container resizes (which corrupt isAtBottom).
@@ -897,13 +935,17 @@ export const SessionChatHistory = memo(function SessionChatHistory({ sessionId, 
   // so committed messages no longer exist here. The remaining dedup handles
   // edge cases where persisted history grows and matches a pending/delivered msg.
   //
-  // Text-based dedup uses newly-appeared persisted messages (prevMsgLen windowing)
+  // Text-based dedup uses newly-appeared persisted messages (prevTotal windowing)
   // to avoid false matches against old history.
   const allOptimistic = optimisticMessages ?? [];
 
-  // Build text counts from newly-appeared persisted user messages
+  // Build text counts from newly-appeared persisted user messages.
+  // With tail slicing, new messages are at the END of the array.
+  // Number of new messages = total - prevTotal (not messages.length - prevLen).
   const newUserTextCounts = new Map<string, number>();
-  for (let i = prevMsgLen.current; i < messages.length; i++) {
+  const newMsgCount = Math.max(0, total - prevTotal.current);
+  const scanStart = Math.max(0, messages.length - newMsgCount);
+  for (let i = scanStart; i < messages.length; i++) {
     if (messages[i].role === 'user') {
       const t = messages[i].text;
       newUserTextCounts.set(t, (newUserTextCounts.get(t) ?? 0) + 1);
@@ -1012,17 +1054,43 @@ export const SessionChatHistory = memo(function SessionChatHistory({ sessionId, 
             </div>
           </div>
         )}
-        {/* Persisted history messages (with optional fork divider) */}
-        {messages.map((m, i) => (
-          <div key={i} data-msg-index={i}>
-            {forkBoundaryIndex != null && i === forkBoundaryIndex && (
-              <div className="session-fork-divider">
-                <span className="session-fork-divider-label">Forked session starts here</span>
-              </div>
-            )}
-            <SessionMessage message={m} sessionCwd={sessionCwd} onTaskClick={onTaskClick} onSessionClick={onSessionClick} />
-          </div>
-        ))}
+        {/* Persisted history messages — truncated to tail for performance.
+            Full messages[] stays in memory; only the visible slice is rendered as DOM. */}
+        {(() => {
+          const visibleLimit = INITIAL_RENDER_LIMIT + truncationOffset;
+          const visibleStart = Math.max(0, messages.length - visibleLimit);
+          const visibleMessages = messages.slice(visibleStart);
+          const hiddenCount = visibleStart;
+          return (
+            <>
+              {hiddenCount > 0 && (
+                <button
+                  className="session-show-earlier-btn"
+                  onClick={() => {
+                    isAtBottom.current = false; // prevent auto-scroll when expanding upward
+                    setTruncationOffset(prev => prev + LOAD_MORE_BATCH);
+                  }}
+                >
+                  Show {Math.min(hiddenCount, LOAD_MORE_BATCH)} earlier messages
+                  <span className="session-show-earlier-count">({hiddenCount} hidden)</span>
+                </button>
+              )}
+              {visibleMessages.map((m, i) => {
+                const globalIndex = visibleStart + i;
+                return (
+                  <div key={globalIndex} data-msg-index={globalIndex}>
+                    {forkBoundaryIndex != null && globalIndex === forkBoundaryIndex && (
+                      <div className="session-fork-divider">
+                        <span className="session-fork-divider-label">Forked session starts here</span>
+                      </div>
+                    )}
+                    <SessionMessage message={m} sessionCwd={sessionCwd} onTaskClick={onTaskClick} onSessionClick={onSessionClick} />
+                  </div>
+                );
+              })}
+            </>
+          );
+        })()}
 
         {/* Turn timeline — interleaved blocks + ALL optimistic messages by blockIndex.
             Both active (pending/received/delivered) and committed messages stay in the timeline

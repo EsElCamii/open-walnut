@@ -90,7 +90,7 @@ export function WorkStatusPicker({ sessionId, processStatus, workStatus, size = 
             style={{ background: psColor }}
           />
         )}
-        {ps === 'running' ? 'Running' : 'Stopped'}
+        {ps === 'running' ? 'Running' : ps === 'idle' ? 'Idle' : 'Stopped'}
       </span>
 
       {/* Work status badge — clickable dropdown when process is stopped */}

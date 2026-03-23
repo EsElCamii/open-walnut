@@ -8,6 +8,13 @@
  */
 import path from 'node:path';
 import os from 'node:os';
+import { fileURLToPath } from 'node:url';
+
+// Real daemon binaries path (not mocked — needed for live tests)
+const REAL_DAEMON_BINARIES_DIR = path.resolve(
+  path.dirname(fileURLToPath(import.meta.url)),
+  '../../dist/daemon-binaries',
+);
 
 export function createMockConstants(prefix = 'walnut-test') {
   const tmpBase = path.join(
@@ -44,5 +51,7 @@ export function createMockConstants(prefix = 'walnut-test') {
     HEARTBEAT_FILE: path.join(tmpBase, 'HEARTBEAT.md'),
     LOG_DIR: path.join(tmpBase, 'logs'),
     LOG_PREFIX: 'open-walnut-test-',
+    FREQUENT_DIRS_FILE: path.join(tmpBase, 'frequent-directories.json'),
+    DAEMON_BINARIES_DIR: REAL_DAEMON_BINARIES_DIR,
   };
 }

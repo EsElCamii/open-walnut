@@ -3,7 +3,7 @@ import fs from 'node:fs/promises';
 import { SESSIONS_FILE, SESSIONS_DIR } from '../constants.js';
 import { readJsonFile, writeJsonFile, ensureDir } from '../utils/fs.js';
 import { withFileLock } from '../utils/file-lock.js';
-import { isProcessAlive } from '../utils/process.js';
+import { isProcessAliveAsync } from '../utils/process.js';
 import { log } from '../logging/index.js';
 import type { SessionSummary, SessionRecord, SessionMode, SessionType, Task } from './types.js';
 
@@ -196,13 +196,13 @@ const DEFAULT_REMOTE_IDLE_LIMIT = 40;
  *
  * Both 'running' and 'idle' mean the process is alive (idle = turn done, waiting for input).
  */
-function isSessionProcessAlive(s: SessionRecord): boolean {
+async function isSessionProcessAlive(s: SessionRecord): Promise<boolean> {
   // SDK and embedded sessions have no PID — trust process_status directly.
   // SDK: managed by session server. Embedded: in-process, managed by SubagentRunner.
   if (s.provider === 'sdk' || s.provider === 'embedded') return s.process_status !== 'stopped';
   if (s.pid == null) return false;
   const processName = s.host ? 'ssh' : 'claude';
-  return isProcessAlive(s.pid, processName);
+  return isProcessAliveAsync(s.pid, processName);
 }
 
 /**
@@ -222,7 +222,7 @@ export async function getActiveSessionsByHost(): Promise<Record<string, SessionR
   for (const s of store.sessions) {
     if (s.archived) continue;
     if (s.process_status !== 'running') continue;
-    if (!isSessionProcessAlive(s)) {
+    if (!await isSessionProcessAlive(s)) {
       staleIds.push(s.claudeSessionId);
       continue;
     }
@@ -250,7 +250,7 @@ export async function getAllAliveSessionsByHost(): Promise<Record<string, Sessio
   for (const s of store.sessions) {
     if (s.archived) continue;
     if (s.process_status === 'stopped') continue;  // only running + idle
-    if (!isSessionProcessAlive(s)) {
+    if (!await isSessionProcessAlive(s)) {
       staleIds.push(s.claudeSessionId);
       continue;
     }
@@ -340,7 +340,7 @@ export async function checkSessionLimit(
   for (const s of store.sessions) {
     if (s.archived) continue;
     if (s.process_status === 'stopped') continue;
-    if (!isSessionProcessAlive(s)) {
+    if (!await isSessionProcessAlive(s)) {
       staleIds.push(s.claudeSessionId);
       continue;
     }
@@ -424,7 +424,7 @@ export async function createSessionRecord(
   taskId: string,
   project: string,
   cwd?: string,
-  extra?: { pid?: number; outputFile?: string; title?: string; description?: string; mode?: SessionMode; planFile?: string; planCompleted?: boolean; host?: string; provider?: import('./types.js').SessionProvider; type?: SessionType; fromPlanSessionId?: string; forkedFromSessionId?: string },
+  extra?: { pid?: number; outputFile?: string; title?: string; description?: string; mode?: SessionMode; planFile?: string; planCompleted?: boolean; host?: string; provider?: import('./types.js').SessionProvider; type?: SessionType; fromPlanSessionId?: string; forkedFromSessionId?: string; cliModel?: string },
 ): Promise<SessionRecord> {
   return withWriteLock(async () => {
     const store = await readStore();
@@ -437,15 +437,22 @@ export async function createSessionRecord(
       existing.messageCount++;
       if (cwd) existing.cwd = cwd;
       if (extra?.pid != null) {
+        // persistSessionRecord is called from the result handler to persist metadata
+        // (title, mode, cliModel) that only becomes available at result time, not at spawn.
+        // Only reset status when the PID actually CHANGES (new process started).
+        // persistSessionRecord() is called from both the transport callback (new PID)
+        // AND the result handler (same PID). Without this guard, the result handler's
+        // call races with the session-runner's updateSessionRecord('agent_complete'),
+        // and the createSessionRecord overwrites agent_complete → in_progress.
+        const pidChanged = extra.pid !== existing.pid;
         existing.pid = extra.pid;
-        // Reset status when a new process starts (new PID = new process).
-        // Always reset work_status — a new PID means the session was actively resumed,
-        // even from terminal states (completed/error).
-        if (existing.process_status !== 'running') {
-          existing.process_status = 'running';
-          existing.last_status_change = now;
+        if (pidChanged) {
+          if (existing.process_status !== 'running') {
+            existing.process_status = 'running';
+            existing.last_status_change = now;
+          }
+          existing.work_status = 'in_progress';
         }
-        existing.work_status = 'in_progress';
       }
       if (extra?.outputFile) existing.outputFile = extra.outputFile;
       if (extra?.mode) existing.mode = extra.mode;
@@ -454,6 +461,7 @@ export async function createSessionRecord(
       if (extra?.host) existing.host = extra.host;
       if (extra?.fromPlanSessionId) existing.fromPlanSessionId = extra.fromPlanSessionId;
       if (extra?.forkedFromSessionId) existing.forkedFromSessionId = extra.forkedFromSessionId;
+      if (extra?.cliModel) existing.cliModel = extra.cliModel;
       await writeStore(store);
       return existing;
     }
@@ -481,6 +489,7 @@ export async function createSessionRecord(
       type: extra?.type ?? 'interactive',
       ...(extra?.fromPlanSessionId ? { fromPlanSessionId: extra.fromPlanSessionId } : {}),
       ...(extra?.forkedFromSessionId ? { forkedFromSessionId: extra.forkedFromSessionId } : {}),
+      ...(extra?.cliModel ? { cliModel: extra.cliModel } : {}),
     };
 
     store.sessions.push(record);

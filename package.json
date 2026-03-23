@@ -45,6 +45,7 @@
     "lint:paths": "bash scripts/lint-production-paths.sh",
     "test:coverage": "vitest run --coverage",
     "test:watch": "vitest",
+    "build:daemon": "bash scripts/build-daemon.sh",
     "lint": "tsc --noEmit",
     "web": "node dist/web/server.js",
     "web:dev": "concurrently \"tsup --watch\" \"cd web && npx vite\"",

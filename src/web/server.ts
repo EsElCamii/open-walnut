@@ -817,9 +817,14 @@ export async function startServer(options: ServerOptions = {}): Promise<HttpServ
     // (forwarding them here would send the full result to browsers, bypassing compact triage logic)
     const isSubagentSessionResult = (event.name === 'session:result' || event.name === 'session:error')
       && event.source === 'subagent-runner'
+    // ── Routing asymmetry ──
+    // session:status-changed uses destinations ['*'] → web-ui receives it directly, no re-emit needed.
+    // session:result / session:error use ['main-ai', 'session-runner'] → web-ui does NOT receive them
+    // directly; we re-emit below with enrichment (taskTitle, taskProject, taskCategory).
+    // INVARIANT: All session:status-changed emitters MUST use ['*'] destinations.
     if (!isSubagentSessionResult && (
       event.name === 'session:started' || event.name === 'session:result' || event.name === 'session:error'
-      || event.name === 'session:status-changed' || event.name === 'session:batch-completed'
+      || event.name === 'session:batch-completed'
       || event.name === 'session:message-queued' || event.name === 'session:messages-delivered')) {
       const enrichedData = { ...(event.data as Record<string, unknown>) }
       if ((event.name === 'session:result' || event.name === 'session:error') && enrichedData.taskId) {

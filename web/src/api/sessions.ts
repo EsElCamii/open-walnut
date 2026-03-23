@@ -25,12 +25,16 @@ export type { SessionHistoryMessage } from '@/types/session';
 export interface SessionHistoryResult {
   messages: SessionHistoryMessage[];
   forkBoundaryIndex?: number;
+  /** Total message count before tail slicing. When tail is used, total > messages.length. */
+  total: number;
 }
 
-export async function fetchSessionHistory(sessionId: string, opts?: { source?: 'streams' }): Promise<SessionHistoryResult> {
-  const params = opts?.source ? { source: opts.source } : undefined;
-  const res = await apiGet<{ messages: SessionHistoryMessage[]; forkBoundaryIndex?: number }>(`/api/sessions/${sessionId}/history`, params);
-  return { messages: res.messages, forkBoundaryIndex: res.forkBoundaryIndex };
+export async function fetchSessionHistory(sessionId: string, opts?: { source?: 'streams'; tail?: number }): Promise<SessionHistoryResult> {
+  const params: Record<string, string> = {};
+  if (opts?.source) params.source = opts.source;
+  if (opts?.tail) params.tail = String(opts.tail);
+  const res = await apiGet<{ messages: SessionHistoryMessage[]; forkBoundaryIndex?: number; total?: number }>(`/api/sessions/${sessionId}/history`, params);
+  return { messages: res.messages, forkBoundaryIndex: res.forkBoundaryIndex, total: res.total ?? res.messages.length };
 }
 
 export async function updateSession(sessionId: string, updates: { title?: string; human_note?: string; work_status?: string; archived?: boolean; archive_reason?: string }): Promise<SessionRecord> {

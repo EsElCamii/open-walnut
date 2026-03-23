@@ -20,8 +20,8 @@ import {
 } from './session-file-reader.js';
 import os from 'node:os';
 import path from 'node:path';
-import { rewriteRemoteImagePaths, findImagePaths } from '../providers/session-io.js';
-import type { SshTarget } from '../providers/session-io.js';
+import { findImagePaths, findRelativeImageNames } from '../providers/session-io.js';
+import { REMOTE_IMAGES_DIR } from '../constants.js';
 
 /** Cached homedir — avoids repeated syscall on each history request */
 const LOCAL_HOME = os.homedir();
@@ -938,9 +938,31 @@ export async function readSessionHistoryPaginated(
 }
 
 /**
+ * Download a single file from a remote host via the daemon's fs.read command.
+ * Returns true on success, false on failure (graceful degradation).
+ */
+async function downloadImageViaDaemon(host: string, remotePath: string, localPath: string): Promise<boolean> {
+  try {
+    const { getDaemonConnection } = await import('../providers/daemon-connection.js')
+    const { getConfig } = await import('./config-manager.js')
+    const config = await getConfig()
+    const hostDef = config.hosts?.[host]
+    if (!hostDef?.hostname) return false
+    const sshTarget = { hostname: hostDef.hostname, user: hostDef.user, port: hostDef.port }
+    const conn = await getDaemonConnection(host, sshTarget)
+    const result = await conn.send('fs.read', { path: remotePath, encoding: 'base64' })
+    if (!result.ok || !result.data) return false
+    const fs = await import('node:fs')
+    fs.mkdirSync(path.dirname(localPath), { recursive: true })
+    fs.writeFileSync(localPath, Buffer.from(result.data as string, 'base64'))
+    return true
+  } catch { return false }
+}
+
+/**
  * Rewrite remote image paths in session history messages to local paths.
- * Used when replaying history for a remote session — downloads images that
- * aren't already cached locally and rewrites paths so the UI can render them.
+ * Used when replaying history for a remote session — downloads images via
+ * the daemon (not SCP) and rewrites paths so the UI can render them.
  */
 export async function rewriteHistoryRemoteImages(
   messages: SessionHistoryMessage[],
@@ -948,28 +970,8 @@ export async function rewriteHistoryRemoteImages(
   sessionId: string,
   cwd?: string,
 ): Promise<SessionHistoryMessage[]> {
-  // Resolve sshTarget from config.hosts
-  let sshTarget: SshTarget | undefined
-  try {
-    const { getConfig } = await import('./config-manager.js')
-    const config = await getConfig()
-    const hostDef = config.hosts?.[host]
-    if (hostDef) {
-      const hostname = hostDef.hostname ?? (hostDef as Record<string, unknown>).ssh as string | undefined
-      if (hostname) {
-        sshTarget = { hostname, user: hostDef.user, port: hostDef.port }
-      }
-    }
-  } catch (err) {
-    log.session.warn('failed to resolve host config for history image rewrite', {
-      host, sessionId,
-      error: err instanceof Error ? err.message : String(err),
-    })
-  }
-
-  if (!sshTarget) return messages
-
   const cache = new Map<string, string>()
+  const fs = await import('node:fs')
 
   // Pre-scan: build filename → absolute path hints from tool inputs/results.
   // Tool inputs (e.g. Bash `cp` commands, file paths) contain full absolute paths
@@ -977,7 +979,7 @@ export async function rewriteHistoryRemoteImages(
   const filePathHints = new Map<string, string[]>()
   const isUsefulHint = (p: string) =>
     !p.startsWith(LOCAL_HOME) &&        // skip local filesystem paths
-    p.lastIndexOf('/') > 0              // require ≥2 path components (reject "/file.png" from `./file.png` regex capture)
+    p.lastIndexOf('/') > 0              // require ≥2 path components
   const addHint = (p: string) => {
     const bn = path.basename(p)
     const arr = filePathHints.get(bn)
@@ -987,14 +989,12 @@ export async function rewriteHistoryRemoteImages(
   for (const msg of messages) {
     if (!msg.tools) continue
     for (const tool of msg.tools) {
-      // Scan tool input (may be object or string)
       const inputStr = typeof tool.input === 'string'
         ? tool.input
         : (tool.input ? JSON.stringify(tool.input) : '')
       for (const p of findImagePaths(inputStr)) {
         if (isUsefulHint(p)) addHint(p)
       }
-      // Scan tool result
       if (tool.result) {
         for (const p of findImagePaths(tool.result)) {
           if (isUsefulHint(p)) addHint(p)
@@ -1003,16 +1003,77 @@ export async function rewriteHistoryRemoteImages(
     }
   }
 
-  for (const msg of messages) {
-    // Rewrite text content
-    if (msg.text) {
-      msg.text = rewriteRemoteImagePaths(msg.text, sshTarget, sessionId, cache, cwd, filePathHints)
+  /**
+   * Rewrite image paths in a text string: detect remote paths, map to local,
+   * and fire-and-forget daemon downloads for images not yet on disk.
+   */
+  const rewriteText = (text: string): string => {
+    let rewritten = text
+
+    // Pass 1: absolute remote paths
+    const remotePaths = findImagePaths(text)
+    for (const remotePath of remotePaths) {
+      // Skip local paths
+      if (remotePath.startsWith(LOCAL_HOME) || remotePath.startsWith(REMOTE_IMAGES_DIR)) continue
+
+      let localPath = cache.get(remotePath)
+      if (!localPath) {
+        localPath = path.join(REMOTE_IMAGES_DIR, sessionId, path.basename(remotePath))
+        cache.set(remotePath, localPath)
+
+        if (!fs.existsSync(localPath)) {
+          downloadImageViaDaemon(host, remotePath, localPath).catch(() => {})
+        }
+      }
+      rewritten = rewritten.split(remotePath).join(localPath)
     }
-    // Rewrite tool results
+
+    // Pass 2: relative image filenames resolved against remote CWD
+    if (cwd) {
+      const relNames = findRelativeImageNames(rewritten)
+      for (const relName of relNames) {
+        const basename = path.basename(relName)
+        const hintPaths = filePathHints.get(basename) ?? []
+        const cwdPath = `${cwd.replace(/\/$/, '')}/${relName}`
+        const tmpPath = `/tmp/${basename}`
+        const candidates = [...hintPaths]
+        if (!candidates.includes(cwdPath)) candidates.push(cwdPath)
+        if (!candidates.includes(tmpPath)) candidates.push(tmpPath)
+
+        if (candidates.some(c => cache.has(c))) continue
+
+        let localPath = cache.get(`rel:${relName}`)
+        if (!localPath) {
+          localPath = path.join(REMOTE_IMAGES_DIR, sessionId, basename)
+          cache.set(`rel:${relName}`, localPath)
+
+          if (!fs.existsSync(localPath)) {
+            const lp = localPath
+            ;(async () => {
+              for (const candidate of candidates) {
+                const ok = await downloadImageViaDaemon(host, candidate, lp)
+                if (ok) return
+              }
+            })().catch(() => {})
+          }
+        }
+        const escaped = relName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+        const nameRe = new RegExp(`(?<=^|[\\s"'\`=:(])${escaped}(?=[\\s"'\`),;\\]}]|$)`, 'g')
+        rewritten = rewritten.replace(nameRe, () => localPath!)
+      }
+    }
+
+    return rewritten
+  }
+
+  for (const msg of messages) {
+    if (msg.text) {
+      msg.text = rewriteText(msg.text)
+    }
     if (msg.tools) {
       for (const tool of msg.tools) {
         if (tool.result) {
-          tool.result = rewriteRemoteImagePaths(tool.result, sshTarget, sessionId, cache, cwd, filePathHints)
+          tool.result = rewriteText(tool.result)
         }
       }
     }
