@@ -3,6 +3,7 @@ import type { Config, TaskPriority } from '@open-walnut/core';
 import { SectionCard } from '../inputs/SectionCard';
 import { ListEditor } from '../inputs/ListEditor';
 import { useTheme, type ThemePreference } from '@/hooks/useTheme';
+import { useFocusBarContext } from '@/contexts/FocusBarContext';
 
 const THEME_OPTIONS: { value: ThemePreference; label: string }[] = [
   { value: 'system', label: 'System' },
@@ -17,6 +18,7 @@ interface Props {
 
 export function GeneralSection({ config, onSave }: Props) {
   const { theme, setTheme } = useTheme();
+  const focusBar = useFocusBarContext();
   const [userName, setUserName] = useState(config.user?.name ?? '');
   const [defaultPriority, setDefaultPriority] = useState<TaskPriority>(config.defaults?.priority ?? 'none');
   const [defaultCategory, setDefaultCategory] = useState(config.defaults?.category ?? '');
@@ -53,6 +55,19 @@ export function GeneralSection({ config, onSave }: Props) {
             </button>
           ))}
         </div>
+      </div>
+
+      <div className="form-group">
+        <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer' }}>
+          <input
+            type="checkbox"
+            checked={focusBar.visible}
+            onChange={(e) => focusBar.setVisible(e.target.checked)}
+            style={{ width: 16, height: 16, accentColor: 'var(--accent)' }}
+          />
+          Show Focus Bar
+          <span className="text-sm text-muted" style={{ marginLeft: 4 }}>&mdash; pinned task dock at the bottom</span>
+        </label>
       </div>
 
       <div className="form-group">

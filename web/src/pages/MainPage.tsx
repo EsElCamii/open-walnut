@@ -964,7 +964,7 @@ export function MainPage({ visible = true, navigateRef }: MainPageProps) {
       </div>{/* end .main-page-content-row */}
 
       {/* FocusDock — inside left column, below chat+sessions */}
-      <FocusDock focusBar={focusBar} />
+      {focusBar.visible && <FocusDock focusBar={focusBar} />}
 
       </div>{/* end .main-page-left */}
 

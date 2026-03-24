@@ -10,13 +10,31 @@ export interface UseFocusBarReturn {
   unpin: (taskId: string) => Promise<void>;
   reorder: (newIds: string[]) => Promise<void>;
   isPinned: (taskId: string) => boolean;
+  visible: boolean;
+  setVisible: (v: boolean) => void;
 }
 
 // How long to ignore config:changed events after we caused them (ms)
 const SELF_CHANGE_COOLDOWN = 3000;
 
+const VISIBLE_KEY = 'open-walnut-focus-dock-visible';
+
+function readVisible(): boolean {
+  try {
+    return localStorage.getItem(VISIBLE_KEY) !== 'false';
+  } catch {
+    return true;
+  }
+}
+
 export function useFocusBar(tasks: Task[]): UseFocusBarReturn {
   const [pinnedIds, setPinnedIds] = useState<string[]>([]);
+  const [visible, setVisibleState] = useState(readVisible);
+
+  const setVisible = useCallback((v: boolean) => {
+    setVisibleState(v);
+    try { localStorage.setItem(VISIBLE_KEY, String(v)); } catch { /* ignore */ }
+  }, []);
   // Track when WE last wrote to the focus_bar config, so we can ignore
   // the resulting config:changed event and avoid overwriting optimistic state.
   const lastWriteRef = useRef(0);
@@ -104,5 +122,5 @@ export function useFocusBar(tasks: Task[]): UseFocusBarReturn {
       .filter((t): t is Task => !!t && t.phase !== 'COMPLETE' && t.status !== 'done');
   }, [pinnedIds, tasks]);
 
-  return { pinnedIds, pinnedTasks, pin, unpin, reorder, isPinned };
+  return { pinnedIds, pinnedTasks, pin, unpin, reorder, isPinned, visible, setVisible };
 }
