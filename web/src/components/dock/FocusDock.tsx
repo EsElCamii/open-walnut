@@ -202,6 +202,7 @@ export function FocusDock({ focusBar }: FocusDockProps) {
   const { pinnedTasks: allPinnedTasks, unpin } = focusBar;
   // Preserve user's pin order — only human drag-reorder may change position.
   // Attention-needed tasks are highlighted via CSS (.dock-task-attention), not reordering.
+  // Do NOT re-add sorting by phase — causes cards to swap mid-typing when phases change.
   const pinnedTasks = useMemo(
     () => allPinnedTasks.slice(0, FOCUS_DOCK_MAX_VISIBLE),
     [allPinnedTasks],
