@@ -2,7 +2,7 @@ import { useState, useMemo, useCallback, useEffect, useRef, memo, Fragment, type
 import { useNavigate } from 'react-router-dom';
 import type { Task } from '@walnut/core';
 import type { SessionRecord } from '@walnut/core';
-import { renderNoteMarkdown, renderMarkdownWithRefs } from '@/utils/markdown';
+import { renderNoteMarkdown } from '@/utils/markdown';
 import { fetchSessionsForTask } from '@/api/sessions';
 import { fetchTask, updateTask as apiUpdateTask } from '@/api/tasks';
 import { SprintPicker } from '@/components/tasks/SprintPicker';
@@ -37,13 +37,13 @@ import {
   SortableContext,
   useSortable,
   verticalListSortingStrategy,
-  horizontalListSortingStrategy,
   sortableKeyboardCoordinates,
   defaultAnimateLayoutChanges,
   type AnimateLayoutChanges,
 } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
-import { SessionPill } from './SessionPill';
+import { TaskStatusDot } from './TaskStatusDot';
+import { ViewDropdown, type SortBy, type GroupBy } from './ViewDropdown';
 import { PersonIcon } from '../common/PersonIcon';
 import { useVerticalSplitter } from '@/hooks/useVerticalSplitter';
 import { useIntegrations, getIntegrationMeta } from '@/hooks/useIntegrations';
@@ -125,19 +125,6 @@ const PHASE_ORDER: string[] = [
   'PEER_CODE_REVIEW', 'RELEASE_IN_PIPELINE', 'COMPLETE',
 ];
 
-// ── Session filter icons + labels ──
-
-const SESSION_ICON: Record<string, ReactNode> = {
-  in_progress: '\u25D0',             // ◐ half-filled
-  agent_complete: '\u23F8',          // ⏸ pause
-  await_human_action: <PersonIcon />,
-  completed: '\u2713\u2713',         // ✓✓ double check
-  error: '\u2716',                   // ✖ cross
-};
-
-// Session filter labels — use canonical labels from the single source of truth.
-const SESSION_LABEL = WORK_LABELS as Record<string, string>;
-
 const PRIORITY_ICON: Record<string, string> = {
   immediate: '!!',
   important: '!',
@@ -162,57 +149,6 @@ function effectivePriority(p: string): string {
   return p;
 }
 
-// ── MoreDropdown — inline dropdown for overflow filter chips ──
-
-interface MoreDropdownItem {
-  value: string;
-  icon: ReactNode;
-  label: string;
-  count: number;
-}
-
-function MoreDropdown({ items, active, onSelect }: { items: MoreDropdownItem[]; active: string; onSelect: (v: string) => void }) {
-  const [open, setOpen] = useState(false);
-  const ref = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    if (!open) return;
-    const handle = (e: MouseEvent) => {
-      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
-    };
-    document.addEventListener('mousedown', handle);
-    return () => document.removeEventListener('mousedown', handle);
-  }, [open]);
-
-  const hasActive = items.some((i) => i.value === active);
-
-  return (
-    <div className="filter-more-wrapper" ref={ref}>
-      <button
-        className={`filter-more-btn${hasActive ? ' has-active' : ''}`}
-        onClick={() => setOpen(!open)}
-      >
-        {hasActive ? items.find((i) => i.value === active)!.icon : 'More'} &#x25BE;
-      </button>
-      {open && (
-        <div className="filter-more-menu">
-          {items.map((item) => (
-            <button
-              key={item.value}
-              className={`filter-more-menu-item${active === item.value ? ' active' : ''}`}
-              onClick={() => { onSelect(active === item.value ? '' : item.value); setOpen(false); }}
-            >
-              <span className="filter-more-icon">{item.icon}</span>
-              <span>{item.label}</span>
-              <span className="filter-more-count">{item.count}</span>
-            </button>
-          ))}
-        </div>
-      )}
-    </div>
-  );
-}
-
 // ── Due date formatter ──
 
 function formatDueDate(iso: string): { label: string; overdue: boolean } {
@@ -233,7 +169,7 @@ const LS_TAB_KEY = 'walnut-todo-active-tab';
 const LS_COLLAPSED_CATS_KEY = 'walnut-todo-collapsed-cats';
 const LS_COLLAPSED_PROJS_KEY = 'walnut-todo-collapsed-projs';
 const LS_EXPANDED_PARENTS_KEY = 'walnut-todo-expanded-parents';
-const LS_FILTERS_COLLAPSED_KEY = 'walnut-todo-filters-collapsed';
+// LS_FILTERS_COLLAPSED_KEY removed — filters now inside ViewDropdown
 const LS_SORT_KEY = 'walnut-todo-sortBy';
 const LS_GROUP_KEY = 'walnut-todo-groupBy';
 
@@ -534,27 +470,7 @@ function SortableTaskItem({ task, isFocused, isRecentlyDone, depth = 0, childCou
           )}
         </div>
         <div className="todo-item-meta-row">
-          <SessionPill
-            sessionId={task.session_id}
-            sessionStatus={task.session_status}
-            planSessionId={task.plan_session_id}
-            execSessionId={task.exec_session_id}
-            planStatus={task.plan_session_status}
-            execStatus={task.exec_session_status}
-            sessionIds={task.session_ids}
-            mode={task.session_status?.mode ?? task.exec_session_status?.mode ?? task.plan_session_status?.mode}
-            isActive={openSessionIds ? !!(
-              (task.session_id && openSessionIds.has(task.session_id)) ||
-              (task.exec_session_id && openSessionIds.has(task.exec_session_id)) ||
-              (task.plan_session_id && openSessionIds.has(task.plan_session_id)) ||
-              (task.session_ids?.some(sid => openSessionIds.has(sid)))
-            ) : false}
-            onClick={onOpenSession ? () => {
-              const sid = resolveTaskSessionId(task);
-              if (sid) onOpenSession(sid);
-              onClick(); // Also select the task
-            } : undefined}
-          />
+          <TaskStatusDot task={task} />
           {dueDateInfo && (
             <span className={`todo-item-due-pill${dueDateInfo.overdue ? ' todo-item-due-overdue' : ''}`}>
               {dueDateInfo.label}
@@ -738,47 +654,6 @@ function SortableGroupItem({ id, children }: SortableGroupItemProps) {
   );
 }
 
-// ── SortableCategoryTab ──
-
-interface SortableCategoryTabProps {
-  id: string;
-  active: boolean;
-  children: React.ReactNode;
-  onClick: () => void;
-  isLocal?: boolean;
-}
-
-function SortableCategoryTab({ id, active, children, onClick, isLocal }: SortableCategoryTabProps) {
-  const {
-    attributes,
-    listeners,
-    setNodeRef,
-    transform,
-    transition,
-    isDragging,
-  } = useSortable({ id, data: { type: 'category-tab' } });
-
-  const style: CSSProperties = {
-    transform: CSS.Transform.toString(transform),
-    transition,
-    opacity: isDragging ? 0.4 : undefined,
-  };
-
-  return (
-    <button
-      ref={setNodeRef}
-      style={style}
-      className={`todo-panel-tab${active ? ' todo-panel-tab-active' : ''}`}
-      onClick={onClick}
-      {...attributes}
-      {...listeners}
-    >
-      {children}
-      {isLocal && <span className="todo-panel-tab-source-badge" title="Local only — not synced">L</span>}
-    </button>
-  );
-}
-
 // ── DroppableHeader (drop zone for cross-group task moves) ──
 
 interface DroppableHeaderProps {
@@ -814,8 +689,7 @@ function orderedSort(items: string[], orderList: string[]): string[] {
 
 // ── Sort comparators ──
 
-type SortBy = 'priority' | 'date' | 'updated';
-type GroupBy = 'category' | 'none';
+// SortBy and GroupBy types imported from ViewDropdown
 
 const PRIORITY_RANK: Record<string, number> = { immediate: 0, important: 1, backlog: 2, none: 3 };
 
@@ -1440,9 +1314,6 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
   const [tagFilter, setTagFilter] = useState('');
   const [sortBy, setSortBy] = useState<SortBy>(readSortBy);
   const [groupBy, setGroupBy] = useState<GroupBy>(readGroupBy);
-  const [filtersCollapsed, setFiltersCollapsed] = useState(() => {
-    try { return localStorage.getItem(LS_FILTERS_COLLAPSED_KEY) !== '0'; } catch { return true; }
-  });
   const [activeCategory, setActiveCategory] = useState(readTab);
 
   // Apply externally-set category (e.g. from URL deep link)
@@ -1678,10 +1549,6 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
     useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
   );
 
-  const tabSensors = useSensors(
-    useSensor(PointerSensor, { activationConstraint: { distance: 8 } }),
-  );
-
   // Sensors for pinned section DnD (separate from main task DnD)
   const pinnedSensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 5 } }),
@@ -1701,8 +1568,6 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
     newOrder.splice(newIndex, 0, active.id as string);
     onReorderPinned?.(newOrder);
   }, [pinnedTaskIds_arr, onReorderPinned]);
-
-  const [activeTabId, setActiveTabId] = useState<string | null>(null);
 
   // Recently completed: tracks tasks completed in the last few seconds.
   // Used for BOTH visual styling (isRecentlyDone green tint) AND filtering —
@@ -1756,14 +1621,7 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
     return orderedSort(names, ordering?.categoryOrder ?? []);
   }, [tasks, ordering?.categoryOrder]);
 
-  // Map category → source (derived from first task in each category)
-  const localCategories = useMemo(() => {
-    const s = new Set<string>();
-    for (const t of tasks) {
-      if (t.source === 'local') s.add(t.category);
-    }
-    return s;
-  }, [tasks]);
+
 
   // Show starred tab when there are starred tasks or favorited categories/projects
   const hasStarredContent = useMemo(() => {
@@ -1771,6 +1629,27 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
     const hasFavorites = favorites?.hasFavorites ?? false;
     return hasStarredTasks || hasFavorites;
   }, [tasks, favorites?.hasFavorites]);
+
+  // Category counts for ViewDropdown
+  const categoryCounts = useMemo(() => {
+    const counts: Record<string, number> = {};
+    for (const t of tasks) {
+      if (t.status !== 'done' || showCompleted) {
+        const cat = t.category || 'Uncategorized';
+        counts[cat] = (counts[cat] ?? 0) + 1;
+      }
+    }
+    return counts;
+  }, [tasks, showCompleted]);
+
+  // Available tags for ViewDropdown
+  const availableTags = useMemo(() => {
+    const tagSet = new Set<string>();
+    for (const t of tasks) {
+      if (t.tags) for (const tag of t.tags) tagSet.add(tag);
+    }
+    return Array.from(tagSet).sort();
+  }, [tasks]);
 
   // Helper: check if a task is visible in starred view via its ancestor chain.
   // Walks up parent_task_id links (max 10 depth) checking if any ancestor is starred
@@ -2256,22 +2135,6 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
     }
   }, [newTitle, onCreate, onClearOperationError, onOperationError, onFocusTask, activeCategory]);
 
-  const handleTabDragEnd = useCallback((event: DragEndEvent) => {
-    setActiveTabId(null);
-    const { active, over } = event;
-    if (!over || active.id === over.id) return;
-    if (!ordering) return;
-    const activeId = String(active.id);
-    const overId = String(over.id);
-    const oldIndex = categories.indexOf(activeId);
-    const newIndex = categories.indexOf(overId);
-    if (oldIndex === -1 || newIndex === -1) return;
-    const newOrder = [...categories];
-    newOrder.splice(oldIndex, 1);
-    newOrder.splice(newIndex, 0, activeId);
-    ordering.reorderCategories(newOrder);
-  }, [ordering, categories]);
-
   const toggleCategory = (cat: string) => {
     setCollapsedCategories((prev) => {
       const next = new Set(prev);
@@ -2341,25 +2204,6 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
       persistSet(LS_EXPANDED_PARENTS_KEY, new Set());
     }
   }, [allCollapsed, allGroupKeys]);
-
-  const toggleFiltersCollapsed = useCallback(() => {
-    setFiltersCollapsed((prev) => {
-      const next = !prev;
-      try { localStorage.setItem(LS_FILTERS_COLLAPSED_KEY, next ? '1' : '0'); } catch { /* ignore */ }
-      return next;
-    });
-  }, []);
-
-  const activeFilterCount = useMemo(() => {
-    let count = 0;
-    if (showCompleted) count++;
-    if (priorityFilter) count++;
-    if (phaseFilter) count++;
-    if (sessionFilter) count++;
-    if (sourceFilter !== 'all') count++;
-    if (tagFilter) count++;
-    return count;
-  }, [showCompleted, priorityFilter, phaseFilter, sessionFilter, sourceFilter, tagFilter]);
 
   const handleDragStart = useCallback((event: DragStartEvent) => {
     const id = String(event.active.id);
@@ -2573,7 +2417,10 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
   const handleTaskClick = useCallback((task: Task) => {
     setDetailTarget(null);
     onFocusTask ? onFocusTask(task) : navigate(`/tasks/${task.id}`);
-  }, [onFocusTask, navigate]);
+    // Auto-open session panel when clicking a task (Task = Session paradigm)
+    const sid = resolveTaskSessionId(task);
+    if (sid && onOpenSession) onOpenSession(sid);
+  }, [onFocusTask, navigate, onOpenSession]);
 
   const showProjectDetail = useCallback((category: string, project: string) => {
     setDetailTarget({ type: 'project', category, project });
@@ -2591,272 +2438,46 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
 
   return (
     <div className={`todo-panel${splitterResizing ? ' splitter-resizing' : ''}`} ref={splitterContainerRef}>
-      {/* Category tabs */}
-      <div className="todo-panel-tabs-row">
-        <div className="todo-panel-tabs">
-          {hasStarredContent && (
-            <button
-              className={`todo-panel-tab todo-panel-tab-starred${activeCategory === STARRED_TAB ? ' todo-panel-tab-active' : ''}`}
-              onClick={() => { const next = activeCategory === STARRED_TAB ? '' : STARRED_TAB; setActiveCategory(next); persistTab(next); onCategoryChange?.(next); }}
-            >
-              {STARRED_TAB}
-            </button>
-          )}
-          <button
-            className={`todo-panel-tab${activeCategory === '' ? ' todo-panel-tab-active' : ''}`}
-            onClick={() => { setActiveCategory(''); persistTab(''); onCategoryChange?.(''); }}
-          >
-            All
-          </button>
-          <DndContext
-            sensors={tabSensors}
-            collisionDetection={closestCenter}
-            onDragStart={(event) => setActiveTabId(String(event.active.id))}
-            onDragEnd={handleTabDragEnd}
-          >
-            <SortableContext items={categories} strategy={horizontalListSortingStrategy}>
-              {categories.map((cat) => (
-                <SortableCategoryTab
-                  key={cat}
-                  id={cat}
-                  active={activeCategory === cat}
-                  onClick={() => { setActiveCategory(cat); persistTab(cat); onCategoryChange?.(cat); }}
-                  isLocal={localCategories.has(cat)}
-                >
-                  {cat}
-                </SortableCategoryTab>
-              ))}
-            </SortableContext>
-            <DragOverlay>
-              {activeTabId ? <div className="todo-panel-tab todo-panel-tab-overlay">{activeTabId}</div> : null}
-            </DragOverlay>
-          </DndContext>
-        </div>
+      {/* Search bar + View dropdown — single row replaces old tabs + filters + sort */}
+      <div className="todo-panel-toolbar">
+        <TodoSearchBar
+          query={searchQuery}
+          onQueryChange={setSearchQuery}
+          onClear={clearSearch}
+          isSearching={isSearching}
+          resultCount={searchResultCount}
+        />
+        <ViewDropdown
+          categories={categories}
+          activeCategory={activeCategory}
+          onCategoryChange={(cat) => { setActiveCategory(cat); persistTab(cat); onCategoryChange?.(cat); }}
+          categoryCounts={categoryCounts}
+          hasStarredContent={hasStarredContent}
+          phaseFilter={phaseFilter}
+          onPhaseFilterChange={setPhaseFilter}
+          priorityFilter={priorityFilter}
+          onPriorityFilterChange={setPriorityFilter}
+          tagFilter={tagFilter}
+          onTagFilterChange={setTagFilter}
+          availableTags={availableTags}
+          sortBy={sortBy}
+          onSortByChange={(v) => { setSortBy(v); persistSortBy(v); }}
+          groupBy={groupBy}
+          onGroupByChange={(v) => { setGroupBy(v); persistGroupBy(v); }}
+          showCompleted={showCompleted}
+          onShowCompletedChange={setShowCompleted}
+          onClearAll={() => {
+            setActiveCategory(''); persistTab(''); onCategoryChange?.('');
+            setPhaseFilter('');
+            setPriorityFilter('');
+            setTagFilter('');
+            setSessionFilter('');
+            setSourceFilter('all');
+          }}
+        />
       </div>
 
-      {/* Search bar */}
-      <TodoSearchBar
-        query={searchQuery}
-        onQueryChange={setSearchQuery}
-        onClear={clearSearch}
-        isSearching={isSearching}
-        resultCount={searchResultCount}
-      />
-
-      {/* Filter toolbar: always visible, compact single row */}
-      <div className="todo-panel-filter-toolbar">
-        <button
-          className={`filter-toolbar-toggle${activeFilterCount > 0 ? ' has-active' : ''}`}
-          onClick={toggleFiltersCollapsed}
-          title={filtersCollapsed ? 'Show filters' : 'Hide filters'}
-        >
-          {filtersCollapsed ? '\u25B8' : '\u25BE'} Filters
-          {activeFilterCount > 0 && <span className="filter-active-count">{activeFilterCount}</span>}
-        </button>
-        <div className="filter-toolbar-actions">
-          <button
-            className={`filter-chip-standalone${groupBy === 'none' ? ' active' : ''}`}
-            onClick={() => { const v = groupBy === 'none' ? 'category' : 'none'; setGroupBy(v); persistGroupBy(v); }}
-            title={groupBy === 'none' ? 'Switch to grouped view' : 'Switch to flat list'}
-          >
-            Flat
-          </button>
-          <div className="sort-toggle" title="Sort order">
-            <button
-              className={`sort-toggle-btn${sortBy === 'priority' ? ' active' : ''}`}
-              onClick={() => { setSortBy('priority'); persistSortBy('priority'); }}
-            >
-              P&#x2193;
-            </button>
-            <button
-              className={`sort-toggle-btn${sortBy === 'date' ? ' active' : ''}`}
-              onClick={() => { setSortBy('date'); persistSortBy('date'); }}
-            >
-              C&#x2193;
-            </button>
-            <button
-              className={`sort-toggle-btn${sortBy === 'updated' ? ' active' : ''}`}
-              onClick={() => { setSortBy('updated'); persistSortBy('updated'); }}
-            >
-              U&#x2193;
-            </button>
-          </div>
-          <button
-            className={`filter-chip-standalone${showCompleted ? ' active' : ''}`}
-            onClick={() => setShowCompleted((p) => !p)}
-            title={showCompleted ? 'Hide completed' : 'Show completed'}
-          >
-            {showCompleted ? 'Hide \u2713' : 'Show \u2713'}
-          </button>
-          {groupBy !== 'none' && grouped.length > 0 && (
-            <button
-              className="filter-chip-standalone"
-              onClick={handleCollapseExpandAll}
-              title={allCollapsed ? 'Expand all groups' : 'Collapse all groups'}
-            >
-              {allCollapsed ? '\u25BC' : '\u25B6'}
-            </button>
-          )}
-        </div>
-      </div>
-
-      {/* Expandable filter rows */}
-      {!filtersCollapsed && (
-        <div className="todo-panel-filters">
-          {/* Row 1: Priority segment */}
-          <div className="filter-bar">
-            <span className="filter-bar-label">Priority</span>
-            <div className="filter-segment">
-              <button
-                className={`filter-chip${!priorityFilter ? ' active' : ''}`}
-                onClick={() => setPriorityFilter('')}
-                title="All priorities"
-              >
-                <span className="filter-chip-text">All</span>
-                <span className="filter-chip-count">{filterCounts.totalForPriority}</span>
-              </button>
-              {(['immediate', 'important', 'backlog', 'none'] as const).map((p) => (
-                <button
-                  key={p}
-                  className={`filter-chip${priorityFilter === p ? ' active' : ''}${filterCounts.priority[p] === 0 ? ' dimmed' : ''}`}
-                  onClick={() => setPriorityFilter(priorityFilter === p ? '' : p)}
-                  title={PRIORITY_LABEL[p]}
-                >
-                  <span className="filter-chip-text">{PRIORITY_ICON[p]}</span>
-                  <span className="filter-chip-count">{filterCounts.priority[p]}</span>
-                </button>
-              ))}
-            </div>
-          </div>
-
-          {/* Row 2: Phase segment + More dropdown */}
-          <div className="filter-bar">
-            <span className="filter-bar-label">Phase</span>
-            <div className="filter-segment">
-              <button
-                className={`filter-chip${!phaseFilter ? ' active' : ''}`}
-                onClick={() => setPhaseFilter('')}
-                title="All phases"
-              >
-                <span className="filter-chip-text">All</span>
-                <span className="filter-chip-count">{filterCounts.totalForPhase}</span>
-              </button>
-              {(['TODO', 'IN_PROGRESS', 'AGENT_COMPLETE', 'AWAIT_HUMAN_ACTION'] as const).map((p) => (
-                <button
-                  key={p}
-                  className={`filter-chip${phaseFilter === p ? ' active' : ''}${filterCounts.phase[p] === 0 ? ' dimmed' : ''}`}
-                  onClick={() => setPhaseFilter(phaseFilter === p ? '' : p)}
-                  title={PHASE_LABEL[p]}
-                >
-                  <span className="filter-chip-text">{PHASE_ICON[p]}</span>
-                  <span className="filter-chip-count">{filterCounts.phase[p]}</span>
-                </button>
-              ))}
-              <MoreDropdown
-                items={[
-                  { value: 'HUMAN_VERIFIED', icon: PHASE_ICON.HUMAN_VERIFIED, label: PHASE_LABEL.HUMAN_VERIFIED, count: filterCounts.phase.HUMAN_VERIFIED },
-                  { value: 'POST_WORK_COMPLETED', icon: PHASE_ICON.POST_WORK_COMPLETED, label: PHASE_LABEL.POST_WORK_COMPLETED, count: filterCounts.phase.POST_WORK_COMPLETED },
-                  { value: 'PEER_CODE_REVIEW', icon: PHASE_ICON.PEER_CODE_REVIEW, label: PHASE_LABEL.PEER_CODE_REVIEW, count: filterCounts.phase.PEER_CODE_REVIEW },
-                  { value: 'RELEASE_IN_PIPELINE', icon: PHASE_ICON.RELEASE_IN_PIPELINE, label: PHASE_LABEL.RELEASE_IN_PIPELINE, count: filterCounts.phase.RELEASE_IN_PIPELINE },
-                  { value: 'COMPLETE', icon: PHASE_ICON.COMPLETE, label: PHASE_LABEL.COMPLETE, count: filterCounts.phase.COMPLETE },
-                ]}
-                active={phaseFilter}
-                onSelect={setPhaseFilter}
-              />
-            </div>
-          </div>
-
-          {/* Row 3: Session segment + More dropdown */}
-          <div className="filter-bar">
-            <span className="filter-bar-label">Session</span>
-            <div className="filter-segment">
-              <button
-                className={`filter-chip${!sessionFilter ? ' active' : ''}`}
-                onClick={() => setSessionFilter('')}
-                title="All sessions"
-              >
-                <span className="filter-chip-text">All</span>
-                <span className="filter-chip-count">{filterCounts.totalForSession}</span>
-              </button>
-              {(['in_progress', 'agent_complete', 'await_human_action'] as const).map((s) => (
-                <button
-                  key={s}
-                  className={`filter-chip${sessionFilter === s ? ' active' : ''}${filterCounts.session[s] === 0 ? ' dimmed' : ''}`}
-                  onClick={() => setSessionFilter(sessionFilter === s ? '' : s)}
-                  title={SESSION_LABEL[s]}
-                >
-                  <span className="filter-chip-text">{SESSION_ICON[s]}</span>
-                  <span className="filter-chip-count">{filterCounts.session[s]}</span>
-                </button>
-              ))}
-              <MoreDropdown
-                items={[
-                  { value: 'completed', icon: SESSION_ICON.completed, label: SESSION_LABEL.completed, count: filterCounts.session.completed },
-                  { value: 'error', icon: SESSION_ICON.error, label: SESSION_LABEL.error, count: filterCounts.session.error },
-                ]}
-                active={sessionFilter}
-                onSelect={setSessionFilter}
-              />
-            </div>
-          </div>
-
-          {/* Row 4: Source segment — data-driven from integration plugins */}
-          <div className="filter-bar">
-            <span className="filter-bar-label">Source</span>
-            <div className="filter-segment">
-              {['all', ...integrations.map(i => i.id), 'local'].map((s) => {
-                const meta = s !== 'all' && s !== 'local' ? getIntegrationMeta(integrations, s) : undefined;
-                const label = s === 'all' ? 'All' : s === 'local' ? 'Local' : (meta?.name ?? s);
-                const count = filterCounts.source[s] ?? 0;
-                return (
-                  <button
-                    key={s}
-                    className={`filter-chip${sourceFilter === s ? ' active' : ''}${s !== 'all' && count === 0 ? ' dimmed' : ''}`}
-                    onClick={() => setSourceFilter(s)}
-                    title={s === 'all' ? 'All sources' : label}
-                  >
-                    <span className="filter-chip-text">{label}</span>
-                    <span className="filter-chip-count">{count}</span>
-                  </button>
-                );
-              })}
-            </div>
-          </div>
-
-          {/* Row 5: Tags segment (only show if there are any tags) */}
-          {Object.keys(filterCounts.tagCounts).length > 0 && (
-            <div className="filter-bar">
-              <span className="filter-bar-label">Tags</span>
-              <div className="filter-segment">
-                <button
-                  className={`filter-chip${!tagFilter ? ' active' : ''}`}
-                  onClick={() => setTagFilter('')}
-                  title="All tags"
-                >
-                  <span className="filter-chip-text">All</span>
-                  <span className="filter-chip-count">{filterCounts.totalForTags}</span>
-                </button>
-                {Object.entries(filterCounts.tagCounts)
-                  .sort(([, a], [, b]) => b - a)
-                  .slice(0, 8)
-                  .map(([tag, count]) => (
-                    <button
-                      key={tag}
-                      className={`filter-chip${tagFilter === tag ? ' active' : ''}${count === 0 ? ' dimmed' : ''}`}
-                      onClick={() => setTagFilter(tagFilter === tag ? '' : tag)}
-                      title={tag}
-                    >
-                      <span className="filter-chip-text">{tag.length > 12 ? tag.slice(0, 12) + '\u2026' : tag}</span>
-                      <span className="filter-chip-count">{count}</span>
-                    </button>
-                  ))}
-              </div>
-            </div>
-          )}
-        </div>
-      )}
-
-      {/* Pinned tasks section — drag-to-reorder, shows between filters and task list */}
+      {/* Pinned tasks section — drag-to-reorder */}
       {pinnedTasks.length > 0 && (
         <div className="todo-pinned-section">
           <div className="todo-pinned-header">
@@ -3220,15 +2841,7 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
           Add
         </button>
       </form>
-      <GlobalNotesSection
-        {...globalNotes}
-        tasks={tasks}
-        focusedTaskId={focusedTaskId ?? undefined}
-        onTaskClick={(taskId) => {
-          const task = tasks.find(t => t.id === taskId);
-          if (task) onFocusTask?.(task);
-        }}
-      />
+      {/* GlobalNotesSection removed — simplification */}
     </div>
   );
 });
