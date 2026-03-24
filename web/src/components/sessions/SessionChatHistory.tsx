@@ -80,49 +80,38 @@ import { renderMarkdownWithRefs, findImagePaths, resolveImagePath } from '@/util
  * in an earlier turn, and then sent "hi" again mid-stream, the new "hi" was
  * incorrectly matched against the OLD "hi" and removed from the timeline.
  *
- * **The fix:** Two-tier dedup based on optimistic message status:
+ * **The fix:** Window-based dedup — only scan NEWLY APPEARED persisted messages
+ * (messages[prevMsgLen..length]) when matching optimistic messages. This prevents
+ * false matches against old history. `prevMsgLen` tracks the persisted message
+ * count from the previous render, updated in useLayoutEffect.
  *
- * - **Non-committed (pending/received/delivered):** Only dedup against NEWLY APPEARED
- *   persisted messages (messages[prevTotal..length]). This prevents false matches
- *   against old history. `prevTotal` tracks the persisted message count from the
- *   previous render, updated in useLayoutEffect.
- *
- * - **Committed:** Dedup against ALL persisted messages. Committed means the CLI has
- *   consumed this message, so its persisted counterpart exists somewhere in history.
- *   This handles multi-batch scenarios where prevTotal has advanced past the
- *   committed message's corresponding persisted entry.
- *
- * Both tiers use count-based (multiset) matching: if the user sends "hi" twice and
- * JSONL contains one "hi", only one optimistic "hi" is removed.
+ * Count-based (multiset) matching: if the user sends "hi" twice and JSONL
+ * contains one "hi", only one optimistic "hi" is removed.
  *
  * ## Turn boundary sequence (useLayoutEffect)
  *
  * When session:batch-completed fires → setHistoryVersion(+1) → history re-fetched:
  *
  * Render 1 (messages grow):
- *   useLayoutEffect fires → clear() (blocks=[]), blockIndexMap.clear(),
- *   onBatchCompleted(count) → promotes optimistic to committed.
- *   prevTotal NOT updated here (stays at old value).
+ *   useLayoutEffect fires → clear() (blocks=[]), blockIndexMap.clear().
+ *   prevMsgLen NOT updated here (stays at old value).
  *
  * Render 2 (batched state updates from Render 1):
- *   blocks=[], optimistic now has committed messages.
- *   Dedup runs: committed messages matched against ALL persisted (removed if found).
- *   Non-committed matched against new messages only (prevTotal still old → correct).
- *   prevTotal updated in the else branch (no awaitingRefresh).
+ *   blocks=[]. Dedup runs: optimistic messages matched against new persisted
+ *   messages only (prevMsgLen still old → correct window).
+ *   prevMsgLen updated in the else branch (no awaitingRefresh).
  *
- * ## prevTotal update timing (critical)
+ * ## prevMsgLen update timing (critical)
  *
- * prevTotal is intentionally NOT updated in the batch-completed path of useLayoutEffect.
- * The batch completion triggers re-renders (from clear() and onBatchCompleted()).
- * Those re-renders must still see prevTotal = old value so the dedup scan covers
- * the newly appeared messages and removes committed optimistic messages that now
- * exist in persisted history.
+ * prevMsgLen is intentionally NOT updated in the batch-completed path of useLayoutEffect.
+ * The batch completion triggers re-renders (from clear()). Those re-renders must
+ * still see prevMsgLen = old value so the dedup scan window covers the newly
+ * appeared messages.
  *
  * ## handleBatchCompleted (useSessionSend)
  *
- * 1. Removes previously committed messages (from earlier batches — now in persisted
- *    history, keeping them causes duplicates since prevTotal has advanced).
- * 2. Promotes the first `count` non-committed messages to 'committed'.
+ * Removes the first `count` optimistic messages whose persisted counterparts
+ * now appear in history.
  *
  * ## Unified timeline (buildTimeline)
  *
@@ -487,12 +476,8 @@ export const SessionChatHistory = memo(function SessionChatHistory({ sessionId, 
   const [historyVersion, setHistoryVersion] = useState(0);
   const awaitingRefresh = useRef(false);
   const pendingBatchTotal = useRef(0);
-  // Track total message count (before tail slicing) to detect history growth.
-  // Using `total` instead of `messages.length` because tail: 30 caps the returned
-  // array length — a session with 35 msgs returns 30, and after a turn it's 37 but
-  // still returns 30. Without `total`, the dedup logic can't detect growth → blocks
-  // never clear → duplicate messages.
-  const prevTotal = useRef(0);
+  // Track persisted message count to detect history growth (used for dedup windowing).
+  const prevMsgLen = useRef(0);
   const [editingId, setEditingId] = useState<string | null>(null);
 
   // ── Message truncation — render only the tail to keep DOM count low ──
@@ -518,7 +503,7 @@ export const SessionChatHistory = memo(function SessionChatHistory({ sessionId, 
     }
   }, [openLightbox]);
 
-  const { messages, loading, phase2Pending, error, forkBoundaryIndex, total } = useSessionHistory(sessionId, historyVersion);
+  const { messages, loading, phase2Pending, error, forkBoundaryIndex } = useSessionHistory(sessionId, historyVersion);
   const { blocks, isStreaming, clear } = useSessionStream(sessionId);
   const containerRef = useRef<HTMLDivElement>(null);
 
@@ -637,20 +622,20 @@ export const SessionChatHistory = memo(function SessionChatHistory({ sessionId, 
   // them. All optimistic messages live in the timeline (not a separate section) to maintain
   // their interleaved positions during the transition.
   useLayoutEffect(() => {
-    if (awaitingRefresh.current && total > prevTotal.current) {
+    if (awaitingRefresh.current) {
       awaitingRefresh.current = false;
       clear();
       blockIndexMap.current.clear(); // Reset for next turn
       onBatchCompleted?.(pendingBatchTotal.current);
       pendingBatchTotal.current = 0;
-      // Do NOT update prevTotal here. The batch completion triggers re-renders
+      // Do NOT update prevMsgLen here. The batch completion triggers re-renders
       // (from clear() and onBatchCompleted()). Those re-renders must still see
-      // prevTotal = old value so the dedup scan covers the newly appeared messages
+      // prevMsgLen = old value so the dedup scan covers the newly appeared messages
       // and removes the committed optimistic message (prevents Pattern A duplicate).
     } else {
-      prevTotal.current = total;
+      prevMsgLen.current = messages.length;
     }
-  }, [messages, total, clear, onBatchCompleted]);
+  }, [messages, clear, onBatchCompleted]);
 
   // ═══════════════════════════════════════════════════════════════════════════
   // AUTO-SCROLL — Dead simple. Standard chat pattern.
@@ -695,7 +680,7 @@ export const SessionChatHistory = memo(function SessionChatHistory({ sessionId, 
     setHistoryVersion(0);
     awaitingRefresh.current = false;
     pendingBatchTotal.current = 0;
-    prevTotal.current = 0;
+    prevMsgLen.current = 0;
     setEditingId(null);
     setTruncationOffset(0);
     blockIndexMap.current.clear();
@@ -935,16 +920,13 @@ export const SessionChatHistory = memo(function SessionChatHistory({ sessionId, 
   // so committed messages no longer exist here. The remaining dedup handles
   // edge cases where persisted history grows and matches a pending/delivered msg.
   //
-  // Text-based dedup uses newly-appeared persisted messages (prevTotal windowing)
+  // Text-based dedup uses newly-appeared persisted messages (prevMsgLen windowing)
   // to avoid false matches against old history.
   const allOptimistic = optimisticMessages ?? [];
 
   // Build text counts from newly-appeared persisted user messages.
-  // With tail slicing, new messages are at the END of the array.
-  // Number of new messages = total - prevTotal (not messages.length - prevLen).
   const newUserTextCounts = new Map<string, number>();
-  const newMsgCount = Math.max(0, total - prevTotal.current);
-  const scanStart = Math.max(0, messages.length - newMsgCount);
+  const scanStart = Math.max(0, prevMsgLen.current);
   for (let i = scanStart; i < messages.length; i++) {
     if (messages[i].role === 'user') {
       const t = messages[i].text;
