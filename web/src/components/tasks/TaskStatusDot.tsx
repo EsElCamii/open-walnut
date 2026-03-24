@@ -14,6 +14,8 @@ interface TaskStatusDotProps {
   task: Task;
   /** Size in px. Default: 8 */
   size?: number;
+  /** Click handler — typically opens the session panel. */
+  onClick?: () => void;
 }
 
 type DotColor = 'green' | 'red' | 'none';
@@ -57,7 +59,7 @@ const DOT_COLORS: Record<DotColor, string> = {
   none: 'transparent',
 };
 
-export function TaskStatusDot({ task, size = 8 }: TaskStatusDotProps) {
+export function TaskStatusDot({ task, size = 8, onClick }: TaskStatusDotProps) {
   const color = getDotColor(task);
 
   if (color === 'none') return null;
@@ -65,7 +67,11 @@ export function TaskStatusDot({ task, size = 8 }: TaskStatusDotProps) {
   return (
     <span
       className="task-status-dot"
-      title={getDotTitle(task, color)}
+      title={getDotTitle(task, color) + (onClick ? ' (click to open)' : '')}
+      role={onClick ? 'button' : undefined}
+      tabIndex={onClick ? 0 : undefined}
+      onClick={onClick ? (e) => { e.stopPropagation(); onClick(); } : undefined}
+      onKeyDown={onClick ? (e) => { if (e.key === 'Enter' || e.key === ' ') { e.stopPropagation(); onClick(); } } : undefined}
       style={{
         display: 'inline-block',
         width: size,
@@ -73,6 +79,7 @@ export function TaskStatusDot({ task, size = 8 }: TaskStatusDotProps) {
         borderRadius: '50%',
         backgroundColor: DOT_COLORS[color],
         flexShrink: 0,
+        cursor: onClick ? 'pointer' : undefined,
         animation: color === 'green' ? 'task-dot-pulse 2s ease-in-out infinite' : undefined,
       }}
     />

@@ -221,6 +221,8 @@ interface SortableTaskItemProps {
   onUpdateTitle?: (id: string, title: string) => void;
   onOpenSession?: (sessionId: string) => void;
   openSessionIds?: Set<string>;
+  onExpandDetail?: (task: Task) => void;
+  onClearFocus?: () => void;
   onPinTask?: (taskId: string) => void;
   onUnpinTask?: (taskId: string) => void;
   isPinned?: boolean;
@@ -231,7 +233,7 @@ interface SortableTaskItemProps {
   searchSemanticScore?: number; // Normalized semantic contribution [0,1]
 }
 
-function SortableTaskItem({ task, isFocused, isRecentlyDone, depth = 0, childCount, isExpanded, onToggleExpand, onClick, onSetPhase, onStar, onSetPriority, onUpdateTitle, onOpenSession, openSessionIds, onPinTask, onUnpinTask, isPinned, searchContext, searchMatchField, searchScore, searchKeywordScore, searchSemanticScore }: SortableTaskItemProps) {
+function SortableTaskItem({ task, isFocused, isRecentlyDone, depth = 0, childCount, isExpanded, onToggleExpand, onClick, onSetPhase, onStar, onSetPriority, onUpdateTitle, onOpenSession, openSessionIds, onExpandDetail, onClearFocus, onPinTask, onUnpinTask, isPinned, searchContext, searchMatchField, searchScore, searchKeywordScore, searchSemanticScore }: SortableTaskItemProps) {
   const integrations = useIntegrations();
   const hookPhases = usePhaseHooks();
   const {
@@ -355,10 +357,16 @@ function SortableTaskItem({ task, isFocused, isRecentlyDone, depth = 0, childCou
   const handleTitleClick = useCallback((e: React.MouseEvent) => {
     e.stopPropagation();
     e.preventDefault();
+    // First click on an unfocused task → focus it (open detail panel).
+    // Only enter editing mode when task is already focused.
+    if (!isFocused) {
+      onClick();
+      return;
+    }
     if (!onUpdateTitle) return;
     clickPosRef.current = { x: e.clientX, y: e.clientY };
     setIsEditing(true);
-  }, [onUpdateTitle]);
+  }, [isFocused, onClick, onUpdateTitle]);
 
   // Click-outside handler: exits editing when clicking outside the title span.
   // Also serves as a fallback when blur doesn't fire (e.g. click on non-focusable element).
@@ -386,7 +394,7 @@ function SortableTaskItem({ task, isFocused, isRecentlyDone, depth = 0, childCou
       data-task-id={task.id}
       onClick={(e) => {
         if (isEditing) return;
-        // Ignore clicks on the title text (handled by its own click for inline editing)
+        // Title has its own click handler (focus first, edit on second click)
         if ((e.target as HTMLElement).closest('.todo-item-title')) return;
         onClick();
       }}
@@ -470,7 +478,10 @@ function SortableTaskItem({ task, isFocused, isRecentlyDone, depth = 0, childCou
           )}
         </div>
         <div className="todo-item-meta-row">
-          <TaskStatusDot task={task} />
+          <TaskStatusDot task={task} onClick={onOpenSession ? () => {
+            const sid = resolveTaskSessionId(task);
+            if (sid) onOpenSession(sid);
+          } : undefined} />
           {dueDateInfo && (
             <span className={`todo-item-due-pill${dueDateInfo.overdue ? ' todo-item-due-overdue' : ''}`}>
               {dueDateInfo.label}
@@ -568,6 +579,20 @@ function SortableTaskItem({ task, isFocused, isRecentlyDone, depth = 0, childCou
 
       {/* — action badges: priority, star, pin — */}
       <div className="todo-item-actions">
+        <button
+          className={`task-expand-btn${isFocused ? ' active' : ''}`}
+          onClick={(e) => {
+            e.stopPropagation();
+            if (isFocused) {
+              onClearFocus?.();
+            } else {
+              onExpandDetail?.(task);
+            }
+          }}
+          title={isFocused ? 'Close detail' : 'Open detail'}
+        >
+          &#x24D8;
+        </button>
         {onSetPriority ? (
           <PriorityPicker
             priority={task.priority}
@@ -2414,13 +2439,16 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
     return collapsedProjects.has(projKey);
   }, [collapsedProjects]);
 
+  // Click task row = open detail panel. The ⓘ button also toggles it.
   const handleTaskClick = useCallback((task: Task) => {
     setDetailTarget(null);
     onFocusTask ? onFocusTask(task) : navigate(`/tasks/${task.id}`);
-    // Auto-open session panel when clicking a task (Task = Session paradigm)
-    const sid = resolveTaskSessionId(task);
-    if (sid && onOpenSession) onOpenSession(sid);
-  }, [onFocusTask, navigate, onOpenSession]);
+  }, [onFocusTask, navigate]);
+
+  const handleExpandDetail = useCallback((task: Task) => {
+    setDetailTarget(null);
+    onFocusTask ? onFocusTask(task) : navigate(`/tasks/${task.id}`);
+  }, [onFocusTask, navigate]);
 
   const showProjectDetail = useCallback((category: string, project: string) => {
     setDetailTarget({ type: 'project', category, project });
@@ -2594,6 +2622,8 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
                     onUpdateTitle={onUpdate ? handleUpdateTitle : undefined}
                     onOpenSession={onOpenSession}
                     openSessionIds={openSessionIds}
+                    onExpandDetail={handleExpandDetail}
+                    onClearFocus={onClearFocus}
                     onPinTask={onPinTask}
                     onUnpinTask={onUnpinTask}
                     isPinned={pinnedTaskIds?.has(task.id)}
@@ -2631,6 +2661,8 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
                   onUpdateTitle={onUpdate ? handleUpdateTitle : undefined}
                   onOpenSession={onOpenSession}
                   openSessionIds={openSessionIds}
+                  onExpandDetail={handleExpandDetail}
+                  onClearFocus={onClearFocus}
                   onPinTask={onPinTask}
                   onUnpinTask={onUnpinTask}
                   isPinned={pinnedTaskIds?.has(task.id)}
@@ -2701,6 +2733,8 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
                                   onUpdateTitle={onUpdate ? handleUpdateTitle : undefined}
                                   onOpenSession={onOpenSession}
                                   openSessionIds={openSessionIds}
+                                  onExpandDetail={handleExpandDetail}
+                                  onClearFocus={onClearFocus}
                                   onPinTask={onPinTask}
                                   onUnpinTask={onUnpinTask}
                                   isPinned={pinnedTaskIds?.has(task.id)}
@@ -2760,6 +2794,8 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
                                                 onUpdateTitle={onUpdate ? handleUpdateTitle : undefined}
                                                 onOpenSession={onOpenSession}
                                                 openSessionIds={openSessionIds}
+                                                onExpandDetail={handleExpandDetail}
+                                                onClearFocus={onClearFocus}
                                                 onPinTask={onPinTask}
                                                 onUnpinTask={onUnpinTask}
                                                 isPinned={pinnedTaskIds?.has(task.id)}
