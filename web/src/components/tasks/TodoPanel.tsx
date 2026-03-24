@@ -456,7 +456,7 @@ function SortableTaskItem({ task, isFocused, isRecentlyDone, depth = 0, childCou
         )}
       </div>
 
-      {/* — content area: title + metadata rows (flex:1) — */}
+      {/* — content area: title + metadata + actions (flex:1) — */}
       <div className="todo-item-content">
         <div className="todo-item-title-row">
           <span
@@ -478,10 +478,6 @@ function SortableTaskItem({ task, isFocused, isRecentlyDone, depth = 0, childCou
           )}
         </div>
         <div className="todo-item-meta-row">
-          <TaskStatusDot task={task} onClick={onOpenSession ? () => {
-            const sid = resolveTaskSessionId(task);
-            if (sid) onOpenSession(sid);
-          } : undefined} />
           {dueDateInfo && (
             <span className={`todo-item-due-pill${dueDateInfo.overdue ? ' todo-item-due-overdue' : ''}`}>
               {dueDateInfo.label}
@@ -575,59 +571,62 @@ function SortableTaskItem({ task, isFocused, isRecentlyDone, depth = 0, childCou
             </span>
           )}
         </div>
-      </div>
-
-      {/* — action badges: priority, star, pin — */}
-      <div className="todo-item-actions">
-        <button
-          className={`task-expand-btn${isFocused ? ' active' : ''}`}
-          onClick={(e) => {
-            e.stopPropagation();
-            if (isFocused) {
-              onClearFocus?.();
-            } else {
-              onExpandDetail?.(task);
-            }
-          }}
-          title={isFocused ? 'Close detail' : 'Open detail'}
-        >
-          &#x24D8;
-        </button>
-        {onSetPriority ? (
-          <PriorityPicker
-            priority={task.priority}
-            onChange={(p) => onSetPriority(task.id, p)}
-          />
-        ) : (
-          <span className={`badge badge-${task.priority}`}>{task.priority === 'immediate' ? '!!' : task.priority === 'important' ? '!' : task.priority === 'backlog' ? '~' : '--'}</span>
-        )}
-        {onStar && (
+        {/* — action badges: priority, star, detail, pin (bottom row) — */}
+        <div className="todo-item-actions">
+          <TaskStatusDot task={task} onClick={onOpenSession ? () => {
+            const sid = resolveTaskSessionId(task);
+            if (sid) onOpenSession(sid);
+          } : undefined} />
           <button
-            className={`task-star-btn${task.starred ? ' starred' : ''}`}
-            onClick={(e) => { e.stopPropagation(); onStar(task.id); }}
-            title={task.starred ? 'Unstar' : 'Star'}
+            className={`task-expand-btn${isFocused ? ' active' : ''}`}
+            onClick={(e) => {
+              e.stopPropagation();
+              if (isFocused) {
+                onClearFocus?.();
+              } else {
+                onExpandDetail?.(task);
+              }
+            }}
+            title={isFocused ? 'Close detail' : 'Open detail'}
           >
-            {task.starred ? '\u2605' : '\u2606'}
+            &#x24D8;
           </button>
-        )}
-        {onPinTask && !isPinned && task.status !== 'done' && task.phase !== 'COMPLETE' && (
-          <button
-            className="task-pin-btn"
-            onClick={(e) => { e.stopPropagation(); onPinTask(task.id); }}
-            title="Pin to Focus Dock"
-          >
-            &#x1F4CC;
-          </button>
-        )}
-        {isPinned && onUnpinTask && (
-          <button
-            className="task-pin-btn task-pinned-indicator"
-            onClick={(e) => { e.stopPropagation(); onUnpinTask(task.id); }}
-            title="Unpin from Focus Dock"
-          >
-            &#x1F4CC;
-          </button>
-        )}
+          {onSetPriority ? (
+            <PriorityPicker
+              priority={task.priority}
+              onChange={(p) => onSetPriority(task.id, p)}
+            />
+          ) : (
+            <span className={`badge badge-${task.priority}`}>{task.priority === 'immediate' ? '!!' : task.priority === 'important' ? '!' : task.priority === 'backlog' ? '~' : '--'}</span>
+          )}
+          {onStar && (
+            <button
+              className={`task-star-btn${task.starred ? ' starred' : ''}`}
+              onClick={(e) => { e.stopPropagation(); onStar(task.id); }}
+              title={task.starred ? 'Unstar' : 'Star'}
+            >
+              {task.starred ? '\u2605' : '\u2606'}
+            </button>
+          )}
+          {onPinTask && !isPinned && task.status !== 'done' && task.phase !== 'COMPLETE' && (
+            <button
+              className="task-pin-btn"
+              onClick={(e) => { e.stopPropagation(); onPinTask(task.id); }}
+              title="Pin to Focus Dock"
+            >
+              &#x1F4CC;
+            </button>
+          )}
+          {isPinned && onUnpinTask && (
+            <button
+              className="task-pin-btn task-pinned-indicator"
+              onClick={(e) => { e.stopPropagation(); onUnpinTask(task.id); }}
+              title="Unpin from Focus Dock"
+            >
+              &#x1F4CC;
+            </button>
+          )}
+        </div>
       </div>
     </div>
   );

@@ -7068,9 +7068,8 @@ img[data-lightbox-src],
 .todo-item-actions {
   display: flex;
   align-items: center;
-  gap: 2px;
-  flex-shrink: 0;
-  margin-top: 1px;
+  gap: 4px;
+  margin-top: 2px;
 }
 
 /* Inline title editing (contentEditable — same element, no layout shift) */
