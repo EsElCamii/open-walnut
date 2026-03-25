@@ -69,6 +69,7 @@ export class DaemonConnection {
   private _connected = false
   private _connecting = false
   private _destroyed = false
+  private _disconnectedSince: number | null = null
   private cmdCounter = 0
   private pendingCommands = new Map<number, PendingCommand>()
   private eventHandlers: EventHandler[] = []
@@ -77,8 +78,10 @@ export class DaemonConnection {
 
   /** Command timeout in ms. Generous for initial deploy operations. */
   private static COMMAND_TIMEOUT_MS = 30_000
-  /** Reconnect delay after connection loss. */
+  /** Initial reconnect delay after connection loss (doubles each attempt, caps at MAX). */
   private static RECONNECT_DELAY_MS = 2_000
+  /** Maximum reconnect delay — retries forever at this interval. */
+  private static RECONNECT_MAX_DELAY_MS = 60_000
   /** Ping interval for keepalive. */
   private static PING_INTERVAL_MS = 15_000
 
@@ -130,6 +133,32 @@ export class DaemonConnection {
   }
 
   get connected(): boolean { return this._connected }
+  get disconnectedSince(): number | null { return this._disconnectedSince }
+
+  /**
+   * Centralized setter for _connected — fires the pool-level callback
+   * whenever the connection state actually changes, so the server can
+   * broadcast the new daemon status to the frontend.
+   */
+  private setConnected(value: boolean): void {
+    const changed = this._connected !== value
+    this._connected = value
+    if (value) {
+      this._disconnectedSince = null
+    } else if (changed) {
+      this._disconnectedSince = Date.now()
+    }
+    if (changed && onPoolStatusChange) {
+      try {
+        const result = onPoolStatusChange()
+        // Handle async callbacks: swallow unhandled rejection warnings.
+        // The registered callback already has its own inner try/catch for logging.
+        if (result && typeof (result as unknown as Promise<void>).catch === 'function') {
+          ;(result as unknown as Promise<void>).catch(() => {})
+        }
+      } catch {}
+    }
+  }
 
   // ── Event subscription ──
 
@@ -178,7 +207,7 @@ export class DaemonConnection {
       // Step 5: Connect WebSocket
       await this.connectWebSocket(this.localPort)
 
-      this._connected = true
+      this.setConnected(true)
       this._connecting = false
 
       // Start ping keepalive
@@ -223,7 +252,7 @@ export class DaemonConnection {
    */
   disconnect(): void {
     this._destroyed = true
-    this._connected = false
+    this.setConnected(false)
     this._connecting = false
 
     // Cancel reconnect
@@ -658,7 +687,7 @@ export class DaemonConnection {
   async connectDirect(wsUrl: string): Promise<void> {
     if (this._connected) return
     await this.connectWebSocket(wsUrl)
-    this._connected = true
+    this.setConnected(true)
     this.startPing()
   }
 
@@ -741,7 +770,7 @@ export class DaemonConnection {
   private handleConnectionLost(): void {
     if (this._destroyed || !this._connected) return
 
-    this._connected = false
+    this.setConnected(false)
 
     // Close WebSocket
     if (this.ws) {
@@ -812,12 +841,51 @@ export class DaemonConnection {
     // Connect WebSocket
     await this.connectWebSocket(this.localPort)
 
-    this._connected = true
+    this.setConnected(true)
     this.startPing()
 
     log.session.info('DaemonConnection: reconnected', {
       host: this.hostKey, localPort: this.localPort, remotePort: daemonPort,
     })
+
+    // Auto-recover sessions that were marked error due to disconnect
+    this.recoverDisconnectedSessions().catch(() => {})
+  }
+
+  /** After successful reconnect, recover sessions marked error due to connection loss. */
+  private async recoverDisconnectedSessions(): Promise<void> {
+    try {
+      const { listSessions, updateSessionRecord } = await import('../core/session-tracker.js')
+      const { bus, EventNames } = await import('../core/event-bus.js')
+      const sessions = await listSessions()
+
+      for (const s of sessions) {
+        if (s.host !== this.hostKey) continue
+        if (s.process_status !== 'error') continue
+        if (!s.errorMessage?.includes('Connection lost')) continue
+
+        // Ask daemon if this session's process is still alive
+        try {
+          const result = await this.send('status', { sid: s.claudeSessionId })
+          if (result.ok && result.alive) {
+            await updateSessionRecord(s.claudeSessionId, {
+              process_status: 'running',
+              errorMessage: undefined,
+              last_status_change: new Date().toISOString(),
+            })
+            bus.emit(EventNames.SESSION_STATUS_CHANGED, {
+              sessionId: s.claudeSessionId,
+              taskId: s.taskId,
+              process_status: 'running',
+            }, ['*'], { source: 'daemon-reconnect', urgency: 'urgent' })
+            log.session.info('DaemonConnection: auto-recovered session after reconnect', {
+              sessionId: s.claudeSessionId, host: this.hostKey,
+            })
+          }
+          // If daemon says process is dead → keep error (accurate)
+        } catch { /* daemon doesn't know this session — keep error */ }
+      }
+    } catch { /* session tracker not available */ }
   }
 
   private startPing(): void {
@@ -828,6 +896,19 @@ export class DaemonConnection {
       }
     }, DaemonConnection.PING_INTERVAL_MS)
   }
+}
+
+// ── Pool-level status change callback ──
+
+let onPoolStatusChange: (() => void) | null = null
+
+/**
+ * Register a callback that fires whenever any DaemonConnection's
+ * connected state changes.  Used by server.ts to broadcast daemon
+ * status to the frontend via WebSocket.
+ */
+export function setOnDaemonStatusChange(cb: () => void): void {
+  onPoolStatusChange = cb
 }
 
 // ── Connection Pool ──
@@ -896,6 +977,10 @@ export interface DaemonStatus {
  */
 export function isDaemonConnected(hostKey: string): boolean {
   return connectionPool.get(hostKey)?.connected ?? false
+}
+
+export function getDaemonDisconnectedSince(hostKey: string): number | null {
+  return connectionPool.get(hostKey)?.disconnectedSince ?? null
 }
 
 export function getDaemonPoolStatus(): DaemonStatus[] {

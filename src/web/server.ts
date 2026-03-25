@@ -144,6 +144,7 @@ export interface SystemHealthState {
     lastReconcileAt?: string;
     lastError?: string;
   };
+  daemons?: Array<{ host: string; label: string; connected: boolean }>;
 }
 
 const systemHealth: SystemHealthState = {
@@ -495,11 +496,11 @@ export async function startServer(options: ServerOptions = {}): Promise<HttpServ
   // -- Clean up old stream files (preserve non-terminal sessions) --
   try {
     const { cleanupStreamFiles } = await import('../providers/claude-code-session.js')
-    const { listSessions, TERMINAL_WORK_STATUSES } = await import('../core/session-tracker.js')
+    const { listSessions, isTerminalSession } = await import('../core/session-tracker.js')
     const allSessions = await listSessions()
     const preserveIds = new Set(
       allSessions
-        .filter(s => !TERMINAL_WORK_STATUSES.has(s.work_status))
+        .filter(s => !isTerminalSession(s))
         .map(s => s.claudeSessionId),
     )
     await cleanupStreamFiles(preserveIds)
@@ -602,6 +603,35 @@ export async function startServer(options: ServerOptions = {}): Promise<HttpServ
   bus.subscribe('web-ui', (event) => {
     broadcastEvent(event.name, event.data)
   })
+
+  // -- Wire daemon connection status changes to broadcast to frontend --
+  // Root cause: the initial GET /api/system/health returns a daemons[] array, but no
+  // subsequent WebSocket events were ever emitted when connection state changed, so the
+  // frontend's daemon status stayed permanently stale after the first load.  This wires
+  // every DaemonConnection state-change into a system:health broadcast so the UI reflects
+  // live connected/disconnected transitions without a page reload.
+  {
+    const { setOnDaemonStatusChange, getDaemonPoolStatus } = await import('../providers/daemon-connection.js')
+    const { getConfig } = await import('../core/config-manager.js')
+    setOnDaemonStatusChange(async () => {
+      try {
+        const config = await getConfig()
+        const hosts = config.hosts
+        if (!hosts || Object.keys(hosts).length === 0) return
+
+        const activeMap = new Map(getDaemonPoolStatus().map(d => [d.host, d]))
+        const daemons = Object.entries(hosts).map(([key, def]) => ({
+          host: key,
+          label: def.label ?? def.hostname,
+          connected: activeMap.get(key)?.connected ?? false,
+        }))
+
+        // Persist daemons onto systemHealth so all subsequent broadcasts include it.
+        systemHealth.daemons = daemons
+        broadcastEvent('system:health', systemHealth)
+      } catch { /* config not ready yet */ }
+    })
+  }
 
   // -- Dependency unblock: emit task:unblocked when a completed task frees dependents --
   bus.subscribe('dependency-unblock', async (event) => {
