@@ -110,10 +110,8 @@ const SS_SESSION_KEY_LEGACY = 'open-walnut-home-session-panel';
 
 const SESSION_WIDTH_BY_COUNT = [0, 40, 65]; // 1=40%, 2=65% (max width)
 
-const MAX_SESSION_SLOTS = 2; // Always keep up to 2 sessions in queue (tab bar handles visibility)
-
-function addSessionColumn(cols: string[], id: string, triageOpen: boolean, _maxColumns: number): string[] {
-  const max = triageOpen ? MAX_SESSION_SLOTS - 1 : MAX_SESSION_SLOTS;
+function addSessionColumn(cols: string[], id: string, triageOpen: boolean, maxColumns: number): string[] {
+  const max = triageOpen ? maxColumns - 1 : maxColumns;
   // Deduplicate: remove existing, then push to rightmost
   const filtered = cols.filter(c => c !== id);
   const next = [...filtered, id];
@@ -197,13 +195,10 @@ export function MainPage({ visible = true, navigateRef }: MainPageProps) {
   // Task ID for filtered triage panel (null = show all)
   const [triageTaskId, setTriageTaskId] = useState<string | null>(null);
 
-  // Session panel mode (1 / 2 / auto)
+  // Session panel mode (1 / 2 / auto) — controls how many sessions shown side by side
   const { effectiveMaxPanels } = useSessionPanelMode();
   const maxPanelsRef = useRef(effectiveMaxPanels);
   maxPanelsRef.current = effectiveMaxPanels;
-
-  // Active tab index for 1-panel mode when multiple sessions exist
-  const [activeColIdx, setActiveColIdx] = useState(0);
 
   // Session quick-start state (opened via /session command)
   const [pathSelectorOpen, setPathSelectorOpen] = useState(false);
@@ -211,20 +206,6 @@ export function MainPage({ visible = true, navigateRef }: MainPageProps) {
 
   // Set of session IDs currently open in columns — for active pill indicators
   const openSessionIdSet = useMemo(() => new Set(sessionColumns), [sessionColumns]);
-
-  // Keep activeColIdx valid: clamp when columns shrink, jump to newest when added
-  const prevColLenRef = useRef(sessionColumns.length);
-  useEffect(() => {
-    const prev = prevColLenRef.current;
-    prevColLenRef.current = sessionColumns.length;
-    if (sessionColumns.length === 0) return;
-    if (sessionColumns.length > prev) {
-      // New session added — jump to last
-      setActiveColIdx(sessionColumns.length - 1);
-    } else if (activeColIdx >= sessionColumns.length) {
-      setActiveColIdx(sessionColumns.length - 1);
-    }
-  }, [sessionColumns.length, activeColIdx]);
 
   // Detect pending ask_question tool call from chat messages
   const pendingQuestion = useMemo(() => {
@@ -284,18 +265,17 @@ export function MainPage({ visible = true, navigateRef }: MainPageProps) {
     document.addEventListener('mouseup', onUp);
   }, [sessionPanel.panelRef]);
 
-  // Graduated session area width — only auto-set when visible column count increases
-  // (don't override user's manual drag on decrease or same count)
+  // Graduated session area width — use total session count (not visible) so tabbed
+  // sessions still get full width. Only auto-set when count increases.
   const prevColCountRef = useRef(0);
   useEffect(() => {
-    const visibleSessionCols = Math.min(sessionColumns.length, effectiveMaxPanels);
-    const count = visibleSessionCols + (triagePanelOpen ? 1 : 0);
+    const count = sessionColumns.length + (triagePanelOpen ? 1 : 0);
     if (count === prevColCountRef.current) return;
     const prev = prevColCountRef.current;
     prevColCountRef.current = count;
     // Only auto-set width when opening panels (0→1, 1→2), not when closing
     if (count > prev && count > 0) sessionPanel.setPct(SESSION_WIDTH_BY_COUNT[Math.min(count, 2)]);
-  }, [sessionColumns.length, effectiveMaxPanels, triagePanelOpen, sessionPanel.setPct]);
+  }, [sessionColumns.length, triagePanelOpen, sessionPanel.setPct]);
 
   // Keep focusedTask in sync with latest data from tasks array (handles WS updates from other sources)
   useEffect(() => {
@@ -949,78 +929,47 @@ export function MainPage({ visible = true, navigateRef }: MainPageProps) {
             />
           </div>
         )}
-        {sessionColumns.length > 0 && (() => {
-          const showTabs = sessionColumns.length > effectiveMaxPanels;
-          const safeIdx = Math.min(activeColIdx, sessionColumns.length - 1);
-          const visibleColumns = showTabs
-            ? [sessionColumns[safeIdx]]
-            : sessionColumns;
-
-          return (<div className="session-columns-wrapper">
-            {showTabs && (
-              <div className="session-tab-bar">
-                {sessionColumns.map((sid, idx) => (
-                  <button
-                    key={sid}
-                    className={`session-tab${idx === safeIdx ? ' active' : ''}`}
-                    onClick={() => setActiveColIdx(idx)}
-                  >
-                    <span className="session-tab-label">
-                      {sid.startsWith('pending:') ? 'Starting…' : `Session ${idx + 1}`}
-                    </span>
-                    <span
-                      className="session-tab-close"
-                      onClick={(e) => { e.stopPropagation(); handleCloseSession(sid); }}
-                    >×</span>
-                  </button>
-                ))}
-              </div>
-            )}
-            <div style={{ display: 'flex', flex: 1, minHeight: 0 }}>
-              {visibleColumns.map((sid, vIdx) => {
-                const realIdx = showTabs ? safeIdx : sessionColumns.indexOf(sid);
-                const needsDivider = (showTabs ? false : realIdx > 0) || (vIdx === 0 && triagePanelOpen);
-                const isPending = sid.startsWith('pending:');
-                const qsMeta = isPending ? pendingQuickStartMetaRef.current : null;
-                const forkMeta = isPending ? pendingForkMetaRef.current : null;
-                const pendingMeta = (qsMeta?.id === sid ? qsMeta : null) ?? (forkMeta?.id === sid ? forkMeta : null);
-                const isForkPending = forkMeta?.id === sid;
-                const totalCols = visibleColumns.length + (triagePanelOpen ? 1 : 0);
-                const colIdx = vIdx + (triagePanelOpen ? 1 : 0);
-                const colStyle: React.CSSProperties = totalCols >= 2
-                  ? { flex: `0 0 ${colIdx === 0 ? colSplitPct : (100 - colSplitPct)}%` }
-                  : {};
-                return (<Fragment key={sid}>
-                  {needsDivider && <div className="session-col-resize-handle" onMouseDown={handleColSplitStart} />}
-                  <div className="main-page-session-column" style={colStyle}>
-                    {isPending && pendingMeta ? (
-                      <PendingSessionPanel
-                        taskId={sid}
-                        realTaskId={'realTaskId' in pendingMeta ? (pendingMeta as { realTaskId?: string }).realTaskId : undefined}
-                        cwd={pendingMeta.cwd}
-                        host={pendingMeta.host}
-                        hostLabel={'hostLabel' in pendingMeta ? (pendingMeta as { hostLabel?: string }).hostLabel : undefined}
-                        label={isForkPending ? 'Forking session...' : undefined}
-                        onClose={() => handleCloseSession(sid)}
-                      />
-                    ) : (
-                      <SessionPanel
-                        sessionId={sid}
-                        onClose={handleCloseSession}
-                        onTaskClick={handleFocusTaskById}
-                        onSessionClick={handleSessionClick}
-                        onSessionReplaced={handleSessionReplaced}
-                        onForkPending={handleForkPending}
-                        onForkResolved={handleForkResolved}
-                        onForkFailed={handleForkFailed}
-                      />
-                    )}
-                  </div>
-                </Fragment>);
-              })}
+        {sessionColumns.map((sid, idx) => {
+          const needsDivider = idx > 0 || triagePanelOpen;
+          const isPending = sid.startsWith('pending:');
+          const qsMeta = isPending ? pendingQuickStartMetaRef.current : null;
+          const forkMeta = isPending ? pendingForkMetaRef.current : null;
+          const pendingMeta = (qsMeta?.id === sid ? qsMeta : null) ?? (forkMeta?.id === sid ? forkMeta : null);
+          const isForkPending = forkMeta?.id === sid;
+          // Column split: when 2+ columns, first gets splitPct%, rest share remainder
+          const totalCols = sessionColumns.length + (triagePanelOpen ? 1 : 0);
+          const colIdx = idx + (triagePanelOpen ? 1 : 0);
+          const colStyle: React.CSSProperties = totalCols >= 2
+            ? { flex: `0 0 ${colIdx === 0 ? colSplitPct : (100 - colSplitPct)}%` }
+            : {};
+          return (<Fragment key={sid}>
+            {needsDivider && <div className="session-col-resize-handle" onMouseDown={handleColSplitStart} />}
+            <div className="main-page-session-column" style={colStyle}>
+              {isPending && pendingMeta ? (
+                <PendingSessionPanel
+                  taskId={sid}
+                  realTaskId={'realTaskId' in pendingMeta ? (pendingMeta as { realTaskId?: string }).realTaskId : undefined}
+                  cwd={pendingMeta.cwd}
+                  host={pendingMeta.host}
+                  hostLabel={'hostLabel' in pendingMeta ? (pendingMeta as { hostLabel?: string }).hostLabel : undefined}
+                  label={isForkPending ? 'Forking session...' : undefined}
+                  onClose={() => handleCloseSession(sid)}
+                />
+              ) : (
+                <SessionPanel
+                  sessionId={sid}
+                  onClose={handleCloseSession}
+                  onTaskClick={handleFocusTaskById}
+                  onSessionClick={handleSessionClick}
+                  onSessionReplaced={handleSessionReplaced}
+                  onForkPending={handleForkPending}
+                  onForkResolved={handleForkResolved}
+                  onForkFailed={handleForkFailed}
+                />
+              )}
             </div>
-          </div>);
-        })()}
+          </Fragment>);
+        })}
       </div>
 
       </div>{/* end .main-page-content-row */}

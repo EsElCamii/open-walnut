@@ -4,11 +4,18 @@ import { SectionCard } from '../inputs/SectionCard';
 import { ListEditor } from '../inputs/ListEditor';
 import { useTheme, type ThemePreference } from '@/hooks/useTheme';
 import { useFocusBarContext } from '@/contexts/FocusBarContext';
+import { useSessionPanelMode, type SessionPanelMode } from '@/hooks/useSessionPanelMode';
 
 const THEME_OPTIONS: { value: ThemePreference; label: string }[] = [
   { value: 'system', label: 'System' },
   { value: 'light', label: 'Light' },
   { value: 'dark', label: 'Dark' },
+];
+
+const PANEL_OPTIONS: { value: SessionPanelMode; label: string }[] = [
+  { value: '1', label: '1 Panel' },
+  { value: '2', label: '2 Panels' },
+  { value: 'auto', label: 'Auto' },
 ];
 
 interface Props {
@@ -19,6 +26,7 @@ interface Props {
 export function GeneralSection({ config, onSave }: Props) {
   const { theme, setTheme } = useTheme();
   const focusBar = useFocusBarContext();
+  const { mode: panelMode, setMode: setPanelMode } = useSessionPanelMode();
   const [userName, setUserName] = useState(config.user?.name ?? '');
   const [defaultPriority, setDefaultPriority] = useState<TaskPriority>(config.defaults?.priority ?? 'none');
   const [defaultCategory, setDefaultCategory] = useState(config.defaults?.category ?? '');
@@ -68,6 +76,25 @@ export function GeneralSection({ config, onSave }: Props) {
           Show Focus Bar
           <span className="text-sm text-muted" style={{ marginLeft: 4 }}>&mdash; pinned task dock at the bottom</span>
         </label>
+      </div>
+
+      <div className="form-group">
+        <label>Session Panels</label>
+        <div className="theme-picker">
+          {PANEL_OPTIONS.map((opt) => (
+            <button
+              key={opt.value}
+              type="button"
+              className={`theme-picker-btn${panelMode === opt.value ? ' active' : ''}`}
+              onClick={() => setPanelMode(opt.value)}
+            >
+              {opt.label}
+            </button>
+          ))}
+        </div>
+        <p className="text-sm text-muted" style={{ margin: '4px 0 0' }}>
+          Auto adjusts based on screen width
+        </p>
       </div>
 
       <div className="form-group">
