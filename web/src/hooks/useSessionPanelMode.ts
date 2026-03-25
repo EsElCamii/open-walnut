@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useSyncExternalStore } from 'react';
+import { useState, useEffect, useCallback, useSyncExternalStore, useRef } from 'react';
 import { fetchConfig, updateConfig } from '@/api/config';
 import { useEvent } from '@/hooks/useWebSocket';
 
@@ -29,17 +29,15 @@ const SELF_CHANGE_COOLDOWN = 3000;
 
 export function useSessionPanelMode() {
   const [mode, setModeState] = useState<SessionPanelMode>('auto');
-  const [loaded, setLoaded] = useState(false);
   const isWide = useSyncExternalStore(subscribeMedia, getMediaSnapshot);
-  const lastSelfChangeRef = { current: 0 };
+  const lastSelfChangeRef = useRef(0);
 
   // Fetch from config on mount
   useEffect(() => {
     fetchConfig().then(c => {
       const v = c.ui?.session_panels;
       if (isValidMode(v)) setModeState(v);
-      setLoaded(true);
-    }).catch(() => setLoaded(true));
+    }).catch(() => {});
   }, []);
 
   // Sync when config changes (from other tabs/sources)
@@ -62,5 +60,5 @@ export function useSessionPanelMode() {
     mode === '2' ? 2 :
     isWide ? 2 : 1;
 
-  return { mode, setMode, effectiveMaxPanels, loaded } as const;
+  return { mode, setMode, effectiveMaxPanels } as const;
 }
