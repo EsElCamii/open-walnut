@@ -25,6 +25,25 @@ export function entityRefsToHtml(text: string): string {
   return result;
 }
 
+/**
+ * Convert entity reference XML tags to markdown links.
+ * Used by NotesEditor to preprocess pasted/loaded content containing raw XML refs.
+ * <task-ref id="X" label="Y"/> → [Y](/tasks/X)
+ * <session-ref id="X" label="Y"/> → [Y](/sessions?id=X)
+ */
+export function entityRefsToMarkdownLinks(text: string): string {
+  let result = text;
+  result = result.replace(TASK_REF_RE, (_match, id: string, label?: string) => {
+    const display = (label || id).replace(/[\[\]]/g, '\\$&');
+    return `[${display}](/tasks/${id})`;
+  });
+  result = result.replace(SESSION_REF_RE, (_match, id: string, label?: string) => {
+    const display = (label || id).replace(/[\[\]]/g, '\\$&');
+    return `[${display}](/sessions?id=${id})`;
+  });
+  return result;
+}
+
 /** DOMPurify attributes preserved for entity ref and image rendering */
 const SANITIZE_ATTRS = ['data-task-id', 'data-session-id', 'data-lightbox-src', 'loading'];
 

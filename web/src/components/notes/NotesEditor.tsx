@@ -8,6 +8,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { useEditor, EditorContent } from '@tiptap/react';
 import type { Editor } from '@tiptap/core';
+import { Selection } from '@tiptap/pm/state';
 import StarterKit from '@tiptap/starter-kit';
 import TaskList from '@tiptap/extension-task-list';
 import TaskItem from '@tiptap/extension-task-item';
@@ -16,6 +17,7 @@ import Image from '@tiptap/extension-image';
 import Link from '@tiptap/extension-link';
 import { Markdown } from 'tiptap-markdown';
 import { uploadNoteImage } from '@/api/notes';
+import { entityRefsToMarkdownLinks } from '@/utils/markdown';
 import { SlashCommandExtension } from './slash-commands/SlashCommandExtension';
 import { SlashCommandPortal } from './slash-commands/SlashCommandPortal';
 import type { SlashCommandState } from './slash-commands/types';
@@ -37,6 +39,27 @@ interface NotesEditorProps {
   /** Called when user clicks a task reference link in the editor */
   onTaskClick?: (taskId: string) => void;
 }
+
+/**
+ * TaskList with tight attribute — fixes extra blank lines between checklist items.
+ * MarkdownTightLists (from tiptap-markdown) only patches bulletList/orderedList
+ * but misses taskList, so we replicate the same tight-attribute logic here.
+ */
+const TightTaskList = TaskList.extend({
+  addAttributes() {
+    return {
+      ...this.parent?.(),
+      tight: {
+        default: true,
+        parseHTML: element =>
+          element.getAttribute('data-tight') === 'true' || !element.querySelector('p'),
+        renderHTML: attributes => ({
+          'data-tight': attributes.tight ? 'true' : null,
+        }),
+      },
+    };
+  },
+});
 
 /** Link extension: adds class="task-link" to /tasks/ hrefs, strips target for internal links */
 const TaskAwareLink = Link.extend({
@@ -229,7 +252,7 @@ export function NotesEditor({ content, onDirty, placeholder, className, autoFocu
         // Disable built-in link — we use TaskAwareLink with custom renderHTML
         link: false,
       }),
-      TaskList,
+      TightTaskList,
       TaskItem.configure({
         nested: true,
       }),
@@ -254,7 +277,7 @@ export function NotesEditor({ content, onDirty, placeholder, className, autoFocu
         onStateChange: setSlashState,
       }),
     ],
-    content,
+    content: entityRefsToMarkdownLinks(content),
     autofocus: autoFocus ? 'end' : false,
     onUpdate: ({ editor }) => {
       if (isExternalUpdate.current) return;
@@ -299,6 +322,16 @@ export function NotesEditor({ content, onDirty, placeholder, className, autoFocu
             return true;
           }
         }
+        // Paste text containing entity refs → convert to markdown links
+        {
+          const clipText = event.clipboardData?.getData('text/plain') ?? '';
+          if ((clipText.includes('<task-ref') || clipText.includes('<session-ref')) && editorRef.current) {
+            event.preventDefault();
+            const converted = entityRefsToMarkdownLinks(clipText);
+            editorRef.current.commands.insertContent(converted);
+            return true;
+          }
+        }
         return false;
       },
       handleDrop: (view, event) => {
@@ -315,8 +348,43 @@ export function NotesEditor({ content, onDirty, placeholder, className, autoFocu
         }
         return false;
       },
-      // Per-line Tab: sink item first (with children), then detach children as siblings
+      // ArrowUp/Down fix + per-line Tab indent
       handleKeyDown: (_view, event) => {
+        // Fix ArrowUp skipping nested children of previous sibling.
+        // Browser jumps from item 4 to item 1, skipping nested items 2-3.
+        if (event.key === 'ArrowUp' && editorRef.current) {
+          if (!_view.endOfTextblock('up')) return false;
+          const { state } = _view;
+          const { $from } = state.selection;
+          let liDepth = 0;
+          for (let d = $from.depth; d > 0; d--) {
+            const n = $from.node(d).type.name;
+            if (n === 'taskItem' || n === 'listItem') { liDepth = d; break; }
+          }
+          if (!liDepth) return false;
+          const listDepth = liDepth - 1;
+          const itemIdx = $from.index(listDepth);
+          if (itemIdx === 0) return false;
+          // Check if previous sibling has nested list children
+          const prevItem = $from.node(listDepth).child(itemIdx - 1);
+          let hasNested = false;
+          for (let i = prevItem.childCount - 1; i >= 0; i--) {
+            const t = prevItem.child(i).type.name;
+            if (t === 'taskList' || t === 'bulletList' || t === 'orderedList') {
+              hasNested = true; break;
+            }
+          }
+          if (!hasNested) return false;
+          // Move to end of last nested child instead of skipping to parent
+          const itemStart = $from.before(liDepth);
+          const sel = Selection.near(state.doc.resolve(Math.max(0, itemStart - 1)), -1);
+          if (sel && sel.from < itemStart) {
+            _view.dispatch(state.tr.setSelection(sel).scrollIntoView());
+            return true;
+          }
+          return false;
+        }
+
         if (event.key !== 'Tab') return false;
         const { $from } = _view.state.selection;
         let listItemType: string | null = null;
@@ -357,11 +425,12 @@ export function NotesEditor({ content, onDirty, placeholder, className, autoFocu
   useEffect(() => {
     if (!editor || editing) return;
     const currentMd = editor.storage.markdown.getMarkdown();
-    if (currentMd !== content) {
+    const preprocessed = entityRefsToMarkdownLinks(content);
+    if (currentMd !== preprocessed) {
       // Save cursor position before replacing doc
       const { from, to } = editor.state.selection;
       isExternalUpdate.current = true;
-      editor.commands.setContent(content, false);
+      editor.commands.setContent(preprocessed, false);
       // Restore cursor, clamped to new doc size
       const maxPos = editor.state.doc.content.size;
       editor.commands.setTextSelection({
