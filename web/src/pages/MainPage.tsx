@@ -109,7 +109,7 @@ const SS_SESSION_KEY_LEGACY = 'open-walnut-home-session-panel';
 
 // ── Session column queue helpers ──
 
-const SESSION_WIDTH_BY_COUNT = [0, 40, 65]; // 1=40%, 2=65% (max width)
+const SESSION_WIDTH_BY_COUNT = [0, 65, 65]; // 1=65%, 2=65% (max width)
 
 function addSessionColumn(cols: string[], id: string, triageOpen: boolean, maxColumns: number): string[] {
   const max = triageOpen ? maxColumns - 1 : maxColumns;
@@ -1012,6 +1012,7 @@ export function MainPage({ visible = true, navigateRef }: MainPageProps) {
           onMoveTask={moveTask}
           onReparentTask={reparentTask}
           onOpenSession={handleToggleSession}
+          onTaskClick={handleFocusTaskById}
           openSessionIds={openSessionIdSet}
           onOpenTriageForTask={handleOpenTriageForTask}
           onPinTask={focusBar.pin}

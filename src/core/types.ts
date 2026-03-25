@@ -298,6 +298,10 @@ export interface Config {
     /** Show "UI ONLY" agent error messages. Default: false. */
     show_ui_only_agent_error?: boolean;
   };
+  ui?: {
+    /** How many session panels to show side-by-side: '1', '2', or 'auto' (breakpoint-driven). */
+    session_panels?: '1' | '2' | 'auto';
+  };
   /** API keys for remote client authentication (iOS app, etc.) */
   api_keys?: ApiKeyEntry[];
   /** Registered push notification tokens for mobile clients */
@@ -409,8 +413,8 @@ export interface ChatHistoryStore {
   entries?: ChatEntry[];
 }
 
-export type ProcessStatus = 'running' | 'idle' | 'stopped';
-export type WorkStatus = 'in_progress' | 'agent_complete' | 'await_human_action' | 'completed' | 'error';
+export type ProcessStatus = 'running' | 'idle' | 'stopped' | 'error';
+export type WorkStatus = 'in_progress' | 'agent_complete' | 'await_human_action' | 'completed';
 export type SessionMode = 'bypass' | 'accept' | 'default' | 'plan';
 export type SessionProvider = 'cli' | 'sdk' | 'embedded';
 export type SessionType = 'interactive' | 'triage' | 'hook' | 'cron' | 'subagent';
@@ -456,6 +460,6 @@ export interface SessionRecord {
   archive_reason?: string;
   /** Plan text stored on execution session (from the archived plan session). */
   planContent?: string;
-  /** Error message when work_status is 'error' — persisted for post-mortem display. */
+  /** Error message when process_status is 'error' — persisted for post-mortem display. */
   errorMessage?: string;
 }

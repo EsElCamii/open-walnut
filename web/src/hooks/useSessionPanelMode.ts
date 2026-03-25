@@ -1,17 +1,10 @@
-import { useState, useEffect, useSyncExternalStore } from 'react';
+import { useState, useEffect, useCallback, useSyncExternalStore } from 'react';
+import { fetchConfig, updateConfig } from '@/api/config';
+import { useEvent } from '@/hooks/useWebSocket';
 
 export type SessionPanelMode = '1' | '2' | 'auto';
 
-const STORAGE_KEY = 'open-walnut-session-panel-mode';
 const AUTO_BREAKPOINT = 1600; // px — Mac 14" is 1512, Mac 16" is 1728
-
-function getStoredMode(): SessionPanelMode {
-  try {
-    const v = localStorage.getItem(STORAGE_KEY);
-    if (v === '1' || v === '2' || v === 'auto') return v;
-  } catch { /* private browsing */ }
-  return 'auto';
-}
 
 // matchMedia listener for auto breakpoint
 const mql = typeof window !== 'undefined'
@@ -27,22 +20,41 @@ function getMediaSnapshot(): boolean {
   return mql?.matches ?? true;
 }
 
+function isValidMode(v: unknown): v is SessionPanelMode {
+  return v === '1' || v === '2' || v === 'auto';
+}
+
+// How long to ignore config:changed events after we caused them (ms)
+const SELF_CHANGE_COOLDOWN = 3000;
+
 export function useSessionPanelMode() {
-  const [mode, setModeState] = useState<SessionPanelMode>(getStoredMode);
+  const [mode, setModeState] = useState<SessionPanelMode>('auto');
+  const [loaded, setLoaded] = useState(false);
   const isWide = useSyncExternalStore(subscribeMedia, getMediaSnapshot);
+  const lastSelfChangeRef = { current: 0 };
 
-  const setMode = (m: SessionPanelMode) => {
-    try { localStorage.setItem(STORAGE_KEY, m); } catch { /* private browsing */ }
-    setModeState(m);
-  };
-
-  // Sync across tabs
+  // Fetch from config on mount
   useEffect(() => {
-    const onStorage = (e: StorageEvent) => {
-      if (e.key === STORAGE_KEY) setModeState(getStoredMode());
-    };
-    window.addEventListener('storage', onStorage);
-    return () => window.removeEventListener('storage', onStorage);
+    fetchConfig().then(c => {
+      const v = c.ui?.session_panels;
+      if (isValidMode(v)) setModeState(v);
+      setLoaded(true);
+    }).catch(() => setLoaded(true));
+  }, []);
+
+  // Sync when config changes (from other tabs/sources)
+  useEvent('config:changed', useCallback(() => {
+    if (Date.now() - lastSelfChangeRef.current < SELF_CHANGE_COOLDOWN) return;
+    fetchConfig().then(c => {
+      const v = c.ui?.session_panels;
+      if (isValidMode(v)) setModeState(v);
+    }).catch(() => {});
+  }, []));
+
+  const setMode = useCallback((m: SessionPanelMode) => {
+    setModeState(m);
+    lastSelfChangeRef.current = Date.now();
+    updateConfig({ ui: { session_panels: m } }).catch(() => {});
   }, []);
 
   const effectiveMaxPanels: number =
@@ -50,5 +62,5 @@ export function useSessionPanelMode() {
     mode === '2' ? 2 :
     isWide ? 2 : 1;
 
-  return { mode, setMode, effectiveMaxPanels } as const;
+  return { mode, setMode, effectiveMaxPanels, loaded } as const;
 }
