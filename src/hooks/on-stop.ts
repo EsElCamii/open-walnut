@@ -94,7 +94,7 @@ function updateSessionStore(sessionId: string): void {
       if (!Array.isArray(store.sessions)) return;
 
       for (const session of store.sessions) {
-        if (session.claudeSessionId === sessionId && session.work_status !== 'completed' && session.work_status !== 'error') {
+        if (session.claudeSessionId === sessionId && session.work_status !== 'completed' && session.process_status !== 'error') {
           session.process_status = 'stopped';
           // Process stopping = turn completed, NOT work completed.
           // Only the human (REST PATCH) can set 'completed'.

@@ -92,8 +92,8 @@ export function registerSessionChatRpc(): void {
     // Check if this is an embedded session — route to SubagentRunner instead of CLI queue
     const record = await getSessionByClaudeId(data.sessionId)
 
-    // Remote image transfer is handled by RemoteSessionManager.prepareOutbound() inside send().
-    // No manual SCP/SSH transfer needed here.
+    // Remote image transfer: RemoteSessionManager.prepareOutbound() uploads local images
+    // and rewrites paths inside start() and writeMessage(). No manual transfer needed here.
 
     if (record?.provider === 'embedded') {
       const messageId = `emb-${Date.now()}`

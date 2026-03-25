@@ -32,7 +32,8 @@ import { isProcessAliveAsync } from '../utils/process.js'
 import { SESSION_STREAMS_DIR } from '../constants.js'
 import { log } from '../logging/index.js'
 import { markProcessing, removeProcessed, revertToPending, loadQueue, getAllSessionsWithPending } from '../core/session-message-queue.js'
-// Image transfer for remote sessions handled by RemoteSessionManager.prepareOutbound()
+// Image transfer for remote sessions: RemoteSessionManager.prepareOutbound() uploads
+// local images via daemon and rewrites paths inside start() and writeMessage().
 import type { SshTarget } from './session-io.js'
 import { createSessionManager, registerSessionManager, unregisterSessionManager } from './session-manager.js'
 import type { SessionManager } from './session-manager.js'
@@ -628,8 +629,9 @@ export class ClaudeCodeSession {
     // Race window: theoretically the server could crash between setting work_status
     // and flushing sessions.json to disk. In practice this window is sub-millisecond.
     // Worst case: one extra triage notification — acceptable.
-    const terminalStatuses: WorkStatus[] = ['agent_complete', 'await_human_action', 'completed', 'error']
-    session.resultEmitted = terminalStatuses.includes(record.work_status as WorkStatus)
+    const terminalWorkStatuses: WorkStatus[] = ['agent_complete', 'await_human_action', 'completed']
+    session.resultEmitted = terminalWorkStatuses.includes(record.work_status as WorkStatus)
+      || record.process_status === 'error'
 
     // Create the appropriate session manager for attach:
     //   - Local sessions → LocalSessionManager (FIFO recovery + file tailing)
@@ -1216,8 +1218,8 @@ export class ClaudeCodeSession {
             : undefined
           if (rawModel) {
             this._initModel = rawModel
-            // Extract short model ID for display (e.g. "claude-opus-4-6")
-            const shortModel = rawModel.replace(/^.*\./, '').replace(/[-_]v\d+.*$/, '') || rawModel
+            // Extract short model ID for display (e.g. "claude-opus-4-6" or "claude-opus-4-6[1m]")
+            const shortModel = rawModel.replace(/^.*\./, '').replace(/[-_]v\d+(\[1m\])?$/, '$1') || rawModel
             this._model = shortModel
           } else if (typeof sys.model === 'string' && sys.model) {
             // sanitizeInitModel rejected the string — log so we can diagnose.
@@ -1228,7 +1230,7 @@ export class ClaudeCodeSession {
             // eslint-disable-next-line no-control-regex
             const fallback = sys.model.replace(/\x1b\[[0-9;]*[A-Za-z]/g, '')
             this._initModel = fallback
-            const shortModel = fallback.replace(/^.*\./, '').replace(/[-_]v\d+.*$/, '') || fallback
+            const shortModel = fallback.replace(/^.*\./, '').replace(/[-_]v\d+(\[1m\])?$/, '$1') || fallback
             this._model = shortModel
           }
 
@@ -1936,11 +1938,11 @@ export class SessionRunner {
             if (!isProcessStillAlive) {
               import('../core/session-tracker.js').then(({ updateSessionRecord }) => {
                 updateSessionRecord(sessionId, {
-                  process_status: 'stopped',
-                  work_status: isError ? 'error' : 'agent_complete',
+                  process_status: isError ? 'error' : 'stopped',
+                  work_status: isError ? undefined : 'agent_complete',
+                  errorMessage: isError ? errorMessage : undefined,
                   activity: undefined,
                   last_status_change: new Date().toISOString(),
-                  ...(errorMessage ? { errorMessage } : {}),
                 }).catch(() => {})
               }).catch(() => {})
             } else {
@@ -1949,11 +1951,11 @@ export class SessionRunner {
               // Previously left as 'running', which bypassed idle timeout checks.
               import('../core/session-tracker.js').then(({ updateSessionRecord }) => {
                 updateSessionRecord(sessionId, {
-                  process_status: 'idle',
-                  work_status: isError ? 'error' : 'agent_complete',
+                  process_status: isError ? 'error' : 'idle',
+                  work_status: isError ? undefined : 'agent_complete',
+                  errorMessage: isError ? errorMessage : undefined,
                   activity: undefined,
                   last_status_change: new Date().toISOString(),
-                  ...(errorMessage ? { errorMessage } : {}),
                 }).catch(() => {})
               }).catch(() => {})
             }
@@ -2087,8 +2089,7 @@ export class SessionRunner {
    */
   private async killOrphanedSessionProcesses(): Promise<void> {
     try {
-      const { listSessions } = await import('../core/session-tracker.js')
-      const { TERMINAL_WORK_STATUSES } = await import('../core/session-tracker.js')
+      const { listSessions, isTerminalSession } = await import('../core/session-tracker.js')
       const sessions = await listSessions()
 
       let killed = 0
@@ -2096,10 +2097,9 @@ export class SessionRunner {
         if (s.pid == null) continue
         if (s.provider === 'embedded' || s.provider === 'sdk') continue
 
-        // Kill processes for sessions that are stopped or in terminal state
-        const shouldBeDeadByStatus = s.process_status === 'stopped'
-        const shouldBeDeadByWork = TERMINAL_WORK_STATUSES.has(s.work_status)
-        if (!shouldBeDeadByStatus && !shouldBeDeadByWork) continue
+        // Kill processes for sessions that are stopped/error or in terminal state
+        const shouldBeDeadByStatus = s.process_status === 'stopped' || s.process_status === 'error'
+        if (!shouldBeDeadByStatus && !isTerminalSession(s)) continue
 
         const processName = s.host ? 'ssh' : 'claude'
         if (!await isProcessAliveAsync(s.pid, processName)) continue
@@ -2375,9 +2375,8 @@ export class SessionRunner {
       }
     }
 
-    // Transfer local images to remote host before spawning session.
-    // Image transfer for remote sessions is handled by RemoteSessionManager.prepareOutbound()
-    // inside transport.start(). No need to pre-transfer via SCP.
+    // Local images are uploaded to the remote host by RemoteSessionManager.prepareOutbound()
+    // called inside start() and writeMessage(). No manual SCP transfer needed.
 
     const sessionTitle = session.pendingTitle ?? message.slice(0, 120)
     // For forks: pass source session ID as resumeSessionId with forkSession=true.
@@ -2984,8 +2983,6 @@ export class SessionRunner {
             }
           }
 
-          // Image transfer handled by RemoteSessionManager.prepareOutbound() inside transport.start()
-
           log.session.info('resuming session via CLI', { sessionId, taskId: record.taskId, messageLength: combined.length, model: resolvedModel })
           session.send(combined, record.cwd ?? undefined, sessionId, resolvedMode ?? mode, resolvedModel, undefined, record.host ?? undefined, sshTarget)
 
@@ -3038,8 +3035,6 @@ export class SessionRunner {
           log.session.warn('failed to resolve host config for resume (existing target)', { sessionId, host: resumeHost })
         }
       }
-
-      // Image transfer handled by RemoteSessionManager.prepareOutbound() inside transport.start()
 
       // Resume the session with the combined message (with optional mode/model override)
       log.session.info('resuming session via CLI (existing target)', { sessionId, taskId: targetSession.taskId, messageLength: combined.length, host: resumeHost, model: resolvedModel })

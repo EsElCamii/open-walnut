@@ -482,7 +482,7 @@ describe('Sequential follow-up messages', () => {
           if (res.status === 200) {
             const body = await res.json() as Record<string, unknown>
             const session = body.session as Record<string, unknown>
-            if (session.work_status === 'agent_complete' || session.work_status === 'error') break
+            if (session.work_status === 'agent_complete' || session.process_status === 'error') break
           }
           await new Promise(r => setTimeout(r, 300))
         }

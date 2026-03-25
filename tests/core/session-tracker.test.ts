@@ -8,11 +8,17 @@ let tmpDir: string;
 vi.mock('../../src/constants.js', () => createMockConstants());
 vi.mock('../../src/utils/process.js', () => ({
   isProcessAlive: () => true,
+  isProcessAliveAsync: async () => true,
+}));
+vi.mock('../../src/providers/daemon-connection.js', () => ({
+  isDaemonConnected: () => true,
+  getDaemonDisconnectedSince: () => null,
 }));
 
 import {
   createSessionRecord,
   listSessions,
+  listNonTerminalSessions,
   getSessionByClaudeId,
   getSessionsForTask,
   updateSessionRecord,
@@ -22,6 +28,7 @@ import {
   getActiveSessionsByHost,
   getAllAliveSessionsByHost,
   checkSessionLimit,
+  isTerminalSession,
 } from '../../src/core/session-tracker.js';
 import { WALNUT_HOME } from '../../src/constants.js';
 
@@ -523,5 +530,141 @@ describe('legacy status migration', () => {
     expect(sessions[0].process_status).toBe('stopped');
     expect(sessions[0].work_status).toBe('agent_complete'); // idle → agent_complete
     expect(sessions[0]).not.toHaveProperty('status');
+  });
+});
+
+// ── Test 1: isTerminalSession recognizes process_status:'error' ──────────────
+
+describe('isTerminalSession', () => {
+  it('returns true when process_status is error', () => {
+    expect(isTerminalSession({ process_status: 'error', work_status: 'in_progress' })).toBe(true);
+  });
+
+  it('returns true when work_status is completed', () => {
+    expect(isTerminalSession({ process_status: 'stopped', work_status: 'completed' })).toBe(true);
+  });
+
+  it('returns false when session is actively running', () => {
+    expect(isTerminalSession({ process_status: 'running', work_status: 'in_progress' })).toBe(false);
+  });
+
+  it('returns false when session is idle but not in a terminal state', () => {
+    expect(isTerminalSession({ process_status: 'stopped', work_status: 'agent_complete' })).toBe(false);
+  });
+
+  it('returns false for await_human_action', () => {
+    expect(isTerminalSession({ process_status: 'idle', work_status: 'await_human_action' })).toBe(false);
+  });
+});
+
+// ── Test 2: Legacy data migration work_status:'error' → process_status:'error' ──
+
+describe('legacy work_status:error migration', () => {
+  it('migrates work_status:error to process_status:error on read', async () => {
+    const { SESSIONS_FILE } = await import('../../src/constants.js');
+    await fsp.mkdir(path.dirname(SESSIONS_FILE), { recursive: true });
+
+    const legacyStore = {
+      version: 2,
+      sessions: [{
+        claudeSessionId: 'err-session-1',
+        taskId: 'task-err',
+        project: 'err-proj',
+        process_status: 'stopped',
+        work_status: 'error',
+        mode: 'default',
+        type: 'interactive',
+        startedAt: '2024-01-01T00:00:00.000Z',
+        lastActiveAt: '2024-01-02T00:00:00.000Z',
+        messageCount: 5,
+      }],
+    };
+    await fsp.writeFile(SESSIONS_FILE, JSON.stringify(legacyStore), 'utf-8');
+
+    const sessions = await listSessions();
+    expect(sessions).toHaveLength(1);
+    // Migration should move error from work_status → process_status
+    expect(sessions[0].process_status).toBe('error');
+    expect(sessions[0].work_status).toBe('in_progress');
+    // The work_status field should NOT be 'error' (it's no longer a valid WorkStatus)
+    expect(sessions[0].work_status).not.toBe('error');
+  });
+
+  it('does not migrate sessions without work_status:error', async () => {
+    const { SESSIONS_FILE } = await import('../../src/constants.js');
+    await fsp.mkdir(path.dirname(SESSIONS_FILE), { recursive: true });
+
+    const store = {
+      version: 2,
+      sessions: [{
+        claudeSessionId: 'normal-session',
+        taskId: 'task-ok',
+        project: 'proj',
+        process_status: 'stopped',
+        work_status: 'agent_complete',
+        mode: 'default',
+        type: 'interactive',
+        startedAt: '2024-01-01T00:00:00.000Z',
+        lastActiveAt: '2024-01-02T00:00:00.000Z',
+        messageCount: 3,
+      }],
+    };
+    await fsp.writeFile(SESSIONS_FILE, JSON.stringify(store), 'utf-8');
+
+    const sessions = await listSessions();
+    expect(sessions).toHaveLength(1);
+    expect(sessions[0].process_status).toBe('stopped');
+    expect(sessions[0].work_status).toBe('agent_complete');
+  });
+});
+
+// ── Test 4: listNonTerminalSessions excludes process_status:'error' ──────────
+
+describe('listNonTerminalSessions', () => {
+  it('excludes sessions with process_status:error', async () => {
+    // Create a normal running session
+    await createSessionRecord('running-1', 'task-1', 'proj', undefined, { pid: 1001 });
+
+    // Create a session and mark it as error
+    await createSessionRecord('error-1', 'task-2', 'proj', undefined, { pid: 1002 });
+    await updateSessionRecord('error-1', { process_status: 'error', errorMessage: 'Process exited without result' });
+
+    // Create a completed session
+    await createSessionRecord('done-1', 'task-3', 'proj');
+    await updateSessionRecord('done-1', { process_status: 'stopped', work_status: 'completed' });
+
+    const nonTerminal = await listNonTerminalSessions();
+
+    // running-1 should be included; error-1 and done-1 should be excluded
+    const ids = nonTerminal.map(s => s.claudeSessionId);
+    expect(ids).toContain('running-1');
+    expect(ids).not.toContain('error-1');
+    expect(ids).not.toContain('done-1');
+  });
+
+  it('includes sessions with non-terminal statuses', async () => {
+    await createSessionRecord('s-running', 'task-1', 'proj', undefined, { pid: 2001 });
+
+    await createSessionRecord('s-agent-complete', 'task-2', 'proj', undefined, { pid: 2002 });
+    await updateSessionRecord('s-agent-complete', { process_status: 'stopped', work_status: 'agent_complete' });
+
+    await createSessionRecord('s-await', 'task-3', 'proj', undefined, { pid: 2003 });
+    await updateSessionRecord('s-await', { work_status: 'await_human_action' });
+
+    const nonTerminal = await listNonTerminalSessions();
+    const ids = nonTerminal.map(s => s.claudeSessionId);
+
+    expect(ids).toContain('s-running');
+    expect(ids).toContain('s-agent-complete');
+    expect(ids).toContain('s-await');
+  });
+
+  it('excludes archived sessions', async () => {
+    await createSessionRecord('archived-1', 'task-1', 'proj');
+    await updateSessionRecord('archived-1', { archived: true });
+
+    const nonTerminal = await listNonTerminalSessions();
+    const ids = nonTerminal.map(s => s.claudeSessionId);
+    expect(ids).not.toContain('archived-1');
   });
 });

@@ -37,12 +37,12 @@ export async function runSessions(globals: GlobalOptions): Promise<void> {
       session.work_status === 'in_progress' ? chalk.green :
       session.work_status === 'agent_complete' ? chalk.yellow :
       session.work_status === 'await_human_action' ? chalk.magenta :
-      session.work_status === 'error' ? chalk.red :
       chalk.dim;
 
     const workStatus = wsColor(padRight(session.work_status, 18));
     const procStatus = session.process_status === 'running' ? chalk.green(padRight('●', 8))
       : session.process_status === 'idle' ? chalk.yellow(padRight('◉', 8))
+      : session.process_status === 'error' ? chalk.red(padRight('✕', 8))
       : chalk.dim(padRight('○', 8));
     const project = padRight(session.project, 16);
     const task = padRight(session.taskId?.slice(0, 10) ?? '-', 12);

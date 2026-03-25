@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
 import { updateSession } from '@/api/sessions';
 import type { ProcessStatus, WorkStatus } from '@/types/session';
-import { WORK_LABELS, WORK_COLORS, PROCESS_COLORS } from '@/utils/session-status';
+import { WORK_LABELS, WORK_COLORS, PROCESS_LABELS, PROCESS_COLORS } from '@/utils/session-status';
 
 /** Work statuses the user can manually set (backend-allowed). */
 const SETTABLE_STATUSES: WorkStatus[] = ['agent_complete', 'await_human_action', 'completed'];
@@ -12,7 +12,7 @@ interface WorkStatusPickerProps {
   workStatus: WorkStatus;
   /** Badge size variant. */
   size?: 'sm' | 'md';
-  /** Error detail shown on hover when work_status is 'error'. */
+  /** Error detail shown on hover when process_status is 'error'. */
   errorMessage?: string;
   /** Called after a successful status change so parent can update local state. */
   onChanged?: (newStatus: WorkStatus) => void;
@@ -25,11 +25,12 @@ export function WorkStatusPicker({ sessionId, processStatus, workStatus, size = 
 
   const ps = processStatus;
   const ws = workStatus;
-  const wsColor = WORK_COLORS[ws];
-  const wsLabel = WORK_LABELS[ws];
+  const isError = ps === 'error';
+  const wsColor = isError ? PROCESS_COLORS.error : WORK_COLORS[ws];
+  const wsLabel = isError ? PROCESS_LABELS.error : WORK_LABELS[ws];
   const psColor = PROCESS_COLORS[ps];
 
-  // Can only change work_status when process is stopped
+  // Can only change work_status when process is stopped (not error)
   const canChange = ps === 'stopped' && !saving;
 
   // Options: all settable statuses except current
@@ -90,10 +91,10 @@ export function WorkStatusPicker({ sessionId, processStatus, workStatus, size = 
             style={{ background: psColor }}
           />
         )}
-        {ps === 'running' ? 'Running' : ps === 'idle' ? 'Idle' : 'Stopped'}
+        {PROCESS_LABELS[ps]}
       </span>
 
-      {/* Work status badge — clickable dropdown when process is stopped */}
+      {/* Work status badge — clickable dropdown when process is stopped; shows Error when process_status is 'error' */}
       <span
         className={badgeBase}
         style={{
@@ -104,7 +105,7 @@ export function WorkStatusPicker({ sessionId, processStatus, workStatus, size = 
           cursor: canChange ? 'pointer' : 'default',
         }}
         onClick={canChange ? () => setOpen(!open) : undefined}
-        title={ws === 'error' && errorMessage ? errorMessage : (canChange ? 'Click to change work status' : wsLabel)}
+        title={isError && errorMessage ? errorMessage : (canChange ? 'Click to change work status' : wsLabel)}
         role={canChange ? 'button' : undefined}
         tabIndex={canChange ? 0 : undefined}
         onKeyDown={canChange ? (e) => { if (e.key === 'Enter' || e.key === ' ') setOpen(!open); } : undefined}

@@ -251,11 +251,15 @@ export async function readSessionJsonlContent(
       const findContent = await reader.findSession(sessionId);
       if (findContent) return withFoundCwd(await mergeSyntheticFromLocalStreams(findContent), 'remote');
     } catch (err) {
-      log.session.debug('remote JSONL read failed', {
+      const errMsg = err instanceof Error ? err.message : String(err);
+      log.session.warn('remote JSONL read failed', {
         host, sessionId,
-        error: err instanceof Error ? err.message : String(err),
+        error: errMsg,
       });
-      // Fall through to stream/outputFile fallbacks
+      // Re-throw SSH/connection errors so the UI can display them.
+      // Remote sessions have no local fallback — falling through silently
+      // would just show "No conversation history found" with no explanation.
+      throw new Error(`Remote read failed (${host}): ${errMsg}`);
     }
   } else {
     // Local session: read canonical JSONL (source of truth).

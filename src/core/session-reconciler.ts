@@ -29,7 +29,7 @@ export interface ReconcileResult {
  *     (only the agent/human can set 'completed') and clean up task references
  */
 export async function reconcileSessions(): Promise<ReconcileResult> {
-  const { listSessions, updateSessionRecord, updateSessionRecordConditionally, TERMINAL_WORK_STATUSES } = await import('./session-tracker.js')
+  const { listSessions, updateSessionRecord, updateSessionRecordConditionally, isTerminalSession } = await import('./session-tracker.js')
   // Captured before listSessions() so any concurrent write that occurs after our snapshot
   // is detectable: if current.last_status_change > reconcilerStartedAt, the record was
   // modified after we read it and we must skip our stale update.
@@ -49,7 +49,7 @@ export async function reconcileSessions(): Promise<ReconcileResult> {
   // Triage/hook/cron are cleaned up by SessionReaper; subagent sessions are user-visible and persist.
   // All sessions have type set by readStore() migration (runs inside listSessions above).
   const zombieCandidates = sessions.filter(
-    (s) => !TERMINAL_WORK_STATUSES.has(s.work_status)
+    (s) => !isTerminalSession(s)
       && s.type === 'interactive'
       && s.process_status !== 'stopped',
   )

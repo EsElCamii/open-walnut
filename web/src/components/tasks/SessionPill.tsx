@@ -65,8 +65,9 @@ function stateClassFromStatus(status: SessionStatus | undefined): string {
 /** CSS class suffix from two legacy statuses — picks the most important. */
 function stateClassLegacy(plan: SessionStatus | undefined, exec: SessionStatus | undefined): string {
   const ws = (s: SessionStatus | undefined) => s?.work_status;
+  const ps = (s: SessionStatus | undefined) => s?.process_status;
   if (ws(plan) === 'in_progress' || ws(exec) === 'in_progress') return 'running';
-  if (ws(plan) === 'error' || ws(exec) === 'error') return 'error';
+  if (ps(plan) === 'error' || ps(exec) === 'error') return 'error';
   if (ws(plan) === 'await_human_action' || ws(exec) === 'await_human_action') return 'await-human';
   if (ws(plan) === 'completed' || ws(exec) === 'completed') return 'completed';
   return 'agent-complete';

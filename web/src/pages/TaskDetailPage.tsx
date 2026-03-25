@@ -581,7 +581,7 @@ export function TaskDetailPage() {
             {otherSessionIds.map((sid) => {
               const record = sessionRecords.get(sid);
               const label = record?.title || sid.slice(0, 12) + '\u2026';
-              const dotClass = record?.work_status === 'error' ? 'dot-error' : 'dot-completed';
+              const dotClass = record?.process_status === 'error' ? 'dot-error' : 'dot-completed';
               return (
                 <div key={sid} className="flex items-center gap-2">
                   <span className={`session-pill-status-dot ${dotClass}`} />

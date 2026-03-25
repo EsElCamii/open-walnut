@@ -81,7 +81,7 @@ export class DaemonConnection {
   /** Initial reconnect delay after connection loss (doubles each attempt, caps at MAX). */
   private static RECONNECT_DELAY_MS = 2_000
   /** Maximum reconnect delay — retries forever at this interval. */
-  private static RECONNECT_MAX_DELAY_MS = 60_000
+  private static RECONNECT_MAX_DELAY_MS = 30_000
   /** Ping interval for keepalive. */
   private static PING_INTERVAL_MS = 15_000
 
@@ -788,24 +788,27 @@ export class DaemonConnection {
       host: this.hostKey, delayMs: DaemonConnection.RECONNECT_DELAY_MS,
     })
 
-    // Schedule reconnect
-    if (!this.reconnectTimer) {
-      this.reconnectTimer = setTimeout(async () => {
-        this.reconnectTimer = null
-        try {
-          await this.reconnect()
-        } catch (err) {
-          log.session.warn('DaemonConnection: reconnect failed', {
-            host: this.hostKey, error: err instanceof Error ? err.message : String(err),
-          })
-          // Try again after a longer delay
-          this.reconnectTimer = setTimeout(() => {
-            this.reconnectTimer = null
-            this.reconnect().catch(() => {})
-          }, DaemonConnection.RECONNECT_DELAY_MS * 3)
-        }
-      }, DaemonConnection.RECONNECT_DELAY_MS)
-    }
+    // Schedule reconnect with exponential backoff (2s → 4s → 8s → … → 60s max), forever
+    this.scheduleReconnect(DaemonConnection.RECONNECT_DELAY_MS)
+  }
+
+  private scheduleReconnect(delayMs: number): void {
+    if (this._destroyed || this._connected || this.reconnectTimer) return
+
+    this.reconnectTimer = setTimeout(async () => {
+      this.reconnectTimer = null
+      if (this._destroyed || this._connected) return
+      try {
+        await this.reconnect()
+      } catch (err) {
+        log.session.warn('DaemonConnection: reconnect failed, will retry', {
+          host: this.hostKey,
+          error: err instanceof Error ? err.message : String(err),
+          nextDelayMs: Math.min(delayMs * 2, DaemonConnection.RECONNECT_MAX_DELAY_MS),
+        })
+        this.scheduleReconnect(Math.min(delayMs * 2, DaemonConnection.RECONNECT_MAX_DELAY_MS))
+      }
+    }, delayMs)
   }
 
   /**

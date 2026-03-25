@@ -55,7 +55,7 @@ function toSlotStatus(info: SessionInfo, slot?: 'plan' | 'exec'): { work_status:
 
 /** Whether a session is still active (not in a terminal state). */
 function isActiveSession(info: SessionInfo): boolean {
-  return info.work_status !== 'completed' && info.work_status !== 'error'
+  return info.work_status !== 'completed' && info.process_status !== 'error'
 }
 
 /** Enrich tasks that have slot sessions with session status info. */

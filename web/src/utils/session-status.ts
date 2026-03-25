@@ -26,6 +26,7 @@ export const PROCESS_LABELS: Record<ProcessStatus, string> = {
   running: 'Running',
   idle: 'Idle',
   stopped: 'Stopped',
+  error: 'Error',
 };
 
 export const WORK_LABELS: Record<WorkStatus, string> = {
@@ -33,7 +34,6 @@ export const WORK_LABELS: Record<WorkStatus, string> = {
   agent_complete: 'Agent Complete',
   await_human_action: 'Awaiting Human',
   completed: 'Completed',
-  error: 'Error',
 };
 
 // ── Colors ──
@@ -42,6 +42,7 @@ export const PROCESS_COLORS: Record<ProcessStatus, string> = {
   running: 'var(--success)',
   idle: 'var(--warning)',
   stopped: 'var(--fg-muted)',
+  error: 'var(--error)',
 };
 
 export const WORK_COLORS: Record<WorkStatus, string> = {
@@ -49,16 +50,16 @@ export const WORK_COLORS: Record<WorkStatus, string> = {
   agent_complete: 'var(--error)',
   await_human_action: 'var(--error)',
   completed: 'var(--fg-muted)',
-  error: 'var(--error)',
 };
 
 // ── Composite helpers ──
 
 /** Single color for indicators that can only show one color (e.g. SessionPill dot).
- *  Running = green, idle = amber/warning, stopped = fall back to work_status color. */
+ *  Running = green, idle = amber/warning, error = red, stopped = fall back to work_status color. */
 export function compositeColor(ps: ProcessStatus, ws: WorkStatus): string {
   if (ps === 'running') return PROCESS_COLORS.running;
   if (ps === 'idle') return PROCESS_COLORS.idle;
+  if (ps === 'error') return PROCESS_COLORS.error;
   return WORK_COLORS[ws] ?? 'var(--fg-muted)';
 }
 
@@ -72,7 +73,6 @@ export function pillClassSuffix(ws: WorkStatus | string): string {
     case 'agent_complete': return 'agent-complete';
     case 'await_human_action': return 'await-human';
     case 'completed': return 'completed';
-    case 'error': return 'error';
     default: return 'agent-complete';
   }
 }

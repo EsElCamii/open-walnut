@@ -6,8 +6,8 @@ import type {
 } from '@/types/session';
 import { WORK_LABELS, PROCESS_LABELS, compositeColor } from '@/utils/session-status';
 
-type ProcessFilter = 'all' | 'running' | 'idle' | 'stopped';
-type WorkFilter = 'all' | 'in_progress' | 'agent_complete' | 'await_human_action' | 'completed' | 'error';
+type ProcessFilter = 'all' | 'running' | 'idle' | 'stopped' | 'error';
+type WorkFilter = 'all' | 'in_progress' | 'agent_complete' | 'await_human_action' | 'completed';
 type TaskFilter = 'all' | 'starred' | 'high';
 
 interface SessionTreePanelProps {
@@ -82,6 +82,7 @@ const PROCESS_FILTERS: { label: string; value: ProcessFilter }[] = [
   { label: PROCESS_LABELS.running, value: 'running' },
   { label: PROCESS_LABELS.idle, value: 'idle' },
   { label: PROCESS_LABELS.stopped, value: 'stopped' },
+  { label: PROCESS_LABELS.error, value: 'error' },
 ];
 
 const WORK_FILTERS: { label: string; value: WorkFilter }[] = [
@@ -90,7 +91,6 @@ const WORK_FILTERS: { label: string; value: WorkFilter }[] = [
   { label: WORK_LABELS.agent_complete, value: 'agent_complete' },
   { label: WORK_LABELS.await_human_action, value: 'await_human_action' },
   { label: WORK_LABELS.completed, value: 'completed' },
-  { label: WORK_LABELS.error, value: 'error' },
 ];
 
 const TASK_FILTERS: { label: string; value: TaskFilter }[] = [

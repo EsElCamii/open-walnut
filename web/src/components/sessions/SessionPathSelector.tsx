@@ -68,6 +68,7 @@ export function SessionPathSelector({ open, onClose, onSelect }: Props) {
   const [editingPath, setEditingPath] = useState('');
   const [liveDirs, setLiveDirs] = useState<string[]>([]);
   const [liveLoading, setLiveLoading] = useState(false);
+  const [liveError, setLiveError] = useState<string | null>(null);
   // For "All" mode: live dirs tagged with their source host
   const [liveTaggedDirs, setLiveTaggedDirs] = useState<Array<{ cwd: string; host: string | null; hostLabel?: string }>>([]);
 
@@ -152,18 +153,21 @@ export function SessionPathSelector({ open, onClose, onSelect }: Props) {
             .catch(() => [])
         );
         // Each SSH host
+        const sshErrors: string[] = [];
         for (const host of sshHosts) {
           promises.push(
             listDirs(activePath, host)
               .then(res => filterChildren(res.dirs, res.parent, partial).map(p => ({ cwd: p, host, hostLabel: hostLabels.get(host) })))
-              .catch(() => [])
+              .catch((err) => { sshErrors.push(`${host}: ${err.message || err}`); return []; })
           );
         }
         setLiveLoading(true);
+        setLiveError(null);
         Promise.all(promises).then(results => {
           setLiveTaggedDirs(results.flat());
           setLiveDirs([]);
           setLiveLoading(false);
+          if (sshErrors.length > 0) setLiveError(sshErrors.join('; '));
         });
       }, 150);
       return () => { if (liveTimerRef.current) clearTimeout(liveTimerRef.current); };
@@ -197,7 +201,7 @@ export function SessionPathSelector({ open, onClose, onSelect }: Props) {
             setEditingPath(res.parent);
           }
         })
-        .catch(() => { setLiveDirs([]); setLiveTaggedDirs([]); setLiveLoading(false); });
+        .catch((err) => { setLiveDirs([]); setLiveTaggedDirs([]); setLiveLoading(false); setLiveError(err.message || String(err)); });
     }, 150);
     return () => { if (liveTimerRef.current) clearTimeout(liveTimerRef.current); };
   }, [activePath, hostFilter, effectiveHost, dirs]);
@@ -435,6 +439,7 @@ export function SessionPathSelector({ open, onClose, onSelect }: Props) {
       <div className="sps-path-list" ref={listRef}>
         {loading && <div className="sps-empty">Loading paths...</div>}
         {error && <div className="sps-error">{error}</div>}
+        {liveError && <div className="sps-error" style={{ fontSize: '12px', padding: '4px 8px' }}>SSH: {liveError}</div>}
         {!loading && !error && filtered.length === 0 && (
           <div className="sps-empty">
             {editMode

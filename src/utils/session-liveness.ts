@@ -5,7 +5,7 @@
  * The function routes to the right session manager:
  *   - Registry hit → manager.isAlive() (authoritative — asks the actual manager)
  *   - Fallback (after server restart, no active manager):
- *       Remote → isDaemonConnected(host) (best effort)
+ *       Remote → isDaemonConnected(host) with 5min grace period
  *       Local  → isProcessAliveAsync(pid)
  *   - Embedded/SDK sessions → always true (managed externally)
  */
@@ -26,9 +26,14 @@ export async function isSessionProcessAlive(session: SessionRecord): Promise<boo
   // Fallback: no active manager (e.g. server just restarted, transport not yet attached)
   // Remote daemon sessions: the PID lives on the remote host.
   // We can't check it locally — instead check if the daemon connection is up.
+  // Short disconnects (< 5min) → assume alive (tunnel may be reconnecting).
   if (session.host) {
-    const { isDaemonConnected } = await import('../providers/daemon-connection.js')
-    return isDaemonConnected(session.host)
+    const { isDaemonConnected, getDaemonDisconnectedSince } = await import('../providers/daemon-connection.js')
+    if (isDaemonConnected(session.host)) return true
+    // Disconnected — check grace period
+    const since = getDaemonDisconnectedSince(session.host)
+    if (since && (Date.now() - since) > 5 * 60 * 1000) return false // > 5min
+    return true // short disconnect — assume alive
   }
 
   // Local sessions: check PID on this machine

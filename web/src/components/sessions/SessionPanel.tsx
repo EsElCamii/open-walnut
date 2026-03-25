@@ -251,7 +251,7 @@ export const SessionPanel = memo(function SessionPanel({ sessionId, onClose, onT
         mode: (d.mode ?? prev.mode) as SessionRecord['mode'],
         ...(d.planCompleted ? { planCompleted: true } : {}),
         // Clear stale error when session recovers from error state
-        ...(d.work_status && d.work_status !== 'error' ? { errorMessage: undefined } : {}),
+        ...(d.process_status && d.process_status !== 'error' ? { errorMessage: undefined } : {}),
         lastActiveAt: new Date().toISOString(),
       } : prev);
     }
@@ -285,7 +285,7 @@ export const SessionPanel = memo(function SessionPanel({ sessionId, onClose, onT
     if (d.sessionId === sessionId) {
       // Immediately show error message from event (before refetch completes)
       if (d.error) {
-        setSession(prev => prev ? { ...prev, work_status: 'error' as const, errorMessage: d.error!.slice(0, 500) } : prev);
+        setSession(prev => prev ? { ...prev, process_status: 'error' as const, errorMessage: d.error!.slice(0, 500) } : prev);
       }
       fetchSession(sessionId).then((s) => { if (s) setSession(s); }).catch(() => {});
     }
@@ -316,7 +316,7 @@ export const SessionPanel = memo(function SessionPanel({ sessionId, onClose, onT
 
   const showExecuteButtons =
     session?.planCompleted === true
-    && session?.work_status !== 'error'
+    && session?.process_status !== 'error'
     && !executeStarted;
 
   const handleExecuteContinue = useCallback(async () => {

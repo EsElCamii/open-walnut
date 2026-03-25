@@ -133,7 +133,7 @@ export function SessionsPage() {
         const patch = (sessions: SessionRecord[]) => {
           for (const s of sessions) {
             if (s.claudeSessionId === d.sessionId) {
-              s.work_status = 'error';
+              s.process_status = 'error';
               s.errorMessage = d.error!.slice(0, 500);
               return true;
             }
@@ -173,7 +173,7 @@ export function SessionsPage() {
               if (d.work_status) s.work_status = d.work_status as SessionRecord['work_status'];
               if ('activity' in d) s.activity = d.activity;
               // Clear stale error when session recovers from error state
-              if (d.work_status && d.work_status !== 'error') s.errorMessage = undefined;
+              if (d.process_status && d.process_status !== 'error') s.errorMessage = undefined;
               return true;
             }
           }

@@ -100,6 +100,15 @@ async function readStore(): Promise<SessionStoreV2> {
     }
   }
 
+  // Migrate legacy work_status:'error' → process_status:'error'
+  for (const session of store.sessions) {
+    if ((session as unknown as Record<string, string>).work_status === 'error') {
+      session.process_status = 'error';
+      (session as unknown as Record<string, string>).work_status = 'in_progress';
+      migrated = true;
+    }
+  }
+
   // Migrate absorbed → archived + archive_reason (unified hidden-session model)
   for (const session of store.sessions) {
     const legacy = session as unknown as Record<string, unknown>;
@@ -165,11 +174,10 @@ export async function listSessions(): Promise<SessionRecord[]> {
   return store.sessions;
 }
 
-/**
- * Terminal work statuses — sessions in these states need no further monitoring.
- * completed = human confirmed done. error = something went wrong.
- */
-export const TERMINAL_WORK_STATUSES = new Set(['completed', 'error']);
+/** A session is terminal if work_status is 'completed' or process_status is 'error'. */
+export function isTerminalSession(s: { process_status?: string; work_status?: string }): boolean {
+  return s.work_status === 'completed' || s.process_status === 'error';
+}
 
 /**
  * List sessions that are not in a terminal state (for health monitor).
@@ -177,7 +185,7 @@ export const TERMINAL_WORK_STATUSES = new Set(['completed', 'error']);
 export async function listNonTerminalSessions(): Promise<SessionRecord[]> {
   const store = await readStore();
   return store.sessions.filter(
-    (s) => !TERMINAL_WORK_STATUSES.has(s.work_status) && !s.archived,
+    (s) => !isTerminalSession(s) && !s.archived,
   );
 }
 
@@ -199,10 +207,17 @@ const DEFAULT_REMOTE_IDLE_LIMIT = 40;
 async function isSessionProcessAlive(s: SessionRecord): Promise<boolean> {
   // SDK and embedded sessions have no PID — trust process_status directly.
   // SDK: managed by session server. Embedded: in-process, managed by SubagentRunner.
-  if (s.provider === 'sdk' || s.provider === 'embedded') return s.process_status !== 'stopped';
+  if (s.provider === 'sdk' || s.provider === 'embedded') return s.process_status !== 'stopped' && s.process_status !== 'error';
+  // Remote sessions: check daemon connection with grace period for transient disconnects
+  if (s.host) {
+    const { isDaemonConnected, getDaemonDisconnectedSince } = await import('../providers/daemon-connection.js');
+    if (isDaemonConnected(s.host)) return true;
+    const since = getDaemonDisconnectedSince(s.host);
+    if (since && (Date.now() - since) > 5 * 60 * 1000) return false; // > 5min
+    return true; // short disconnect — assume alive
+  }
   if (s.pid == null) return false;
-  const processName = s.host ? 'ssh' : 'claude';
-  return isProcessAliveAsync(s.pid, processName);
+  return isProcessAliveAsync(s.pid, 'claude');
 }
 
 /**
@@ -249,7 +264,7 @@ export async function getAllAliveSessionsByHost(): Promise<Record<string, Sessio
   const staleIds: string[] = [];
   for (const s of store.sessions) {
     if (s.archived) continue;
-    if (s.process_status === 'stopped') continue;  // only running + idle
+    if (s.process_status === 'stopped' || s.process_status === 'error') continue;
     if (!await isSessionProcessAlive(s)) {
       staleIds.push(s.claudeSessionId);
       continue;
@@ -574,9 +589,10 @@ export async function updateSessionRecord(
 
     // When session reaches terminal state, clear PID to prevent stale PID orphan kills.
     // OS can recycle PIDs — a stale PID on a completed session can collide with a new session's PID.
-    if (updates.work_status && TERMINAL_WORK_STATUSES.has(updates.work_status) && session.pid != null) {
+    if (isTerminalSession(session) && session.pid != null) {
       log.session.info('clearing stale PID on terminal transition', {
-        sessionId: claudeSessionId, pid: session.pid, work_status: updates.work_status,
+        sessionId: claudeSessionId, pid: session.pid,
+        process_status: session.process_status, work_status: session.work_status,
       });
       session.pid = undefined;
     }
@@ -607,9 +623,10 @@ export async function updateSessionRecordConditionally(
     Object.assign(session, updates);
 
     // Keep in sync with updateSessionRecord — duplicated because this path bypasses it.
-    if (updates.work_status && TERMINAL_WORK_STATUSES.has(updates.work_status) && session.pid != null) {
+    if (isTerminalSession(session) && session.pid != null) {
       log.session.info('clearing stale PID on terminal transition (conditional)', {
-        sessionId: claudeSessionId, pid: session.pid, work_status: updates.work_status,
+        sessionId: claudeSessionId, pid: session.pid,
+        process_status: session.process_status, work_status: session.work_status,
       });
       session.pid = undefined;
     }
@@ -677,7 +694,7 @@ export async function completeTaskSessions(sessionIds: string[]): Promise<number
     for (const sid of sessionIds) {
       const session = store.sessions.find((s) => s.claudeSessionId === sid);
       if (!session) continue;
-      if (TERMINAL_WORK_STATUSES.has(session.work_status)) continue;
+      if (isTerminalSession(session)) continue;
       // Collect PIDs to kill (CLI sessions only — embedded/SDK have no OS process)
       if (session.pid != null && session.provider !== 'embedded' && session.provider !== 'sdk') {
         pidsToKill.push(session.pid);
@@ -730,8 +747,8 @@ export async function getSlotSession(
   const sessionId = slot === 'plan' ? task.plan_session_id : task.exec_session_id;
   if (!sessionId) return null;
   const rec = await getSessionByClaudeId(sessionId);
-  // Slot is empty if the session no longer exists, has been archived, or has been fully completed/errored.
-  if (!rec || rec.archived || rec.work_status === 'completed' || rec.work_status === 'error') return null;
+  // Slot is empty if the session no longer exists, has been archived, or has reached terminal state.
+  if (!rec || rec.archived || isTerminalSession(rec)) return null;
   return rec;
 }
 
@@ -750,7 +767,7 @@ export async function getActiveSession(task: Task): Promise<SessionRecord | null
 
   for (const sessionId of candidates) {
     const rec = await getSessionByClaudeId(sessionId);
-    if (rec && !rec.archived && rec.process_status !== 'stopped') return rec;
+    if (rec && !rec.archived && rec.process_status !== 'stopped' && rec.process_status !== 'error') return rec;
   }
   return null;
 }

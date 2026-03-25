@@ -116,7 +116,7 @@ async function migrateSessionSlots(store: TaskStore): Promise<boolean> {
           });
           continue;
         }
-        if (!rec || rec.work_status === 'completed' || rec.work_status === 'error') continue;
+        if (!rec || rec.work_status === 'completed' || rec.process_status === 'error') continue;
         if (rec.mode === 'plan' && !task.plan_session_id) {
           task.plan_session_id = sid;
         } else if (rec.mode !== 'plan' && !task.exec_session_id) {

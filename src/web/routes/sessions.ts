@@ -51,7 +51,7 @@ async function enrichWithLiveStatus(sessions: SessionRecord[]): Promise<SessionR
     const s = sessions[i]
     if (s.process_status === 'running' || s.process_status === 'idle') {
       needsCheck.push(i)
-    } else if (s.pid == null && (s.work_status === 'completed' || s.work_status === 'error')) {
+    } else if (s.pid == null && s.work_status === 'completed') {
       s.process_status = 'stopped'
     }
   }
@@ -702,7 +702,16 @@ sessionsRouter.get('/:sessionId/history', async (req: Request, res: Response, ne
     }
 
     // Full path: reads from source of truth (SSH for remote sessions)
-    let messages = await readSessionHistory(sessionId, cwd, record?.host, record?.outputFile)
+    let messages: Awaited<ReturnType<typeof readSessionHistory>>
+    try {
+      messages = await readSessionHistory(sessionId, cwd, record?.host, record?.outputFile)
+    } catch (err) {
+      // Surface remote read errors (SSH auth, daemon connection, etc.) to the frontend
+      const msg = err instanceof Error ? err.message : String(err)
+      log.web.warn('session history read failed', { sessionId, host: record?.host, error: msg })
+      res.status(502).json({ error: msg })
+      return
+    }
     logMessageOrdering('P2:full', sessionId, messages, record?.host)
     if (messages.length === 0 && !record) {
       res.status(404).json({ error: 'Session not found' })

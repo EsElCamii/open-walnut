@@ -522,8 +522,8 @@ export class SubagentRunner {
       try {
         const { updateSessionRecord } = await import('../core/session-tracker.js');
         await updateSessionRecord(run.runId, {
-          process_status: 'stopped',
-          work_status: 'error',
+          process_status: 'error',
+          errorMessage: run.error,
           activity: undefined,
           last_status_change: new Date().toISOString(),
         });
@@ -532,8 +532,8 @@ export class SubagentRunner {
       bus.emit(EventNames.SESSION_STATUS_CHANGED, {
         sessionId: run.runId,
         taskId: data.taskId,
-        process_status: 'stopped',
-        work_status: 'error',
+        process_status: 'error',
+        errorMessage: run.error,
       }, ['*'], { source: 'subagent-runner', urgency: 'urgent' });
 
       // Clear optimistic messages on error too

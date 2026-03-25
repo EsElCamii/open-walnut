@@ -38,10 +38,10 @@ export function PendingSessionPanel({ cwd, host, hostLabel, label, realTaskId, o
     }
   });
 
-  // Also catch session:status-changed with work_status 'error' for this task
+  // Also catch session:status-changed with process_status 'error' for this task
   useEvent('session:status-changed', (data: unknown) => {
-    const d = data as { taskId?: string; work_status?: string };
-    if (realTaskId && d.taskId === realTaskId && d.work_status === 'error') {
+    const d = data as { taskId?: string; process_status?: string };
+    if (realTaskId && d.taskId === realTaskId && d.process_status === 'error') {
       setError('Session process exited with an error');
     }
   });

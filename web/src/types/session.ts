@@ -1,5 +1,5 @@
-export type ProcessStatus = 'running' | 'idle' | 'stopped';
-export type WorkStatus = 'in_progress' | 'agent_complete' | 'await_human_action' | 'completed' | 'error';
+export type ProcessStatus = 'running' | 'idle' | 'stopped' | 'error';
+export type WorkStatus = 'in_progress' | 'agent_complete' | 'await_human_action' | 'completed';
 export type SessionMode = 'bypass' | 'accept' | 'default' | 'plan';
 export type SessionProvider = 'cli' | 'sdk' | 'embedded';
 
@@ -33,7 +33,7 @@ export interface SessionRecord {
   archived?: boolean;
   /** Why this session was archived (e.g. "plan_executed", user-provided reason). */
   archive_reason?: string;
-  /** Error message when work_status is 'error' — for clear error display. */
+  /** Error message when process_status is 'error' — for clear error display. */
   errorMessage?: string;
 }
 

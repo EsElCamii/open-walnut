@@ -1,15 +1,12 @@
 /**
  * Session Health Monitor — periodic liveness checks for non-terminal sessions.
  *
- * Runs every 30 seconds inside the server process. For each session whose
- * work_status is not terminal (completed, error):
- *   1. Check isProcessAlive(pid, 'claude')
- *   2. Update process_status accordingly
- *   3. If process died while work_status was 'in_progress':
- *      → Check output file for result line → agent_complete or error
- *      → Clear task session slot only on error (agent_complete keeps slot for resume)
- *      → Emit session:status-changed
- *   4. Check idle timeout: kill sessions whose outputFile mtime exceeds the threshold.
+ * Runs every 30 seconds inside the server process. For each non-terminal session:
+ *   1. Check isProcessAlive (routes through session manager or daemon connection)
+ *   2. If process dead: set process_status='error' (with errorMessage) or 'stopped'+'agent_complete'
+ *   3. Clear task session slot on error (agent_complete keeps slot for resume)
+ *   4. Emit session:status-changed
+ *   5. Check idle timeout: kill sessions whose outputFile mtime exceeds the threshold.
  *      Uses file mtime — persistent on disk, survives server restarts, no state machine dependency.
  */
 
@@ -63,123 +60,110 @@ export class SessionHealthMonitor {
     // Idle timeout — kill sessions with stale outputFile mtime past the configured threshold
     await this.checkIdleTimeout(sessions, updateSessionRecord)
 
-    // Safety net for remote sessions: if process_status is already 'stopped' but
-    // work_status is still 'in_progress', the daemon exit event never arrived.
-    // Force work_status to 'error' after 60s to prevent permanent inconsistency.
-    for (const session of sessions) {
-      if (session.process_status === 'stopped'
-        && session.work_status === 'in_progress'
-        && session.last_status_change) {
-        const stoppedAt = new Date(session.last_status_change).getTime()
-        if (Date.now() - stoppedAt > 60_000) {
-          const now = new Date().toISOString()
-          await updateSessionRecord(session.claudeSessionId, {
-            work_status: 'error',
-            activity: undefined,
-            last_status_change: now,
-          })
-          log.session.warn('health monitor: forced stale in_progress → error for stopped session', {
-            sessionId: session.claudeSessionId,
-            stoppedAt: session.last_status_change,
-          })
-          bus.emit(EventNames.SESSION_STATUS_CHANGED, {
-            sessionId: session.claudeSessionId,
-            taskId: session.taskId,
-            process_status: 'stopped',
-            work_status: 'error',
-            previousWorkStatus: 'in_progress',
-          }, ['*'], { source: 'health-monitor', urgency: 'urgent' })
-        }
-      }
-    }
-
     for (const session of sessions) {
       const alive = await isSessionProcessAlive(session)
 
-      // Determine expected process status from PID liveness
       // alive=true: could be 'running' or 'idle' (don't override idle→running)
-      // alive=false: must be 'stopped'
-      if (!alive && session.process_status !== 'stopped') {
+      // alive=false: process is dead or unreachable past grace period
+      if (!alive && session.process_status !== 'stopped' && session.process_status !== 'error') {
         const now = new Date().toISOString()
 
         if (session.process_status === 'running' && session.work_status === 'in_progress') {
           // Process died while work was in progress — determine outcome.
-          //
-          // Remote sessions: the daemon sends an exit event via WebSocket which triggers
-          // the normal result handler (handleStreamLine → agent_complete). The health
-          // monitor should NOT race it — just mark process_status as stopped and let the
-          // daemon exit event set the correct work_status when it arrives.
+
           if (session.host) {
+            // Remote session: daemon confirms process is dead (or grace period exceeded).
+            // Set process_status='error' directly with detail message.
             await updateSessionRecord(session.claudeSessionId, {
-              process_status: 'stopped',
+              process_status: 'error',
+              errorMessage: 'Connection lost — unable to reach remote host',
+              activity: undefined,
               last_status_change: now,
+            })
+            log.session.warn('health monitor: remote session unreachable', {
+              sessionId: session.claudeSessionId,
+              taskId: session.taskId,
             })
             bus.emit(EventNames.SESSION_STATUS_CHANGED, {
               sessionId: session.claudeSessionId,
               taskId: session.taskId,
-              process_status: 'stopped',
-              work_status: 'in_progress',
-            }, ['*'], { source: 'health-monitor' })
+              process_status: 'error',
+              errorMessage: 'Connection lost — unable to reach remote host',
+            }, ['*'], { source: 'health-monitor', urgency: 'urgent' })
             continue
           }
 
           // Local sessions: read the last 8KB of the JSONL file to check for a result event.
           const hasResult = session.outputFile ? this.outputFileHasResult(session.outputFile) : false
-          const newWorkStatus = hasResult ? 'agent_complete' as const : 'error' as const
 
-          await updateSessionRecord(session.claudeSessionId, {
-            process_status: 'stopped',
-            work_status: newWorkStatus,
-            activity: undefined,
-            last_status_change: now,
-          })
+          if (hasResult) {
+            // Normal completion — process_status 'stopped', work_status 'agent_complete'
+            await updateSessionRecord(session.claudeSessionId, {
+              process_status: 'stopped',
+              work_status: 'agent_complete',
+              activity: undefined,
+              last_status_change: now,
+            })
+          } else {
+            // Error — process_status 'error' with detail
+            await updateSessionRecord(session.claudeSessionId, {
+              process_status: 'error',
+              errorMessage: 'Process exited without result',
+              activity: undefined,
+              last_status_change: now,
+            })
 
-          // Only clear session slot on error — agent_complete sessions keep
-          // their slot so the UI shows them and they can be resumed.
-          if (newWorkStatus === 'error' && session.taskId) {
-            try {
-              const { clearSessionSlot } = await import('./task-manager.js')
-              const { task } = await clearSessionSlot(session.taskId, session.claudeSessionId)
-              bus.emit(EventNames.TASK_UPDATED, { task }, ['web-ui'], { source: 'session-error' })
-            } catch (err) {
-              log.session.warn('health monitor: failed to clear session slot', {
-                sessionId: session.claudeSessionId,
-                taskId: session.taskId,
-                error: err instanceof Error ? err.message : String(err),
-              })
+            // Clear session slot on error
+            if (session.taskId) {
+              try {
+                const { clearSessionSlot } = await import('./task-manager.js')
+                const { task } = await clearSessionSlot(session.taskId, session.claudeSessionId)
+                bus.emit(EventNames.TASK_UPDATED, { task }, ['web-ui'], { source: 'session-error' })
+              } catch (err) {
+                log.session.warn('health monitor: failed to clear session slot', {
+                  sessionId: session.claudeSessionId,
+                  taskId: session.taskId,
+                  error: err instanceof Error ? err.message : String(err),
+                })
+              }
             }
           }
 
+          const newProcessStatus = hasResult ? 'stopped' : 'error'
           log.session.info('health monitor: session process died', {
             sessionId: session.claudeSessionId,
             taskId: session.taskId,
-            newWorkStatus,
+            newProcessStatus,
           })
 
           bus.emit(EventNames.SESSION_STATUS_CHANGED, {
             sessionId: session.claudeSessionId,
             taskId: session.taskId,
-            process_status: 'stopped',
-            work_status: newWorkStatus,
-            previousWorkStatus: 'in_progress',
+            process_status: newProcessStatus,
+            work_status: hasResult ? 'agent_complete' : session.work_status,
           }, ['*'], { source: 'health-monitor', urgency: 'urgent' })
         } else {
           // Process died while idle or in non-in_progress state.
-          // If work_status is still 'in_progress' (race: message queued → process_status
-          // set to idle → process dies before CLI reads the FIFO), force to agent_complete.
-          // Without this, process_status='stopped' + work_status='in_progress' is permanent
-          // because subsequent health checks skip already-stopped sessions.
           const forceWorkStatus = session.work_status === 'in_progress'
           const updates: Record<string, unknown> = {
-            process_status: 'stopped',
             last_status_change: now,
           }
+
           if (forceWorkStatus) {
             const hasResult = session.outputFile && !session.outputFile.startsWith('remote://')
               ? this.outputFileHasResult(session.outputFile) : false
-            updates.work_status = hasResult ? 'agent_complete' : 'error'
+            if (hasResult) {
+              updates.process_status = 'stopped'
+              updates.work_status = 'agent_complete'
+            } else {
+              updates.process_status = 'error'
+              updates.errorMessage = 'Process exited without result'
+            }
             updates.activity = undefined
+          } else {
+            updates.process_status = 'stopped'
           }
+
           await updateSessionRecord(session.claudeSessionId, updates)
 
           log.session.info('health monitor: process status updated', {
@@ -188,16 +172,15 @@ export class SessionHealthMonitor {
             pid: session.pid,
             previousProcessStatus: session.process_status,
             workStatus: session.work_status,
-            ...(forceWorkStatus ? { forcedWorkStatus: updates.work_status } : {}),
+            ...(forceWorkStatus ? { newProcessStatus: updates.process_status } : {}),
           })
 
           if (forceWorkStatus) {
             bus.emit(EventNames.SESSION_STATUS_CHANGED, {
               sessionId: session.claudeSessionId,
               taskId: session.taskId,
-              process_status: 'stopped',
-              work_status: updates.work_status,
-              previousWorkStatus: 'in_progress',
+              process_status: updates.process_status as string,
+              work_status: updates.work_status as string | undefined,
             }, ['*'], { source: 'health-monitor', urgency: 'urgent' })
           }
         }
@@ -331,7 +314,7 @@ export class SessionHealthMonitor {
 
     for (const session of sessions) {
       // Check both running and idle — await_human_action can be in either state
-      if (session.process_status === 'stopped') continue
+      if (session.process_status === 'stopped' || session.process_status === 'error') continue
       if (session.work_status !== 'await_human_action') continue
 
       // Determine last activity time via session manager or file mtime
@@ -391,7 +374,7 @@ export class SessionHealthMonitor {
     const ORPHAN_GRACE_MS = 2 * 60 * 1000
 
     try {
-      const { listSessions, TERMINAL_WORK_STATUSES } = await import('./session-tracker.js')
+      const { listSessions, isTerminalSession } = await import('./session-tracker.js')
       const sessions = await listSessions()
 
       // Build set of PIDs actively used by non-terminal, non-stopped sessions.
@@ -400,9 +383,8 @@ export class SessionHealthMonitor {
       const activePids = new Set<number>()
       for (const s of sessions) {
         if (s.pid == null) continue
-        const isTerminal = TERMINAL_WORK_STATUSES.has(s.work_status)
-        const isStopped = s.process_status === 'stopped'
-        if (!isTerminal && !isStopped) {
+        const isStopped = s.process_status === 'stopped' || s.process_status === 'error'
+        if (!isTerminalSession(s) && !isStopped) {
           activePids.add(s.pid)
         }
       }
@@ -414,9 +396,8 @@ export class SessionHealthMonitor {
         if (s.provider === 'embedded' || s.provider === 'sdk') continue
 
         // Only target sessions that SHOULD have no running process
-        const isTerminal = TERMINAL_WORK_STATUSES.has(s.work_status)
-        const isStopped = s.process_status === 'stopped'
-        if (!isTerminal && !isStopped) continue
+        const isStopped = s.process_status === 'stopped' || s.process_status === 'error'
+        if (!isTerminalSession(s) && !isStopped) continue
 
         // Grace period: skip sessions whose record was recently changed.
         // Prevents killing processes during transient reconciler/startup race windows.
