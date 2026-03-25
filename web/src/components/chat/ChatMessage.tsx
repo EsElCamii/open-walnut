@@ -5,6 +5,7 @@ import DOMPurify from 'dompurify';
 import type { Task } from '@open-walnut/core';
 import type { MessageBlock, ThinkingBlock, ToolCallBlock, ImageBlock, TaskContext, ImageAttachment } from '@/hooks/useChat';
 import { useLightbox } from '@/hooks/useLightbox';
+import { useEntityClickHandler } from '@/hooks/useEntityClickHandler';
 import { Lightbox } from '@/components/common/Lightbox';
 import { entityRefsToHtml, renderToolResultWithRefs, extractMarkdownFields } from '@/utils/markdown';
 import { parseAskQuestionInput } from './QuestionPopover';
@@ -713,35 +714,8 @@ export function ToolCallSection({ block, taskLookup, onTaskClick, onSessionClick
     }
   }, [navigate, onSessionClick]);
 
-  // Click handler for entity ref links in tool results
-  const handleResultClick = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
-    const target = e.target as HTMLElement;
-    const taskAnchor = target.closest('a.task-link') as HTMLAnchorElement | null;
-    if (taskAnchor) {
-      const taskId = taskAnchor.dataset.taskId;
-      if (taskId) {
-        e.preventDefault();
-        if (onTaskClick) {
-          onTaskClick(taskId);
-        } else {
-          navigate(`/tasks/${taskId}`);
-        }
-      }
-      return;
-    }
-    const sessionAnchor = target.closest('a.session-link') as HTMLAnchorElement | null;
-    if (sessionAnchor) {
-      const sessionId = sessionAnchor.dataset.sessionId;
-      if (sessionId) {
-        e.preventDefault();
-        if (onSessionClick) {
-          onSessionClick(sessionId);
-        } else {
-          navigate(`/sessions?id=${sessionId}`);
-        }
-      }
-    }
-  }, [navigate, onTaskClick, onSessionClick]);
+  // Unified click handler for entity ref links (.task-link, .session-link) in tool results
+  const handleResultClick = useEntityClickHandler(onTaskClick, onSessionClick);
 
   // Collapsed summary: resolve task IDs and session IDs as pills
   const inputSummaryNode = block.input
@@ -934,6 +908,9 @@ function ChatMessageInner({ role, content, blocks, images, taskContext, routeInf
   const isErrorNotification = source === 'session-error' || source === 'agent-error';
   const time = formatTimestamp(timestamp);
 
+  // Unified entity click handler for .task-link and .session-link anchors
+  const handleEntityClick = useEntityClickHandler(onTaskClick, onSessionClick);
+
   // Intercept clicks on task-link, session-link anchors, and lightbox images
   // NOTE: ALL hooks must be declared before any early returns (Rules of Hooks).
   const handleContentClick = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
@@ -950,32 +927,9 @@ function ChatMessageInner({ role, content, blocks, images, taskContext, routeInf
       return;
     }
 
-    const taskAnchor = target.closest('a.task-link') as HTMLAnchorElement | null;
-    if (taskAnchor) {
-      const taskId = taskAnchor.dataset.taskId;
-      if (taskId) {
-        e.preventDefault();
-        if (onTaskClick) {
-          onTaskClick(taskId);
-        } else {
-          navigate(`/tasks/${taskId}`);
-        }
-      }
-      return;
-    }
-    const sessionAnchor = target.closest('a.session-link') as HTMLAnchorElement | null;
-    if (sessionAnchor) {
-      const sessionId = sessionAnchor.dataset.sessionId;
-      if (sessionId) {
-        e.preventDefault();
-        if (onSessionClick) {
-          onSessionClick(sessionId);
-        } else {
-          navigate(`/sessions?id=${sessionId}`);
-        }
-      }
-    }
-  }, [navigate, onTaskClick, onSessionClick, openLightbox]);
+    // Delegate entity ref clicks (task-link, session-link) to shared handler
+    handleEntityClick(e);
+  }, [handleEntityClick, openLightbox]);
 
   const html = useMemo(() => {
     // Skip markdown rendering for special message types that use early returns

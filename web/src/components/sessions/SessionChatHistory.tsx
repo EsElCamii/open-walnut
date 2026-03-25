@@ -1,9 +1,9 @@
 import { useState, useEffect, useLayoutEffect, useRef, useCallback, useMemo, memo } from 'react';
-import { useNavigate } from 'react-router-dom';
 import { useSessionHistory } from '@/hooks/useSessionHistory';
 import { useSessionStream, type StreamingBlock } from '@/hooks/useSessionStream';
 import { useEvent } from '@/hooks/useWebSocket';
 import { useLightbox } from '@/hooks/useLightbox';
+import { useEntityClickHandler } from '@/hooks/useEntityClickHandler';
 import { SessionMessage, PlanCard, CollapsedPlanWrite, GenericToolCall } from './SessionMessage';
 import { TeamCard } from './TeamCard';
 import { LoadingSpinner } from '../common/LoadingSpinner';
@@ -168,29 +168,9 @@ interface SessionChatHistoryProps {
 
 /** Memoized text block that caches renderMarkdownWithRefs output */
 function StreamingTextBlock({ content, sessionCwd, onTaskClick, onSessionClick }: { content: string; sessionCwd?: string; onTaskClick?: (taskId: string) => void; onSessionClick?: (sessionId: string) => void }) {
-  const navigate = useNavigate();
   const html = useMemo(() => renderMarkdownWithRefs(content), [content]);
   const imagePaths = useMemo(() => findImagePaths(content), [content]);
-  const handleClick = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
-    const target = e.target as HTMLElement;
-    const taskAnchor = target.closest('a.task-link') as HTMLAnchorElement | null;
-    if (taskAnchor) {
-      const taskId = taskAnchor.dataset.taskId;
-      if (taskId) {
-        e.preventDefault();
-        onTaskClick ? onTaskClick(taskId) : navigate(`/tasks/${taskId}`);
-      }
-      return;
-    }
-    const sessionAnchor = target.closest('a.session-link') as HTMLAnchorElement | null;
-    if (sessionAnchor) {
-      const sessionId = sessionAnchor.dataset.sessionId;
-      if (sessionId) {
-        e.preventDefault();
-        onSessionClick ? onSessionClick(sessionId) : navigate(`/sessions?id=${sessionId}`);
-      }
-    }
-  }, [navigate, onTaskClick, onSessionClick]);
+  const handleClick = useEntityClickHandler(onTaskClick, onSessionClick);
   return (
     <>
       <div

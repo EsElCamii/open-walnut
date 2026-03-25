@@ -1,8 +1,8 @@
 import { useState, useEffect, useCallback } from 'react';
-import { useNavigate } from 'react-router-dom';
 import { fetchTriageHistory, type ChatEntry } from '@/api/chat';
 import { fetchSessionHistory, type SessionHistoryMessage } from '@/api/sessions';
 import { useEvent } from '@/hooks/useWebSocket';
+import { useEntityClickHandler } from '@/hooks/useEntityClickHandler';
 import { timeAgo } from '@/utils/time';
 import { renderMarkdownWithRefs } from '@/utils/markdown';
 import { SessionMessage } from '@/components/sessions/SessionMessage';
@@ -59,7 +59,6 @@ function TriageSessionSection({
   onTaskClick?: (taskId: string) => void;
   onSessionClick?: (sessionId: string) => void;
 }) {
-  const navigate = useNavigate();
   const [expanded, setExpanded] = useState(defaultExpanded);
   const [messages, setMessages] = useState<SessionHistoryMessage[]>([]);
   const [loadingHistory, setLoadingHistory] = useState(false);
@@ -86,18 +85,12 @@ function TriageSessionSection({
       .finally(() => setLoadingHistory(false));
   }, [expanded, loaded, hasSessionId, entry.sessionId]);
 
+  const handleEntityClick = useEntityClickHandler(onTaskClick, onSessionClick);
+  // Triage ref clicks need stopPropagation (to avoid collapsing the section)
   const handleTaskRefClick = useCallback((e: React.MouseEvent<HTMLSpanElement>) => {
     e.stopPropagation();
-    const target = e.target as HTMLElement;
-    const taskAnchor = target.closest('a.task-link') as HTMLAnchorElement | null;
-    if (taskAnchor) {
-      const taskId = taskAnchor.dataset.taskId;
-      if (taskId) {
-        e.preventDefault();
-        onTaskClick ? onTaskClick(taskId) : navigate(`/tasks/${taskId}`);
-      }
-    }
-  }, [navigate, onTaskClick]);
+    handleEntityClick(e);
+  }, [handleEntityClick]);
 
   const hasHistory = messages.length > 0;
 

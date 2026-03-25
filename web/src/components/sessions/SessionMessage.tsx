@@ -1,10 +1,10 @@
 import { useState, useCallback, useMemo, memo, type MouseEvent } from 'react';
-import { useNavigate } from 'react-router-dom';
 import type { SessionHistoryMessage, SessionHistoryTool } from '@/types/session';
 import {
   renderMarkdownWithRefs, extractMarkdownFields, injectJsonIdLinks,
   extractContentBlockImages, findImagePaths, isImageFilePath, resolveImagePath,
 } from '@/utils/markdown';
+import { useEntityClickHandler } from '@/hooks/useEntityClickHandler';
 import { useLivePlanContent } from '@/contexts/PlanContentContext';
 import { PlanPopup } from './PlanPopup';
 
@@ -126,7 +126,6 @@ interface GenericToolCallProps {
 }
 
 export function GenericToolCall({ tool, status = 'done', result: resultProp, sessionCwd, onTaskClick, onSessionClick }: GenericToolCallProps) {
-  const navigate = useNavigate();
   const [open, setOpen] = useState(false);
   // Merge result from explicit prop (streaming path) and tool.result (persisted history path)
   const result = resultProp ?? (tool as { result?: string }).result;
@@ -199,27 +198,8 @@ export function GenericToolCall({ tool, status = 'done', result: resultProp, ses
     return resolved ? `/api/local-image?path=${encodeURIComponent(resolved)}` : null;
   }, [safeInput, open, resultImages, sessionCwd]);
 
-  // Click handler for pill links inside <pre> (event delegation)
-  const handlePreClick = useCallback((e: React.MouseEvent<HTMLPreElement>) => {
-    const target = e.target as HTMLElement;
-    const taskAnchor = target.closest('a.task-link') as HTMLAnchorElement | null;
-    if (taskAnchor) {
-      const taskId = taskAnchor.dataset.taskId;
-      if (taskId) {
-        e.preventDefault();
-        onTaskClick ? onTaskClick(taskId) : navigate(`/tasks/${taskId}`);
-      }
-      return;
-    }
-    const sessionAnchor = target.closest('a.session-link') as HTMLAnchorElement | null;
-    if (sessionAnchor) {
-      const sessionId = sessionAnchor.dataset.sessionId;
-      if (sessionId) {
-        e.preventDefault();
-        onSessionClick ? onSessionClick(sessionId) : navigate(`/sessions?id=${sessionId}`);
-      }
-    }
-  }, [navigate, onTaskClick, onSessionClick]);
+  // Unified click handler for entity ref links (.task-link, .session-link) inside tool blocks
+  const handlePreClick = useEntityClickHandler(onTaskClick, onSessionClick);
 
   return (
     <div className={`chat-tool-block ${statusClass}`}>
@@ -363,7 +343,6 @@ function SessionToolCall({ tool, sessionCwd, onTaskClick, onSessionClick }: Sess
 
 export const SessionMessage = memo(function SessionMessage({ message, sessionCwd, onTaskClick, onSessionClick }: SessionMessageProps) {
   const { role, text, timestamp, tools, thinking, model, usage } = message;
-  const navigate = useNavigate();
   const time = formatTime(timestamp);
   const isUser = role === 'user';
 
@@ -373,27 +352,8 @@ export const SessionMessage = memo(function SessionMessage({ message, sessionCwd
     return findImagePaths(text);
   }, [text, isUser]);
 
-  // Intercept clicks on entity ref links for SPA navigation
-  const handleContentClick = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
-    const target = e.target as HTMLElement;
-    const taskAnchor = target.closest('a.task-link') as HTMLAnchorElement | null;
-    if (taskAnchor) {
-      const taskId = taskAnchor.dataset.taskId;
-      if (taskId) {
-        e.preventDefault();
-        onTaskClick ? onTaskClick(taskId) : navigate(`/tasks/${taskId}`);
-      }
-      return;
-    }
-    const sessionAnchor = target.closest('a.session-link') as HTMLAnchorElement | null;
-    if (sessionAnchor) {
-      const sessionId = sessionAnchor.dataset.sessionId;
-      if (sessionId) {
-        e.preventDefault();
-        onSessionClick ? onSessionClick(sessionId) : navigate(`/sessions?id=${sessionId}`);
-      }
-    }
-  }, [navigate, onTaskClick, onSessionClick]);
+  // Unified click handler for entity ref links in message content
+  const handleContentClick = useEntityClickHandler(onTaskClick, onSessionClick);
 
   return (
     <div className={`session-msg ${isUser ? 'session-msg-user' : 'session-msg-assistant'}`}>
