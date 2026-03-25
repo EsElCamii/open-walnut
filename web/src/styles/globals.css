@@ -7065,13 +7065,6 @@ img[data-lightbox-src],
   color: var(--error);
 }
 
-.todo-item-actions {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  margin-top: 2px;
-}
-
 /* Inline title editing (contentEditable — same element, no layout shift) */
 
 .todo-item-title.editing {
@@ -8985,11 +8978,8 @@ img[data-lightbox-src],
   transition: opacity 0.15s;
 }
 
-.todo-panel-item:hover .task-external-link {
-  opacity: 1;
-}
-
 .task-external-link:hover {
+  opacity: 1;
   color: var(--accent);
 }
 
@@ -9083,48 +9073,29 @@ img[data-lightbox-src],
   background: var(--accent-subtle);
 }
 
-/* ===== Task Star Button ===== */
-
-/* Expand detail button — hidden until hover, like star/pin */
-.task-expand-btn {
-  font-size: 12px;
-  color: var(--fg-muted);
-  padding: 2px 4px;
+/* ===== Unified task action buttons (SVG icons, 12×12) ===== */
+.task-action-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  padding: 0;
   flex-shrink: 0;
-  opacity: 0;
-  transition: opacity 0.15s, color 0.15s;
   background: none;
   border: none;
   cursor: pointer;
-}
-.task-expand-btn.active {
-  opacity: 1;
-  color: var(--accent);
-}
-.todo-panel-item:hover .task-expand-btn { opacity: 1; }
-.task-expand-btn:hover { color: var(--accent); }
-
-.task-star-btn {
-  font-size: 14px;
   color: var(--fg-muted);
-  padding: 2px 4px;
-  flex-shrink: 0;
-  opacity: 0;
-  transition: opacity 0.15s, color 0.15s;
+  border-radius: 3px;
 }
+.task-action-btn:hover { color: var(--accent); background: var(--hover-bg, rgba(0,0,0,0.04)); }
+.task-action-btn svg { display: block; }
 
-.task-star-btn.starred {
-  opacity: 1;
-  color: var(--warning);
-}
-
-.todo-panel-item:hover .task-star-btn {
-  opacity: 1;
-}
-
-.task-star-btn:hover {
-  color: var(--warning);
-}
+.task-expand-btn.active { color: var(--accent); }
+.task-star-btn.starred { color: var(--warning); }
+.task-star-btn:hover { color: var(--warning); }
+.task-pin-btn.pinned { color: var(--accent); }
+.task-pin-btn:hover { color: var(--accent); }
 
 /* ===== Context Inspector ===== */
 
@@ -12745,30 +12716,7 @@ img[data-lightbox-src],
   font-size: 14px;
 }
 
-/* ── Pin button in TodoPanel ── */
-
-.task-pin-btn {
-  background: none;
-  border: none;
-  cursor: pointer;
-  font-size: 12px;
-  padding: 0 2px;
-  opacity: 0;
-  transition: opacity 0.15s;
-}
-
-.todo-panel-item:hover .task-pin-btn {
-  opacity: 0.6;
-}
-
-.task-pin-btn:hover {
-  opacity: 1 !important;
-}
-
-.task-pinned-indicator {
-  font-size: 12px;
-  opacity: 0.5;
-}
+/* Pin button old overrides removed — unified via .task-action-btn */
 
 /* ===== Settings Page ===== */
 

@@ -141,6 +141,13 @@ const PRIORITY_LABEL: Record<string, string> = {
 
 const CHEVRON_ICON = '\u25B6'; // ▶ — used by all collapse-chevron buttons (CSS rotation handles expanded state)
 
+// Clean 12×12 SVG icons for task action buttons (monochrome, uses currentColor)
+const ICON_INFO = <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5"><circle cx="8" cy="8" r="6.5"/><path d="M8 7v4.5"/><circle cx="8" cy="5" r=".5" fill="currentColor"/></svg>;
+const ICON_STAR_EMPTY = <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinejoin="round"><path d="M8 1.5l2 4.1 4.5.6-3.2 3.2.8 4.5L8 11.7l-4.1 2.2.8-4.5L1.5 6.2l4.5-.6z"/></svg>;
+const ICON_STAR_FILLED = <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor" stroke="currentColor" strokeWidth="0.5" strokeLinejoin="round"><path d="M8 1.5l2 4.1 4.5.6-3.2 3.2.8 4.5L8 11.7l-4.1 2.2.8-4.5L1.5 6.2l4.5-.6z"/></svg>;
+const ICON_PIN = <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round"><path d="M6 2h4l1 5H5l1-5z"/><path d="M8 7v5"/><path d="M5 7h6"/></svg>;
+const ICON_PIN_FILLED = <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor" stroke="currentColor" strokeWidth="0.5" strokeLinecap="round"><path d="M6 2h4l1 5H5l1-5z"/><path d="M8 7v5" strokeWidth="1.3"/><path d="M5 7h6" strokeWidth="1.3"/></svg>;
+
 /** Normalize legacy priority values to current 4-tier system. */
 function effectivePriority(p: string): string {
   if (p === 'high') return 'immediate';
@@ -477,25 +484,12 @@ function SortableTaskItem({ task, isFocused, isRecentlyDone, depth = 0, childCou
             <span className="task-attention-dot" title="Needs your attention" role="img" aria-label="Needs your attention" />
           )}
         </div>
+        {/* — single bottom row: status · source · link · actions — */}
         <div className="todo-item-meta-row">
-          {dueDateInfo && (
-            <span className={`todo-item-due-pill${dueDateInfo.overdue ? ' todo-item-due-overdue' : ''}`}>
-              {dueDateInfo.label}
-            </span>
-          )}
-          {task.sprint && (
-            <span className="todo-item-sprint-pill" title={`Sprint: ${task.sprint}`}>
-              {task.sprint}
-            </span>
-          )}
-          {!!(task as Record<string, unknown>).is_blocked && !isDone && (
-            <span className="task-blocked-badge" title="Blocked by dependencies">
-              blocked
-            </span>
-          )}
-          {!!childCount && (
-            <span className="task-children-badge">{childCount} sub</span>
-          )}
+          <TaskStatusDot task={task} onClick={onOpenSession ? () => {
+            const sid = resolveTaskSessionId(task);
+            if (sid) onOpenSession(sid);
+          } : undefined} />
           {task.source && (() => {
             const meta = getIntegrationMeta(integrations, task.source);
             const badge = task.source === 'local' ? 'L' : (meta?.badge ?? task.source.charAt(0).toUpperCase());
@@ -536,6 +530,68 @@ function SortableTaskItem({ task, isFocused, isRecentlyDone, depth = 0, childCou
               </a>
             );
           })()}
+          <button
+            className={`task-action-btn task-expand-btn${isFocused ? ' active' : ''}`}
+            onClick={(e) => {
+              e.stopPropagation();
+              if (isFocused) {
+                onClearFocus?.();
+              } else {
+                onExpandDetail?.(task);
+              }
+            }}
+            title={isFocused ? 'Close detail' : 'Open detail'}
+          >
+            {ICON_INFO}
+          </button>
+          {onSetPriority ? (
+            <PriorityPicker
+              priority={task.priority}
+              onChange={(p) => onSetPriority(task.id, p)}
+            />
+          ) : (
+            <span className={`badge badge-${task.priority}`}>{task.priority === 'immediate' ? '!!' : task.priority === 'important' ? '!' : task.priority === 'backlog' ? '~' : '--'}</span>
+          )}
+          {onStar && (
+            <button
+              className={`task-action-btn task-star-btn${task.starred ? ' starred' : ''}`}
+              onClick={(e) => { e.stopPropagation(); onStar(task.id); }}
+              title={task.starred ? 'Unstar' : 'Star'}
+            >
+              {task.starred ? ICON_STAR_FILLED : ICON_STAR_EMPTY}
+            </button>
+          )}
+          {onPinTask && !isPinned && task.status !== 'done' && task.phase !== 'COMPLETE' && (
+            <button
+              className="task-action-btn task-pin-btn"
+              onClick={(e) => { e.stopPropagation(); onPinTask(task.id); }}
+              title="Pin to Focus Dock"
+            >
+              {ICON_PIN}
+            </button>
+          )}
+          {isPinned && onUnpinTask && (
+            <button
+              className="task-action-btn task-pin-btn pinned"
+              onClick={(e) => { e.stopPropagation(); onUnpinTask(task.id); }}
+              title="Unpin from Focus Dock"
+            >
+              {ICON_PIN_FILLED}
+            </button>
+          )}
+          {dueDateInfo && (
+            <span className={`todo-item-due-pill${dueDateInfo.overdue ? ' todo-item-due-overdue' : ''}`}>
+              {dueDateInfo.label}
+            </span>
+          )}
+          {!!(task as Record<string, unknown>).is_blocked && !isDone && (
+            <span className="task-blocked-badge" title="Blocked by dependencies">
+              blocked
+            </span>
+          )}
+          {!!childCount && (
+            <span className="task-children-badge">{childCount} sub</span>
+          )}
           {isDone && task.completed_at && (
             <span className="task-completed-time">{timeAgo(task.completed_at)}</span>
           )}
@@ -569,62 +625,6 @@ function SortableTaskItem({ task, isFocused, isRecentlyDone, depth = 0, childCou
             <span className="todo-search-context-pill" title={searchContext}>
               {searchContext}
             </span>
-          )}
-        </div>
-        {/* — action badges: priority, star, detail, pin (bottom row) — */}
-        <div className="todo-item-actions">
-          <TaskStatusDot task={task} onClick={onOpenSession ? () => {
-            const sid = resolveTaskSessionId(task);
-            if (sid) onOpenSession(sid);
-          } : undefined} />
-          <button
-            className={`task-expand-btn${isFocused ? ' active' : ''}`}
-            onClick={(e) => {
-              e.stopPropagation();
-              if (isFocused) {
-                onClearFocus?.();
-              } else {
-                onExpandDetail?.(task);
-              }
-            }}
-            title={isFocused ? 'Close detail' : 'Open detail'}
-          >
-            &#x24D8;
-          </button>
-          {onSetPriority ? (
-            <PriorityPicker
-              priority={task.priority}
-              onChange={(p) => onSetPriority(task.id, p)}
-            />
-          ) : (
-            <span className={`badge badge-${task.priority}`}>{task.priority === 'immediate' ? '!!' : task.priority === 'important' ? '!' : task.priority === 'backlog' ? '~' : '--'}</span>
-          )}
-          {onStar && (
-            <button
-              className={`task-star-btn${task.starred ? ' starred' : ''}`}
-              onClick={(e) => { e.stopPropagation(); onStar(task.id); }}
-              title={task.starred ? 'Unstar' : 'Star'}
-            >
-              {task.starred ? '\u2605' : '\u2606'}
-            </button>
-          )}
-          {onPinTask && !isPinned && task.status !== 'done' && task.phase !== 'COMPLETE' && (
-            <button
-              className="task-pin-btn"
-              onClick={(e) => { e.stopPropagation(); onPinTask(task.id); }}
-              title="Pin to Focus Dock"
-            >
-              &#x1F4CC;
-            </button>
-          )}
-          {isPinned && onUnpinTask && (
-            <button
-              className="task-pin-btn task-pinned-indicator"
-              onClick={(e) => { e.stopPropagation(); onUnpinTask(task.id); }}
-              title="Unpin from Focus Dock"
-            >
-              &#x1F4CC;
-            </button>
           )}
         </div>
       </div>
@@ -1299,13 +1299,13 @@ function SortablePinnedCard({ task, isFocused, onFocusTask, onUnpinTask, onOpenS
       style={style}
       className={`todo-pinned-card${isFocused ? ' todo-pinned-card-active' : ''}${needsAttention ? ' todo-pinned-card-attention' : ''}`}
       onClick={() => {
-        onFocusTask?.(task);
         const sid = resolveTaskSessionId(task);
         if (sid) onOpenSession?.(sid);
+        else onFocusTask?.(task);
       }}
       role="button"
       tabIndex={0}
-      onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onFocusTask?.(task); const sid = resolveTaskSessionId(task); if (sid) onOpenSession?.(sid); } }}
+      onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); const sid = resolveTaskSessionId(task); if (sid) onOpenSession?.(sid); else onFocusTask?.(task); } }}
     >
       <span className="todo-pinned-drag-handle" {...attributes} {...listeners} title="Drag to reorder">
         &#x2630;
@@ -2438,11 +2438,16 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
     return collapsedProjects.has(projKey);
   }, [collapsedProjects]);
 
-  // Click task row = open detail panel. The ⓘ button also toggles it.
+  // Click task row = open session only. Use ⓘ button for task detail.
   const handleTaskClick = useCallback((task: Task) => {
-    setDetailTarget(null);
-    onFocusTask ? onFocusTask(task) : navigate(`/tasks/${task.id}`);
-  }, [onFocusTask, navigate]);
+    const sid = resolveTaskSessionId(task);
+    if (sid) {
+      onOpenSession?.(sid);
+    } else {
+      // No session — fall back to task detail
+      onFocusTask ? onFocusTask(task) : navigate(`/tasks/${task.id}`);
+    }
+  }, [onFocusTask, onOpenSession, navigate]);
 
   const handleExpandDetail = useCallback((task: Task) => {
     setDetailTarget(null);
@@ -2876,7 +2881,15 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
           Add
         </button>
       </form>
-      {/* GlobalNotesSection removed — simplification */}
+      <GlobalNotesSection
+        {...globalNotes}
+        tasks={tasks}
+        focusedTaskId={focusedTaskId ?? undefined}
+        onTaskClick={(taskId) => {
+          const task = tasks.find(t => t.id === taskId);
+          if (task) onFocusTask?.(task);
+        }}
+      />
     </div>
   );
 });
