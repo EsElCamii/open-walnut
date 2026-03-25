@@ -66,7 +66,7 @@ interface TodoPanelProps {
   onUpdate?: (id: string, updates: { title?: string }) => void;
   onStar?: (id: string) => void;
   onSetPriority?: (id: string, priority: string) => void;
-  onFocusTask?: (task: Task) => void;
+  onFocusTask?: (task: Task, opts?: { openDetail?: boolean }) => void;
   onClearFocus?: () => void;
   focusedTaskId?: string;
   /** Increments on every focus action — forces re-scroll even for same task */
@@ -82,6 +82,8 @@ interface TodoPanelProps {
   onUnpinTask?: (taskId: string) => void;
   onReorderPinned?: (newIds: string[]) => void;
   pinnedTaskIds?: Set<string>;
+  /** When true, suppress opening the detail panel for the focused task (e.g. chat task-ref clicks). */
+  suppressDetail?: boolean;
   /** Set of session IDs currently displayed in session columns. */
   openSessionIds?: Set<string>;
   operationError?: string | null;
@@ -1269,12 +1271,11 @@ function TaskDetailPane({ task, allTasks, onClose, onOpenSession, onOpenTriageFo
 interface SortablePinnedCardProps {
   task: Task;
   isFocused: boolean;
-  onFocusTask?: (task: Task) => void;
+  onClick?: (task: Task) => void;
   onUnpinTask?: (taskId: string) => void;
-  onOpenSession?: (sessionId: string) => void;
 }
 
-function SortablePinnedCard({ task, isFocused, onFocusTask, onUnpinTask, onOpenSession }: SortablePinnedCardProps) {
+function SortablePinnedCard({ task, isFocused, onClick, onUnpinTask }: SortablePinnedCardProps) {
   const {
     attributes,
     listeners,
@@ -1298,14 +1299,10 @@ function SortablePinnedCard({ task, isFocused, onFocusTask, onUnpinTask, onOpenS
       ref={setNodeRef}
       style={style}
       className={`todo-pinned-card${isFocused ? ' todo-pinned-card-active' : ''}${needsAttention ? ' todo-pinned-card-attention' : ''}`}
-      onClick={() => {
-        const sid = resolveTaskSessionId(task);
-        if (sid) onOpenSession?.(sid);
-        else onFocusTask?.(task);
-      }}
+      onClick={() => onClick?.(task)}
       role="button"
       tabIndex={0}
-      onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); const sid = resolveTaskSessionId(task); if (sid) onOpenSession?.(sid); else onFocusTask?.(task); } }}
+      onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onClick?.(task); } }}
     >
       <span className="todo-pinned-drag-handle" {...attributes} {...listeners} title="Drag to reorder">
         &#x2630;
@@ -1326,7 +1323,7 @@ function SortablePinnedCard({ task, isFocused, onFocusTask, onUnpinTask, onOpenS
 
 // ── TodoPanel ──
 
-export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onComplete, onSetPhase, onCreate, onUpdate, onStar, onSetPriority, onFocusTask, onClearFocus, focusedTaskId, focusNonce, favorites, ordering, onReorder, onMoveTask, onReparentTask, onOpenSession, onOpenTriageForTask, onPinTask, onUnpinTask, onReorderPinned, pinnedTaskIds, openSessionIds, operationError, onClearOperationError, onOperationError, externalCategory, onCategoryChange }: TodoPanelProps) {
+export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onComplete, onSetPhase, onCreate, onUpdate, onStar, onSetPriority, onFocusTask, onClearFocus, focusedTaskId, focusNonce, favorites, ordering, onReorder, onMoveTask, onReparentTask, onOpenSession, onOpenTriageForTask, onPinTask, onUnpinTask, onReorderPinned, pinnedTaskIds, suppressDetail, openSessionIds, operationError, onClearOperationError, onOperationError, externalCategory, onCategoryChange }: TodoPanelProps) {
   // Hide .metadata* tasks (project/category configuration tasks, not user-visible)
   const tasks = useMemo(() => rawTasks.filter((t) => !t.title.startsWith('.metadata')), [rawTasks]);
   const navigate = useNavigate();
@@ -2440,6 +2437,14 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
     return collapsedProjects.has(projKey);
   }, [collapsedProjects]);
 
+  // Pinned card click = scroll to list position + open session if exists (no detail panel)
+  const handlePinnedCardClick = useCallback((task: Task) => {
+    const sid = resolveTaskSessionId(task);
+    if (sid) onOpenSession?.(sid);
+    // Always scroll to position; suppress detail panel (session panel is the primary view)
+    onFocusTask?.(task, { openDetail: false });
+  }, [onFocusTask, onOpenSession]);
+
   // Click task row = open session only. Use ⓘ button for task detail.
   const handleTaskClick = useCallback((task: Task) => {
     const sid = resolveTaskSessionId(task);
@@ -2527,9 +2532,8 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
                     key={task.id}
                     task={task}
                     isFocused={focusedTaskId === task.id}
-                    onFocusTask={onFocusTask}
+                    onClick={handlePinnedCardClick}
                     onUnpinTask={onUnpinTask}
-                    onOpenSession={onOpenSession}
                   />
                 ))}
               </div>
@@ -2538,7 +2542,7 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
         </div>
       )}
 
-      <div className="todo-panel-list" style={(focusedTask || detailTarget) ? { flex: `${1 - detailRatio} 1 0%` } : undefined}>
+      <div className="todo-panel-list" style={((focusedTask && !suppressDetail) || detailTarget) ? { flex: `${1 - detailRatio} 1 0%` } : undefined}>
         {loading && (
           <div className="empty-state" style={{ padding: '24px 8px' }}>
             <div className="spinner" style={{ width: 20, height: 20, borderWidth: 2, margin: '0 auto' }} />
@@ -2844,8 +2848,8 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
       </div>
 
       {/* Detail pane: task, project, or category */}
-      {(focusedTask || detailTarget) && <div className="todo-detail-splitter" onMouseDown={splitterMouseDown} />}
-      {focusedTask ? (
+      {((focusedTask && !suppressDetail) || detailTarget) && <div className="todo-detail-splitter" onMouseDown={splitterMouseDown} />}
+      {focusedTask && !suppressDetail ? (
         <TaskDetailPane task={focusedTask} allTasks={tasks} onClose={onClearFocus} onOpenSession={onOpenSession} onOpenTriageForTask={onOpenTriageForTask} onFocusChild={onFocusTask} style={{ flex: `${detailRatio} 1 0%` }} />
       ) : detailTarget?.type === 'project' ? (
         <ProjectDetailPane

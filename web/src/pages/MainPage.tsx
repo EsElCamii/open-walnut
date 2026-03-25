@@ -23,6 +23,7 @@ import { ContextInspectorPanel } from '@/components/context/ContextInspectorPane
 import { QuickAccessBar } from '@/components/chat/QuickAccessBar';
 import { useContextInspector } from '@/hooks/useContextInspector';
 import { useUrlSync } from '@/hooks/useUrlSync';
+import { useSessionPanelMode } from '@/hooks/useSessionPanelMode';
 import { shouldHideUiOnlyMessage } from '@/hooks/useDeveloperSettings';
 import { useUiOnlySettings } from '@/hooks/useDeveloperSettings';
 import { FocusDock } from '@/components/dock/FocusDock';
@@ -105,13 +106,14 @@ const SS_CHAT_VISIBLE_KEY = 'open-walnut-home-chat-visible';
 // Legacy key for migration
 const SS_SESSION_KEY_LEGACY = 'open-walnut-home-session-panel';
 
-// ── Session column queue helpers (max 2, or max 1 if triage open) ──
+// ── Session column queue helpers ──
 
-const MAX_COLUMNS = 2;
 const SESSION_WIDTH_BY_COUNT = [0, 40, 65]; // 1=40%, 2=65% (max width)
 
-function addSessionColumn(cols: string[], id: string, triageOpen: boolean): string[] {
-  const max = triageOpen ? MAX_COLUMNS - 1 : MAX_COLUMNS;
+const MAX_SESSION_SLOTS = 2; // Always keep up to 2 sessions in queue (tab bar handles visibility)
+
+function addSessionColumn(cols: string[], id: string, triageOpen: boolean, _maxColumns: number): string[] {
+  const max = triageOpen ? MAX_SESSION_SLOTS - 1 : MAX_SESSION_SLOTS;
   // Deduplicate: remove existing, then push to rightmost
   const filtered = cols.filter(c => c !== id);
   const next = [...filtered, id];
@@ -195,12 +197,34 @@ export function MainPage({ visible = true, navigateRef }: MainPageProps) {
   // Task ID for filtered triage panel (null = show all)
   const [triageTaskId, setTriageTaskId] = useState<string | null>(null);
 
+  // Session panel mode (1 / 2 / auto)
+  const { effectiveMaxPanels } = useSessionPanelMode();
+  const maxPanelsRef = useRef(effectiveMaxPanels);
+  maxPanelsRef.current = effectiveMaxPanels;
+
+  // Active tab index for 1-panel mode when multiple sessions exist
+  const [activeColIdx, setActiveColIdx] = useState(0);
+
   // Session quick-start state (opened via /session command)
   const [pathSelectorOpen, setPathSelectorOpen] = useState(false);
   const [quickStartPath, setQuickStartPath] = useState<QuickStartPath | null>(null);
 
   // Set of session IDs currently open in columns — for active pill indicators
   const openSessionIdSet = useMemo(() => new Set(sessionColumns), [sessionColumns]);
+
+  // Keep activeColIdx valid: clamp when columns shrink, jump to newest when added
+  const prevColLenRef = useRef(sessionColumns.length);
+  useEffect(() => {
+    const prev = prevColLenRef.current;
+    prevColLenRef.current = sessionColumns.length;
+    if (sessionColumns.length === 0) return;
+    if (sessionColumns.length > prev) {
+      // New session added — jump to last
+      setActiveColIdx(sessionColumns.length - 1);
+    } else if (activeColIdx >= sessionColumns.length) {
+      setActiveColIdx(sessionColumns.length - 1);
+    }
+  }, [sessionColumns.length, activeColIdx]);
 
   // Detect pending ask_question tool call from chat messages
   const pendingQuestion = useMemo(() => {
@@ -260,17 +284,18 @@ export function MainPage({ visible = true, navigateRef }: MainPageProps) {
     document.addEventListener('mouseup', onUp);
   }, [sessionPanel.panelRef]);
 
-  // Graduated session area width — only auto-set when column count increases
+  // Graduated session area width — only auto-set when visible column count increases
   // (don't override user's manual drag on decrease or same count)
   const prevColCountRef = useRef(0);
   useEffect(() => {
-    const count = sessionColumns.length + (triagePanelOpen ? 1 : 0);
+    const visibleSessionCols = Math.min(sessionColumns.length, effectiveMaxPanels);
+    const count = visibleSessionCols + (triagePanelOpen ? 1 : 0);
     if (count === prevColCountRef.current) return;
     const prev = prevColCountRef.current;
     prevColCountRef.current = count;
     // Only auto-set width when opening panels (0→1, 1→2), not when closing
     if (count > prev && count > 0) sessionPanel.setPct(SESSION_WIDTH_BY_COUNT[Math.min(count, 2)]);
-  }, [sessionColumns.length, triagePanelOpen, sessionPanel.setPct]);
+  }, [sessionColumns.length, effectiveMaxPanels, triagePanelOpen, sessionPanel.setPct]);
 
   // Keep focusedTask in sync with latest data from tasks array (handles WS updates from other sources)
   useEffect(() => {
@@ -361,7 +386,7 @@ export function MainPage({ visible = true, navigateRef }: MainPageProps) {
       const { taskId, sessionId } = (e as CustomEvent).detail as { taskId: string; sessionId?: string };
       const task = taskMapRef.current.get(taskId);
       if (task) setFocusedTask(task);
-      if (sessionId) setSessionColumns(prev => addSessionColumn(prev, sessionId, triageOpenRef.current));
+      if (sessionId) setSessionColumns(prev => addSessionColumn(prev, sessionId, triageOpenRef.current, maxPanelsRef.current));
     };
     const handleDockChat = () => {
       // Toggle main chat panel visibility
@@ -403,7 +428,7 @@ export function MainPage({ visible = true, navigateRef }: MainPageProps) {
   // ── Session column handlers ──
   // Clicking a session pill always opens/moves to rightmost — use close button to dismiss
   const handleToggleSession = useCallback((sessionId: string) => {
-    setSessionColumns(prev => addSessionColumn(prev, sessionId, triageOpenRef.current));
+    setSessionColumns(prev => addSessionColumn(prev, sessionId, triageOpenRef.current, maxPanelsRef.current));
   }, []);
 
   // Per-column close handler factory
@@ -433,7 +458,8 @@ export function MainPage({ visible = true, navigateRef }: MainPageProps) {
     setTriagePanelOpen(true);
     setTriageTaskId(taskId);
     // Trim sessions to max-1 if triage is opening
-    setSessionColumns(prev => prev.length > MAX_COLUMNS - 1 ? prev.slice(prev.length - (MAX_COLUMNS - 1)) : prev);
+    const mp = maxPanelsRef.current;
+    setSessionColumns(prev => prev.length > mp - 1 ? prev.slice(prev.length - (mp - 1)) : prev);
   }, []);
 
   const handleCloseTriage = useCallback(() => {
@@ -475,7 +501,7 @@ export function MainPage({ visible = true, navigateRef }: MainPageProps) {
       if (pendingMeta) {
         setSessionColumns(prev => replaceSessionColumn(prev, pendingMeta.id, sessionId));
       } else {
-        setSessionColumns(prev => addSessionColumn(prev, sessionId, triageOpenRef.current));
+        setSessionColumns(prev => addSessionColumn(prev, sessionId, triageOpenRef.current, maxPanelsRef.current));
       }
       return;
     }
@@ -489,7 +515,7 @@ export function MainPage({ visible = true, navigateRef }: MainPageProps) {
       if (meta) {
         setSessionColumns(prev => replaceSessionColumn(prev, meta.id, sessionId));
       } else {
-        setSessionColumns(prev => addSessionColumn(prev, sessionId, triageOpenRef.current));
+        setSessionColumns(prev => addSessionColumn(prev, sessionId, triageOpenRef.current, maxPanelsRef.current));
       }
       return;
     }
@@ -521,7 +547,7 @@ export function MainPage({ visible = true, navigateRef }: MainPageProps) {
             if (pendingMeta) {
               setSessionColumns(prev => replaceSessionColumn(prev, pendingMeta.id, active.claudeSessionId));
             } else {
-              setSessionColumns(prev => addSessionColumn(prev, active.claudeSessionId, triageOpenRef.current));
+              setSessionColumns(prev => addSessionColumn(prev, active.claudeSessionId, triageOpenRef.current, maxPanelsRef.current));
             }
             return;
           }
@@ -542,7 +568,7 @@ export function MainPage({ visible = true, navigateRef }: MainPageProps) {
             if (meta) {
               setSessionColumns(prev => replaceSessionColumn(prev, meta.id, active.claudeSessionId));
             } else {
-              setSessionColumns(prev => addSessionColumn(prev, active.claudeSessionId, triageOpenRef.current));
+              setSessionColumns(prev => addSessionColumn(prev, active.claudeSessionId, triageOpenRef.current, maxPanelsRef.current));
             }
             return;
           }
@@ -555,7 +581,7 @@ export function MainPage({ visible = true, navigateRef }: MainPageProps) {
   const handleForkPending = useCallback((cwd: string, host?: string) => {
     const pendingColId = `pending:fork-${Date.now()}`;
     pendingForkMetaRef.current = { id: pendingColId, cwd, host };
-    setSessionColumns(prev => addSessionColumn(prev, pendingColId, triageOpenRef.current));
+    setSessionColumns(prev => addSessionColumn(prev, pendingColId, triageOpenRef.current, maxPanelsRef.current));
   }, []);
 
   const handleForkResolved = useCallback((taskId: string) => {
@@ -577,7 +603,7 @@ export function MainPage({ visible = true, navigateRef }: MainPageProps) {
   // Handle session click from chat: focus the associated task + open session column
   const handleSessionClick = useCallback(async (sessionId: string) => {
     // Add session column
-    setSessionColumns(prev => addSessionColumn(prev, sessionId, triageOpenRef.current));
+    setSessionColumns(prev => addSessionColumn(prev, sessionId, triageOpenRef.current, maxPanelsRef.current));
     // Fetch session to find its associated task
     try {
       const session = await fetchSession(sessionId);
@@ -602,25 +628,30 @@ export function MainPage({ visible = true, navigateRef }: MainPageProps) {
   const focusedTaskRef = useRef(focusedTask);
   focusedTaskRef.current = focusedTask;
 
-  const handleFocusTask = useCallback((task: Task) => {
+  const [suppressDetail, setSuppressDetail] = useState(false);
+
+  const handleFocusTask = useCallback((task: Task, opts?: { openDetail?: boolean }) => {
     const isRefocus = focusedTaskRef.current?.id === task.id;
     // Always focus (never toggle off) — unfocusing is done via detail panel close / Esc.
     // Increment nonce so TodoPanel re-scrolls even when the same task is re-clicked.
     setFocusedTask(task);
     setFocusNonce(n => n + 1);
+    setSuppressDetail(opts?.openDetail === false); // Auto-clears on next direct click (opts is undefined → false)
     // Clear attention flag on new focus (not re-focus)
     if (!isRefocus && task.needs_attention) {
       update(task.id, { needs_attention: false });
     }
   }, [update]);
 
+  // Suppress detail — callers (chat refs, session/triage panels) already show their own context
   const handleFocusTaskById = useCallback((taskId: string) => {
     const task = taskMapRef.current.get(taskId);
-    if (task) handleFocusTask(task);
+    if (task) handleFocusTask(task, { openDetail: false });
   }, [handleFocusTask]);
 
   const handleClearFocus = useCallback(() => {
     setFocusedTask(null);
+    setSuppressDetail(false);
   }, []);
 
   // Escape key unfocuses the current task (since clicking no longer toggles off)
@@ -676,7 +707,7 @@ export function MainPage({ visible = true, navigateRef }: MainPageProps) {
 
       // Immediately open a pending session column for instant visual feedback
       const pendingColId = `pending:${tempTaskId}`;
-      setSessionColumns(prev => addSessionColumn(prev, pendingColId, triageOpenRef.current));
+      setSessionColumns(prev => addSessionColumn(prev, pendingColId, triageOpenRef.current, maxPanelsRef.current));
       // Store pending metadata for rendering
       pendingQuickStartMetaRef.current = { id: pendingColId, cwd: qsp.cwd, host: qsp.host ?? undefined, hostLabel: qsp.hostLabel ?? undefined };
 
@@ -902,7 +933,7 @@ export function MainPage({ visible = true, navigateRef }: MainPageProps) {
         <div className="session-resize-handle" onMouseDown={sessionPanel.handleResizeStart} />
       )}
 
-      {/* Sessions Area — triage (first slot) + up to 2 session columns */}
+      {/* Sessions Area — triage (first slot) + session columns */}
       <div
         ref={sessionPanel.panelRef}
         className={`main-page-sessions-area${sessionColumns.length === 0 && !triagePanelOpen ? ' collapsed' : ''}`}
@@ -918,47 +949,78 @@ export function MainPage({ visible = true, navigateRef }: MainPageProps) {
             />
           </div>
         )}
-        {sessionColumns.map((sid, idx) => {
-          const needsDivider = idx > 0 || triagePanelOpen;
-          const isPending = sid.startsWith('pending:');
-          const qsMeta = isPending ? pendingQuickStartMetaRef.current : null;
-          const forkMeta = isPending ? pendingForkMetaRef.current : null;
-          const pendingMeta = (qsMeta?.id === sid ? qsMeta : null) ?? (forkMeta?.id === sid ? forkMeta : null);
-          const isForkPending = forkMeta?.id === sid;
-          // Column split: when 2+ columns, first gets splitPct%, rest share remainder
-          const totalCols = sessionColumns.length + (triagePanelOpen ? 1 : 0);
-          const colIdx = idx + (triagePanelOpen ? 1 : 0);
-          const colStyle: React.CSSProperties = totalCols >= 2
-            ? { flex: `0 0 ${colIdx === 0 ? colSplitPct : (100 - colSplitPct)}%` }
-            : {};
-          return (<Fragment key={sid}>
-            {needsDivider && <div className="session-col-resize-handle" onMouseDown={handleColSplitStart} />}
-            <div className="main-page-session-column" style={colStyle}>
-              {isPending && pendingMeta ? (
-                <PendingSessionPanel
-                  taskId={sid}
-                  realTaskId={'realTaskId' in pendingMeta ? (pendingMeta as { realTaskId?: string }).realTaskId : undefined}
-                  cwd={pendingMeta.cwd}
-                  host={pendingMeta.host}
-                  hostLabel={'hostLabel' in pendingMeta ? (pendingMeta as { hostLabel?: string }).hostLabel : undefined}
-                  label={isForkPending ? 'Forking session...' : undefined}
-                  onClose={() => handleCloseSession(sid)}
-                />
-              ) : (
-                <SessionPanel
-                  sessionId={sid}
-                  onClose={handleCloseSession}
-                  onTaskClick={handleFocusTaskById}
-                  onSessionClick={handleSessionClick}
-                  onSessionReplaced={handleSessionReplaced}
-                  onForkPending={handleForkPending}
-                  onForkResolved={handleForkResolved}
-                  onForkFailed={handleForkFailed}
-                />
-              )}
+        {sessionColumns.length > 0 && (() => {
+          const showTabs = sessionColumns.length > effectiveMaxPanels;
+          const safeIdx = Math.min(activeColIdx, sessionColumns.length - 1);
+          const visibleColumns = showTabs
+            ? [sessionColumns[safeIdx]]
+            : sessionColumns;
+
+          return (<div className="session-columns-wrapper">
+            {showTabs && (
+              <div className="session-tab-bar">
+                {sessionColumns.map((sid, idx) => (
+                  <button
+                    key={sid}
+                    className={`session-tab${idx === safeIdx ? ' active' : ''}`}
+                    onClick={() => setActiveColIdx(idx)}
+                  >
+                    <span className="session-tab-label">
+                      {sid.startsWith('pending:') ? 'Starting…' : `Session ${idx + 1}`}
+                    </span>
+                    <span
+                      className="session-tab-close"
+                      onClick={(e) => { e.stopPropagation(); handleCloseSession(sid); }}
+                    >×</span>
+                  </button>
+                ))}
+              </div>
+            )}
+            <div style={{ display: 'flex', flex: 1, minHeight: 0 }}>
+              {visibleColumns.map((sid, vIdx) => {
+                const realIdx = showTabs ? safeIdx : sessionColumns.indexOf(sid);
+                const needsDivider = (showTabs ? false : realIdx > 0) || (vIdx === 0 && triagePanelOpen);
+                const isPending = sid.startsWith('pending:');
+                const qsMeta = isPending ? pendingQuickStartMetaRef.current : null;
+                const forkMeta = isPending ? pendingForkMetaRef.current : null;
+                const pendingMeta = (qsMeta?.id === sid ? qsMeta : null) ?? (forkMeta?.id === sid ? forkMeta : null);
+                const isForkPending = forkMeta?.id === sid;
+                const totalCols = visibleColumns.length + (triagePanelOpen ? 1 : 0);
+                const colIdx = vIdx + (triagePanelOpen ? 1 : 0);
+                const colStyle: React.CSSProperties = totalCols >= 2
+                  ? { flex: `0 0 ${colIdx === 0 ? colSplitPct : (100 - colSplitPct)}%` }
+                  : {};
+                return (<Fragment key={sid}>
+                  {needsDivider && <div className="session-col-resize-handle" onMouseDown={handleColSplitStart} />}
+                  <div className="main-page-session-column" style={colStyle}>
+                    {isPending && pendingMeta ? (
+                      <PendingSessionPanel
+                        taskId={sid}
+                        realTaskId={'realTaskId' in pendingMeta ? (pendingMeta as { realTaskId?: string }).realTaskId : undefined}
+                        cwd={pendingMeta.cwd}
+                        host={pendingMeta.host}
+                        hostLabel={'hostLabel' in pendingMeta ? (pendingMeta as { hostLabel?: string }).hostLabel : undefined}
+                        label={isForkPending ? 'Forking session...' : undefined}
+                        onClose={() => handleCloseSession(sid)}
+                      />
+                    ) : (
+                      <SessionPanel
+                        sessionId={sid}
+                        onClose={handleCloseSession}
+                        onTaskClick={handleFocusTaskById}
+                        onSessionClick={handleSessionClick}
+                        onSessionReplaced={handleSessionReplaced}
+                        onForkPending={handleForkPending}
+                        onForkResolved={handleForkResolved}
+                        onForkFailed={handleForkFailed}
+                      />
+                    )}
+                  </div>
+                </Fragment>);
+              })}
             </div>
-          </Fragment>);
-        })}
+          </div>);
+        })()}
       </div>
 
       </div>{/* end .main-page-content-row */}
@@ -1002,6 +1064,7 @@ export function MainPage({ visible = true, navigateRef }: MainPageProps) {
           onUnpinTask={focusBar.unpin}
           onReorderPinned={focusBar.reorder}
           pinnedTaskIds={pinnedTaskIdSet}
+          suppressDetail={suppressDetail}
           operationError={operationError}
           onClearOperationError={clearOperationError}
           onOperationError={showOperationError}
