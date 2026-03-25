@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect } from 'react';
+import { useState, useCallback, useEffect, useRef } from 'react';
 import { wsClient } from '@/api/ws';
 import { log } from '@/utils/log';
 import type { OptimisticMessage } from '@/components/sessions/SessionChatHistory';
@@ -9,6 +9,8 @@ interface UseSessionSendReturn {
   sendError: string | null;
   send: (sessionId: string, message: string, images?: ImageAttachment[]) => void;
   interruptSend: (sessionId: string, message: string, images?: ImageAttachment[]) => void;
+  retryFailed: (queueId: string, sessionId: string) => void;
+  dismissFailed: (queueId: string) => void;
   handleMessagesDelivered: (count: number) => void;
   handleBatchCompleted: (count: number) => void;
   handleEditQueued: (sessionId: string, queueId: string, newText: string) => void;
@@ -42,6 +44,10 @@ interface UseSessionSendReturn {
 export function useSessionSend(activeSessionId: string | null): UseSessionSendReturn {
   const [optimisticMsgs, setOptimisticMsgs] = useState<OptimisticMessage[]>([]);
   const [sendError, setSendError] = useState<string | null>(null);
+
+  // Ref for accessing current optimistic messages in callbacks without stale closures
+  const msgsRef = useRef(optimisticMsgs);
+  msgsRef.current = optimisticMsgs;
 
   // Clear optimistic messages on session switch
   useEffect(() => {
@@ -79,7 +85,9 @@ export function useSessionSend(activeSessionId: string | null): UseSessionSendRe
       .catch((e: Error) => {
         log.error('send', 'RPC failed', { sessionId, error: e.message });
         setSendError(e.message);
-        setOptimisticMsgs((prev) => prev.filter((m) => m.queueId !== tempId));
+        setOptimisticMsgs((prev) => prev.map((m) =>
+          m.queueId === tempId ? { ...m, status: 'failed' as const, failedError: e.message } : m
+        ));
       });
   }, []);
 
@@ -113,8 +121,49 @@ export function useSessionSend(activeSessionId: string | null): UseSessionSendRe
       .catch((e: Error) => {
         log.error('send', 'RPC failed (interrupt)', { sessionId, error: e.message });
         setSendError(e.message);
-        setOptimisticMsgs((prev) => prev.filter((m) => m.queueId !== tempId));
+        setOptimisticMsgs((prev) => prev.map((m) =>
+          m.queueId === tempId ? { ...m, status: 'failed' as const, failedError: e.message } : m
+        ));
       });
+  }, []);
+
+  /** Retry a failed message — resets to pending and re-sends via RPC. */
+  const retryFailed = useCallback((queueId: string, sessionId: string) => {
+    const failedMsg = msgsRef.current.find(m => m.queueId === queueId && m.status === 'failed');
+    if (!failedMsg) return;
+
+    setSendError(null);
+    const newTempId = `temp-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+    log.info('send', 'retrying', { sessionId, oldQueueId: queueId, newQueueId: newTempId });
+
+    setOptimisticMsgs((prev) => prev.map((m) =>
+      m.queueId === queueId ? { ...m, queueId: newTempId, status: 'pending' as const, failedError: undefined } : m
+    ));
+
+    const rpcPayload: Record<string, unknown> = { sessionId, message: failedMsg.text };
+    if (failedMsg.images?.length) {
+      rpcPayload.images = failedMsg.images.map(img => ({ data: img.data, mediaType: img.mediaType }));
+    }
+    wsClient.sendRpc<{ messageId: string }>('session:send', rpcPayload)
+      .then((res) => {
+        if (res?.messageId) {
+          setOptimisticMsgs((prev) => prev.map((m) =>
+            m.queueId === newTempId ? { ...m, queueId: res.messageId, status: 'received' as const } : m
+          ));
+        }
+      })
+      .catch((e: Error) => {
+        log.error('send', 'Retry failed', { sessionId, error: e.message });
+        setSendError(e.message);
+        setOptimisticMsgs((prev) => prev.map((m) =>
+          m.queueId === newTempId ? { ...m, status: 'failed' as const, failedError: e.message } : m
+        ));
+      });
+  }, []);
+
+  /** Remove a failed message from the optimistic list. */
+  const dismissFailed = useCallback((queueId: string) => {
+    setOptimisticMsgs((prev) => prev.filter((m) => m.queueId !== queueId));
   }, []);
 
   const handleMessagesDelivered = useCallback((count: number) => {
@@ -134,12 +183,12 @@ export function useSessionSend(activeSessionId: string | null): UseSessionSendRe
   const handleBatchCompleted = useCallback((count: number) => {
     log.info('send', 'batch completed', { count });
     setOptimisticMsgs((prev) => {
-      // Remove the first `count` messages outright — the backend's batch count is
-      // authoritative and the re-fetched persisted history already contains them
-      // (possibly combined with \n\n when multiple messages are delivered together —
-      // see claude-code-session.ts handleSend / processNext).
+      // Remove the first `count` non-failed messages outright — the backend's batch
+      // count is authoritative and the re-fetched persisted history already contains
+      // them. Failed messages are never consumed by the backend, so skip them.
       let remaining = count;
       return prev.filter(m => {
+        if (m.status === 'failed') return true; // keep failed messages
         if (remaining > 0) {
           remaining--;
           return false; // remove this message
@@ -198,6 +247,8 @@ export function useSessionSend(activeSessionId: string | null): UseSessionSendRe
     sendError,
     send,
     interruptSend,
+    retryFailed,
+    dismissFailed,
     handleMessagesDelivered,
     handleBatchCompleted,
     handleEditQueued,

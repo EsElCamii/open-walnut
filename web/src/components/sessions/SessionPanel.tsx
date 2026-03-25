@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback, useRef, Component, type ReactNode, ty
 import { useNavigate } from 'react-router-dom';
 import { SessionChatHistory } from './SessionChatHistory';
 import { SessionNotes } from './SessionNotes';
+import { ICON_ROBOT, ICON_EXPAND, ICON_COLLAPSE, ICON_PIN, ICON_PIN_FILLED, ICON_CLOSE } from '../common/Icons';
 import { UserMessagesSummary } from './UserMessagesSummary';
 import { PlanPreviewSection } from './PlanPreviewSection';
 import { ChatInput } from '@/components/chat/ChatInput';
@@ -22,6 +23,7 @@ import { TaskQuickActions } from './TaskQuickActions';
 import { useFullscreen } from '@/hooks/useFullscreen';
 import { useSessionUsage, formatModelName, getContextWindowSize } from '@/hooks/useSessionUsage';
 import { useSessionPlan } from '@/hooks/useSessionPlan';
+import { SessionRetryButton } from './SessionRetryButton';
 import { wsClient } from '@/api/ws';
 import type { SessionRecord } from '@/types/session';
 
@@ -96,7 +98,7 @@ export const SessionPanel = memo(function SessionPanel({ sessionId, onClose, onT
   const navigate = useNavigate();
   const [session, setSession] = useState<SessionRecord | null>(null);
   const [loading, setLoading] = useState(true);
-  const { optimisticMsgs, sendError, send, interruptSend, handleMessagesDelivered, handleBatchCompleted, handleEditQueued, handleDeleteQueued, addExternalQueued, clearCommitted } = useSessionSend(sessionId);
+  const { optimisticMsgs, sendError, send, interruptSend, retryFailed, dismissFailed, handleMessagesDelivered, handleBatchCompleted, handleEditQueued, handleDeleteQueued, addExternalQueued, clearCommitted } = useSessionSend(sessionId);
   const { isStreaming } = useSessionStream(sessionId);
   const bodyRef = useRef<HTMLDivElement>(null);
   // Track latest sessionId so async callbacks can detect navigation
@@ -350,6 +352,24 @@ export const SessionPanel = memo(function SessionPanel({ sessionId, onClose, onT
     }
   }, [sessionId, onSessionReplaced]);
 
+  // Retry: when retrySession() succeeds, listen for the new session to appear on the task
+  const retryTaskIdRef = useRef<string | null>(null);
+  const handleRetried = useCallback((taskId: string) => {
+    retryTaskIdRef.current = taskId;
+  }, []);
+
+  // Listen for task:updated to detect when new session is linked after retry
+  useEvent('task:updated', (data: unknown) => {
+    const d = data as { task?: { id?: string; exec_session_id?: string; plan_session_id?: string } };
+    const t = d.task;
+    if (!t?.id || !retryTaskIdRef.current || t.id !== retryTaskIdRef.current) return;
+    const newSessionId = t.exec_session_id ?? t.plan_session_id;
+    if (newSessionId) {
+      retryTaskIdRef.current = null;
+      onSessionReplaced?.(sessionId, newSessionId);
+    }
+  });
+
   const handleSend = useCallback((message: string, images?: ImageAttachment[]) => {
     send(sessionId, message, images);
   }, [sessionId, send]);
@@ -365,6 +385,10 @@ export const SessionPanel = memo(function SessionPanel({ sessionId, onClose, onT
   const handleDelete = useCallback((queueId: string) => {
     handleDeleteQueued(sessionId, queueId);
   }, [sessionId, handleDeleteQueued]);
+
+  const handleRetry = useCallback((queueId: string) => {
+    retryFailed(queueId, sessionId);
+  }, [sessionId, retryFailed]);
 
   const ps = session?.process_status;
   const ws = session?.work_status;
@@ -394,7 +418,7 @@ export const SessionPanel = memo(function SessionPanel({ sessionId, onClose, onT
                     fontWeight: 600,
                   }}
                 >
-                  🤖 Embedded
+                  {ICON_ROBOT} Embedded
                 </span>
               )}
               {!loading && ps && ws && (
@@ -408,41 +432,29 @@ export const SessionPanel = memo(function SessionPanel({ sessionId, onClose, onT
               )}
               {loading && <span className="session-panel-badge" style={{ color: 'var(--fg-muted)' }}>Loading...</span>}
             </div>
-            <div style={{ display: 'flex', alignItems: 'center', gap: '2px', flexShrink: 0 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '3px', flexShrink: 0 }}>
               <button
-                className="session-panel-expand"
+                className="task-action-btn session-panel-expand"
                 onClick={isFullscreen ? exitFullscreen : enterFullscreen}
                 title={isFullscreen ? 'Collapse back' : 'Expand to full screen'}
                 aria-label={isFullscreen ? 'Collapse session' : 'Expand session to full screen'}
               >
-                {isFullscreen ? (
-                  <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-                    <polyline points="4 14 4 10 0 10" />
-                    <polyline points="12 2 12 6 16 6" />
-                    <line x1="0" y1="10" x2="5" y2="5" />
-                    <line x1="16" y1="6" x2="11" y2="11" />
-                  </svg>
-                ) : (
-                  <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-                    <polyline points="10 2 14 2 14 6" />
-                    <polyline points="6 14 2 14 2 10" />
-                    <line x1="14" y1="2" x2="9" y2="7" />
-                    <line x1="2" y1="14" x2="7" y2="9" />
-                  </svg>
-                )}
+                {isFullscreen ? ICON_COLLAPSE : ICON_EXPAND}
               </button>
               {session?.taskId && (
                 <button
-                  className={`session-panel-pin${pinned ? ' pinned' : ''}`}
+                  className={`task-action-btn session-panel-pin${pinned ? ' pinned' : ''}`}
                   onClick={handleTogglePin}
                   disabled={pinBusy}
                   title={pinned ? 'Unpin from Focus Bar' : 'Pin to Focus Bar'}
                   aria-label={pinned ? 'Unpin from Focus Bar' : 'Pin to Focus Bar'}
                 >
-                  {pinned ? '\u{1F4CC}' : '\u{1F4CD}'}
+                  {pinned ? ICON_PIN_FILLED : ICON_PIN}
                 </button>
               )}
-              <button className="session-panel-close" onClick={() => onClose(sessionId)} title="Close session panel">&times;</button>
+              <button className="task-action-btn session-panel-close" onClick={() => onClose(sessionId)} title="Close session panel">
+                {ICON_CLOSE}
+              </button>
             </div>
           </div>
           {session?.taskId && (
@@ -565,10 +577,11 @@ export const SessionPanel = memo(function SessionPanel({ sessionId, onClose, onT
           sessionId={sessionId}
           initialNote={session?.human_note}
         />
-        {ws === 'error' && session?.errorMessage && (
+        {(ws === 'error' || ps === 'error') && session?.errorMessage && (
           <div className="session-error-banner">
             <span className="session-error-banner-icon">&#x26A0;&#xFE0F;</span>
             <span className="session-error-banner-text">{session.errorMessage}</span>
+            <SessionRetryButton sessionId={sessionId} onRetried={handleRetried} />
           </div>
         )}
         <div className="session-panel-body" ref={bodyRef}>
@@ -585,6 +598,8 @@ export const SessionPanel = memo(function SessionPanel({ sessionId, onClose, onT
             onDeleteQueued={handleDelete}
             onAgentQueued={addExternalQueued}
             onClearCommitted={clearCommitted}
+            onRetryFailed={handleRetry}
+            onDismissFailed={dismissFailed}
             onTaskClick={onTaskClick}
             onSessionClick={onSessionClick}
           />

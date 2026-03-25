@@ -86,7 +86,8 @@ function TriageSessionSection({
   }, [expanded, loaded, hasSessionId, entry.sessionId]);
 
   const handleEntityClick = useEntityClickHandler(onTaskClick, onSessionClick);
-  // Triage ref clicks need stopPropagation (to avoid collapsing the section)
+  // stopPropagation needed because these links sit inside the collapsible section
+  // header button — without it, clicking a task ref would also toggle section expand/collapse.
   const handleTaskRefClick = useCallback((e: React.MouseEvent<HTMLSpanElement>) => {
     e.stopPropagation();
     handleEntityClick(e);

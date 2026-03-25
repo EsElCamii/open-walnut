@@ -899,7 +899,6 @@ function MemoizedTextBlock({ content, onClick }: { content: string; onClick: (e:
 }
 
 function ChatMessageInner({ role, content, blocks, images, taskContext, routeInfo, timestamp, source, cronJobName, notification, queued, onCancel, taskLookup, onTaskClick, onSessionClick }: ChatMessageProps) {
-  const navigate = useNavigate();
   const { lightboxSrc, openLightbox, closeLightbox } = useLightbox();
 
   const isCron = source === 'cron';

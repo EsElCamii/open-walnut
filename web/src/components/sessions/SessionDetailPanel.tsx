@@ -7,12 +7,15 @@ import { WorkStatusPicker } from './WorkStatusPicker';
 import { SessionCopyButtons } from './SessionCopyButtons';
 import { TaskQuickActions } from './TaskQuickActions';
 import { updateSession, executePlanSession, executePlanContinue } from '@/api/sessions';
+import { SessionRetryButton } from './SessionRetryButton';
 import { useSessionHistory } from '@/hooks/useSessionHistory';
 import { useSessionPlan } from '@/hooks/useSessionPlan';
 import { useSessionUsage, formatModelName, getContextWindowSize } from '@/hooks/useSessionUsage';
+import { useEvent } from '@/hooks/useWebSocket';
 import { PlanContentContext } from '@/contexts/PlanContentContext';
 import type { SessionRecord } from '@/types/session';
 import { timeAgo } from '@/utils/time';
+import { ICON_CLIPBOARD, ICON_LIGHTNING, ICON_WARNING } from '@/components/common/Icons';
 
 interface SessionDetailPanelProps {
   session: SessionRecord | null;
@@ -30,6 +33,8 @@ interface SessionDetailPanelProps {
   onDeleteQueued?: (queueId: string) => void;
   onAgentQueued?: (msg: { queueId: string; text: string }) => void;
   onClearCommitted?: () => void;
+  onRetryFailed?: (queueId: string) => void;
+  onDismissFailed?: (queueId: string) => void;
 }
 
 function formatDate(dateStr: string): string {
@@ -119,7 +124,7 @@ function EditableTitle({ sessionId, title, onSaved }: { sessionId: string; title
   );
 }
 
-export function SessionDetailPanel({ session, taskTitle, summary, onTitleChanged, onSessionReplaced, optimisticMessages, onMessagesDelivered, onBatchCompleted, onEditQueued, onDeleteQueued, onAgentQueued, onClearCommitted }: SessionDetailPanelProps) {
+export function SessionDetailPanel({ session, taskTitle, summary, onTitleChanged, onSessionReplaced, optimisticMessages, onMessagesDelivered, onBatchCompleted, onEditQueued, onDeleteQueued, onAgentQueued, onClearCommitted, onRetryFailed, onDismissFailed }: SessionDetailPanelProps) {
   const [executing, setExecuting] = useState(false);
   const [executeError, setExecuteError] = useState<string | null>(null);
   const [executeStarted, setExecuteStarted] = useState(false);
@@ -159,6 +164,24 @@ export function SessionDetailPanel({ session, taskTitle, summary, onTitleChanged
       contextPercent = Math.round(totalInput / ctxSize * 100);
     }
   }
+
+  // Retry: when retrySession() succeeds, listen for the new session to appear on the task
+  const retryTaskIdRef = useRef<string | null>(null);
+  const handleRetried = useCallback((taskId: string) => {
+    retryTaskIdRef.current = taskId;
+  }, []);
+
+  // Listen for task:updated to detect when new session is linked after retry
+  useEvent('task:updated', (data: unknown) => {
+    const d = data as { task?: { id?: string; exec_session_id?: string; plan_session_id?: string } };
+    const t = d.task;
+    if (!t?.id || !retryTaskIdRef.current || t.id !== retryTaskIdRef.current) return;
+    const newSessionId = t.exec_session_id ?? t.plan_session_id;
+    if (newSessionId && session?.claudeSessionId) {
+      retryTaskIdRef.current = null;
+      onSessionReplaced?.(newSessionId);
+    }
+  });
 
   // Scroll-to-message: find the message element in SessionChatHistory by data-msg-index
   const handleMessageClick = useCallback((messageIndex: number) => {
@@ -259,7 +282,7 @@ export function SessionDetailPanel({ session, taskTitle, summary, onTitleChanged
                   className="session-detail-badge"
                   style={{ color: 'var(--fg-muted)', background: 'var(--bg-tertiary)', fontWeight: 600, fontSize: '11px' }}
                 >
-                  {session.mode === 'plan' ? '\uD83D\uDCCB Plan' : '\u26A1 Bypass'}
+                  {session.mode === 'plan' ? <>{ICON_CLIPBOARD}{' Plan'}</> : <>{ICON_LIGHTNING}{' Bypass'}</>}
                 </span>
               )}
               {session.archived && (
@@ -495,10 +518,11 @@ export function SessionDetailPanel({ session, taskTitle, summary, onTitleChanged
           sessionId={sessionId}
           initialNote={session.human_note}
         />
-        {ws === 'error' && session.errorMessage && (
+        {(ws === 'error' || ps === 'error') && session.errorMessage && (
           <div className="session-error-banner">
-            <span className="session-error-banner-icon">&#x26A0;&#xFE0F;</span>
+            <span className="session-error-banner-icon">{ICON_WARNING}</span>
             <span className="session-error-banner-text">{session.errorMessage}</span>
+            <SessionRetryButton sessionId={session.claudeSessionId} onRetried={handleRetried} />
           </div>
         )}
         <SessionChatHistory
@@ -514,6 +538,8 @@ export function SessionDetailPanel({ session, taskTitle, summary, onTitleChanged
           onDeleteQueued={onDeleteQueued}
           onAgentQueued={onAgentQueued}
           onClearCommitted={onClearCommitted}
+          onRetryFailed={onRetryFailed}
+          onDismissFailed={onDismissFailed}
         />
       </div>
     </PlanContentContext.Provider>

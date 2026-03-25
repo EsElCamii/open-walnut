@@ -127,8 +127,10 @@ import { renderMarkdownWithRefs, findImagePaths, resolveImagePath } from '@/util
 export interface OptimisticMessage extends SessionHistoryMessage {
   queueId: string;
   /** 'committed' is legacy — no longer assigned. Kept for type compat. */
-  status: 'pending' | 'received' | 'delivered' | 'committed';
+  status: 'pending' | 'received' | 'delivered' | 'committed' | 'failed';
   images?: ImageAttachment[];
+  /** Error message when status is 'failed' */
+  failedError?: string;
 }
 
 /** Renders base64 image thumbnails for optimistic messages */
@@ -162,6 +164,8 @@ interface SessionChatHistoryProps {
   onDeleteQueued?: (queueId: string) => void;
   onAgentQueued?: (msg: { queueId: string; text: string }) => void;
   onClearCommitted?: () => void;
+  onRetryFailed?: (queueId: string) => void;
+  onDismissFailed?: (queueId: string) => void;
   onTaskClick?: (taskId: string) => void;
   onSessionClick?: (sessionId: string) => void;
 }
@@ -452,7 +456,7 @@ function buildTimeline(
 // ── Auto-scroll constant ──
 const NEAR_BOTTOM_PX = 80;  // px from bottom to consider "at bottom"
 
-export const SessionChatHistory = memo(function SessionChatHistory({ sessionId, workStatus, initialPrompt, sessionCwd, optimisticMessages, onMessagesDelivered, onBatchCompleted, onEditQueued, onDeleteQueued, onAgentQueued, onClearCommitted, onTaskClick, onSessionClick }: SessionChatHistoryProps) {
+export const SessionChatHistory = memo(function SessionChatHistory({ sessionId, workStatus, initialPrompt, sessionCwd, optimisticMessages, onMessagesDelivered, onBatchCompleted, onEditQueued, onDeleteQueued, onAgentQueued, onClearCommitted, onRetryFailed, onDismissFailed, onTaskClick, onSessionClick }: SessionChatHistoryProps) {
   const [historyVersion, setHistoryVersion] = useState(0);
   const awaitingRefresh = useRef(false);
   const pendingBatchTotal = useRef(0);
@@ -915,6 +919,8 @@ export const SessionChatHistory = memo(function SessionChatHistory({ sessionId, 
   }
 
   const deduped = allOptimistic.filter(m => {
+    // Failed messages are never consumed by the backend — always keep them
+    if (m.status === 'failed') return true;
     // Text-based: match against newly-appeared persisted user messages
     const c = newUserTextCounts.get(m.text);
     if (c && c > 0) {
@@ -1158,7 +1164,8 @@ export const SessionChatHistory = memo(function SessionChatHistory({ sessionId, 
 
               const wrapperClass = m.status === 'pending' ? 'session-msg-queued'
                 : m.status === 'received' ? 'session-msg-received'
-                : m.status === 'delivered' ? 'session-msg-delivered' : '';
+                : m.status === 'delivered' ? 'session-msg-delivered'
+                : m.status === 'failed' ? 'session-msg-failed' : '';
 
               return (
                 <div key={`u-${m.queueId}`} className={wrapperClass}>
@@ -1175,6 +1182,17 @@ export const SessionChatHistory = memo(function SessionChatHistory({ sessionId, 
                   )}
                   {m.status === 'delivered' && (
                     <div className="session-msg-delivered-badge">Delivered ✓</div>
+                  )}
+                  {m.status === 'failed' && (
+                    <>
+                      <div className="session-msg-failed-badge">
+                        Send failed{m.failedError ? ` — ${m.failedError}` : ''}
+                      </div>
+                      <div className="session-msg-queued-actions">
+                        <button className="session-msg-retry-btn" onClick={() => onRetryFailed?.(m.queueId)}>Retry</button>
+                        <button onClick={() => onDismissFailed?.(m.queueId)}>Dismiss</button>
+                      </div>
+                    </>
                   )}
                 </div>
               );

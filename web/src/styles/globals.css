@@ -288,6 +288,22 @@ input:focus, textarea:focus, select:focus {
   flex-shrink: 0;
 }
 
+/* Sidebar panel toggle buttons (Chat / Todo) */
+.sidebar-panel-toggle {
+  background: none;
+  border: none;
+  cursor: pointer;
+  width: 100%;
+  text-align: left;
+  font-family: inherit;
+}
+
+.sidebar-nav-divider {
+  height: 1px;
+  background: var(--border);
+  margin: 6px 12px;
+}
+
 .sidebar-stats {
   padding: 14px 16px;
   border-top: 1px solid var(--border);
@@ -5077,39 +5093,15 @@ input:focus, textarea:focus, select:focus {
   margin: 0;
 }
 
-.plan-preview-refresh {
-  margin-left: auto;
-  padding: 2px 6px;
-  background: none;
-  border: 1px solid var(--border);
-  border-radius: 4px;
-  cursor: pointer;
-  font-size: 13px;
-  line-height: 1;
-  color: var(--fg-muted);
-  transition: background 0.15s, border-color 0.15s;
-  flex-shrink: 0;
-}
-
-.plan-preview-refresh:hover {
-  background: var(--bg-tertiary);
-  border-color: var(--accent);
-}
-
-.plan-preview-refresh:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
+/* Refresh button — inherits pill base from .task-action-btn */
+.plan-preview-refresh { margin-left: auto; }
+.plan-preview-refresh:disabled { opacity: 0.5; cursor: not-allowed; }
 
 @keyframes plan-refresh-spin {
   from { transform: rotate(0deg); }
   to { transform: rotate(360deg); }
 }
-
-.plan-preview-refresh-spin {
-  display: inline-block;
-  animation: plan-refresh-spin 0.8s linear infinite;
-}
+.plan-preview-refresh-spin { animation: plan-refresh-spin 0.8s linear infinite; }
 
 .chat-input-container {
   display: flex;
@@ -5544,8 +5536,8 @@ img[data-lightbox-src],
   overflow: hidden;
 }
 
-/* Left column: chat + sessions + focus dock (everything except todo sidebar) */
-.main-page-left {
+/* Right column: chat + sessions + focus dock (everything except todo sidebar) */
+.main-page-right {
   flex: 1;
   min-width: 0;
   display: flex;
@@ -5585,19 +5577,13 @@ img[data-lightbox-src],
   min-width: 0;
 }
 
-/* When chat is hidden AND no sessions open, let todo fill space */
-.main-page-chat.collapsed ~ .main-page-sessions-area.collapsed ~ .main-page-todo {
-  flex: 1;
-  min-width: 0;
-}
-
 .main-page-chat .chat-page {
   height: 100%;
 }
 
 .main-page-todo {
   flex-shrink: 0;
-  border-left: 1px solid var(--border);
+  border-right: 1px solid var(--border);
   background: var(--bg-secondary);
   display: flex;
   flex-direction: column;
@@ -5606,7 +5592,13 @@ img[data-lightbox-src],
   transition: width 0.25s ease, opacity 0.2s ease;
 }
 
-
+.main-page-todo.collapsed {
+  width: 0 !important;
+  opacity: 0;
+  border-right: none;
+  overflow: hidden;
+  pointer-events: none;
+}
 
 /* ===== Todo Resize Handle ===== */
 
@@ -5846,75 +5838,10 @@ img[data-lightbox-src],
   flex-shrink: 0;
 }
 
-.session-panel-close {
-  background: none;
-  border: none;
-  font-size: 20px;
-  line-height: 1;
-  color: var(--fg-muted);
-  cursor: pointer;
-  padding: 0 2px;
-  flex-shrink: 0;
-  transition: color 0.15s;
-}
-
-.session-panel-close:hover {
-  color: var(--fg);
-}
-
-.session-panel-pin {
-  background: none;
-  border: none;
-  font-size: 14px;
-  line-height: 1;
-  cursor: pointer;
-  padding: 2px 4px;
-  border-radius: 4px;
-  opacity: 0.4;
-  transition: opacity 0.15s, background 0.15s;
-  flex-shrink: 0;
-}
-
-.session-panel-pin:hover {
-  opacity: 0.7;
-  background: var(--bg-tertiary);
-}
-
-.session-panel-pin.pinned {
-  opacity: 1;
-}
-
-.session-panel-pin.pinned:hover {
-  opacity: 0.8;
-}
-
-.session-panel-pin:disabled {
-  cursor: default;
-  opacity: 0.2;
-}
-
-/* --- Session Panel Expand Button --- */
-.session-panel-expand {
-  background: none;
-  border: none;
-  font-size: 14px;
-  line-height: 1;
-  cursor: pointer;
-  padding: 2px 4px;
-  border-radius: 4px;
-  opacity: 0.4;
-  transition: opacity 0.15s, background 0.15s;
-  flex-shrink: 0;
-  color: var(--fg-secondary);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-}
-
-.session-panel-expand:hover {
-  opacity: 0.8;
-  background: var(--bg-tertiary);
-}
+/* Session header buttons — inherits pill base from .task-action-btn */
+.session-panel-close:hover { color: var(--error); background: rgba(255, 59, 48, 0.08); }
+.session-panel-pin.pinned { color: var(--accent); background: rgba(0, 122, 255, 0.12); }
+.session-panel-pin:disabled { cursor: default; opacity: 0.3; }
 
 /* --- CSS-promotion fullscreen (used by SessionPanel + DockTaskCard) --- */
 .open-walnut-fullscreen-backdrop {
@@ -10470,7 +10397,7 @@ img[data-lightbox-src],
     flex-direction: column;
   }
 
-  .main-page-left {
+  .main-page-right {
     flex: 1;
     min-height: 0;
   }
@@ -10499,8 +10426,8 @@ img[data-lightbox-src],
   .main-page-todo {
     width: 100% !important;
     height: 40%;
-    border-left: none;
-    border-top: 1px solid var(--border);
+    border-right: none;
+    border-bottom: 1px solid var(--border);
   }
 
 }
@@ -11687,6 +11614,27 @@ img[data-lightbox-src],
 .session-msg-queued-actions button:hover {
   background: var(--bg-tertiary);
   color: var(--fg);
+}
+
+/* Failed: send error — red border, full opacity so message is clearly visible */
+.session-msg-failed {
+  position: relative;
+  border-left: 2px solid var(--danger, #ff3b30);
+  padding-left: 8px;
+  margin-left: 8px;
+}
+.session-msg-failed-badge {
+  font-size: 10px;
+  color: var(--danger, #ff3b30);
+  padding-left: 4px;
+  font-weight: 600;
+}
+.session-msg-retry-btn {
+  color: var(--accent) !important;
+  font-weight: 600;
+}
+.session-msg-retry-btn:hover {
+  text-decoration: underline;
 }
 
 .session-msg-edit {
@@ -13630,6 +13578,51 @@ img[data-lightbox-src],
 }
 .pending-session-dismiss-btn:hover {
   background: var(--bg-tertiary);
+}
+
+/* Retry + Dismiss action row in PendingSessionPanel */
+.pending-session-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.pending-session-retry-btn {
+  padding: 6px 16px;
+  border-radius: 6px;
+  border: none;
+  background: var(--accent, #007AFF);
+  color: #fff;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+.pending-session-retry-btn:hover {
+  background: var(--accent-hover, #0066D6);
+}
+
+/* Inline retry button in session error banner */
+.session-retry-btn {
+  flex-shrink: 0;
+  padding: 3px 10px;
+  border-radius: 5px;
+  border: none;
+  background: var(--accent, #007AFF);
+  color: #fff;
+  font-size: 11px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.15s;
+  white-space: nowrap;
+}
+.session-retry-btn:hover {
+  background: var(--accent-hover, #0066D6);
+}
+.session-retry-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
 }
 
 /* ===== Quick Start System Banner (in chat) ===== */

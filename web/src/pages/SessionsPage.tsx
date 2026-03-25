@@ -284,6 +284,11 @@ export function SessionsPage() {
     sessionSend.interruptSend(selectedId, message, images);
   }, [selectedId, sessionSend]);
 
+  const handleRetryFailed = useCallback((queueId: string) => {
+    if (!selectedId) return;
+    sessionSend.retryFailed(queueId, selectedId);
+  }, [selectedId, sessionSend]);
+
   // Model picker state
   const [modelPickerOpen, setModelPickerOpen] = useState(false);
 
@@ -340,6 +345,8 @@ export function SessionsPage() {
           onDeleteQueued={handleDeleteQueued}
           onAgentQueued={sessionSend.addExternalQueued}
           onClearCommitted={sessionSend.clearCommitted}
+          onRetryFailed={handleRetryFailed}
+          onDismissFailed={sessionSend.dismissFailed}
         />
         {selectedSession && (
           <div className="session-chat-input-wrapper">
