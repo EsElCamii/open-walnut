@@ -104,18 +104,24 @@ export class RemoteSessionManager implements SessionManager {
   async start(opts: TransportStartOptions): Promise<TransportStartResult> {
     await this.ensureConnected()
 
-    // Subscribe to daemon events
+    // Subscribe to daemon events (clean up any leaked listener from a prior start/resume)
+    if (this.unsubscribeEvent) {
+      this.unsubscribeEvent()
+      this.unsubscribeEvent = null
+    }
     this._onOutput = opts.onOutput
     this._onExit = opts.onExit
     this._sid = this.tmpId
-    this.unsubscribeEvent = this.conn.onEvent((event) => this.handleDaemonEvent(event))
+    this.unsubscribeEvent = this.conn!.onEvent((event) => this.handleDaemonEvent(event))
 
-    // Send start command
+    // Upload local images to remote host and rewrite paths before sending
+    const preparedMessage = await this.prepareOutbound(opts.message)
+
     const result = await this.conn.send('start', {
       sid: this.tmpId,
       args: ['claude', ...opts.args],
       cwd: opts.cwd,
-      message: opts.message,
+      message: preparedMessage,
       resume: opts.resume ?? false,
     })
 
@@ -152,12 +158,17 @@ export class RemoteSessionManager implements SessionManager {
   async attach(opts: TransportAttachOptions): Promise<TransportAttachResult> {
     await this.ensureConnected()
 
+    // Clean up any leaked listener from a prior attach/start
+    if (this.unsubscribeEvent) {
+      this.unsubscribeEvent()
+      this.unsubscribeEvent = null
+    }
     this._onOutput = opts.onOutput
     this._onExit = opts.onExit
     this._sid = opts.sessionId
-    this.unsubscribeEvent = this.conn.onEvent((event) => this.handleDaemonEvent(event))
+    this.unsubscribeEvent = this.conn!.onEvent((event) => this.handleDaemonEvent(event))
 
-    const result = await this.conn.send('attach', {
+    const result = await this.conn!.send('attach', {
       sid: opts.sessionId,
       fromOffset: opts.fromOffset ?? 0,
     })
@@ -191,8 +202,10 @@ export class RemoteSessionManager implements SessionManager {
     // silently → message lost → caller never gets a result → timeout.
     if (!this.conn?.connected || !this._sid || !this._hasPipe) return false
 
-    // Fire-and-forget send via daemon
-    this.conn.send('send', { sid: this._sid, message }).then((result) => {
+    // Fire-and-forget: upload local images then send rewritten message via daemon
+    this.prepareOutbound(message).then((prepared) => {
+      return this.conn!.send('send', { sid: this._sid, message: prepared })
+    }).then((result) => {
       if (!result.ok) {
         log.session.warn('RemoteSessionManager: send failed', {
           host: this.hostKey, sid: this._sid, reason: result.reason || result.error,
@@ -242,13 +255,23 @@ export class RemoteSessionManager implements SessionManager {
   }
 
   async isAlive(): Promise<boolean> {
-    if (!this.conn?.connected || !this._sid) return false
+    if (!this._sid) return false
+
+    // Disconnected ≠ dead. Short disconnects (< 5min) → assume alive, wait for reconnect.
+    // Long disconnects (> 5min) → let health monitor mark error.
+    if (!this.conn?.connected) {
+      const since = this.conn?.disconnectedSince
+      if (since && (Date.now() - since) > 5 * 60 * 1000) {
+        return false // exceeded grace period
+      }
+      return true // short disconnect — assume process is still alive
+    }
 
     try {
       const result = await this.conn.send('status', { sid: this._sid })
       return result.ok === true && result.alive === true
     } catch {
-      return false
+      return true // send failed (possibly reconnecting) — assume alive
     }
   }
 
