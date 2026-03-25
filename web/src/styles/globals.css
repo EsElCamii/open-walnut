@@ -5202,14 +5202,15 @@ input:focus, textarea:focus, select:focus {
   flex: 1;
   resize: none;
   min-height: 40px;
-  max-height: 200px;
   font: inherit;
+  line-height: 1.5;
+  max-height: calc(5 * 1.5em + 16px); /* 5 lines + vertical padding */
   color: var(--fg);
   background: transparent;
   border: none;
   padding: 8px 12px;
   outline: none;
-  line-height: 1.5;
+  overflow-y: auto;
 }
 
 .chat-send-btn {
@@ -12710,7 +12711,7 @@ img[data-lightbox-src],
 .dock-task-input .chat-input-textarea {
   font-size: 11px;
   min-height: 40px;
-  max-height: 120px;
+  max-height: calc(5 * 1.5em + 8px); /* 5 lines + smaller vertical padding */
   padding: 4px 8px;
 }
 

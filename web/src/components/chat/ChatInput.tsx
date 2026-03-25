@@ -155,7 +155,8 @@ export function ChatInput({ onSend, onCommand, onStop, onInterruptSend, onClearQ
       const el = textareaRef.current;
       if (el) {
         el.style.height = 'auto';
-        el.style.height = Math.min(el.scrollHeight, 200) + 'px';
+        const maxH = parseFloat(getComputedStyle(el).maxHeight) || 200;
+        el.style.height = Math.min(el.scrollHeight, maxH) + 'px';
         el.focus();
         el.setSelectionRange(text.length, text.length);
       }
@@ -203,7 +204,8 @@ export function ChatInput({ onSend, onCommand, onStop, onInterruptSend, onClearQ
     const el = textareaRef.current;
     if (!el) return;
     el.style.height = 'auto';
-    el.style.height = Math.min(el.scrollHeight, 200) + 'px';
+    const maxH = parseFloat(getComputedStyle(el).maxHeight) || 200;
+    el.style.height = Math.min(el.scrollHeight, maxH) + 'px';
   };
 
   const handleChange = (newValue: string) => {
