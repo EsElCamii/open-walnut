@@ -61,13 +61,23 @@ const TightTaskList = TaskList.extend({
   },
 });
 
+/**
+ * Extract relative task path from href — handles both "/tasks/ID" and
+ * "http://localhost:3456/tasks/ID" (browser resolves relative→absolute on paste).
+ */
+function extractTaskPath(href: string): string | null {
+  const idx = href.indexOf('/tasks/');
+  return idx >= 0 ? href.slice(idx) : null;
+}
+
 /** Link extension: adds class="task-link" to /tasks/ hrefs, strips target for internal links */
 const TaskAwareLink = Link.extend({
   renderHTML({ HTMLAttributes }) {
     const href = HTMLAttributes.href || '';
-    if (!href.startsWith('/tasks/')) return ['a', HTMLAttributes, 0];
-    // Strip target/rel for internal task links — we handle navigation ourselves
-    const attrs = { ...HTMLAttributes, class: 'task-link' };
+    const taskPath = extractTaskPath(href);
+    if (!taskPath) return ['a', HTMLAttributes, 0];
+    // Normalize to relative path + strip target/rel — we handle navigation ourselves
+    const attrs = { ...HTMLAttributes, href: taskPath, class: 'task-link' };
     delete attrs.target;
     delete attrs.rel;
     return ['a', attrs, 0];
@@ -290,9 +300,10 @@ export function NotesEditor({ content, onDirty, placeholder, className, autoFocu
         const target = event.target as HTMLElement;
         const anchor = target.closest('a');
         const href = anchor?.getAttribute('href');
-        if (href?.startsWith('/tasks/') && onTaskClickRef.current) {
+        const taskPath = href ? extractTaskPath(href) : null;
+        if (taskPath && onTaskClickRef.current) {
           event.preventDefault();
-          const taskId = href.slice('/tasks/'.length);
+          const taskId = taskPath.slice('/tasks/'.length);
           if (taskId) onTaskClickRef.current(taskId);
           return true; // tell ProseMirror we handled it
         }
