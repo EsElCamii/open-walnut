@@ -2437,22 +2437,16 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
     return collapsedProjects.has(projKey);
   }, [collapsedProjects]);
 
-  // Pinned card click = scroll to list position + open session if exists (no detail panel)
-  const handlePinnedCardClick = useCallback((task: Task) => {
-    const sid = resolveTaskSessionId(task);
-    if (sid) onOpenSession?.(sid);
-    // Always scroll to position; suppress detail panel (session panel is the primary view)
-    onFocusTask?.(task, { openDetail: false });
-  }, [onFocusTask, onOpenSession]);
-
-  // Click task row = select + scroll + open session (if any). Never open detail panel.
-  // Same logic as handlePinnedCardClick — all task click sources must behave identically.
+  // Click task row (or pinned card) = select + scroll + open session (if any). Never open detail panel.
+  // Pinned cards and list rows share identical behavior — single handler, one alias.
   const handleTaskClick = useCallback((task: Task) => {
     const sid = resolveTaskSessionId(task);
     if (sid) onOpenSession?.(sid);
     // Always scroll to position; suppress detail panel (ⓘ button is the only way to open detail)
     onFocusTask?.(task, { openDetail: false });
   }, [onFocusTask, onOpenSession]);
+
+  const handlePinnedCardClick = handleTaskClick;
 
   const handleExpandDetail = useCallback((task: Task) => {
     setDetailTarget(null);
@@ -2891,7 +2885,7 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
         focusedTaskId={focusedTaskId ?? undefined}
         onTaskClick={(taskId) => {
           const task = tasks.find(t => t.id === taskId);
-          if (task) onFocusTask?.(task);
+          if (task) handleTaskClick(task);
         }}
       />
     </div>
