@@ -1780,7 +1780,9 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
       if (tagFilter && (!t.tags || !t.tags.includes(tagFilter))) return false;
       // NOTE: category tab filter is intentionally skipped in search mode.
       // Search should find tasks across ALL categories — scoping to the
-      // active tab defeats the purpose of searching.
+      // active tab defeats the purpose of searching. Other filters (priority,
+      // phase, source, tag, session) are kept because they are explicit user
+      // refinement choices rather than navigation affordances.
       return true;
     };
 
