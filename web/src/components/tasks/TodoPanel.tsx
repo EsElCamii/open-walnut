@@ -141,12 +141,12 @@ const PRIORITY_LABEL: Record<string, string> = {
 
 const CHEVRON_ICON = '\u25B6'; // ▶ — used by all collapse-chevron buttons (CSS rotation handles expanded state)
 
-// Clean 12×12 SVG icons for task action buttons (monochrome, uses currentColor)
-const ICON_INFO = <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5"><circle cx="8" cy="8" r="6.5"/><path d="M8 7v4.5"/><circle cx="8" cy="5" r=".5" fill="currentColor"/></svg>;
-const ICON_STAR_EMPTY = <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinejoin="round"><path d="M8 1.5l2 4.1 4.5.6-3.2 3.2.8 4.5L8 11.7l-4.1 2.2.8-4.5L1.5 6.2l4.5-.6z"/></svg>;
-const ICON_STAR_FILLED = <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor" stroke="currentColor" strokeWidth="0.5" strokeLinejoin="round"><path d="M8 1.5l2 4.1 4.5.6-3.2 3.2.8 4.5L8 11.7l-4.1 2.2.8-4.5L1.5 6.2l4.5-.6z"/></svg>;
-const ICON_PIN = <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round"><path d="M6 2h4l1 5H5l1-5z"/><path d="M8 7v5"/><path d="M5 7h6"/></svg>;
-const ICON_PIN_FILLED = <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor" stroke="currentColor" strokeWidth="0.5" strokeLinecap="round"><path d="M6 2h4l1 5H5l1-5z"/><path d="M8 7v5" strokeWidth="1.3"/><path d="M5 7h6" strokeWidth="1.3"/></svg>;
+// 14×14 SVG icons for task action pill buttons (bold strokes, fill the viewBox)
+const ICON_INFO = <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"><circle cx="8" cy="8" r="6.5"/><path d="M8 7.5v4"/><circle cx="8" cy="5.2" r=".8" fill="currentColor" stroke="none"/></svg>;
+const ICON_STAR_EMPTY = <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinejoin="round"><path d="M8 1.5l2 4.1 4.5.6-3.2 3.2.8 4.5L8 11.7l-4.1 2.2.8-4.5L1.5 6.2l4.5-.6z"/></svg>;
+const ICON_STAR_FILLED = <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" stroke="currentColor" strokeWidth="0.5" strokeLinejoin="round"><path d="M8 1.5l2 4.1 4.5.6-3.2 3.2.8 4.5L8 11.7l-4.1 2.2.8-4.5L1.5 6.2l4.5-.6z"/></svg>;
+const ICON_PIN = <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><circle cx="8" cy="5.5" r="3.5"/><path d="M8 9v5"/></svg>;
+const ICON_PIN_FILLED = <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" stroke="currentColor" strokeWidth="0.5" strokeLinecap="round"><circle cx="8" cy="5.5" r="3.5"/><path d="M8 9v5" stroke="currentColor" strokeWidth="1.5"/></svg>;
 
 /** Normalize legacy priority values to current 4-tier system. */
 function effectivePriority(p: string): string {

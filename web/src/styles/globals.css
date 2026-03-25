@@ -8968,19 +8968,20 @@ img[data-lightbox-src],
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 16px;
-  height: 16px;
+  height: 20px;
+  min-width: 20px;
+  padding: 0 5px;
+  border-radius: 10px;
   font-size: 11px;
   color: var(--fg-muted);
   text-decoration: none;
   flex-shrink: 0;
-  opacity: 0.6;
-  transition: opacity 0.15s;
+  background: var(--bg-tertiary);
 }
 
 .task-external-link:hover {
-  opacity: 1;
   color: var(--accent);
+  background: var(--accent-subtle);
 }
 
 .task-detail-external-link {
@@ -9007,10 +9008,11 @@ img[data-lightbox-src],
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 18px;
-  height: 18px;
-  border-radius: 4px;
-  font-size: 10px;
+  height: 20px;
+  min-width: 20px;
+  padding: 0 5px;
+  border-radius: 10px;
+  font-size: 11px;
   font-weight: 600;
   flex-shrink: 0;
   /* Default color — overridden by inline styles from plugin metadata */
@@ -9073,28 +9075,30 @@ img[data-lightbox-src],
   background: var(--accent-subtle);
 }
 
-/* ===== Unified task action buttons (SVG icons, 12×12) ===== */
+/* ===== Unified task action pill buttons (match .badge pill style) ===== */
 .task-action-btn {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 20px;
   height: 20px;
-  padding: 0;
+  min-width: 20px;
+  padding: 0 5px;
   flex-shrink: 0;
-  background: none;
+  background: var(--bg-tertiary);
   border: none;
   cursor: pointer;
   color: var(--fg-muted);
-  border-radius: 3px;
+  border-radius: 10px;
+  font-size: 11px;
+  font-weight: 600;
 }
-.task-action-btn:hover { color: var(--accent); background: var(--hover-bg, rgba(0,0,0,0.04)); }
+.task-action-btn:hover { color: var(--accent); background: var(--accent-subtle); }
 .task-action-btn svg { display: block; }
 
-.task-expand-btn.active { color: var(--accent); }
-.task-star-btn.starred { color: var(--warning); }
-.task-star-btn:hover { color: var(--warning); }
-.task-pin-btn.pinned { color: var(--accent); }
+.task-expand-btn.active { color: var(--accent); background: rgba(0, 122, 255, 0.12); }
+.task-star-btn.starred { color: var(--warning); background: rgba(255, 149, 0, 0.12); }
+.task-star-btn:hover { color: var(--warning); background: rgba(255, 149, 0, 0.08); }
+.task-pin-btn.pinned { color: var(--accent); background: rgba(0, 122, 255, 0.12); }
 .task-pin-btn:hover { color: var(--accent); }
 
 /* ===== Context Inspector ===== */
