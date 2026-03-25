@@ -202,13 +202,18 @@ export class RemoteSessionManager implements SessionManager {
     // silently → message lost → caller never gets a result → timeout.
     if (!this.conn?.connected || !this._sid || !this._hasPipe) return false
 
+    // Capture conn/sid synchronously — they may change during the async image upload
+    // (e.g. renameForSession(), detach(), or a concurrent start() call).
+    const conn = this.conn
+    const sid = this._sid
+
     // Fire-and-forget: upload local images then send rewritten message via daemon
     this.prepareOutbound(message).then((prepared) => {
-      return this.conn!.send('send', { sid: this._sid, message: prepared })
+      return conn.send('send', { sid, message: prepared })
     }).then((result) => {
       if (!result.ok) {
         log.session.warn('RemoteSessionManager: send failed', {
-          host: this.hostKey, sid: this._sid, reason: result.reason || result.error,
+          host: this.hostKey, sid, reason: result.reason || result.error,
         })
       }
     }).catch((err) => {
