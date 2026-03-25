@@ -26,6 +26,7 @@ import { useUrlSync } from '@/hooks/useUrlSync';
 import { useSessionPanelMode } from '@/hooks/useSessionPanelMode';
 import { shouldHideUiOnlyMessage } from '@/hooks/useDeveloperSettings';
 import { useUiOnlySettings } from '@/hooks/useDeveloperSettings';
+import { resolveTaskSessionId } from '@/utils/session-status';
 import { FocusDock } from '@/components/dock/FocusDock';
 import type { SlashCommand } from '@/commands/types';
 import type { CommandContext } from '@/commands/types';
@@ -623,11 +624,15 @@ export function MainPage({ visible = true, navigateRef }: MainPageProps) {
     }
   }, [update]);
 
-  // Suppress detail — callers (chat refs, session/triage panels) already show their own context
+  // Unified task-click: select + scroll + open session (if any). Never open detail panel.
+  // Used by chat refs, session panels, triage — must behave identically to TodoPanel/PinnedCard clicks.
   const handleFocusTaskById = useCallback((taskId: string) => {
     const task = taskMapRef.current.get(taskId);
-    if (task) handleFocusTask(task, { openDetail: false });
-  }, [handleFocusTask]);
+    if (!task) return;
+    const sid = resolveTaskSessionId(task);
+    if (sid) handleToggleSession(sid);
+    handleFocusTask(task, { openDetail: false });
+  }, [handleFocusTask, handleToggleSession]);
 
   const handleClearFocus = useCallback(() => {
     setFocusedTask(null);

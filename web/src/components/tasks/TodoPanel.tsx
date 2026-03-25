@@ -2445,16 +2445,14 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
     onFocusTask?.(task, { openDetail: false });
   }, [onFocusTask, onOpenSession]);
 
-  // Click task row = open session only. Use ⓘ button for task detail.
+  // Click task row = select + scroll + open session (if any). Never open detail panel.
+  // Same logic as handlePinnedCardClick — all task click sources must behave identically.
   const handleTaskClick = useCallback((task: Task) => {
     const sid = resolveTaskSessionId(task);
-    if (sid) {
-      onOpenSession?.(sid);
-    } else {
-      // No session — fall back to task detail
-      onFocusTask ? onFocusTask(task) : navigate(`/tasks/${task.id}`);
-    }
-  }, [onFocusTask, onOpenSession, navigate]);
+    if (sid) onOpenSession?.(sid);
+    // Always scroll to position; suppress detail panel (ⓘ button is the only way to open detail)
+    onFocusTask?.(task, { openDetail: false });
+  }, [onFocusTask, onOpenSession]);
 
   const handleExpandDetail = useCallback((task: Task) => {
     setDetailTarget(null);
