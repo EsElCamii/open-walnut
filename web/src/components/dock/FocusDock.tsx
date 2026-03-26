@@ -161,7 +161,7 @@ const DockTaskCard = memo(function DockTaskCard({ task, isActive, onActivate, on
             placeholder="Send message... (/ for commands)"
             sessionCommands={slashCommands}
             searchSessionCommands={searchSlashCommands}
-            draftKey={sessionId ? `draft:session:${sessionId}` : undefined}
+            draftKey={`draft:session:${sessionId}`}
           />
         </div>
       )}

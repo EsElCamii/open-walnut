@@ -52,8 +52,23 @@ export function ChatInput({ onSend, onCommand, onStop, onInterruptSend, onClearQ
   const draftKeyRef = useRef(draftKey);
   draftKeyRef.current = draftKey;
 
-  // When draftKey changes (e.g. switching sessions), restore the new draft
+  // Track whether the component has mounted so the effect below can skip the
+  // initial run (the useState initializer above already handles first render).
+  const mountedRef = useRef(false);
+
+  // Restore draft when switching sessions (draftKey change).
+  // Initial mount is handled by useState initializer above — skip here to avoid double-read.
   useEffect(() => {
+    // Cancel any pending debounce timer for the previous session's key before
+    // restoring the new session's draft. Without this, the stale timer could
+    // fire after the key has changed and write the old text under the new key.
+    clearTimeout(draftTimerRef.current);
+
+    if (!mountedRef.current) {
+      mountedRef.current = true;
+      return;
+    }
+
     if (!draftKey) return;
     try {
       const saved = localStorage.getItem(draftKey) ?? '';
@@ -70,7 +85,7 @@ export function ChatInput({ onSend, onCommand, onStop, onInterruptSend, onClearQ
     } catch { /* localStorage unavailable */ }
   }, [draftKey]);
 
-  // Flush pending draft on unmount
+  // Cancel pending debounce timer on unmount
   useEffect(() => {
     return () => { clearTimeout(draftTimerRef.current); };
   }, []);
