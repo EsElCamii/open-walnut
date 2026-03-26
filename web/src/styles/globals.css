@@ -6747,16 +6747,17 @@ img[data-lightbox-src],
 }
 
 .todo-pinned-phase {
-  font-size: 9px;
-  font-weight: 600;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
   flex-shrink: 0;
-  text-transform: uppercase;
-  letter-spacing: 0.3px;
-  color: var(--fg-muted);
+  background: var(--fg-muted);
+  opacity: 0.45;
 }
 
 .todo-pinned-phase-attention {
-  color: var(--error);
+  background: var(--error);
+  opacity: 1;
 }
 
 .todo-pinned-card-attention {
@@ -8298,7 +8299,7 @@ img[data-lightbox-src],
 }
 
 .todo-group-project {
-  padding-left: 8px;
+  padding-left: 0;
 }
 
 .todo-group-project-header {
@@ -8547,7 +8548,7 @@ img[data-lightbox-src],
 }
 
 .todo-group-project .todo-panel-item {
-  padding-left: 8px;
+  padding-left: 0;
 }
 
 /* Drag overlay (floating copy while dragging) */

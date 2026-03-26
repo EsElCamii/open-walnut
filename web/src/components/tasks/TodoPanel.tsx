@@ -15,6 +15,7 @@ import { WORK_LABELS, WORK_COLORS, PROCESS_COLORS, PROCESS_LABELS, resolveTaskSe
 import type { UseFavoritesReturn } from '@/hooks/useFavorites';
 import type { UseOrderingReturn } from '@/hooks/useOrdering';
 import { PriorityPicker } from '../common/PriorityPicker';
+import * as ICONS from '../common/Icons';
 import type { TaskPriority } from '@walnut/core';
 import { TodoSearchBar } from './TodoSearchBar';
 import { useTaskSearch } from '@/hooks/useTaskSearch';
@@ -98,15 +99,15 @@ interface TodoPanelProps {
 const STARRED_TAB = '\u2605';
 
 const PHASE_ICON: Record<string, ReactNode> = {
-  TODO: '\u25CB',                    // ○ hollow circle
-  IN_PROGRESS: '\u25D0',            // ◐ half-filled
-  AGENT_COMPLETE: '\u2713',          // ✓ single check
+  TODO: ICONS.ICON_PHASE_TODO,
+  IN_PROGRESS: ICONS.ICON_PHASE_IN_PROGRESS,
+  AGENT_COMPLETE: ICONS.ICON_PHASE_AGENT_COMPLETE,
   AWAIT_HUMAN_ACTION: <PersonIcon />,
-  HUMAN_VERIFIED: '\u2705',          // ✅ green checkmark
-  POST_WORK_COMPLETED: '\uD83D\uDCE6', // 📦 package
-  PEER_CODE_REVIEW: '\u22C8',       // ⋈ bowtie
-  RELEASE_IN_PIPELINE: '\u25B7',    // ▷ open triangle
-  COMPLETE: '\u2713\u2713',          // ✓✓ double check
+  HUMAN_VERIFIED: ICONS.ICON_PHASE_HUMAN_VERIFIED,
+  POST_WORK_COMPLETED: ICONS.ICON_PHASE_POST_WORK,
+  PEER_CODE_REVIEW: ICONS.ICON_PHASE_CODE_REVIEW,
+  RELEASE_IN_PIPELINE: ICONS.ICON_PHASE_PIPELINE,
+  COMPLETE: ICONS.ICON_PHASE_COMPLETE,
 };
 
 const PHASE_LABEL: Record<string, string> = {
@@ -143,12 +144,7 @@ const PRIORITY_LABEL: Record<string, string> = {
 
 const CHEVRON_ICON = '\u25B6'; // ▶ — used by all collapse-chevron buttons (CSS rotation handles expanded state)
 
-// 14×14 SVG icons for task action pill buttons (bold strokes, fill the viewBox)
-const ICON_INFO = <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"><circle cx="8" cy="8" r="6.5"/><path d="M8 7.5v4"/><circle cx="8" cy="5.2" r=".8" fill="currentColor" stroke="none"/></svg>;
-const ICON_STAR_EMPTY = <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinejoin="round"><path d="M8 1.5l2 4.1 4.5.6-3.2 3.2.8 4.5L8 11.7l-4.1 2.2.8-4.5L1.5 6.2l4.5-.6z"/></svg>;
-const ICON_STAR_FILLED = <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" stroke="currentColor" strokeWidth="0.5" strokeLinejoin="round"><path d="M8 1.5l2 4.1 4.5.6-3.2 3.2.8 4.5L8 11.7l-4.1 2.2.8-4.5L1.5 6.2l4.5-.6z"/></svg>;
-const ICON_PIN = <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><circle cx="8" cy="5.5" r="3.5"/><path d="M8 9v5"/></svg>;
-const ICON_PIN_FILLED = <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" stroke="currentColor" strokeWidth="0.5" strokeLinecap="round"><circle cx="8" cy="5.5" r="3.5"/><path d="M8 9v5" stroke="currentColor" strokeWidth="1.5"/></svg>;
+// Action icons: imported from shared Icons.tsx via ICONS.*
 
 /** Normalize legacy priority values to current 4-tier system. */
 function effectivePriority(p: string): string {
@@ -263,7 +259,6 @@ function SortableTaskItem({ task, isFocused, isRecentlyDone, depth = 0, childCou
     transform: CSS.Transform.toString(transform),
     transition,
     opacity: isDragging ? 0 : undefined,
-    ...(depth > 0 ? { paddingLeft: `${depth * 20}px` } : {}),
   };
 
   const isDone = task.phase === 'COMPLETE';
@@ -411,10 +406,10 @@ function SortableTaskItem({ task, isFocused, isRecentlyDone, depth = 0, childCou
       {...activeAttributes}
       {...activeListeners}
     >
-      {/* ── Layout: [chevron 20px] [phase-icon] [content ...flex-1...] [badges] ── */}
+      {/* ── Layout: [chevron if children] [content ...flex-1...] ── */}
 
-      {/* — chevron column: collapse button or spacer for alignment — */}
-      {childCount > 0 ? (
+      {/* — chevron: only shown when task has children (no spacer for leaf tasks) — */}
+      {childCount > 0 && (
         <button
           className={`collapse-chevron${isExpanded ? ' expanded' : ''}`}
           title={isExpanded ? 'Collapse child tasks' : `Expand ${childCount} child task(s)`}
@@ -422,50 +417,9 @@ function SortableTaskItem({ task, isFocused, isRecentlyDone, depth = 0, childCou
         >
           {CHEVRON_ICON}
         </button>
-      ) : (
-        <span className="collapse-chevron-spacer" />
       )}
 
-      {/* — status column: phase icon + picker dropdown — */}
-      <div className="phase-picker-wrapper" ref={phaseWrapperRef}>
-        <button
-          className={`task-status-btn task-status-${task.status} task-phase-${task.phase?.toLowerCase()}`}
-          onClick={(e) => {
-            e.stopPropagation();
-            setPhaseMenuOpen(!phaseMenuOpen);
-          }}
-          aria-label={PHASE_LABEL[task.phase] ?? 'Change phase'}
-          title={PHASE_LABEL[task.phase] ?? 'Change phase'}
-        >
-          {PHASE_ICON[task.phase] ?? '\u25CB'}
-        </button>
-        {phaseMenuOpen && (
-          <div className="phase-picker-menu">
-            {PHASE_ORDER.map((phase) => (
-              <button
-                key={phase}
-                className={`phase-picker-item${task.phase === phase ? ' active' : ''}`}
-                onClick={(e) => {
-                  e.stopPropagation();
-                  if (task.phase !== phase) onSetPhase(task.id, phase);
-                  setPhaseMenuOpen(false);
-                }}
-              >
-                <span className={`phase-picker-icon task-phase-${phase.toLowerCase()}`}>
-                  {PHASE_ICON[phase]}
-                </span>
-                <span>{PHASE_LABEL[phase]}</span>
-                {hookPhases.has(phase) && (
-                  <span className="phase-hook-indicator" title={hookPhases.get(phase)}>⚡</span>
-                )}
-                {task.phase === phase && <span className="phase-picker-check">✓</span>}
-              </button>
-            ))}
-          </div>
-        )}
-      </div>
-
-      {/* — content area: title + metadata + actions (flex:1) — */}
+      {/* — content area: title + single bottom row (flex:1) — */}
       <div className="todo-item-content">
         <div className="todo-item-title-row">
           <span
@@ -486,8 +440,45 @@ function SortableTaskItem({ task, isFocused, isRecentlyDone, depth = 0, childCou
             <span className="task-attention-dot" title="Needs your attention" role="img" aria-label="Needs your attention" />
           )}
         </div>
-        {/* — single bottom row: status · source · link · actions — */}
+        {/* — single bottom row: phase · status · source · link · actions — */}
         <div className="todo-item-meta-row">
+          <div className="phase-picker-wrapper" ref={phaseWrapperRef}>
+            <button
+              className={`task-action-btn task-status-btn task-status-${task.status} task-phase-${task.phase?.toLowerCase()}`}
+              onClick={(e) => {
+                e.stopPropagation();
+                setPhaseMenuOpen(!phaseMenuOpen);
+              }}
+              aria-label={PHASE_LABEL[task.phase] ?? 'Change phase'}
+              title={PHASE_LABEL[task.phase] ?? 'Change phase'}
+            >
+              {PHASE_ICON[task.phase] ?? ICONS.ICON_PHASE_TODO}
+            </button>
+            {phaseMenuOpen && (
+              <div className="phase-picker-menu">
+                {PHASE_ORDER.map((phase) => (
+                  <button
+                    key={phase}
+                    className={`phase-picker-item${task.phase === phase ? ' active' : ''}`}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      if (task.phase !== phase) onSetPhase(task.id, phase);
+                      setPhaseMenuOpen(false);
+                    }}
+                  >
+                    <span className={`phase-picker-icon task-phase-${phase.toLowerCase()}`}>
+                      {PHASE_ICON[phase]}
+                    </span>
+                    <span>{PHASE_LABEL[phase]}</span>
+                    {hookPhases.has(phase) && (
+                      <span className="phase-hook-indicator" title={hookPhases.get(phase)}>{ICONS.ICON_LIGHTNING}</span>
+                    )}
+                    {task.phase === phase && <span className="phase-picker-check">✓</span>}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
           <TaskStatusDot task={task} onClick={onOpenSession ? () => {
             const sid = resolveTaskSessionId(task);
             if (sid) onOpenSession(sid);
@@ -544,7 +535,7 @@ function SortableTaskItem({ task, isFocused, isRecentlyDone, depth = 0, childCou
             }}
             title={isFocused ? 'Close detail' : 'Open detail'}
           >
-            {ICON_INFO}
+            {ICONS.ICON_INFO}
           </button>
           {onSetPriority ? (
             <PriorityPicker
@@ -560,7 +551,7 @@ function SortableTaskItem({ task, isFocused, isRecentlyDone, depth = 0, childCou
               onClick={(e) => { e.stopPropagation(); onStar(task.id); }}
               title={task.starred ? 'Unstar' : 'Star'}
             >
-              {task.starred ? ICON_STAR_FILLED : ICON_STAR_EMPTY}
+              {task.starred ? ICONS.ICON_STAR_FILLED : ICONS.ICON_STAR_EMPTY}
             </button>
           )}
           {onPinTask && !isPinned && task.status !== 'done' && task.phase !== 'COMPLETE' && (
@@ -569,7 +560,7 @@ function SortableTaskItem({ task, isFocused, isRecentlyDone, depth = 0, childCou
               onClick={(e) => { e.stopPropagation(); onPinTask(task.id); }}
               title="Pin to Focus Dock"
             >
-              {ICON_PIN}
+              {ICONS.ICON_PIN}
             </button>
           )}
           {isPinned && onUnpinTask && (
@@ -578,7 +569,7 @@ function SortableTaskItem({ task, isFocused, isRecentlyDone, depth = 0, childCou
               onClick={(e) => { e.stopPropagation(); onUnpinTask(task.id); }}
               title="Unpin from Focus Dock"
             >
-              {ICON_PIN_FILLED}
+              {ICONS.ICON_PIN_FILLED}
             </button>
           )}
           {dueDateInfo && (
@@ -639,10 +630,6 @@ function SortableTaskItem({ task, isFocused, isRecentlyDone, depth = 0, childCou
 function TaskItemOverlay({ task }: { task: Task }) {
   return (
     <div className="todo-panel-item drag-overlay-item">
-      <span className="collapse-chevron-spacer" />
-      <span className={`task-status-btn task-status-${task.status} task-phase-${task.phase?.toLowerCase()}`}>
-        {PHASE_ICON[task.phase] ?? '\u25CB'}
-      </span>
       <div className="todo-item-content">
         <span className="todo-item-title">{task.title}</span>
       </div>
@@ -1308,7 +1295,7 @@ function SortablePinnedCard({ task, isFocused, onClick, onUnpinTask }: SortableP
         &#x2630;
       </span>
       <span className="todo-pinned-title" title={task.title}>{task.title}</span>
-      <span className={`todo-pinned-phase${needsAttention ? ' todo-pinned-phase-attention' : ''}`}>{phaseLabel}</span>
+      <span className={`todo-pinned-phase${needsAttention ? ' todo-pinned-phase-attention' : ''}`} title={phaseLabel} />
       <button
         className="todo-pinned-unpin"
         onClick={(e) => { e.stopPropagation(); onUnpinTask?.(task.id); }}
