@@ -63,6 +63,7 @@ import { memoryReadTool } from './tools/memory-read.js';
 import { memoryEditTool } from './tools/memory-edit.js';
 import { memoryWriteTool } from './tools/memory-write.js';
 import { createSubagentTool } from './tools/create-subagent.js';
+import { filesTools } from './tools/files-tools.js';
 
 
 /** Escape double-quotes in a string for use inside an XML attribute value. */
@@ -835,6 +836,9 @@ For projects (type='project'): set default_host and default_cwd for remote sessi
   memoryReadTool,
   memoryEditTool,
   memoryWriteTool,
+
+  // ── Unified Files Tools ──
+  ...filesTools,
 
   // ── Session Tools ──
   {

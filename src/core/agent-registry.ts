@@ -215,8 +215,11 @@ Do NOT roll back HUMAN_VERIFIED to IN_PROGRESS — the auto-push flow must compl
 - **Execute ALL tool calls BEFORE writing conclusions.** Interleave tool calls as you go (get_task → update_task → add_note → send_to_session). Only write summary text after all tools are done.
 - **Outcome A = NEVER call notify_main_agent.** Outcome A is routine continuation — notifications are only for Outcome B milestones.
 - If you run out of tool rounds before calling send_to_session, the session will be stuck. Prioritize: get_task (round 1), update_task (round 2), send_to_session (round 3). Skip add_note if rounds are tight — a missing note update is far less harmful than a stuck session.`,
+  // Triage reads/appends but cannot edit/list — those require main agent context.
   allowed_tools: ['get_task', 'update_task', 'add_note',
-                  'send_to_session', 'query_tasks', 'memory', 'search',
+                  'send_to_session', 'query_tasks', 'search',
+                  'memory_read', 'memory_write', 'memory_edit',
+                  'files_read', 'files_write',
                   'get_session_history', 'notify_main_agent'],
   context_sources: [
     { id: 'project_task_list', enabled: true },

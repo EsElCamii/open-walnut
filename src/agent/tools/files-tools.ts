@@ -1,0 +1,302 @@
+/**
+ * Unified files_* tool group — 4 tools for CRUDL on any content source.
+ *
+ * files_read  — read any source with optional parse
+ * files_write — write/append to any source
+ * files_edit  — edit by exact string replacement
+ * files_list  — list contents under a source prefix
+ */
+import type { ToolDefinition, ToolResultContent } from '../tools.js';
+import {
+  resolveSource,
+  parseMarkdown,
+  memoryHandler,
+  notesHandler,
+  fileHandler,
+} from './files/index.js';
+import type { FileHandler, FilesReadResult } from './files/index.js';
+import {
+  StaleHashError,
+  ContentNotFoundError,
+  AmbiguousMatchError,
+} from '../../utils/file-ops.js';
+
+function json(data: unknown): string {
+  return JSON.stringify(data, null, 2);
+}
+
+/** Get the handler for a resolved source. */
+function getHandler(type: string): FileHandler {
+  switch (type) {
+    case 'memory': return memoryHandler;
+    case 'notes': return notesHandler;
+    case 'file': return fileHandler;
+    default: throw new Error(`Unknown source type: ${type}`);
+  }
+}
+
+/** Format error messages consistently. */
+function formatError(err: unknown, source: string): string {
+  if (err instanceof StaleHashError) {
+    return `Error: ${err.message}`;
+  }
+  if (err instanceof ContentNotFoundError) {
+    return `Error: old_content not found in "${source}". Make sure the string matches exactly (including whitespace and indentation). Use files_read first to see current content.`;
+  }
+  if (err instanceof AmbiguousMatchError) {
+    return `Error: ${err.message}`;
+  }
+  const code = (err as NodeJS.ErrnoException).code;
+  if (code === 'ENOENT') {
+    return `Error: Source not found: "${source}". File does not exist.`;
+  }
+  if (code === 'EACCES') {
+    return `Error: Permission denied: "${source}".`;
+  }
+  if (code === 'EISDIR') {
+    return `Error: Source is a directory, not a file: "${source}". Use files_list instead.`;
+  }
+  return `Error: ${err instanceof Error ? err.message : String(err)}`;
+}
+
+// ── files_read ──
+
+export const filesReadTool: ToolDefinition = {
+  name: 'files_read',
+  description: `Read any content source. Returns line-numbered text + content_hash. Images return inline.
+
+Special sources (use these URIs instead of raw file paths):
+  notes/global           — The Notes panel on the home page: user's personal scratchpad
+                           with todos, checklists, task-refs, and links (WYSIWYG markdown).
+  notes/{name}           — Named note document (e.g. notes/recipes, notes/reading-list).
+  memory/global          — Agent's curated knowledge & user preferences (MEMORY.md).
+                           Updated by the agent as it learns across sessions.
+  memory/project/{path}  — Per-project work log and accumulated context
+                           (e.g. memory/project/work/api, memory/project/passion/walnut).
+  memory/daily           — Today's activity log (timestamped entries from all sessions).
+  memory/daily/YYYY-MM-DD — Specific day's log (e.g. memory/daily/2026-03-25).
+  /absolute/path         — Any file on disk. Images (PNG/JPEG/GIF/WebP) return inline.
+
+Set parse=true to also return structured extraction (headers, todos, task-refs, links).`,
+  input_schema: {
+    type: 'object',
+    properties: {
+      source: {
+        type: 'string',
+        description: 'Content source URI.',
+      },
+      offset: {
+        type: 'number',
+        description: '1-based start line.',
+      },
+      limit: {
+        type: 'number',
+        description: 'Max lines to return.',
+      },
+      parse: {
+        type: 'boolean',
+        description: 'Also return structured parse result (headers, todos, task-refs, links).',
+      },
+    },
+    required: ['source'],
+  },
+
+  async execute(params): Promise<ToolResultContent> {
+    const source = params.source as string;
+    if (!source) return 'Error: source is required.';
+
+    try {
+      const resolved = resolveSource(source);
+      const handler = getHandler(resolved.type);
+      const result = await handler.read(resolved, {
+        offset: params.offset as number | undefined,
+        limit: params.limit as number | undefined,
+      });
+
+      // If handler returned raw content (e.g. image blocks), pass through
+      if (typeof result === 'string' || Array.isArray(result)) {
+        return result;
+      }
+
+      const readResult = result as FilesReadResult;
+
+      // Optionally parse
+      if (params.parse) {
+        // We need the raw (un-numbered) content for parsing.
+        // Reconstruct from line-numbered output by stripping line numbers.
+        const rawLines = readResult.content.split('\n').map((line) => {
+          // Line format: "    42\tcontent..." — strip the 6-char number + tab prefix
+          const tabIdx = line.indexOf('\t');
+          return tabIdx >= 0 ? line.slice(tabIdx + 1) : line;
+        });
+        const rawContent = rawLines.join('\n');
+        readResult.parsed = parseMarkdown(rawContent);
+      }
+
+      return json(readResult);
+    } catch (err) {
+      return formatError(err, source);
+    }
+  },
+};
+
+// ── files_write ──
+
+export const filesWriteTool: ToolDefinition = {
+  name: 'files_write',
+  description: `Write or append content to any source.
+Mode 'overwrite' replaces entire content (default). Mode 'append' adds to end.
+For memory sources: append auto-prepends timestamp heading.
+content_hash (from files_read) required for overwrite on memory/notes sources — prevents stale writes.
+For file sources: content_hash is optional but recommended for safety.
+
+Sources: notes/global, notes/{name}, memory/global, memory/project/{path},
+memory/daily[/YYYY-MM-DD], /absolute/path — see files_read for full descriptions.`,
+  input_schema: {
+    type: 'object',
+    properties: {
+      source: {
+        type: 'string',
+        description: 'Content source URI.',
+      },
+      content: {
+        type: 'string',
+        description: 'The content to write or append.',
+      },
+      mode: {
+        type: 'string',
+        enum: ['overwrite', 'append'],
+        description: 'Write mode. Default: overwrite.',
+      },
+      content_hash: {
+        type: 'string',
+        description: 'From files_read. Required for overwrite on memory/notes sources.',
+      },
+    },
+    required: ['source', 'content'],
+  },
+
+  async execute(params): Promise<ToolResultContent> {
+    const source = params.source as string;
+    const content = params.content as string;
+    if (!source) return 'Error: source is required.';
+    if (content == null) return 'Error: content is required.';
+
+    try {
+      const resolved = resolveSource(source);
+      const handler = getHandler(resolved.type);
+      const result = await handler.write(resolved, content, {
+        mode: (params.mode as 'overwrite' | 'append') ?? 'overwrite',
+        contentHash: params.content_hash as string | undefined,
+      });
+      return json(result);
+    } catch (err) {
+      return formatError(err, source);
+    }
+  },
+};
+
+// ── files_edit ──
+
+export const filesEditTool: ToolDefinition = {
+  name: 'files_edit',
+  description: `Edit by exact string replacement in any source.
+content_hash (from files_read) required for memory/notes sources — prevents stale edits.
+For file sources: content_hash is optional but recommended.
+
+Sources: notes/global, notes/{name}, memory/global, memory/project/{path},
+memory/daily[/YYYY-MM-DD], /absolute/path — see files_read for full descriptions.`,
+  input_schema: {
+    type: 'object',
+    properties: {
+      source: {
+        type: 'string',
+        description: 'Content source URI.',
+      },
+      old_content: {
+        type: 'string',
+        description: 'Exact text to find.',
+      },
+      new_content: {
+        type: 'string',
+        description: 'Replacement text. Empty string to delete matched text.',
+      },
+      content_hash: {
+        type: 'string',
+        description: 'From files_read. Required for memory/notes sources.',
+      },
+      replace_all: {
+        type: 'boolean',
+        description: 'Replace all occurrences instead of requiring a unique match. Default: false.',
+      },
+    },
+    required: ['source', 'old_content'],
+  },
+
+  async execute(params): Promise<ToolResultContent> {
+    const source = params.source as string;
+    const oldContent = params.old_content as string;
+    const newContent = (params.new_content as string) ?? '';
+    if (!source) return 'Error: source is required.';
+    if (!oldContent) return 'Error: old_content is required.';
+
+    try {
+      const resolved = resolveSource(source);
+      const handler = getHandler(resolved.type);
+      const result = await handler.edit(resolved, oldContent, newContent, {
+        contentHash: params.content_hash as string | undefined,
+        replaceAll: (params.replace_all as boolean) ?? false,
+      });
+      return json(result);
+    } catch (err) {
+      return formatError(err, source);
+    }
+  },
+};
+
+// ── files_list ──
+
+export const filesListTool: ToolDefinition = {
+  name: 'files_list',
+  description: `List available content under a source prefix.
+  "notes"          → all note documents (global + named notes)
+  "memory/project" → all project memories with names & descriptions
+  "memory/daily"   → all daily log dates (most recent first)
+  "/path/to/dir"   → directory listing of files on disk`,
+  input_schema: {
+    type: 'object',
+    properties: {
+      prefix: {
+        type: 'string',
+        description: 'Source prefix to list.',
+      },
+    },
+    required: ['prefix'],
+  },
+
+  async execute(params): Promise<ToolResultContent> {
+    const prefix = params.prefix as string;
+    if (!prefix) return 'Error: prefix is required.';
+
+    try {
+      const resolved = resolveSource(prefix);
+      const handler = getHandler(resolved.type);
+      const items = await handler.list(resolved);
+
+      if (items.length === 0) {
+        return `No items found under "${prefix}".`;
+      }
+      return json(items);
+    } catch (err) {
+      return formatError(err, prefix);
+    }
+  },
+};
+
+/** All files_* tools for registration. */
+export const filesTools: ToolDefinition[] = [
+  filesReadTool,
+  filesWriteTool,
+  filesEditTool,
+  filesListTool,
+];
