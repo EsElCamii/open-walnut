@@ -21,9 +21,9 @@ const VISIBLE_KEY = 'open-walnut-focus-dock-visible';
 
 function readVisible(): boolean {
   try {
-    return localStorage.getItem(VISIBLE_KEY) !== 'false';
+    return localStorage.getItem(VISIBLE_KEY) === 'true';
   } catch {
-    return true;
+    return false;
   }
 }
 

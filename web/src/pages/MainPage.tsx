@@ -103,6 +103,7 @@ const SS_TASK_KEY = 'open-walnut-home-focused-task';
 const SS_SESSION_COLUMNS_KEY = 'open-walnut-home-session-columns';
 const SS_TODO_SCROLL_KEY = 'walnut-home-todo-scroll';
 const SS_CHAT_VISIBLE_KEY = 'open-walnut-home-chat-visible';
+const SS_TODO_VISIBLE_KEY = 'open-walnut-home-todo-visible';
 
 // Legacy key for migration
 const SS_SESSION_KEY_LEGACY = 'open-walnut-home-session-panel';
@@ -113,11 +114,11 @@ const SESSION_WIDTH_BY_COUNT = [0, 65, 65]; // 1=65%, 2=65% (max width)
 
 function addSessionColumn(cols: string[], id: string, triageOpen: boolean, maxColumns: number): string[] {
   const max = triageOpen ? maxColumns - 1 : maxColumns;
-  // Deduplicate: remove existing, then push to rightmost
+  // Deduplicate: remove existing, then insert at leftmost (closest to todo panel)
   const filtered = cols.filter(c => c !== id);
-  const next = [...filtered, id];
-  // Evict leftmost if over max
-  return next.length > max ? next.slice(next.length - max) : next;
+  const next = [id, ...filtered];
+  // Evict rightmost if over max
+  return next.length > max ? next.slice(0, max) : next;
 }
 
 function removeSessionColumn(cols: string[], id: string): string[] {
@@ -169,9 +170,14 @@ export function MainPage({ visible = true, navigateRef }: MainPageProps) {
   // Force re-render when UI Only settings change (hook subscribes to localStorage)
   useUiOnlySettings();
 
-  // Chat panel visibility — toggle via Focus Dock "Chat" button
+  // Chat panel visibility — toggle via Focus Dock "Chat" button or Sidebar toggle
   const [chatVisible, setChatVisible] = useState<boolean>(
     () => sessionStorage.getItem(SS_CHAT_VISIBLE_KEY) !== 'false'
+  );
+
+  // Todo panel visibility — toggle via Sidebar toggle button
+  const [todoVisible, setTodoVisible] = useState<boolean>(
+    () => sessionStorage.getItem(SS_TODO_VISIBLE_KEY) !== 'false'
   );
 
   // Session columns state — up to 2 sessions displayed side by side
@@ -201,6 +207,14 @@ export function MainPage({ visible = true, navigateRef }: MainPageProps) {
   const maxPanelsRef = useRef(effectiveMaxPanels);
   maxPanelsRef.current = effectiveMaxPanels;
 
+  // Auto-evict excess session columns when effectiveMaxPanels shrinks (e.g. auto mode + window resize)
+  useEffect(() => {
+    setSessionColumns(prev => {
+      const max = triageOpenRef.current ? effectiveMaxPanels - 1 : effectiveMaxPanels;
+      return prev.length > max ? prev.slice(prev.length - max) : prev;
+    });
+  }, [effectiveMaxPanels]);
+
   // Session quick-start state (opened via /session command)
   const [pathSelectorOpen, setPathSelectorOpen] = useState(false);
   const [quickStartPath, setQuickStartPath] = useState<QuickStartPath | null>(null);
@@ -229,7 +243,7 @@ export function MainPage({ visible = true, navigateRef }: MainPageProps) {
   taskMapRef.current = taskMap;
 
   // Resizable panels
-  const todoPanel = useResizablePanel('open-walnut-todo-width', 25);
+  const todoPanel = useResizablePanel('open-walnut-todo-width', 25, 'left');
   const sessionPanel = useResizablePanel('walnut-session-panel-width-v2', 35);
 
   // Column split ratio: left column gets splitPct%, right gets (100-splitPct)%
@@ -355,11 +369,17 @@ export function MainPage({ visible = true, navigateRef }: MainPageProps) {
     else sessionStorage.removeItem(SS_SESSION_COLUMNS_KEY);
   }, [sessionColumns]);
 
-  // Persist chatVisible + broadcast to FocusDock
+  // Persist chatVisible + broadcast to FocusDock / Sidebar
   useEffect(() => {
     sessionStorage.setItem(SS_CHAT_VISIBLE_KEY, String(chatVisible));
     window.dispatchEvent(new CustomEvent('main:chat-visible', { detail: { visible: chatVisible } }));
   }, [chatVisible]);
+
+  // Persist todoVisible + broadcast to Sidebar
+  useEffect(() => {
+    sessionStorage.setItem(SS_TODO_VISIBLE_KEY, String(todoVisible));
+    window.dispatchEvent(new CustomEvent('main:todo-visible', { detail: { visible: todoVisible } }));
+  }, [todoVisible]);
 
   // ── Listen for FocusDock events ──
   useEffect(() => {
@@ -374,13 +394,16 @@ export function MainPage({ visible = true, navigateRef }: MainPageProps) {
       setChatVisible(prev => !prev);
     };
     const handleSessionLauncher = () => setPathSelectorOpen(true);
+    const handleToggleTodo = () => setTodoVisible(prev => !prev);
     window.addEventListener('dock:activate-task', handleDockTask);
     window.addEventListener('dock:activate-chat', handleDockChat);
     window.addEventListener('session-launcher:open', handleSessionLauncher);
+    window.addEventListener('sidebar:toggle-todo', handleToggleTodo);
     return () => {
       window.removeEventListener('dock:activate-task', handleDockTask);
       window.removeEventListener('dock:activate-chat', handleDockChat);
       window.removeEventListener('session-launcher:open', handleSessionLauncher);
+      window.removeEventListener('sidebar:toggle-todo', handleToggleTodo);
     };
   }, []);
 
@@ -434,6 +457,37 @@ export function MainPage({ visible = true, navigateRef }: MainPageProps) {
     }
   });
 
+  // ── Quick Start retry handler ──
+  const handleQuickStartRetry = useCallback(() => {
+    const meta = pendingQuickStartMetaRef.current;
+    if (!meta || !meta.message) return;
+
+    // Clear the httpError so panel goes back to spinner
+    pendingQuickStartMetaRef.current = { ...meta, httpError: undefined };
+
+    quickStartSession({
+      cwd: meta.cwd,
+      host: meta.host,
+      message: meta.message,
+      category: meta.category,
+      taskId: meta.realTaskId, // reuse existing task if we have one
+    }).then((result) => {
+      // Update refs with (possibly new) taskId
+      if (pendingQuickStartRef.current) {
+        pendingQuickStartRef.current = result.taskId;
+      }
+      if (pendingQuickStartMetaRef.current?.id === meta.id) {
+        pendingQuickStartMetaRef.current = { ...pendingQuickStartMetaRef.current, realTaskId: result.taskId, httpError: undefined };
+      }
+    }).catch((err) => {
+      const errMsg = err instanceof Error ? err.message : String(err);
+      if (pendingQuickStartMetaRef.current?.id === meta.id) {
+        pendingQuickStartMetaRef.current = { ...pendingQuickStartMetaRef.current, httpError: errMsg };
+      }
+      setSessionColumns(prev => [...prev]); // force re-render
+    });
+  }, []);
+
   // ── Triage panel handlers ──
   const handleOpenTriageForTask = useCallback((taskId: string) => {
     setTriagePanelOpen(true);
@@ -451,7 +505,7 @@ export function MainPage({ visible = true, navigateRef }: MainPageProps) {
   // Quick-start: track pending taskId, auto-open session panel when it starts
   const pendingQuickStartRef = useRef<string | null>(null);
   // Metadata for the pending session panel (cwd, host, etc.)
-  const pendingQuickStartMetaRef = useRef<{ id: string; cwd: string; host?: string; hostLabel?: string; realTaskId?: string } | null>(null);
+  const pendingQuickStartMetaRef = useRef<{ id: string; cwd: string; host?: string; hostLabel?: string; realTaskId?: string; message?: string; category?: string; httpError?: string } | null>(null);
 
   // Fork: pending panel metadata (same pattern as quick-start)
   const pendingForkMetaRef = useRef<{ id: string; cwd: string; host?: string; realTaskId?: string } | null>(null);
@@ -694,7 +748,7 @@ export function MainPage({ visible = true, navigateRef }: MainPageProps) {
       const pendingColId = `pending:${tempTaskId}`;
       setSessionColumns(prev => addSessionColumn(prev, pendingColId, triageOpenRef.current, maxPanelsRef.current));
       // Store pending metadata for rendering
-      pendingQuickStartMetaRef.current = { id: pendingColId, cwd: qsp.cwd, host: qsp.host ?? undefined, hostLabel: qsp.hostLabel ?? undefined };
+      pendingQuickStartMetaRef.current = { id: pendingColId, cwd: qsp.cwd, host: qsp.host ?? undefined, hostLabel: qsp.hostLabel ?? undefined, message: text, category: qsp.category };
 
       quickStartSession({
         cwd: qsp.cwd,
@@ -726,11 +780,14 @@ export function MainPage({ visible = true, navigateRef }: MainPageProps) {
         // Images already sent to the session via quickStartSession() — don't duplicate
         chat.sendMessage(agentMsg, undefined, undefined, 'quick-start');
       }).catch((err) => {
-        setQuickStartPath(qsp); // Restore so user can retry
-        // Remove the pending column on failure
-        setSessionColumns(prev => removeSessionColumn(prev, pendingColId));
-        pendingQuickStartMetaRef.current = null;
-        chat.addLocalMessage(`Quick Start failed: ${err instanceof Error ? err.message : String(err)}`);
+        // Keep the pending column visible with error — user can Retry from panel
+        const errMsg = err instanceof Error ? err.message : String(err);
+        if (pendingQuickStartMetaRef.current?.id === pendingColId) {
+          pendingQuickStartMetaRef.current = { ...pendingQuickStartMetaRef.current, httpError: errMsg };
+        }
+        // Force re-render by updating sessionColumns in-place (identity change)
+        setSessionColumns(prev => [...prev]);
+        chat.addLocalMessage(`Quick Start failed: ${errMsg}`);
       });
       return;
     }
@@ -791,11 +848,55 @@ export function MainPage({ visible = true, navigateRef }: MainPageProps) {
   return (
     <div className="main-page" style={{ position: 'relative' }}>
 
-      {/* Left column: Chat + Sessions + FocusDock (sidebar excluded) */}
-      <div className="main-page-left">
+      {/* Todo Panel (LEFT — collapsible via Sidebar toggle) */}
+      <div
+        ref={todoPanel.panelRef}
+        className={`main-page-todo${todoVisible ? '' : ' collapsed'}`}
+        style={todoVisible ? { width: todoPanel.width } : undefined}
+      >
+        <TodoPanel
+          tasks={tasks}
+          loading={loading}
+          onComplete={handleComplete}
+          onSetPhase={handleSetPhase}
+          onCreate={handleCreate}
+          onUpdate={handleUpdate}
+          onStar={star}
+          onSetPriority={handleSetPriority}
+          onFocusTask={handleFocusTask}
+          onClearFocus={handleClearFocus}
+          focusedTaskId={focusedTask?.id}
+          focusNonce={focusNonce}
+          favorites={favorites}
+          ordering={ordering}
+          onReorder={reorder}
+          onMoveTask={moveTask}
+          onReparentTask={reparentTask}
+          onOpenSession={handleToggleSession}
+          onTaskClick={handleFocusTaskById}
+          openSessionIds={openSessionIdSet}
+          onOpenTriageForTask={handleOpenTriageForTask}
+          onPinTask={focusBar.pin}
+          onUnpinTask={focusBar.unpin}
+          onReorderPinned={focusBar.reorder}
+          pinnedTaskIds={pinnedTaskIdSet}
+          suppressDetail={suppressDetail}
+          operationError={operationError}
+          onClearOperationError={clearOperationError}
+          onOperationError={showOperationError}
+          externalCategory={activeCategory}
+          onCategoryChange={setActiveCategory}
+        />
+      </div>
+
+      {/* Todo Resize Handle — only shown when todo is visible */}
+      {todoVisible && <div className="todo-resize-handle" onMouseDown={todoPanel.handleResizeStart} />}
+
+      {/* Right column: Chat + Sessions + FocusDock */}
+      <div className="main-page-right">
       <div className="main-page-content-row">
 
-      {/* Chat Panel (left, flex) — collapsible via Focus Dock toggle */}
+      {/* Chat Panel — collapsible via Sidebar / Focus Dock toggle */}
       <div className={`main-page-chat${chatVisible ? '' : ' collapsed'}`}>
         <div className="chat-page">
           <ChatHeaderRow
@@ -959,6 +1060,8 @@ export function MainPage({ visible = true, navigateRef }: MainPageProps) {
                   host={pendingMeta.host}
                   hostLabel={'hostLabel' in pendingMeta ? (pendingMeta as { hostLabel?: string }).hostLabel : undefined}
                   label={isForkPending ? 'Forking session...' : undefined}
+                  initialError={'httpError' in pendingMeta ? (pendingMeta as { httpError?: string }).httpError : undefined}
+                  onRetry={!isForkPending ? handleQuickStartRetry : undefined}
                   onClose={() => handleCloseSession(sid)}
                 />
               ) : (
@@ -980,54 +1083,10 @@ export function MainPage({ visible = true, navigateRef }: MainPageProps) {
 
       </div>{/* end .main-page-content-row */}
 
-      {/* FocusDock — inside left column, below chat+sessions */}
+      {/* FocusDock — inside right column, below chat+sessions */}
       {focusBar.visible && <FocusDock focusBar={focusBar} />}
 
-      </div>{/* end .main-page-left */}
-
-      {/* Todo Resize Handle */}
-      <div className="todo-resize-handle" onMouseDown={todoPanel.handleResizeStart} />
-
-      {/* Todo Panel (right) */}
-      <div
-        ref={todoPanel.panelRef}
-        className="main-page-todo"
-        style={{ width: todoPanel.width }}
-      >
-        <TodoPanel
-          tasks={tasks}
-          loading={loading}
-          onComplete={handleComplete}
-          onSetPhase={handleSetPhase}
-          onCreate={handleCreate}
-          onUpdate={handleUpdate}
-          onStar={star}
-          onSetPriority={handleSetPriority}
-          onFocusTask={handleFocusTask}
-          onClearFocus={handleClearFocus}
-          focusedTaskId={focusedTask?.id}
-          focusNonce={focusNonce}
-          favorites={favorites}
-          ordering={ordering}
-          onReorder={reorder}
-          onMoveTask={moveTask}
-          onReparentTask={reparentTask}
-          onOpenSession={handleToggleSession}
-          onTaskClick={handleFocusTaskById}
-          openSessionIds={openSessionIdSet}
-          onOpenTriageForTask={handleOpenTriageForTask}
-          onPinTask={focusBar.pin}
-          onUnpinTask={focusBar.unpin}
-          onReorderPinned={focusBar.reorder}
-          pinnedTaskIds={pinnedTaskIdSet}
-          suppressDetail={suppressDetail}
-          operationError={operationError}
-          onClearOperationError={clearOperationError}
-          onOperationError={showOperationError}
-          externalCategory={activeCategory}
-          onCategoryChange={setActiveCategory}
-        />
-      </div>
+      </div>{/* end .main-page-right */}
 
     </div>
   );

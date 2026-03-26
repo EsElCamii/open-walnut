@@ -28,7 +28,7 @@ function isValidMode(v: unknown): v is SessionPanelMode {
 const SELF_CHANGE_COOLDOWN = 3000;
 
 export function useSessionPanelMode() {
-  const [mode, setModeState] = useState<SessionPanelMode>('auto');
+  const [mode, setModeState] = useState<SessionPanelMode>('1');
   const isWide = useSyncExternalStore(subscribeMedia, getMediaSnapshot);
   const lastSelfChangeRef = useRef(0);
 
