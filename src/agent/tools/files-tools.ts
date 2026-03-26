@@ -1,10 +1,12 @@
 /**
- * Unified files_* tool group — 4 tools for CRUDL on any content source.
+ * Unified files_* tool group — 6 tools for CRUDL + search on any content source.
  *
  * files_read  — read any source with optional parse
  * files_write — write/append to any source
  * files_edit  — edit by exact string replacement
  * files_list  — list contents under a source prefix
+ * files_glob  — find files by glob pattern
+ * files_grep  — search file contents by regex
  */
 import type { ToolDefinition, ToolResultContent } from '../tools.js';
 import {
@@ -13,8 +15,10 @@ import {
   memoryHandler,
   notesHandler,
   fileHandler,
+  filesGlob,
+  filesGrep,
 } from './files/index.js';
-import type { FileHandler, FilesReadResult } from './files/index.js';
+import type { FileHandler, FilesReadResult, GrepOptions } from './files/index.js';
 import {
   StaleHashError,
   ContentNotFoundError,
@@ -293,10 +297,112 @@ export const filesListTool: ToolDefinition = {
   },
 };
 
+// ── files_glob ──
+
+export const filesGlobTool: ToolDefinition = {
+  name: 'files_glob',
+  description: `Find files by glob pattern. Returns matching paths sorted by modification time (most recent first).
+Pattern syntax: * matches any chars in one segment, ** matches across segments,
+{a,b} matches either, [abc] matches character class.
+Example: files_glob(pattern="**/*.ts", path="/project/src")`,
+  input_schema: {
+    type: 'object',
+    properties: {
+      pattern: {
+        type: 'string',
+        description: 'Glob pattern (e.g. "**/*.ts", "src/**/index.*").',
+      },
+      path: {
+        type: 'string',
+        description: 'Base directory to search in. Default: cwd.',
+      },
+    },
+    required: ['pattern'],
+  },
+
+  async execute(params): Promise<ToolResultContent> {
+    const pattern = params.pattern as string;
+    if (!pattern) return 'Error: pattern is required.';
+
+    try {
+      const result = filesGlob(pattern, params.path as string | undefined);
+      return json(result);
+    } catch (err) {
+      return `Error: ${err instanceof Error ? err.message : String(err)}`;
+    }
+  },
+};
+
+// ── files_grep ──
+
+export const filesGrepTool: ToolDefinition = {
+  name: 'files_grep',
+  description: `Search file contents by regex. Returns matching lines with optional context.
+Output modes: "content" (lines + context), "files" (paths only, default), "count" (per-file counts).
+Use glob parameter to filter which files to search (e.g. "*.ts").`,
+  input_schema: {
+    type: 'object',
+    properties: {
+      pattern: {
+        type: 'string',
+        description: 'Regex pattern to search for.',
+      },
+      path: {
+        type: 'string',
+        description: 'File or directory to search. Default: cwd.',
+      },
+      glob: {
+        type: 'string',
+        description: 'Glob to filter files (e.g. "*.ts", "**/*.{ts,tsx}").',
+      },
+      output_mode: {
+        type: 'string',
+        enum: ['content', 'files', 'count'],
+        description: 'Default: "files".',
+      },
+      context: {
+        type: 'number',
+        description: 'Lines of context before/after each match.',
+      },
+      case_insensitive: {
+        type: 'boolean',
+        description: 'Case insensitive matching. Default: false.',
+      },
+      max_results: {
+        type: 'number',
+        description: 'Max matches to return. Default: 50.',
+      },
+    },
+    required: ['pattern'],
+  },
+
+  async execute(params): Promise<ToolResultContent> {
+    const pattern = params.pattern as string;
+    if (!pattern) return 'Error: pattern is required.';
+
+    try {
+      const opts: GrepOptions = {
+        path: params.path as string | undefined,
+        glob: params.glob as string | undefined,
+        output_mode: params.output_mode as GrepOptions['output_mode'],
+        context: params.context as number | undefined,
+        case_insensitive: params.case_insensitive as boolean | undefined,
+        max_results: params.max_results as number | undefined,
+      };
+      const result = filesGrep(pattern, opts);
+      return json(result);
+    } catch (err) {
+      return `Error: ${err instanceof Error ? err.message : String(err)}`;
+    }
+  },
+};
+
 /** All files_* tools for registration. */
 export const filesTools: ToolDefinition[] = [
   filesReadTool,
   filesWriteTool,
   filesEditTool,
   filesListTool,
+  filesGlobTool,
+  filesGrepTool,
 ];
