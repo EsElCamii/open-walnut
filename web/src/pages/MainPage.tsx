@@ -202,8 +202,19 @@ export function MainPage({ visible = true, navigateRef }: MainPageProps) {
   // Task ID for filtered triage panel (null = show all)
   const [triageTaskId, setTriageTaskId] = useState<string | null>(null);
 
+  // Measure session area container width for auto mode (ResizeObserver)
+  const contentRowRef = useRef<HTMLDivElement>(null);
+  const [sessionAreaWidth, setSessionAreaWidth] = useState(0);
+  useEffect(() => {
+    const el = contentRowRef.current;
+    if (!el) return;
+    const ro = new ResizeObserver(([entry]) => setSessionAreaWidth(entry.contentRect.width));
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+
   // Session panel mode (1 / 2 / auto) — controls how many sessions shown side by side
-  const { effectiveMaxPanels } = useSessionPanelMode();
+  const { effectiveMaxPanels } = useSessionPanelMode(sessionAreaWidth);
   const maxPanelsRef = useRef(effectiveMaxPanels);
   maxPanelsRef.current = effectiveMaxPanels;
 
@@ -894,7 +905,7 @@ export function MainPage({ visible = true, navigateRef }: MainPageProps) {
 
       {/* Right column: Chat + Sessions + FocusDock */}
       <div className="main-page-right">
-      <div className="main-page-content-row">
+      <div className="main-page-content-row" ref={contentRowRef}>
 
       {/* Chat Panel — collapsible via Sidebar / Focus Dock toggle */}
       <div className={`main-page-chat${chatVisible ? '' : ' collapsed'}`}>

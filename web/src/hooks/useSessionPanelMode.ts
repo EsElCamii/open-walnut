@@ -1,24 +1,14 @@
-import { useState, useEffect, useCallback, useSyncExternalStore, useRef } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { fetchConfig, updateConfig } from '@/api/config';
 import { useEvent } from '@/hooks/useWebSocket';
 
 export type SessionPanelMode = '1' | '2' | 'auto';
 
-const AUTO_BREAKPOINT = 1600; // px — Mac 14" is 1512, Mac 16" is 1728
-
-// matchMedia listener for auto breakpoint
-const mql = typeof window !== 'undefined'
-  ? window.matchMedia(`(min-width: ${AUTO_BREAKPOINT}px)`)
-  : null;
-
-function subscribeMedia(cb: () => void) {
-  mql?.addEventListener('change', cb);
-  return () => mql?.removeEventListener('change', cb);
-}
-
-function getMediaSnapshot(): boolean {
-  return mql?.matches ?? true;
-}
+// Min width (px) of the chat+sessions container to allow 2 session panels in auto mode.
+// Chat needs ~350px + 2 sessions need ~300px each = ~950px minimum.
+// Set to 1200 so Mac 14" (content-row ~1084px) defaults to 1 panel,
+// while Mac 16" (~1300px) and external monitors get 2 panels.
+const AUTO_MIN_WIDTH_FOR_TWO = 1200;
 
 function isValidMode(v: unknown): v is SessionPanelMode {
   return v === '1' || v === '2' || v === 'auto';
@@ -27,9 +17,12 @@ function isValidMode(v: unknown): v is SessionPanelMode {
 // How long to ignore config:changed events after we caused them (ms)
 const SELF_CHANGE_COOLDOWN = 3000;
 
-export function useSessionPanelMode() {
+/**
+ * @param containerWidth - actual pixel width of the session area container.
+ *   Used by auto mode to decide 1 vs 2 panels based on available space (not viewport).
+ */
+export function useSessionPanelMode(containerWidth = 0) {
   const [mode, setModeState] = useState<SessionPanelMode>('1');
-  const isWide = useSyncExternalStore(subscribeMedia, getMediaSnapshot);
   const lastSelfChangeRef = useRef(0);
 
   // Fetch from config on mount
@@ -58,7 +51,7 @@ export function useSessionPanelMode() {
   const effectiveMaxPanels: number =
     mode === '1' ? 1 :
     mode === '2' ? 2 :
-    isWide ? 2 : 1;
+    containerWidth >= AUTO_MIN_WIDTH_FOR_TWO ? 2 : 1;
 
   return { mode, setMode, effectiveMaxPanels } as const;
 }
