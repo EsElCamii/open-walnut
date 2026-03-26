@@ -908,6 +908,7 @@ export function MainPage({ visible = true, navigateRef }: MainPageProps) {
               focusedTask={quickStartPath ? null : focusedTask}
               onClearFocus={handleClearFocus}
               queueCount={chat.queueCount}
+              draftKey="draft:main-chat"
             />
           </div>
         </div>

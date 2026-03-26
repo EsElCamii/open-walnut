@@ -97,6 +97,7 @@ export function ChatPage() {
         disabled={connectionState !== 'connected'}
         isStreaming={isStreaming}
         queueCount={queueCount}
+        draftKey="draft:chat-page"
       />
     </div>
   );

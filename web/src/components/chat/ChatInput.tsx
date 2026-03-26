@@ -1,4 +1,4 @@
-import { useState, useRef, useCallback, type KeyboardEvent, type DragEvent, type ClipboardEvent, useLayoutEffect } from 'react';
+import { useState, useRef, useCallback, useEffect, type KeyboardEvent, type DragEvent, type ClipboardEvent, useLayoutEffect } from 'react';
 import { searchCommands, getCommand } from '@/commands/index';
 import type { SlashCommand } from '@/commands/types';
 import type { ImageAttachment } from '@/api/chat';
@@ -33,14 +33,47 @@ interface ChatInputProps {
   searchSessionCommands?: (query: string) => SlashCommandItem[];
   /** Session-mode: control commands like /model are intercepted and trigger UI actions */
   onControlCommand?: (command: string) => void;
+  /** localStorage key for persisting draft text. When set, input value is saved on change (debounced) and restored on mount. */
+  draftKey?: string;
 }
 
-export function ChatInput({ onSend, onCommand, onStop, onInterruptSend, onClearQueue, disabled, isStreaming, focusedTaskTitle, focusedTask, onClearFocus, queueCount, placeholder, showCommands = true, sessionCommands, searchSessionCommands, onControlCommand }: ChatInputProps) {
-  const [value, setValue] = useState('');
+export function ChatInput({ onSend, onCommand, onStop, onInterruptSend, onClearQueue, disabled, isStreaming, focusedTaskTitle, focusedTask, onClearFocus, queueCount, placeholder, showCommands = true, sessionCommands, searchSessionCommands, onControlCommand, draftKey }: ChatInputProps) {
+  const [value, setValue] = useState(() => {
+    if (!draftKey) return '';
+    try { return localStorage.getItem(draftKey) ?? ''; } catch { return ''; }
+  });
   const [images, setImages] = useState<ImageAttachment[]>([]);
   const [dragOver, setDragOver] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // Draft persistence: debounce save to localStorage
+  const draftTimerRef = useRef<ReturnType<typeof setTimeout>>(undefined);
+  const draftKeyRef = useRef(draftKey);
+  draftKeyRef.current = draftKey;
+
+  // When draftKey changes (e.g. switching sessions), restore the new draft
+  useEffect(() => {
+    if (!draftKey) return;
+    try {
+      const saved = localStorage.getItem(draftKey) ?? '';
+      setValue(saved);
+      // Resize textarea to fit restored content
+      requestAnimationFrame(() => {
+        const el = textareaRef.current;
+        if (el && saved) {
+          el.style.height = 'auto';
+          const maxH = parseFloat(getComputedStyle(el).maxHeight) || 200;
+          el.style.height = Math.min(el.scrollHeight, maxH) + 'px';
+        }
+      });
+    } catch { /* localStorage unavailable */ }
+  }, [draftKey]);
+
+  // Flush pending draft on unmount
+  useEffect(() => {
+    return () => { clearTimeout(draftTimerRef.current); };
+  }, []);
 
   const queueFull = isStreaming && (queueCount ?? 0) >= MAX_QUEUE_SIZE;
 
@@ -91,10 +124,30 @@ export function ChatInput({ onSend, onCommand, onStop, onInterruptSend, onClearQ
     setImages((prev) => prev.filter((_, i) => i !== index));
   }, []);
 
+  const saveDraft = useCallback((text: string) => {
+    clearTimeout(draftTimerRef.current);
+    draftTimerRef.current = setTimeout(() => {
+      const key = draftKeyRef.current;
+      if (!key) return;
+      try {
+        if (text) localStorage.setItem(key, text);
+        else localStorage.removeItem(key);
+      } catch { /* quota exceeded or unavailable */ }
+    }, 300);
+  }, []);
+
+  const clearDraft = useCallback(() => {
+    clearTimeout(draftTimerRef.current);
+    const key = draftKeyRef.current;
+    if (!key) return;
+    try { localStorage.removeItem(key); } catch { /* ignore */ }
+  }, []);
+
   const resetInput = () => {
     setValue('');
     setImages([]);
     closePalette();
+    clearDraft();
     if (textareaRef.current) {
       textareaRef.current.style.height = 'auto';
     }
@@ -211,6 +264,7 @@ export function ChatInput({ onSend, onCommand, onStop, onInterruptSend, onClearQ
   const handleChange = (newValue: string) => {
     setValue(newValue);
     handleInput();
+    saveDraft(newValue);
 
     // Slash command detection: text starts with "/" and no space yet (still typing command name)
     const enablePalette = showCommands || isSessionMode;

@@ -564,6 +564,7 @@ export function TaskDetailPage() {
                   onSend={(msg: string, images?: ImageAttachment[]) => sessionSend.send(activeSessionId, msg, images)}
                   placeholder="Send a message to this session..."
                   showCommands={false}
+                  draftKey={activeSessionId ? `draft:session:${activeSessionId}` : undefined}
                 />
               </div>
             </div>

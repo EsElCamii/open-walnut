@@ -620,6 +620,7 @@ export const SessionPanel = memo(function SessionPanel({ sessionId, onClose, onT
             sessionCommands={slashCommands}
             searchSessionCommands={searchSlashCommands}
             onControlCommand={handleControlCommand}
+            draftKey={`draft:session:${sessionId}`}
           />
           {modelPickerOpen && (
             <ModelPicker

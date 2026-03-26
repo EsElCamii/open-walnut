@@ -8,6 +8,7 @@ import { useSlashCommands } from '@/hooks/useSlashCommands';
 import { useFullscreen } from '@/hooks/useFullscreen';
 import type { ImageAttachment } from '@/api/chat';
 import type { UseFocusBarReturn } from '@/hooks/useFocusBar';
+import { ICON_CHAT } from '@/components/common/Icons';
 
 // ── Custom events for Dock ↔ MainPage communication ──
 
@@ -160,6 +161,7 @@ const DockTaskCard = memo(function DockTaskCard({ task, isActive, onActivate, on
             placeholder="Send message... (/ for commands)"
             sessionCommands={slashCommands}
             searchSessionCommands={searchSlashCommands}
+            draftKey={sessionId ? `draft:session:${sessionId}` : undefined}
           />
         </div>
       )}
@@ -183,7 +185,7 @@ const ChatDockItem = memo(function ChatDockItem({ isActive }: ChatDockItemProps)
       onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); emitDockActivateChat(); } }}
       title="Main Chat"
     >
-      <span className="dock-chat-icon">&#x1F4AC;</span>
+      <span className="dock-chat-icon">{ICON_CHAT}</span>
       <span className="dock-chat-label">Chat</span>
       {isActive && <span className="dock-chat-active-dot" />}
     </div>

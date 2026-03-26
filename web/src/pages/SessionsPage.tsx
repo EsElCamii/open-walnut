@@ -364,6 +364,7 @@ export function SessionsPage() {
               sessionCommands={slashCommands}
               searchSessionCommands={searchSlashCommands}
               onControlCommand={handleControlCommand}
+              draftKey={selectedId ? `draft:session:${selectedId}` : undefined}
             />
             {modelPickerOpen && (
               <ModelPicker
