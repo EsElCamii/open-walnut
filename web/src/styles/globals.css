@@ -5191,7 +5191,7 @@ input:focus, textarea:focus, select:focus {
 }
 
 .chat-input-textarea {
-  flex: 1;
+  flex: none; /* height controlled by JS auto-resize, not flex */
   resize: none;
   min-height: 40px;
   font: inherit;
