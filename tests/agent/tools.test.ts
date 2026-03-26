@@ -32,6 +32,7 @@ afterEach(async () => {
   await fs.rm(tmpDir, { recursive: true, force: true });
 });
 
+// Full integration tests: tests/agent/files-memory-integration.test.ts (memory), tests/agent/tools/files-glob-grep.test.ts (glob/grep)
 describe('tool definitions', () => {
   it('has all expected tools', () => {
     const names = tools.map((t) => t.name);
@@ -41,9 +42,12 @@ describe('tool definitions', () => {
     expect(names).toContain('update_task');
     expect(names).toContain('delete_task');
     expect(names).toContain('search');
-    expect(names).toContain('memory_read');
-    expect(names).toContain('memory_edit');
-    expect(names).toContain('memory_write');
+    expect(names).toContain('files_read');
+    expect(names).toContain('files_write');
+    expect(names).toContain('files_edit');
+    expect(names).toContain('files_list');
+    expect(names).toContain('files_glob');
+    expect(names).toContain('files_grep');
     expect(names).toContain('list_sessions');
     expect(names).toContain('get_session_summary');
     expect(names).toContain('update_session');
@@ -284,43 +288,6 @@ describe('search tool', () => {
 
     const result = await executeTool('search', { query: 'xyznonexistent', mode: 'keyword' });
     expect(result).toBe('No results found.');
-  });
-});
-
-describe('memory tools (smoke tests — see memory-tool-integration.test.ts for full coverage)', () => {
-  it('memory_read returns content and hash for global', async () => {
-    const { MEMORY_FILE } = await import('../../src/constants.js');
-    const nodefs = await import('node:fs');
-    const nodepath = await import('node:path');
-    nodefs.mkdirSync(nodepath.dirname(MEMORY_FILE), { recursive: true });
-    nodefs.writeFileSync(MEMORY_FILE, '# Test memory\n', 'utf-8');
-
-    const result = await executeTool('memory_read', { target: 'global' });
-    const parsed = JSON.parse(result as string);
-    expect(parsed.content_hash).toHaveLength(12);
-    expect(parsed.content).toContain('Test memory');
-  });
-
-  it('memory_write append creates project memory', async () => {
-    const result = await executeTool('memory_write', {
-      target: 'project',
-      mode: 'append',
-      project_path: 'work/api',
-      content: 'New knowledge',
-    });
-    const parsed = JSON.parse(result as string);
-    expect(parsed.status).toBe('saved');
-    expect(parsed.written_to).toContain('project');
-  });
-
-  it('memory_edit requires content_hash', async () => {
-    const result = await executeTool('memory_edit', {
-      target: 'global',
-      old_content: 'anything',
-      new_content: 'replacement',
-    });
-    expect(result).toContain('Error');
-    expect(result).toContain('content_hash');
   });
 });
 

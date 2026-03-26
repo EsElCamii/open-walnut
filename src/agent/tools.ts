@@ -59,9 +59,6 @@ import { agentCrudTools } from './tools/agent-crud-tools.js';
 import { commandCrudTools } from './tools/command-tools.js';
 import { heartbeatTools } from './tools/heartbeat-tools.js';
 import { askQuestionTool } from './tools/ask-question-tool.js';
-import { memoryReadTool } from './tools/memory-read.js';
-import { memoryEditTool } from './tools/memory-edit.js';
-import { memoryWriteTool } from './tools/memory-write.js';
 import { createSubagentTool } from './tools/create-subagent.js';
 import { filesTools } from './tools/files-tools.js';
 
@@ -831,11 +828,6 @@ For projects (type='project'): set default_host and default_cwd for remote sessi
       })));
     },
   },
-
-  // ── Memory Tools ──
-  memoryReadTool,
-  memoryEditTool,
-  memoryWriteTool,
 
   // ── Unified Files Tools ──
   ...filesTools,
