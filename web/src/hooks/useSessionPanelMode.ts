@@ -5,10 +5,9 @@ import { useEvent } from '@/hooks/useWebSocket';
 export type SessionPanelMode = '1' | '2' | 'auto';
 
 // Min width (px) of the chat+sessions container to allow 2 session panels in auto mode.
-// Chat needs ~350px + 2 sessions need ~300px each = ~950px minimum.
-// Set to 1200 so Mac 14" (content-row ~1084px) defaults to 1 panel,
-// while Mac 16" (~1300px) and external monitors get 2 panels.
-const AUTO_MIN_WIDTH_FOR_TWO = 1200;
+// Mac 14" content-row ≈ 1305px — too cramped for 2 sessions alongside chat.
+// Set to 1400 so Mac 14" gets 1 panel, external monitors (1500px+) get 2.
+const AUTO_MIN_WIDTH_FOR_TWO = 1400;
 
 function isValidMode(v: unknown): v is SessionPanelMode {
   return v === '1' || v === '2' || v === 'auto';

@@ -222,7 +222,8 @@ export function MainPage({ visible = true, navigateRef }: MainPageProps) {
   useEffect(() => {
     setSessionColumns(prev => {
       const max = triageOpenRef.current ? effectiveMaxPanels - 1 : effectiveMaxPanels;
-      return prev.length > max ? prev.slice(prev.length - max) : prev;
+      // Keep leftmost panels (primary); evict from right — matches addSessionColumn logic
+      return prev.length > max ? prev.slice(0, max) : prev;
     });
   }, [effectiveMaxPanels]);
 
@@ -327,7 +328,7 @@ export function MainPage({ visible = true, navigateRef }: MainPageProps) {
         const task = tasks.find(t => t.id === p.taskId);
         if (task) setFocusedTask(task);
       }
-      if (p.sessionIds.length > 0) setSessionColumns(p.sessionIds);
+      if (p.sessionIds.length > 0) setSessionColumns(p.sessionIds.slice(-maxPanelsRef.current));
       if (p.category !== null) setActiveCategory(p.category);
       urlSync.clearPending();
       return;
@@ -361,7 +362,7 @@ export function MainPage({ visible = true, navigateRef }: MainPageProps) {
     }
     if (sessionColumns.length === 0) {
       const restored = loadSessionColumns();
-      if (restored.length > 0) setSessionColumns(restored);
+      if (restored.length > 0) setSessionColumns(restored.slice(-maxPanelsRef.current));
     }
   }, [visible, tasks, focusedTask, sessionColumns]);
 
@@ -505,7 +506,8 @@ export function MainPage({ visible = true, navigateRef }: MainPageProps) {
     setTriageTaskId(taskId);
     // Trim sessions to max-1 if triage is opening
     const mp = maxPanelsRef.current;
-    setSessionColumns(prev => prev.length > mp - 1 ? prev.slice(prev.length - (mp - 1)) : prev);
+    // Keep leftmost panels (primary); evict from right — matches addSessionColumn logic
+    setSessionColumns(prev => prev.length > mp - 1 ? prev.slice(0, mp - 1) : prev);
   }, []);
 
   const handleCloseTriage = useCallback(() => {
