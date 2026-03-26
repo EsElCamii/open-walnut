@@ -111,6 +111,7 @@ export function SessionCopyButtons({ sessionId, cwd, project, taskId, taskTitle,
   };
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
+    if (e.nativeEvent.isComposing || e.keyCode === 229) return;
     if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
       e.preventDefault();
       doFork(forkMessage.trim() || undefined);

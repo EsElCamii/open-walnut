@@ -38,6 +38,8 @@ export function SlashCommandMenu({ query, onSelect, onClose }: SlashCommandMenuP
       // Don't intercept navigation keys when no results
       if (filtered.length === 0) return;
 
+      if (e.isComposing || e.keyCode === 229) return;
+
       if (e.key === 'ArrowDown') {
         e.preventDefault();
         e.stopPropagation();

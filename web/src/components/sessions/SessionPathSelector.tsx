@@ -309,6 +309,9 @@ export function SessionPathSelector({ open, onClose, onSelect }: Props) {
       return;
     }
 
+    // Skip IME composition (e.g. Chinese input selecting candidate)
+    if (e.nativeEvent.isComposing || e.keyCode === 229) return;
+
     if (editMode) {
       // --- EDIT MODE ---
       if (e.key === 'Enter' && (e.shiftKey || e.metaKey)) {

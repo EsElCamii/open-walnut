@@ -119,6 +119,7 @@ export function QuestionPopover({ open, questions, onClose }: QuestionPopoverPro
   }, [current?.multiSelect, toggleOption, answers, key, isLastPage, questions, submitAll])
 
   const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
+    if (e.nativeEvent.isComposing || e.keyCode === 229) return
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault()
       handleNext()

@@ -242,6 +242,9 @@ export function ChatInput({ onSend, onCommand, onStop, onInterruptSend, onClearQ
     // Read palette state from ref to avoid stale closure issues —
     // React may not have flushed re-render from onChange before keydown fires
     const ps = paletteRef.current;
+    // Skip IME composition (e.g. Chinese input selecting candidate)
+    if (e.nativeEvent.isComposing || e.keyCode === 229) return;
+
     if (ps.open && ps.results.length > 0) {
       if (e.key === 'ArrowDown') {
         e.preventDefault();

@@ -11,6 +11,7 @@ import { Lightbox } from '../common/Lightbox';
 import type { SessionHistoryMessage } from '@/types/session';
 import type { ImageAttachment } from '@/api/chat';
 import { renderMarkdownWithRefs, findImagePaths, resolveImagePath } from '@/utils/markdown';
+import { log } from '@/utils/log';
 
 /**
  * ═══════════════════════════════════════════════════════════════════════════════
@@ -379,6 +380,7 @@ function EditableQueuedMessage({ message, onSave, onCancel }: {
         value={value}
         onChange={(e) => setValue(e.target.value)}
         onKeyDown={(e) => {
+          if (e.nativeEvent.isComposing || e.keyCode === 229) return;
           if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); onSave(value.trim() || message); }
           if (e.key === 'Escape') onCancel();
         }}
@@ -554,6 +556,7 @@ export const SessionChatHistory = memo(function SessionChatHistory({ sessionId, 
   useEvent('session:batch-completed', (data) => {
     const d = data as { sessionId?: string; count?: number };
     if (d.sessionId === sessionId) {
+      log.info('stream', `batch-completed count=${d.count ?? 1} blocks=${blocks.length} isStreaming=${isStreaming}`, { sessionId });
       pendingBatchTotal.current += (d.count ?? 1);
       awaitingRefresh.current = true;
       setHistoryVersion((v) => v + 1);
@@ -607,6 +610,7 @@ export const SessionChatHistory = memo(function SessionChatHistory({ sessionId, 
   // their interleaved positions during the transition.
   useLayoutEffect(() => {
     if (awaitingRefresh.current) {
+      log.info('stream', `useLayoutEffect: awaitingRefresh=true → clear() msgs=${messages.length} prevMsgLen=${prevMsgLen.current} batchTotal=${pendingBatchTotal.current}`, { sessionId });
       awaitingRefresh.current = false;
       clear();
       blockIndexMap.current.clear(); // Reset for next turn

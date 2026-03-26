@@ -53,6 +53,7 @@ export function TagEditor({ tags, onAdd, onRemove }: TagEditorProps) {
   }, [tags, onAdd]);
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
+    if (e.nativeEvent.isComposing || e.keyCode === 229) return;
     if (e.key === 'Enter' || e.key === ',') {
       e.preventDefault();
       if (selectedIdx >= 0 && selectedIdx < suggestions.length) {

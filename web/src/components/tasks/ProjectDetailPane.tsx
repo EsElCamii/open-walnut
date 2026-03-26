@@ -112,7 +112,7 @@ export function ProjectDetailPane({ category, project, tasks, onClose, style }: 
               value={editValue}
               onChange={(e) => setEditValue(e.target.value)}
               onBlur={() => saveEdit('default_cwd')}
-              onKeyDown={(e) => { if (e.key === 'Enter') saveEdit('default_cwd'); if (e.key === 'Escape') setEditingField(null); }}
+              onKeyDown={(e) => { if (e.nativeEvent.isComposing || e.keyCode === 229) return; if (e.key === 'Enter') saveEdit('default_cwd'); if (e.key === 'Escape') setEditingField(null); }}
               autoFocus
             />
           ) : (
@@ -134,7 +134,7 @@ export function ProjectDetailPane({ category, project, tasks, onClose, style }: 
               value={editValue}
               onChange={(e) => setEditValue(e.target.value)}
               onBlur={() => saveEdit('default_host')}
-              onKeyDown={(e) => { if (e.key === 'Enter') saveEdit('default_host'); if (e.key === 'Escape') setEditingField(null); }}
+              onKeyDown={(e) => { if (e.nativeEvent.isComposing || e.keyCode === 229) return; if (e.key === 'Enter') saveEdit('default_host'); if (e.key === 'Escape') setEditingField(null); }}
               autoFocus
             />
           ) : (

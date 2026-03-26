@@ -779,7 +779,7 @@ export function TaskDetailPage() {
             type="text"
             value={newNote}
             onChange={(e) => setNewNote(e.target.value)}
-            onKeyDown={(e) => { if (e.key === 'Enter') handleAddNote(); }}
+            onKeyDown={(e) => { if (e.nativeEvent.isComposing || e.keyCode === 229) return; if (e.key === 'Enter') handleAddNote(); }}
             placeholder="Add to note..."
             style={{ flex: 1 }}
           />

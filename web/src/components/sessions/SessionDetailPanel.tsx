@@ -94,6 +94,7 @@ function EditableTitle({ sessionId, title, onSaved }: { sessionId: string; title
   };
 
   const handleKeyDown = (e: KeyboardEvent) => {
+    if (e.nativeEvent.isComposing || e.keyCode === 229) return;
     if (e.key === 'Enter') { e.preventDefault(); save(); }
     if (e.key === 'Escape') { setValue(title); setEditing(false); }
   };

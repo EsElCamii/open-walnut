@@ -23,6 +23,7 @@ export function ListEditor({ items, onChange, placeholder, vertical }: ListEdito
   };
 
   const handleKeyDown = (e: KeyboardEvent) => {
+    if (e.nativeEvent.isComposing || e.keyCode === 229) return;
     if (e.key === 'Enter') {
       e.preventDefault();
       addItem();

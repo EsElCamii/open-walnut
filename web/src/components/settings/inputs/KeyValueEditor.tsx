@@ -41,6 +41,7 @@ export function KeyValueEditor({
   };
 
   const handleKeyDown = (e: KeyboardEvent) => {
+    if (e.nativeEvent.isComposing || e.keyCode === 229) return;
     if (e.key === 'Enter') {
       e.preventDefault();
       addEntry();

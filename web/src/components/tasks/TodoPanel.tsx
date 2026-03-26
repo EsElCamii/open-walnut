@@ -259,6 +259,8 @@ function SortableTaskItem({ task, isFocused, isRecentlyDone, depth = 0, childCou
     transform: CSS.Transform.toString(transform),
     transition,
     opacity: isDragging ? 0 : undefined,
+    // Subtasks indent to align with parent's text (after chevron ~24px per level)
+    ...(depth > 0 ? { paddingLeft: `${depth * 24}px` } : {}),
   };
 
   const isDone = task.phase === 'COMPLETE';
@@ -430,6 +432,7 @@ function SortableTaskItem({ task, isFocused, isRecentlyDone, depth = 0, childCou
             onClick={isEditing ? (e) => e.stopPropagation() : handleTitleClick}
             onBlur={isEditing ? commitEdit : undefined}
             onKeyDown={isEditing ? (e) => {
+              if (e.nativeEvent.isComposing || e.keyCode === 229) return;
               if (e.key === 'Enter') { e.preventDefault(); commitEdit(); }
               if (e.key === 'Escape') { e.preventDefault(); cancelEdit(); }
             } : undefined}

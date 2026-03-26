@@ -209,6 +209,7 @@ function ModelConfig({
               placeholder="Add model ID..."
               style={{ flex: 1 }}
               onKeyDown={(e) => {
+                if (e.nativeEvent.isComposing || e.keyCode === 229) return;
                 if (e.key === 'Enter' && newModelId.trim()) {
                   onAddModel(newModelId.trim());
                   setNewModelId('');

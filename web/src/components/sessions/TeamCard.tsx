@@ -104,6 +104,7 @@ function TeamChatInput({ teamName, agentName, agentStatus, onSent }: {
   }, [teamName, agentName, message, onSent]);
 
   const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
+    if (e.nativeEvent.isComposing || e.keyCode === 229) return;
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
       handleSend();

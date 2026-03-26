@@ -81,6 +81,7 @@ export function TaskSearchPanel({ tasks, focusedTaskId, onSelect, onBack }: Task
   }, [selectedIdx]);
 
   const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
+    if (e.nativeEvent.isComposing || e.keyCode === 229) return;
     if (e.key === 'ArrowDown') {
       e.preventDefault();
       setSelectedIdx(i => Math.min(i + 1, results.length - 1));
