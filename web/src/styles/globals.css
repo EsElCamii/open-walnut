@@ -5191,12 +5191,12 @@ input:focus, textarea:focus, select:focus {
 }
 
 .chat-input-textarea {
-  flex: none; /* height controlled by JS auto-resize, not flex */
+  flex: none; /* flex: 1 sets flex-basis: 0% which overrides JS-set style.height in column flex; use none so height is controlled by JS auto-resize */
   resize: none;
   min-height: 40px;
   font: inherit;
   line-height: 1.5;
-  max-height: calc(5 * 1.5em + 16px); /* 5 lines + vertical padding */
+  max-height: calc(5 * 1.5em + 16px); /* 5 lines at 1.5em line-height; 16px = 2×8px vertical padding */
   color: var(--fg);
   background: transparent;
   border: none;
@@ -12660,7 +12660,7 @@ img[data-lightbox-src],
 .dock-task-input .chat-input-textarea {
   font-size: 11px;
   min-height: 40px;
-  max-height: calc(5 * 1.5em + 8px); /* 5 lines + smaller vertical padding */
+  max-height: calc(5 * 1.5em + 8px); /* 5 lines at 1.5em line-height; 8px = 2×4px vertical padding */
   padding: 4px 8px;
 }
 

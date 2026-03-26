@@ -11,6 +11,15 @@ import { StatusBadge } from '../common/StatusBadge';
 const ALLOWED_TYPES = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp']);
 const MAX_IMAGES = 5;
 
+/**
+ * Read the computed max-height of a textarea element in pixels.
+ * Falls back to 200 because getComputedStyle returns "none" when max-height is
+ * unset, which makes parseFloat return NaN.
+ */
+function getMaxHeight(el: HTMLTextAreaElement): number {
+  return parseFloat(getComputedStyle(el).maxHeight) || 200;
+}
+
 interface ChatInputProps {
   onSend: (text: string, images?: ImageAttachment[]) => void;
   onCommand?: (cmd: SlashCommand, args?: string) => void;
@@ -78,8 +87,7 @@ export function ChatInput({ onSend, onCommand, onStop, onInterruptSend, onClearQ
         const el = textareaRef.current;
         if (el && saved) {
           el.style.height = 'auto';
-          const maxH = parseFloat(getComputedStyle(el).maxHeight) || 200;
-          el.style.height = Math.min(el.scrollHeight, maxH) + 'px';
+          el.style.height = Math.min(el.scrollHeight, getMaxHeight(el)) + 'px';
         }
       });
     } catch { /* localStorage unavailable */ }
@@ -223,8 +231,7 @@ export function ChatInput({ onSend, onCommand, onStop, onInterruptSend, onClearQ
       const el = textareaRef.current;
       if (el) {
         el.style.height = 'auto';
-        const maxH = parseFloat(getComputedStyle(el).maxHeight) || 200;
-        el.style.height = Math.min(el.scrollHeight, maxH) + 'px';
+        el.style.height = Math.min(el.scrollHeight, getMaxHeight(el)) + 'px';
         el.focus();
         el.setSelectionRange(text.length, text.length);
       }
@@ -272,8 +279,7 @@ export function ChatInput({ onSend, onCommand, onStop, onInterruptSend, onClearQ
     const el = textareaRef.current;
     if (!el) return;
     el.style.height = 'auto';
-    const maxH = parseFloat(getComputedStyle(el).maxHeight) || 200;
-    el.style.height = Math.min(el.scrollHeight, maxH) + 'px';
+    el.style.height = Math.min(el.scrollHeight, getMaxHeight(el)) + 'px';
   };
 
   const handleChange = (newValue: string) => {
