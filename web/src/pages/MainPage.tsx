@@ -328,7 +328,7 @@ export function MainPage({ visible = true, navigateRef }: MainPageProps) {
         const task = tasks.find(t => t.id === p.taskId);
         if (task) setFocusedTask(task);
       }
-      if (p.sessionIds.length > 0) setSessionColumns(p.sessionIds.slice(-maxPanelsRef.current));
+      if (p.sessionIds.length > 0) setSessionColumns(p.sessionIds.slice(0, maxPanelsRef.current));
       if (p.category !== null) setActiveCategory(p.category);
       urlSync.clearPending();
       return;
@@ -362,7 +362,7 @@ export function MainPage({ visible = true, navigateRef }: MainPageProps) {
     }
     if (sessionColumns.length === 0) {
       const restored = loadSessionColumns();
-      if (restored.length > 0) setSessionColumns(restored.slice(-maxPanelsRef.current));
+      if (restored.length > 0) setSessionColumns(restored.slice(0, maxPanelsRef.current));
     }
   }, [visible, tasks, focusedTask, sessionColumns]);
 
