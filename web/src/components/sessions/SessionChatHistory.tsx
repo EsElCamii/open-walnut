@@ -561,15 +561,22 @@ export const SessionChatHistory = memo(function SessionChatHistory({ sessionId, 
       awaitingRefresh.current = true;
       setHistoryVersion((v) => v + 1);
       // Fallback: if JSONL history doesn't grow (FIFO-injected messages not in output),
-      // force-clear after 1s. The batch count is authoritative.
+      // force-clear after timeout. The batch count is authoritative.
+      // Use 5s timeout (not 1s) to avoid racing with remote session history fetches
+      // which can take 2-5s over SSH. A premature fallback clears awaitingRefresh
+      // but not streaming blocks, causing the same turn to appear in both persisted
+      // history AND the streaming timeline (2x duplication bug).
       if (batchTimeoutRef.current) clearTimeout(batchTimeoutRef.current);
       batchTimeoutRef.current = setTimeout(() => {
         if (awaitingRefresh.current && pendingBatchTotal.current > 0) {
+          log.info('stream', `batch fallback timeout: clearing blocks+awaitingRefresh`, { sessionId });
           awaitingRefresh.current = false;
+          clear(); // CRITICAL: also clear streaming blocks to prevent 2x duplication
+          blockIndexMap.current.clear();
           onBatchCompleted?.(pendingBatchTotal.current);
           pendingBatchTotal.current = 0;
         }
-      }, 1000);
+      }, 5000);
     }
   });
 
@@ -612,6 +619,11 @@ export const SessionChatHistory = memo(function SessionChatHistory({ sessionId, 
     if (awaitingRefresh.current) {
       log.info('stream', `useLayoutEffect: awaitingRefresh=true → clear() msgs=${messages.length} prevMsgLen=${prevMsgLen.current} batchTotal=${pendingBatchTotal.current}`, { sessionId });
       awaitingRefresh.current = false;
+      // Cancel the fallback timeout — the history refresh completed normally
+      if (batchTimeoutRef.current) {
+        clearTimeout(batchTimeoutRef.current);
+        batchTimeoutRef.current = null;
+      }
       clear();
       blockIndexMap.current.clear(); // Reset for next turn
       onBatchCompleted?.(pendingBatchTotal.current);
@@ -621,9 +633,19 @@ export const SessionChatHistory = memo(function SessionChatHistory({ sessionId, 
       // prevMsgLen = old value so the dedup scan covers the newly appeared messages
       // and removes the committed optimistic message (prevents Pattern A duplicate).
     } else {
+      // Defensive: if messages grew but awaitingRefresh was already cleared
+      // (e.g. fallback timeout fired before this fetch completed), clear stale
+      // streaming blocks to prevent 2x duplication.
+      // Guards: prevMsgLen > 0 excludes initial Phase 1/2 loading;
+      // !isStreaming excludes active streaming turns (where blocks SHOULD exist).
+      if (prevMsgLen.current > 0 && messages.length > prevMsgLen.current && blocks.length > 0 && !isStreaming) {
+        log.warn('stream', `useLayoutEffect: defensive clear — msgs grew ${prevMsgLen.current}→${messages.length} with ${blocks.length} stale blocks`, { sessionId });
+        clear();
+        blockIndexMap.current.clear();
+      }
       prevMsgLen.current = messages.length;
     }
-  }, [messages, clear, onBatchCompleted]);
+  }, [messages, blocks.length, isStreaming, clear, onBatchCompleted]);
 
   // ═══════════════════════════════════════════════════════════════════════════
   // AUTO-SCROLL — Dead simple. Standard chat pattern.
@@ -805,6 +827,8 @@ export const SessionChatHistory = memo(function SessionChatHistory({ sessionId, 
     if (len > prevOptimisticLen.current) {
       isAtBottom.current = true;
       setShowScrollArrow(false);
+      const el = containerRef.current;
+      if (el) el.scrollTop = el.scrollHeight;
     }
     prevOptimisticLen.current = len;
   }, [optimisticMessages?.length]);
