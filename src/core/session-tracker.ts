@@ -3,7 +3,7 @@ import fs from 'node:fs/promises';
 import { SESSIONS_FILE, SESSIONS_DIR } from '../constants.js';
 import { readJsonFile, writeJsonFile, ensureDir } from '../utils/fs.js';
 import { withFileLock } from '../utils/file-lock.js';
-import { isProcessAliveAsync } from '../utils/process.js';
+import { isSessionProcessAlive } from '../utils/session-liveness.js';
 import { log } from '../logging/index.js';
 import type { SessionSummary, SessionRecord, SessionMode, SessionType, Task } from './types.js';
 
@@ -198,29 +198,6 @@ const DEFAULT_LOCAL_IDLE_LIMIT = 30;
 const DEFAULT_REMOTE_IDLE_LIMIT = 40;
 
 /**
- * Check if a session's OS process is actually alive.
- * SDK/embedded sessions trust process_status; CLI sessions verify via PID.
- * Returns false for anomalous records (no PID).
- *
- * Both 'running' and 'idle' mean the process is alive (idle = turn done, waiting for input).
- */
-async function isSessionProcessAlive(s: SessionRecord): Promise<boolean> {
-  // SDK and embedded sessions have no PID — trust process_status directly.
-  // SDK: managed by session server. Embedded: in-process, managed by SubagentRunner.
-  if (s.provider === 'sdk' || s.provider === 'embedded') return s.process_status !== 'stopped' && s.process_status !== 'error';
-  // Remote sessions: check daemon connection with grace period for transient disconnects
-  if (s.host) {
-    const { isDaemonConnected, getDaemonDisconnectedSince } = await import('../providers/daemon-connection.js');
-    if (isDaemonConnected(s.host)) return true;
-    const since = getDaemonDisconnectedSince(s.host);
-    if (since && (Date.now() - since) > 5 * 60 * 1000) return false; // > 5min
-    return true; // short disconnect — assume alive
-  }
-  if (s.pid == null) return false;
-  return isProcessAliveAsync(s.pid, 'claude');
-}
-
-/**
  * Get actively-processing sessions grouped by host.
  * Only counts sessions with process_status='running' (actively processing a turn).
  * Idle sessions (turn complete, waiting for input) are NOT included.
@@ -237,6 +214,8 @@ export async function getActiveSessionsByHost(): Promise<Record<string, SessionR
   for (const s of store.sessions) {
     if (s.archived) continue;
     if (s.process_status !== 'running') continue;
+    // Embedded/SDK sessions have no OS process — don't count toward host limits
+    if (s.provider === 'embedded' || s.provider === 'sdk') continue;
     if (!await isSessionProcessAlive(s)) {
       staleIds.push(s.claudeSessionId);
       continue;
@@ -265,6 +244,8 @@ export async function getAllAliveSessionsByHost(): Promise<Record<string, Sessio
   for (const s of store.sessions) {
     if (s.archived) continue;
     if (s.process_status === 'stopped' || s.process_status === 'error') continue;
+    // Embedded/SDK sessions have no OS process — don't count toward host limits
+    if (s.provider === 'embedded' || s.provider === 'sdk') continue;
     if (!await isSessionProcessAlive(s)) {
       staleIds.push(s.claudeSessionId);
       continue;

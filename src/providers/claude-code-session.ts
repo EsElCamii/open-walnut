@@ -1941,14 +1941,23 @@ export class SessionRunner {
               && (cliSession?.processStatus === 'running' || cliSession?.processStatus === 'idle')
 
             if (!isProcessStillAlive) {
-              import('../core/session-tracker.js').then(({ updateSessionRecord }) => {
+              import('../core/session-tracker.js').then(({ updateSessionRecord, getSessionByClaudeId }) => {
                 updateSessionRecord(sessionId, {
                   process_status: isError ? 'error' : 'stopped',
                   work_status: isError ? undefined : 'agent_complete',
                   errorMessage: isError ? errorMessage : undefined,
                   activity: undefined,
                   last_status_change: new Date().toISOString(),
-                }).catch(() => {})
+                }).then(() =>
+                  // Clear task session slot so the 1-session-per-task rule allows new sessions
+                  getSessionByClaudeId(sessionId).then(rec => {
+                    if (rec?.taskId) {
+                      import('../core/task-manager.js').then(({ clearSessionSlot }) => {
+                        clearSessionSlot(rec.taskId!, sessionId).catch(() => {})
+                      }).catch(() => {})
+                    }
+                  }).catch(() => {})
+                ).catch(() => {})
               }).catch(() => {})
             } else {
               // FIFO session: process is alive between turns — mark idle so the

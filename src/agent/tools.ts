@@ -35,6 +35,7 @@ import {
   importSessionRecord,
   checkSessionLimit,
   TRIAGE_AGENTS,
+  isTriageSession,
 } from '../core/session-tracker.js';
 import type { SessionLimitResult } from '../core/session-tracker.js';
 import { bus, EventNames } from '../core/event-bus.js';
@@ -1049,7 +1050,9 @@ and is always allowed.`,
         // ── Strict 1-session-per-task: block if task already has a non-archived session ──
         if (task) {
           const allSessions = await getSessionsForTask(task.id);
-          const nonArchived = allSessions.filter(s => !s.archived);
+          // Skip triage sessions — they are short-lived housekeeping runs that should
+          // never block new CLI sessions. Also skip archived sessions.
+          const nonArchived = allSessions.filter(s => !s.archived && !isTriageSession(s));
 
           // Auto-archive terminal sessions (stopped/error) to free the slot.
           // This preserves the strict 1-session rule while letting new sessions
