@@ -679,9 +679,19 @@ input:focus, textarea:focus, select:focus {
 .task-phase-peer_code_review { color: #AF52DE; }
 .task-phase-release_in_pipeline { color: #30B0C7; }
 .task-phase-complete { color: var(--success); }
-/* Higher specificity overrides for phases that must win over .task-status-* */
-.task-status-btn.task-phase-agent_complete { color: var(--error); }
-.task-status-btn.task-phase-await_human_action { color: var(--error); }
+/* Higher specificity overrides for phases that must win over .task-phase-icon-btn */
+.task-phase-icon-btn.task-phase-agent_complete { color: var(--error); }
+.task-phase-icon-btn.task-phase-await_human_action { color: var(--error); }
+
+/* Inline phase icon (before title text) */
+.task-phase-icon-btn {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 18px; height: 18px; flex-shrink: 0;
+  background: none; border: none; padding: 0; cursor: pointer;
+  color: var(--fg-muted); border-radius: 4px;
+}
+.task-phase-icon-btn:hover { background: var(--bg-tertiary); }
+.phase-picker-inline { display: inline-flex; flex-shrink: 0; }
 
 /* Phase picker dropdown */
 .phase-picker-wrapper { position: relative; }
@@ -1042,21 +1052,8 @@ input:focus, textarea:focus, select:focus {
   color: var(--accent);
 }
 
-/* ===== 3-State Status Button ===== */
-
-.task-status-btn {
-  font-size: 15px;
-  padding: 0;
-  flex-shrink: 0;
-  width: 18px;
-  height: 18px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  border-radius: 50%;
-  transition: color 0.15s, background 0.15s, border-color 0.15s;
-  margin-top: 1px;
-}
+/* ===== Phase Status Button (inside .task-action-btn pill) ===== */
+/* Layout inherited from .task-action-btn; only color overrides here */
 
 .task-status-todo {
   color: var(--fg-muted);
@@ -5191,7 +5188,7 @@ input:focus, textarea:focus, select:focus {
 }
 
 .chat-input-textarea {
-  flex: none; /* flex: 1 sets flex-basis: 0% which overrides JS-set style.height in column flex; use none so height is controlled by JS auto-resize */
+  flex: none; /* flex: 1 would set flex-basis: 0%, overriding the JS-set style.height in a column flex container; use flex: none so height is controlled entirely by JS auto-resize */
   resize: none;
   min-height: 40px;
   font: inherit;
@@ -6502,7 +6499,22 @@ img[data-lightbox-src],
   border-bottom: none;
 }
 
-/* ── TaskStatusDot pulse animation ── */
+/* ── Task Session Badge ("S" pill, same size as source badge) ── */
+.task-session-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 20px;
+  min-width: 20px;
+  padding: 0 5px;
+  border-radius: 10px;
+  font-size: 11px;
+  font-weight: 600;
+  color: white;
+  flex-shrink: 0;
+  cursor: pointer;
+}
+
 @keyframes task-dot-pulse {
   0%, 100% { opacity: 1; }
   50% { opacity: 0.4; }
@@ -6829,8 +6841,8 @@ img[data-lightbox-src],
 .todo-panel-item {
   display: flex;
   align-items: flex-start;
-  gap: 6px;
-  padding: 6px 8px;
+  gap: 4px;
+  padding: 4px 6px;
   border-bottom: 1px solid var(--border);
   cursor: pointer;
   transition: background 0.15s;
@@ -6940,18 +6952,40 @@ img[data-lightbox-src],
 
 .todo-item-title-row {
   display: flex;
-  align-items: first baseline;
+  align-items: baseline;
+  gap: 4px;
+}
+/* Phase icon sits on text baseline; wrapper uses matching line-height */
+.todo-item-title-row .phase-picker-inline {
+  display: inline-flex;
+  align-items: center;
+  flex-shrink: 0;
+  /* Shift down so the icon center aligns with text midline (baseline offset) */
+  position: relative;
+  top: 2px;
 }
 
+/* Attention dot — sits below phase icon via negative margin.
+   meta-row has margin-left:22px; dot pulls back -22px to land under 🏃,
+   then margin-right:-2px keeps S badge at the 22px mark (0+18(width)+(-2)+6(gap)=22). */
 .task-attention-dot {
-  display: inline-block;
-  width: 7px;
-  height: 7px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  /* Match S badge height so flex centering aligns them */
+  width: 18px;  /* same as phase icon width — centers dot under 🏃 */
+  height: 20px;
+  flex-shrink: 0;
+  margin-left: -22px; /* pull back past meta-row indent */
+  margin-right: -2px; /* 22 - 18(width) - 6(gap) + 4 = compensate so S stays at 22px */
+}
+.task-attention-dot::after {
+  content: '';
+  display: block;
+  width: 8px;
+  height: 8px;
   border-radius: 50%;
   background: var(--error);
-  margin-left: 5px;
-  flex-shrink: 0;
-  align-self: center;
 }
 
 .todo-item-title {
@@ -6977,6 +7011,8 @@ img[data-lightbox-src],
   align-items: center;
   gap: 6px;
   flex-wrap: wrap;
+  /* Align first badge with title text (skip past phase icon 18px + gap 4px) */
+  margin-left: 22px;
 }
 
 .todo-item-due-pill {
@@ -8299,14 +8335,15 @@ img[data-lightbox-src],
 }
 
 .todo-group-project {
-  padding-left: 0;
+  padding-left: 6px;
+  margin-left: 0;
 }
 
 .todo-group-project-header {
   display: flex;
   align-items: center;
   gap: 4px;
-  padding: 4px 4px;
+  padding: 4px 4px 4px 0;
   font-size: 12px;
   font-weight: 500;
   color: var(--fg-muted);
@@ -8547,8 +8584,20 @@ img[data-lightbox-src],
   flex-shrink: 0;
 }
 
+/* Tasks under project: align with project name (after chevron + gap) */
+/* Task text aligns with parent header's first letter.
+   Measured: category name at 38px, project name at 40px from panel left.
+   Use descendant selectors (not >) because SortableContext adds wrapper divs. */
 .todo-group-project .todo-panel-item {
-  padding-left: 0;
+  padding-left: 24px;
+}
+/* Category direct tasks (not inside a project) — match category name position */
+.todo-group-category .todo-panel-item {
+  padding-left: 30px;
+}
+/* Project tasks override the category rule above with higher specificity */
+.todo-group-category .todo-group-project .todo-panel-item {
+  padding-left: 24px;
 }
 
 /* Drag overlay (floating copy while dragging) */

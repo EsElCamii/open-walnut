@@ -259,8 +259,8 @@ function SortableTaskItem({ task, isFocused, isRecentlyDone, depth = 0, childCou
     transform: CSS.Transform.toString(transform),
     transition,
     opacity: isDragging ? 0 : undefined,
-    // Subtasks indent to align with parent's text (after chevron ~24px per level)
-    ...(depth > 0 ? { paddingLeft: `${depth * 24}px` } : {}),
+    // Subtasks indent: 22px = phase-icon(18px) + gap(4px), aligns with parent's first letter
+    ...(depth > 0 ? { marginLeft: `${depth * 22}px` } : {}),
   };
 
   const isDone = task.phase === 'COMPLETE';
@@ -424,30 +424,10 @@ function SortableTaskItem({ task, isFocused, isRecentlyDone, depth = 0, childCou
       {/* — content area: title + single bottom row (flex:1) — */}
       <div className="todo-item-content">
         <div className="todo-item-title-row">
-          <span
-            ref={titleRef}
-            className={`todo-item-title${isEditing ? ' editing' : ''}`}
-            contentEditable={isEditing}
-            suppressContentEditableWarning
-            onClick={isEditing ? (e) => e.stopPropagation() : handleTitleClick}
-            onBlur={isEditing ? commitEdit : undefined}
-            onKeyDown={isEditing ? (e) => {
-              if (e.nativeEvent.isComposing || e.keyCode === 229) return;
-              if (e.key === 'Enter') { e.preventDefault(); commitEdit(); }
-              if (e.key === 'Escape') { e.preventDefault(); cancelEdit(); }
-            } : undefined}
-          >
-            {task.title}
-          </span>
-          {task.needs_attention && !isDone && (
-            <span className="task-attention-dot" title="Needs your attention" role="img" aria-label="Needs your attention" />
-          )}
-        </div>
-        {/* — single bottom row: phase · status · source · link · actions — */}
-        <div className="todo-item-meta-row">
-          <div className="phase-picker-wrapper" ref={phaseWrapperRef}>
+          {/* Phase icon inline before title text */}
+          <div className="phase-picker-wrapper phase-picker-inline" ref={phaseWrapperRef}>
             <button
-              className={`task-action-btn task-status-btn task-status-${task.status} task-phase-${task.phase?.toLowerCase()}`}
+              className={`task-phase-icon-btn task-status-${task.status} task-phase-${task.phase?.toLowerCase()}`}
               onClick={(e) => {
                 e.stopPropagation();
                 setPhaseMenuOpen(!phaseMenuOpen);
@@ -482,6 +462,27 @@ function SortableTaskItem({ task, isFocused, isRecentlyDone, depth = 0, childCou
               </div>
             )}
           </div>
+          <span
+            ref={titleRef}
+            className={`todo-item-title${isEditing ? ' editing' : ''}`}
+            contentEditable={isEditing}
+            suppressContentEditableWarning
+            onClick={isEditing ? (e) => e.stopPropagation() : handleTitleClick}
+            onBlur={isEditing ? commitEdit : undefined}
+            onKeyDown={isEditing ? (e) => {
+              if (e.nativeEvent.isComposing || e.keyCode === 229) return;
+              if (e.key === 'Enter') { e.preventDefault(); commitEdit(); }
+              if (e.key === 'Escape') { e.preventDefault(); cancelEdit(); }
+            } : undefined}
+          >
+            {task.title}
+          </span>
+        </div>
+        {/* — badge row: [attention dot below 🏃] status · source · link · actions — */}
+        <div className="todo-item-meta-row">
+          {task.needs_attention && !isDone && (
+            <span className="task-attention-dot" role="img" aria-label="Needs your attention" title="Needs your attention" />
+          )}
           <TaskStatusDot task={task} onClick={onOpenSession ? () => {
             const sid = resolveTaskSessionId(task);
             if (sid) onOpenSession(sid);
