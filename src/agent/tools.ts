@@ -1314,11 +1314,12 @@ defaults (same resolution chain as start_session).`,
             }
           }
           if (!jsonlContent) {
-            return `Error: JSONL not found for session ${sessionId} on ${resolvedHost}.\n` +
+            return `Error: JSONL not found for session ${sessionId}.\n` +
+              `  Searched on: ${resolvedHost}\n` +
               `  Tried canonical: ${exactPath}\n` +
               `  Also ran: find ~/.claude/projects -name '${sessionId}.jsonl'\n` +
               `  CWD used: ${resolvedCwd}\n` +
-              `Verify the session exists on ${resolvedHost}.`;
+              `The session JSONL may be on a different host, or the CWD may be wrong.`;
           }
         } else {
           // Local: check canonical path first, then search all project dirs
@@ -1343,11 +1344,11 @@ defaults (same resolution chain as start_session).`,
           if (!jsonlContent) {
             const encoded = encodeProjectPath(resolvedCwd);
             return `Error: JSONL not found for session ${sessionId}.\n` +
+              `  Searched on: local machine\n` +
               `  Tried canonical: ~/.claude/projects/${encoded}/${sessionId}.jsonl\n` +
               `  Also searched all directories under ~/.claude/projects/\n` +
               `  CWD used: ${resolvedCwd}\n` +
-              `Verify the session JSONL file exists.\n` +
-              `Hint: If this session ran on a remote host, specify the host parameter (e.g. host: 'clouddev').`;
+              `The session JSONL may be on a remote host (specify host parameter), or the CWD may be wrong.`;
           }
         }
 
