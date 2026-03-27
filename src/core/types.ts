@@ -30,7 +30,6 @@ export interface Task {
   session_id?: string;
   /** Enrichment-only (not stored): live status of the linked session. */
   session_status?: {
-    work_status: WorkStatus;
     process_status: ProcessStatus;
     activity?: string;
     mode?: SessionMode;
@@ -42,11 +41,9 @@ export interface Task {
   /** @deprecated Use session_id instead. Kept for backward compat during migration. */
   exec_session_id?: string;
   /** @deprecated Use session_status instead. Kept for backward compat during migration. */
-  plan_session_status?: { work_status: WorkStatus; process_status: ProcessStatus; activity?: string; mode?: SessionMode; provider?: SessionProvider; planCompleted?: boolean };
+  plan_session_status?: { process_status: ProcessStatus; activity?: string; mode?: SessionMode; provider?: SessionProvider; planCompleted?: boolean };
   /** @deprecated Use session_status instead. Kept for backward compat during migration. */
-  exec_session_status?: { work_status: WorkStatus; process_status: ProcessStatus; activity?: string; mode?: SessionMode; provider?: SessionProvider };
-  /** All unique work_statuses across every session in session_ids + active slots (enrichment only, not stored). */
-  session_work_statuses?: WorkStatus[];
+  exec_session_status?: { process_status: ProcessStatus; activity?: string; mode?: SessionMode; provider?: SessionProvider };
   parent_task_id?: string;     // If set, this is a child task of the parent
   depends_on?: string[];       // Full IDs of tasks that must complete before this one
   description: string;
@@ -399,6 +396,8 @@ export interface ChatEntry {
   compacted?: boolean;         // true = excluded from model context, kept for scroll-back
   // Per-field content hashes for task context dedup (keys like "note:{taskId}", "pm:life/tax")
   contextHashes?: Record<string, string>;
+  // Unique turn ID for eager-persist dedup (prevents double-write on error paths)
+  turnId?: string;
 }
 
 export interface ChatHistoryStore {
@@ -414,7 +413,6 @@ export interface ChatHistoryStore {
 }
 
 export type ProcessStatus = 'running' | 'idle' | 'stopped' | 'error';
-export type WorkStatus = 'in_progress' | 'agent_complete' | 'await_human_action' | 'completed';
 export type SessionMode = 'bypass' | 'accept' | 'default' | 'plan';
 export type SessionProvider = 'cli' | 'sdk' | 'embedded';
 export type SessionType = 'interactive' | 'triage' | 'hook' | 'cron' | 'subagent';
@@ -424,7 +422,6 @@ export interface SessionRecord {
   taskId: string;
   project: string;
   process_status: ProcessStatus;
-  work_status: WorkStatus;
   mode: SessionMode;
   provider?: SessionProvider;
   /** Session type — determines lifecycle and cleanup behavior. Undefined = 'interactive'. */

@@ -165,6 +165,9 @@ export async function startServer(options: ServerOptions = {}): Promise<HttpServ
   // Seed config defaults (e.g. available_models) on first run
   await seedConfigDefaults()
 
+  // Recover orphaned user messages from a previous crash
+  await chatHistory.recoverOrphanedUserMessage()
+
   const port = options.port ?? DEFAULT_PORT
   const dev = options.dev ?? false
   const isEphemeral = !!process.env.OPEN_WALNUT_EPHEMERAL

@@ -534,7 +534,24 @@ export async function addAIMessages(
     const store = await readStore();
     const now = new Date().toISOString();
     let displayTextAttached = false;
-    for (const msg of msgs) {
+
+    // ── Dedup guard: if the last store entry is an eagerly-persisted user message
+    //    (has turnId) and the first msg in this batch is also a user message, skip it.
+    //    Belt-and-suspenders — callers should already skip the user msg. ──
+    const lastStoreEntry = store.entries!.length > 0
+      ? store.entries![store.entries!.length - 1]
+      : null;
+    const skipFirstUser = !!(
+      lastStoreEntry?.tag === 'ai' && lastStoreEntry.role === 'user' && lastStoreEntry.turnId
+      && msgs.length > 0 && (msgs[0] as { role: string }).role === 'user'
+    );
+    if (skipFirstUser) {
+      log.agent.debug('Dedup guard: skipping first user msg (already eagerly persisted)');
+    }
+
+    for (let i = 0; i < msgs.length; i++) {
+      if (i === 0 && skipFirstUser) continue;
+      const msg = msgs[i];
       const { role, content } = msg as { role: string; content: unknown };
       const entry: ChatEntry = {
         tag: 'ai',
@@ -556,6 +573,80 @@ export async function addAIMessages(
     }
     await writeStore(store);
     log.agent.info('AI messages persisted', { count: msgs.length });
+  });
+}
+
+/**
+ * Persist a single user message eagerly (before the agent loop runs).
+ * Ensures the message survives page refreshes during processing.
+ * Tagged 'ai' so it appears in both model context and display.
+ * The turnId field enables dedup guards in addAIMessages.
+ */
+export async function addUserMessage(
+  content: string | unknown[],
+  options?: {
+    displayText?: string;
+    contextHashes?: Record<string, string>;
+    taskId?: string;
+    source?: ChatEntry['source'];
+    turnId?: string;
+  },
+): Promise<void> {
+  return withWriteLock(async () => {
+    const store = await readStore();
+    const entry: ChatEntry = {
+      tag: 'ai',
+      role: 'user',
+      content,
+      timestamp: new Date().toISOString(),
+    };
+    if (options?.displayText) entry.displayText = options.displayText;
+    if (options?.contextHashes) entry.contextHashes = options.contextHashes;
+    if (options?.taskId) entry.taskId = options.taskId;
+    if (options?.source) entry.source = options.source;
+    if (options?.turnId) entry.turnId = options.turnId;
+    store.entries!.push(entry);
+    await writeStore(store);
+    log.agent.info('User message eagerly persisted', { turnId: options?.turnId });
+  });
+}
+
+/**
+ * Check for orphaned user messages left by a server crash during processing.
+ * If the last AI entry is a user message with no assistant response following,
+ * add a recovery notification so the user knows to resend.
+ * Call once at server startup.
+ */
+export async function recoverOrphanedUserMessage(): Promise<void> {
+  return withWriteLock(async () => {
+    const store = await readStore();
+    const entries = store.entries ?? [];
+
+    // Find the last AI-tagged entry (skip trailing UI notifications)
+    let lastAiIdx = -1;
+    for (let i = entries.length - 1; i >= 0; i--) {
+      if (entries[i].tag === 'ai') { lastAiIdx = i; break; }
+    }
+    if (lastAiIdx < 0) return;
+
+    const lastAi = entries[lastAiIdx];
+    if (lastAi.role !== 'user') return; // last AI entry is assistant → no orphan
+    if (!lastAi.turnId) return; // only eagerly-persisted messages (with turnId) can be orphans
+
+    log.agent.warn('Orphaned user message detected at startup', {
+      turnId: lastAi.turnId,
+      timestamp: lastAi.timestamp,
+    });
+
+    store.entries!.push({
+      tag: 'ui',
+      role: 'assistant',
+      content: 'Your previous message was saved, but the response was interrupted by a server restart. You may want to resend it.',
+      timestamp: new Date().toISOString(),
+      source: 'agent-error',
+      notification: true,
+    });
+    await writeStore(store);
   });
 }
 
