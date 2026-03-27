@@ -355,6 +355,9 @@ export async function checkSessionLimit(
   for (const s of store.sessions) {
     if (s.archived) continue;
     if (s.process_status === 'stopped') continue;
+    if (s.process_status === 'error') continue;
+    // Embedded/SDK sessions have no OS process — don't count toward host limits
+    if (s.provider === 'embedded' || s.provider === 'sdk') continue;
     if (!await isSessionProcessAlive(s)) {
       staleIds.push(s.claudeSessionId);
       continue;

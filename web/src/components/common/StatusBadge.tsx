@@ -1,6 +1,7 @@
 import type { ReactNode } from 'react';
 import type { TaskStatus, TaskPhase } from '@open-walnut/core';
 import { PersonIcon } from './PersonIcon';
+import { phaseIcon } from './Icons';
 
 interface StatusBadgeProps {
   status: TaskStatus;
@@ -8,15 +9,15 @@ interface StatusBadgeProps {
 }
 
 const phaseSymbols: Record<string, ReactNode> = {
-  TODO: '\u25CB',                    // ○ hollow circle
-  IN_PROGRESS: '\u25D0',            // ◐ half-filled
-  AGENT_COMPLETE: '\u2713',          // ✓ checkmark
+  TODO: phaseIcon('TODO'),
+  IN_PROGRESS: phaseIcon('IN_PROGRESS'),
+  AGENT_COMPLETE: phaseIcon('AGENT_COMPLETE'),
   AWAIT_HUMAN_ACTION: <PersonIcon />,
-  HUMAN_VERIFIED: '\u2705',          // ✅ green checkmark
-  POST_WORK_COMPLETED: '\uD83D\uDCE6', // 📦 package
-  PEER_CODE_REVIEW: '\u22C8',       // ⋈ bowtie
-  RELEASE_IN_PIPELINE: '\u25B7',    // ▷ open triangle
-  COMPLETE: '\u2713\u2713',          // ✓✓ double check
+  HUMAN_VERIFIED: phaseIcon('HUMAN_VERIFIED'),
+  POST_WORK_COMPLETED: phaseIcon('POST_WORK_COMPLETED'),
+  PEER_CODE_REVIEW: phaseIcon('PEER_CODE_REVIEW'),
+  RELEASE_IN_PIPELINE: phaseIcon('RELEASE_IN_PIPELINE'),
+  COMPLETE: phaseIcon('COMPLETE'),
 };
 
 const phaseLabels: Record<string, string> = {

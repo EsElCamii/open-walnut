@@ -323,7 +323,7 @@ sessionsRouter.get('/list-dirs', async (req: Request, res: Response, next: NextF
 // POST /api/sessions/quick-start — create task + start session in one step
 sessionsRouter.post('/quick-start', async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const { cwd, host, message, category, model, mode, images } = req.body as {
+    const { cwd, host, message, category, model, mode, images, taskId: existingTaskId } = req.body as {
       cwd: string
       host?: string
       message: string
@@ -331,6 +331,7 @@ sessionsRouter.post('/quick-start', async (req: Request, res: Response, next: Ne
       model?: string
       mode?: string
       images?: ImagePayload[]
+      taskId?: string // retry mode: reuse existing task instead of creating a new one
     }
 
     if (!cwd || typeof cwd !== 'string') {
@@ -372,22 +373,43 @@ sessionsRouter.post('/quick-start', async (req: Request, res: Response, next: Ne
 
     const config = await getConfig()
     const taskCategory = category || config.defaults?.category || 'Inbox'
-    const title = `Session: ${path.basename(cwd.replace(/\/+$/, '') || '/')}`
 
-    // Create task in "Quick Start" project under the determined category
-    const { task } = await addTask({
-      title,
-      category: taskCategory,
-      project: 'Quick Start',
-    })
+    let updatedTask: Task
 
-    // Star the task and set cwd
-    await updateTask(task.id, { starred: true, cwd }, { source: 'quick-start' })
+    if (existingTaskId) {
+      // Retry mode: reuse existing task, archive error sessions
+      updatedTask = await getTask(existingTaskId)
+      if (!updatedTask) {
+        res.status(404).json({ error: `Task "${existingTaskId}" not found` })
+        return
+      }
+      // Archive all error/stopped sessions under this task to free the slot
+      const existingSessions = await getSessionsForTask(updatedTask.id)
+      for (const s of existingSessions) {
+        if (!s.archived && (s.process_status === 'error' || s.process_status === 'stopped')) {
+          await updateSessionRecord(s.claudeSessionId, { archived: true, archive_reason: 'retry' })
+          try {
+            const { clearSession, clearSessionSlot } = await import('../../core/task-manager.js')
+            await clearSession(updatedTask.id, s.claudeSessionId)
+            await clearSessionSlot(updatedTask.id, s.claudeSessionId)
+          } catch { /* task may not exist */ }
+        }
+      }
+    } else {
+      // Normal mode: create new task
+      const title = `Session: ${path.basename(cwd.replace(/\/+$/, '') || '/')}`
+      const { task } = await addTask({
+        title,
+        category: taskCategory,
+        project: 'Quick Start',
+      })
+      await updateTask(task.id, { starred: true, cwd }, { source: 'quick-start' })
+      updatedTask = await getTask(task.id)
+    }
 
-    // Re-read to get updated fields
-    const updatedTask = await getTask(task.id)
-
-    bus.emit(EventNames.TASK_CREATED, { task: updatedTask }, ['web-ui', 'main-agent'], { source: 'quick-start' })
+    if (!existingTaskId) {
+      bus.emit(EventNames.TASK_CREATED, { task: updatedTask }, ['web-ui', 'main-agent'], { source: 'quick-start' })
+    }
 
     // Build system prompt hint for session AI
     const appendSystemPrompt = [
@@ -400,7 +422,7 @@ sessionsRouter.post('/quick-start', async (req: Request, res: Response, next: Ne
 
     // Emit SESSION_START event (sessionMessage includes image path annotations if images were attached)
     bus.emit(EventNames.SESSION_START, {
-      taskId: task.id,
+      taskId: updatedTask.id,
       message: sessionMessage,
       cwd,
       project: 'Quick Start',
@@ -410,9 +432,9 @@ sessionsRouter.post('/quick-start', async (req: Request, res: Response, next: Ne
       appendSystemPrompt,
     }, ['session-runner'], { source: 'quick-start' })
 
-    log.web.info('quick-start: created task + started session', { taskId: task.id, cwd, host, category: taskCategory })
+    log.web.info('quick-start: created task + started session', { taskId: updatedTask.id, cwd, host, category: taskCategory, retry: !!existingTaskId })
 
-    res.json({ taskId: task.id, task: updatedTask })
+    res.json({ taskId: updatedTask.id, task: updatedTask })
   } catch (err) {
     next(err)
   }
@@ -680,7 +702,9 @@ sessionsRouter.patch('/:sessionId', async (req: Request, res: Response, next: Ne
 })
 
 // GET /api/sessions/:sessionId/history
-// ?source=streams — fast path: read local streams file only (skip SSH), ~1ms
+// ?source=streams — fast path: local-only reads (skip SSH).
+// Local sessions: reads canonical JSONL (~1ms, same result as full path).
+// Remote sessions: returns empty (no local files exist for remote sessions).
 sessionsRouter.get('/:sessionId/history', async (req: Request, res: Response, next: NextFunction) => {
   try {
     const sessionId = req.params.sessionId as string
@@ -692,8 +716,9 @@ sessionsRouter.get('/:sessionId/history', async (req: Request, res: Response, ne
     const cwd = record?.cwd
 
     if (source === 'streams') {
-      // Fast path: host=undefined forces local-only reads (canonical local + streams fallback).
-      // Skips SSH entirely — ideal for instant first paint of FocusDock cards.
+      // Fast path: host=undefined forces local-only reads (canonical JSONL + streams fallback).
+      // Skips SSH entirely. For local sessions this returns full data (~1ms).
+      // For remote sessions this returns empty (they have no local files).
       const messages = await readSessionHistory(sessionId, cwd, undefined, record?.outputFile)
       logMessageOrdering('P1:streams', sessionId, messages, record?.host)
       const sliced = tail && tail > 0 ? messages.slice(-tail) : messages
@@ -966,6 +991,67 @@ sessionsRouter.post('/:sessionId/execute', async (req: Request, res: Response, n
     const newSessionId = await newSessionPromise
 
     res.json({ status: 'started', planSessionId, taskId, mode: execMode, ...(newSessionId ? { sessionId: newSessionId } : {}), ...(execHost ? { host: execHost } : {}) })
+  } catch (err) {
+    next(err)
+  }
+})
+
+// POST /api/sessions/:sessionId/retry — retry a failed session (archive old, start new)
+sessionsRouter.post('/:sessionId/retry', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const sessionId = req.params.sessionId as string
+    const record = await getSessionByClaudeId(sessionId)
+    if (!record) {
+      res.status(404).json({ error: 'Session not found' })
+      return
+    }
+
+    // Only allow retry on failed/stopped sessions
+    if (record.process_status !== 'error' && record.process_status !== 'stopped') {
+      res.status(400).json({ error: `Session is ${record.process_status}, not retryable` })
+      return
+    }
+    if (!record.taskId) {
+      res.status(400).json({ error: 'Session has no associated task' })
+      return
+    }
+
+    const task = await getTask(record.taskId)
+    if (!task) {
+      res.status(404).json({ error: 'Associated task not found' })
+      return
+    }
+
+    // Archive the old session
+    await updateSessionRecord(sessionId, { archived: true, archive_reason: 'retry' })
+    try {
+      const { clearSession, clearSessionSlot } = await import('../../core/task-manager.js')
+      await clearSession(task.id, sessionId)
+      await clearSessionSlot(task.id, sessionId)
+    } catch { /* task may not exist */ }
+
+    // Read first user message from old session for retry
+    let retryMessage = 'Retry session'
+    try {
+      const messages = await readSessionHistory(sessionId, record.cwd, record.host, record.outputFile)
+      const firstUser = messages.find(m => m.role === 'user')
+      if (firstUser?.text) retryMessage = firstUser.text
+    } catch { /* history may be unavailable */ }
+
+    // Start new session on the same task
+    bus.emit(EventNames.SESSION_START, {
+      taskId: task.id,
+      message: retryMessage,
+      cwd: record.cwd,
+      project: task.project ?? '',
+      mode: record.mode !== 'default' ? record.mode : undefined,
+      model: record.model,
+      host: record.host,
+    }, ['session-runner'], { source: 'retry' })
+
+    log.web.info('session retry: archived old session, started new', { oldSessionId: sessionId, taskId: task.id })
+
+    res.json({ status: 'pending', taskId: task.id, oldSessionId: sessionId })
   } catch (err) {
     next(err)
   }

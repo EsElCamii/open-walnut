@@ -65,12 +65,15 @@ export function PlanPreviewSection({ session, plan, loading, refresh }: PlanPrev
         <span className="plan-preview-title">{sectionTitle}</span>
         <code className="plan-preview-filename" title={plan.planFile || filename}>{filename}</code>
         <button
-          className="plan-preview-refresh"
+          className="task-action-btn plan-preview-refresh"
           onClick={handleRefresh}
           disabled={refreshing}
           title="Refresh plan content"
         >
-          <span className={refreshing ? 'plan-preview-refresh-spin' : ''}>&#x1F504;</span>
+          <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" className={refreshing ? 'plan-preview-refresh-spin' : ''}>
+            <path d="M1.5 8a6.5 6.5 0 0111.3-4.4"/><polyline points="13 1 13 4.5 9.5 4.5"/>
+            <path d="M14.5 8a6.5 6.5 0 01-11.3 4.4"/><polyline points="3 15 3 11.5 6.5 11.5"/>
+          </svg>
         </button>
       </button>
       {isFromPlan && plan.sourceSessionId && (

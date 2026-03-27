@@ -138,6 +138,7 @@ export async function quickStartSession(opts: {
   model?: string;
   mode?: string;
   images?: ImageAttachment[];
+  taskId?: string; // retry mode: reuse existing task
 }): Promise<{ taskId: string; task: unknown }> {
   // Convert ImageAttachment[] to the backend ImagePayload format (data + mediaType only)
   const payload: Record<string, unknown> = { ...opts };
@@ -149,6 +150,10 @@ export async function quickStartSession(opts: {
   const result = await apiPost<{ taskId: string; task: unknown }>('/api/sessions/quick-start', payload);
   invalidateWorkingDirsCache(); // new session → new path entry
   return result;
+}
+
+export async function retrySession(sessionId: string): Promise<{ status: string; taskId: string; oldSessionId: string }> {
+  return apiPost(`/api/sessions/${sessionId}/retry`, {});
 }
 
 export async function forkSessionInWalnut(

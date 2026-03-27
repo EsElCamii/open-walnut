@@ -18,6 +18,7 @@ import Link from '@tiptap/extension-link';
 import { Markdown } from 'tiptap-markdown';
 import { uploadNoteImage } from '@/api/notes';
 import { entityRefsToMarkdownLinks } from '@/utils/markdown';
+import { log } from '@/utils/log';
 import { SlashCommandExtension } from './slash-commands/SlashCommandExtension';
 import { SlashCommandPortal } from './slash-commands/SlashCommandPortal';
 import type { SlashCommandState } from './slash-commands/types';
@@ -30,8 +31,6 @@ interface NotesEditorProps {
   className?: string;
   /** Auto-focus when mounted */
   autoFocus?: boolean;
-  /** When true, skip external content sync (editor is being actively edited) */
-  editing?: boolean;
   /** Tasks for slash command /task search */
   tasks?: Task[];
   /** Currently focused task ID — pinned at top of search results */
@@ -103,6 +102,7 @@ function isUrl(text: string): boolean {
  * logical task list into multiple ProseMirror taskList nodes.
  */
 function tryJoinPreviousListAndSink(editor: Editor, listItemType: string): boolean {
+  try {
   const { state } = editor;
   const { $from } = state.selection;
 
@@ -167,6 +167,10 @@ function tryJoinPreviousListAndSink(editor: Editor, listItemType: string): boole
   const sunk = editor.commands.sinkListItem(listItemType);
   if (sunk) detachListItemChildren(editor);
   return sunk;
+  } catch (err) {
+    log.warn('notes', 'tryJoinPreviousListAndSink failed', { error: String(err) });
+    return false;
+  }
 }
 
 /**
@@ -175,60 +179,88 @@ function tryJoinPreviousListAndSink(editor: Editor, listItemType: string): boole
  * Enables per-line Tab indentation: only the current item moves, not children.
  */
 function detachListItemChildren(editor: Editor): boolean {
-  const { state } = editor;
-  const { $from } = state.selection;
+  try {
+    const { state } = editor;
+    const { $from } = state.selection;
 
-  let depth = $from.depth;
-  while (depth > 0) {
-    const name = $from.node(depth).type.name;
-    if (name === 'taskItem' || name === 'listItem') break;
-    depth--;
-  }
-  if (depth === 0) return false;
-
-  const item = $from.node(depth);
-  const itemPos = $from.before(depth);
-  const itemEnd = $from.after(depth);
-
-  // Find nested list (taskList, bulletList, orderedList) within this item
-  let nestedList: ReturnType<typeof item.child> | null = null;
-  let offsetInItem = 1; // +1 for item open tag
-
-  for (let i = 0; i < item.childCount; i++) {
-    const child = item.child(i);
-    const t = child.type.name;
-    if (t === 'taskList' || t === 'bulletList' || t === 'orderedList') {
-      nestedList = child;
-      break;
+    let depth = $from.depth;
+    while (depth > 0) {
+      const name = $from.node(depth).type.name;
+      if (name === 'taskItem' || name === 'listItem') break;
+      depth--;
     }
-    offsetInItem += child.nodeSize;
+    if (depth === 0) return false;
+
+    const item = $from.node(depth);
+    const itemPos = $from.before(depth);
+    const itemEnd = $from.after(depth);
+
+    // Find nested list (taskList, bulletList, orderedList) within this item
+    let nestedList: ReturnType<typeof item.child> | null = null;
+    let offsetInItem = 1; // +1 for item open tag
+
+    for (let i = 0; i < item.childCount; i++) {
+      const child = item.child(i);
+      const t = child.type.name;
+      if (t === 'taskList' || t === 'bulletList' || t === 'orderedList') {
+        nestedList = child;
+        break;
+      }
+      offsetInItem += child.nodeSize;
+    }
+
+    if (!nestedList || nestedList.childCount === 0) return false;
+
+    const children: ReturnType<typeof item.child>[] = [];
+    nestedList.forEach(child => children.push(child));
+
+    const nestedPos = itemPos + offsetInItem;
+    const { tr } = state;
+
+    // Validate positions before mutating
+    if (nestedPos < 0 || nestedPos + nestedList.nodeSize > state.doc.content.size + 2) {
+      log.warn('notes', 'detachListItemChildren: position out of bounds', {
+        nestedPos, nestedSize: nestedList.nodeSize, docSize: state.doc.content.size,
+      });
+      return false;
+    }
+
+    // Remove nested list from inside the item
+    tr.delete(nestedPos, nestedPos + nestedList.nodeSize);
+
+    // Insert children as siblings after the (now shorter) item
+    let insertPos = tr.mapping.map(itemEnd);
+    for (const child of children) {
+      tr.insert(insertPos, child);
+      insertPos += child.nodeSize;
+    }
+
+    // Validate resulting document before dispatch
+    try { tr.doc.check(); } catch (checkErr) {
+      log.warn('notes', 'detachListItemChildren: invalid doc after transform, aborting', {
+        error: String(checkErr),
+      });
+      return false;
+    }
+
+    editor.view.dispatch(tr);
+    return true;
+  } catch (err) {
+    log.warn('notes', 'detachListItemChildren failed', { error: String(err) });
+    return false;
   }
-
-  if (!nestedList || nestedList.childCount === 0) return false;
-
-  const children: ReturnType<typeof item.child>[] = [];
-  nestedList.forEach(child => children.push(child));
-
-  const nestedPos = itemPos + offsetInItem;
-  const { tr } = state;
-
-  // Remove nested list from inside the item
-  tr.delete(nestedPos, nestedPos + nestedList.nodeSize);
-
-  // Insert children as siblings after the (now shorter) item
-  let insertPos = tr.mapping.map(itemEnd);
-  for (const child of children) {
-    tr.insert(insertPos, child);
-    insertPos += child.nodeSize;
-  }
-
-  editor.view.dispatch(tr);
-  return true;
 }
 
-export function NotesEditor({ content, onDirty, placeholder, className, autoFocus, editing, tasks, focusedTaskId, onTaskClick }: NotesEditorProps) {
+export function NotesEditor({ content, onDirty, placeholder, className, autoFocus, tasks, focusedTaskId, onTaskClick }: NotesEditorProps) {
   const isExternalUpdate = useRef(false);
   const editorRef = useRef<Editor | null>(null);
+  /**
+   * Tracks whether this editor instance was the source of recent changes.
+   * Set true on user edit (onUpdate), checked/reset in the sync effect.
+   * Prevents the save-sync loop: after this editor saves, the content prop
+   * updates but setContent() is skipped since we already have correct content.
+   */
+  const isSourceRef = useRef(false);
   const [slashState, setSlashState] = useState<SlashCommandState>({ phase: 'closed' });
   // Ref so ProseMirror's handleClick closure always sees the latest callback
   const onTaskClickRef = useRef(onTaskClick);
@@ -291,7 +323,8 @@ export function NotesEditor({ content, onDirty, placeholder, className, autoFocu
     autofocus: autoFocus ? 'end' : false,
     onUpdate: ({ editor }) => {
       if (isExternalUpdate.current) return;
-      // Signal dirty — no serialization here
+      // Mark this editor as the source — prevents save-sync loop
+      isSourceRef.current = true;
       onDirty(editor);
     },
     editorProps: {
@@ -431,14 +464,32 @@ export function NotesEditor({ content, onDirty, placeholder, className, autoFocu
     editorRef.current = editor;
   }, [editor]);
 
-  // Sync external content changes (e.g. initial load, popup/sidebar sync after save)
-  // Skip when `editing` is true — the editor owns the source of truth during active editing
+  // Sync external content changes (e.g. initial load, popup↔inline sync).
+  // Uses isSourceRef to break the save-sync loop: when THIS editor was the
+  // source of the save, skip setContent() — the editor already has correct content.
+  // Only apply setContent() for genuine external changes (initial load, other editor saved).
   useEffect(() => {
-    if (!editor || editing) return;
+    if (!editor) return;
+
+    // This editor was the source of changes — the content update came from
+    // our own save. Editor already has correct content, skip setContent().
+    if (isSourceRef.current) {
+      isSourceRef.current = false;
+      return;
+    }
+
     const currentMd = editor.storage.markdown.getMarkdown();
     const preprocessed = entityRefsToMarkdownLinks(content);
     if (currentMd !== preprocessed) {
-      // Save cursor position before replacing doc
+      log.info('notes', 'external content sync applied', {
+        currentLen: currentMd.length, newLen: preprocessed.length,
+      });
+
+      // Save scroll position before replacing doc
+      const scrollEl = editor.view.dom.closest('.global-notes-body, .notes-popup-body') as HTMLElement | null;
+      const savedScroll = scrollEl?.scrollTop ?? 0;
+
+      // Save cursor position
       const { from, to } = editor.state.selection;
       isExternalUpdate.current = true;
       editor.commands.setContent(preprocessed, false);
@@ -449,8 +500,13 @@ export function NotesEditor({ content, onDirty, placeholder, className, autoFocu
         to: Math.min(to, maxPos),
       });
       isExternalUpdate.current = false;
+
+      // Restore scroll after DOM update
+      if (scrollEl) {
+        requestAnimationFrame(() => { scrollEl.scrollTop = savedScroll; });
+      }
     }
-  }, [content, editor, editing]);
+  }, [content, editor]);
 
   // Cleanup
   useEffect(() => {

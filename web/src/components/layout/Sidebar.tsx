@@ -1,7 +1,10 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { NavLink } from 'react-router-dom';
 import { useSystemHealth } from '@/hooks/useSystemHealth';
 import { NotificationPanel } from '@/components/common/NotificationPanel';
+
+const SS_CHAT_VISIBLE_KEY = 'open-walnut-home-chat-visible';
+const SS_TODO_VISIBLE_KEY = 'open-walnut-home-todo-visible';
 
 interface SidebarProps {
   open: boolean;
@@ -13,6 +16,36 @@ export function Sidebar({ open, collapsed, onToggleCollapse }: SidebarProps) {
   const cls = `sidebar${open ? ' open' : ''}${collapsed ? ' collapsed' : ''}`;
   const { hasIssues } = useSystemHealth();
   const [notifOpen, setNotifOpen] = useState(false);
+
+  // Panel visibility state — synced from MainPage via custom events
+  const [chatVisible, setChatVisible] = useState<boolean>(
+    () => sessionStorage.getItem(SS_CHAT_VISIBLE_KEY) !== 'false'
+  );
+  const [todoVisible, setTodoVisible] = useState<boolean>(
+    () => sessionStorage.getItem(SS_TODO_VISIBLE_KEY) !== 'false'
+  );
+
+  useEffect(() => {
+    const handleChatVisible = (e: Event) => {
+      setChatVisible((e as CustomEvent).detail?.visible ?? true);
+    };
+    const handleTodoVisible = (e: Event) => {
+      setTodoVisible((e as CustomEvent).detail?.visible ?? true);
+    };
+    window.addEventListener('main:chat-visible', handleChatVisible);
+    window.addEventListener('main:todo-visible', handleTodoVisible);
+    return () => {
+      window.removeEventListener('main:chat-visible', handleChatVisible);
+      window.removeEventListener('main:todo-visible', handleTodoVisible);
+    };
+  }, []);
+
+  const handleToggleChat = () => {
+    window.dispatchEvent(new CustomEvent('dock:activate-chat'));
+  };
+  const handleToggleTodo = () => {
+    window.dispatchEvent(new CustomEvent('sidebar:toggle-todo'));
+  };
 
   return (
     <aside className={cls}>
@@ -30,6 +63,24 @@ export function Sidebar({ open, collapsed, onToggleCollapse }: SidebarProps) {
         </span>
       </div>
       <nav className="sidebar-nav">
+        {/* Panel toggle buttons */}
+        <button
+          className={`sidebar-link sidebar-panel-toggle${chatVisible ? ' active' : ''}`}
+          onClick={handleToggleChat}
+          title={collapsed ? 'Chat' : undefined}
+        >
+          <ChatBubbleIcon />
+          <span className="sidebar-label">Chat</span>
+        </button>
+        <button
+          className={`sidebar-link sidebar-panel-toggle${todoVisible ? ' active' : ''}`}
+          onClick={handleToggleTodo}
+          title={collapsed ? 'Todo' : undefined}
+        >
+          <TodoListIcon />
+          <span className="sidebar-label">Todo</span>
+        </button>
+        <div className="sidebar-nav-divider" />
         <NavLink to="/" end className={navLinkClass} title={collapsed ? 'Home' : undefined}>
           <HomeIcon />
           <span className="sidebar-label">Home</span>
@@ -263,6 +314,27 @@ function HamburgerIcon() {
       <line x1="3" y1="6" x2="21" y2="6" />
       <line x1="3" y1="12" x2="21" y2="12" />
       <line x1="3" y1="18" x2="21" y2="18" />
+    </svg>
+  );
+}
+
+function ChatBubbleIcon() {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
+    </svg>
+  );
+}
+
+function TodoListIcon() {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <line x1="8" y1="6" x2="21" y2="6" />
+      <line x1="8" y1="12" x2="21" y2="12" />
+      <line x1="8" y1="18" x2="21" y2="18" />
+      <line x1="3" y1="6" x2="3.01" y2="6" />
+      <line x1="3" y1="12" x2="3.01" y2="12" />
+      <line x1="3" y1="18" x2="3.01" y2="18" />
     </svg>
   );
 }

@@ -4,6 +4,7 @@
  */
 
 import { useRef, useEffect, useCallback } from 'react';
+import { ICON_SEARCH } from '@/components/common/Icons';
 
 interface TodoSearchBarProps {
   query: string;
@@ -50,7 +51,7 @@ export function TodoSearchBar({
 
   return (
     <div className="todo-search-bar">
-      <span className="todo-search-icon">&#x1F50D;</span>
+      <span className="todo-search-icon">{ICON_SEARCH}</span>
       <input
         ref={inputRef}
         type="text"

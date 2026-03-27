@@ -3,6 +3,7 @@ import { GlobalNotesPopup } from './GlobalNotesPopup';
 import { NotesEditor } from './NotesEditor';
 import type { UseGlobalNotesReturn } from '@/hooks/useGlobalNotes';
 import type { Task } from '@open-walnut/core';
+import { ICON_EXPAND } from '@/components/common/Icons';
 
 const LS_NOTES_HEIGHT_KEY = 'open-walnut-global-notes-height';
 const DEFAULT_HEIGHT = 180;
@@ -88,7 +89,7 @@ export function GlobalNotesSection(props: GlobalNotesSectionProps) {
             aria-label="Expand notes"
             title="Expand notes"
           >
-            &#x26F6;
+            {ICON_EXPAND}
           </button>
         </div>
         {!collapsed && (
@@ -96,7 +97,6 @@ export function GlobalNotesSection(props: GlobalNotesSectionProps) {
             <NotesEditor
               content={content}
               onDirty={onEditorUpdate}
-              editing={saving}
               className="global-notes-editor-inline"
               tasks={tasks}
               focusedTaskId={focusedTaskId}

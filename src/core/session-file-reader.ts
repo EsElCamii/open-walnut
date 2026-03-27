@@ -198,10 +198,12 @@ export async function readSessionJsonlContent(
   };
 
   // Helper: extract synthetic walnut-injected user events from the local streams file.
-  // Remote sessions write synthetic events to the local streams capture, but the
-  // remote canonical JSONL never sees them. Merge them so user messages appear.
-  // Uses direct filename lookup (streams files are renamed to {sessionId}.jsonl;
-  // see SessionIO.renameForSession() in session-io.ts).
+  // Local sessions write synthetic events (walnut-injected user messages) to their
+  // streams capture file, but the canonical JSONL (owned by Claude Code) never sees them.
+  // This merges them into remote-fetched content so user messages appear in history.
+  // NOTE: Remote sessions do NOT have a local streams file (RemoteSessionManager.outputFile
+  // returns null, writeSyntheticUserEvent is a no-op). This helper silently returns
+  // unmodified content when no local streams file exists.
   const mergeSyntheticFromLocalStreams = async (remoteContent: string): Promise<string> => {
     const streamFilePath = path.join(SESSION_STREAMS_DIR, `${sessionId}.jsonl`);
     try {
@@ -278,8 +280,10 @@ export async function readSessionJsonlContent(
     }
   }
 
-  // 2. Local streaming capture (SESSION_STREAMS_DIR) — fallback
-  //    Useful when canonical is unavailable (remote SSH down, local file missing).
+  // 2. Local streaming capture (SESSION_STREAMS_DIR) — fallback for LOCAL sessions only.
+  //    Only local sessions create streams files (via LocalIO); remote sessions have no
+  //    local output file (RemoteSessionManager.outputFile returns null).
+  //    Useful when the canonical JSONL is missing (e.g. deleted or not yet written).
   //    Direct filename lookup: streams files are renamed to {sessionId}.jsonl
   //    (see SessionIO.renameForSession() in session-io.ts).
   {

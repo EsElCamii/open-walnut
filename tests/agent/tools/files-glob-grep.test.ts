@@ -266,4 +266,269 @@ describe('files_grep', () => {
     expect(parsed.count).toBe(1);
     expect(parsed.files[0]).toContain('text.txt');
   });
+
+  // ── type parameter ──
+
+  it('filters by type parameter', async () => {
+    const result = await executeTool('files_grep', {
+      pattern: 'Hello',
+      path: searchDir,
+      type: 'ts',
+      output_mode: 'files',
+    });
+    const parsed = JSON.parse(result as string);
+    expect(parsed.files.length).toBeGreaterThan(0);
+    expect(parsed.files.every((f: string) => f.endsWith('.ts'))).toBe(true);
+  });
+
+  it('type falls back to *.{type} for unknown types', async () => {
+    const result = await executeTool('files_grep', {
+      pattern: 'hello',
+      path: searchDir,
+      type: 'md',
+      output_mode: 'files',
+    });
+    const parsed = JSON.parse(result as string);
+    expect(parsed.files.every((f: string) => /\.(md|markdown)$/.test(f))).toBe(true);
+  });
+
+  it('errors when both type and glob specified', async () => {
+    const result = await executeTool('files_grep', {
+      pattern: 'Hello',
+      path: searchDir,
+      type: 'ts',
+      glob: '*.ts',
+    });
+    expect(result).toContain('Error');
+    expect(result).toContain('Cannot specify both');
+  });
+
+  // ── context_before / context_after (-B / -A) ──
+
+  it('supports asymmetric context (context_before only)', async () => {
+    const result = await executeTool('files_grep', {
+      pattern: 'console\\.log',
+      path: searchDir,
+      output_mode: 'content',
+      context_before: 1,
+    });
+    const parsed = JSON.parse(result as string);
+    expect(parsed.matches.length).toBe(1);
+    const match = parsed.matches[0];
+    expect(match.context_before).toBeDefined();
+    expect(match.context_before.length).toBeGreaterThan(0);
+    expect(match.context_after).toBeUndefined();
+  });
+
+  it('supports asymmetric context (context_after only)', async () => {
+    const result = await executeTool('files_grep', {
+      pattern: 'console\\.log',
+      path: searchDir,
+      output_mode: 'content',
+      context_after: 1,
+    });
+    const parsed = JSON.parse(result as string);
+    expect(parsed.matches.length).toBe(1);
+    const match = parsed.matches[0];
+    expect(match.context_before).toBeUndefined();
+    expect(match.context_after).toBeDefined();
+    expect(match.context_after.length).toBeGreaterThan(0);
+  });
+
+  it('context_before/after override symmetric context', async () => {
+    const result = await executeTool('files_grep', {
+      pattern: 'console\\.log',
+      path: searchDir,
+      output_mode: 'content',
+      context: 2,
+      context_before: 1,
+      context_after: 0,
+    });
+    const parsed = JSON.parse(result as string);
+    const match = parsed.matches[0];
+    // context_before=1 overrides context=2 for before
+    expect(match.context_before).toBeDefined();
+    expect(match.context_before.length).toBe(1);
+    // context_after=0 overrides context=2 for after
+    expect(match.context_after).toBeUndefined();
+  });
+
+  // ── offset ──
+
+  it('offset skips first N entries in content mode', async () => {
+    const manyDir = path.join(tmpDir, 'offset');
+    const lines = Array.from({ length: 20 }, (_, i) => `match line ${i}`);
+    await createTree(manyDir, { 'data.txt': lines.join('\n') });
+
+    // Without offset: first match is line 1
+    const resultNoOffset = await executeTool('files_grep', {
+      pattern: 'match',
+      path: manyDir,
+      output_mode: 'content',
+      max_results: 3,
+    });
+    const parsedNo = JSON.parse(resultNoOffset as string);
+    expect(parsedNo.matches[0].line).toBe(1);
+
+    // With offset=5: first returned match is line 6
+    const resultOffset = await executeTool('files_grep', {
+      pattern: 'match',
+      path: manyDir,
+      output_mode: 'content',
+      max_results: 3,
+      offset: 5,
+    });
+    const parsedOff = JSON.parse(resultOffset as string);
+    expect(parsedOff.matches[0].line).toBe(6);
+    expect(parsedOff.matches.length).toBe(3);
+  });
+
+  it('offset skips first N files in files mode', async () => {
+    const multiDir = path.join(tmpDir, 'offset-files');
+    await createTree(multiDir, {
+      'a.txt': 'match here',
+      'b.txt': 'match here',
+      'c.txt': 'match here',
+      'd.txt': 'match here',
+    });
+
+    const resultAll = await executeTool('files_grep', {
+      pattern: 'match',
+      path: multiDir,
+      output_mode: 'files',
+    });
+    const parsedAll = JSON.parse(resultAll as string);
+    expect(parsedAll.count).toBe(4);
+
+    const resultOffset = await executeTool('files_grep', {
+      pattern: 'match',
+      path: multiDir,
+      output_mode: 'files',
+      offset: 2,
+    });
+    const parsedOff = JSON.parse(resultOffset as string);
+    expect(parsedOff.count).toBe(2);
+  });
+
+  // ── multiline ──
+
+  it('matches patterns spanning multiple lines with multiline mode', async () => {
+    const mlDir = path.join(tmpDir, 'multiline');
+    await createTree(mlDir, {
+      'code.ts': 'function foo() {\n  return 42;\n}\n',
+    });
+
+    const result = await executeTool('files_grep', {
+      pattern: 'function.*\\{\\n.*return',
+      path: mlDir,
+      output_mode: 'content',
+      multiline: true,
+    });
+    const parsed = JSON.parse(result as string);
+    expect(parsed.matches.length).toBe(1);
+    expect(parsed.matches[0].text).toContain('function');
+    expect(parsed.matches[0].text).toContain('return');
+    expect(parsed.matches[0].line).toBe(1);
+  });
+
+  it('multiline mode with context', async () => {
+    const mlDir = path.join(tmpDir, 'multiline-ctx');
+    await createTree(mlDir, {
+      'code.ts': 'const a = 1;\nfunction foo() {\n  return 42;\n}\nconst b = 2;\n',
+    });
+
+    const result = await executeTool('files_grep', {
+      pattern: 'function.*\\{\\n.*return',
+      path: mlDir,
+      output_mode: 'content',
+      multiline: true,
+      context_after: 1,
+    });
+    const parsed = JSON.parse(result as string);
+    expect(parsed.matches.length).toBe(1);
+    // Match starts at line 2 ("function foo()"), spans to line 3 ("  return 42;")
+    // context_after=1 should give line after the match end (line 4: "}")
+    expect(parsed.matches[0].context_after).toBeDefined();
+    expect(parsed.matches[0].context_after.length).toBeGreaterThan(0);
+  });
+
+  // ── CRLF handling ──
+
+  it('handles CRLF line endings', async () => {
+    const crlfDir = path.join(tmpDir, 'crlf');
+    await createTree(crlfDir, {
+      'windows.txt': 'line one\r\nline two\r\nline three\r\n',
+    });
+
+    const result = await executeTool('files_grep', {
+      pattern: 'line two',
+      path: crlfDir,
+      output_mode: 'content',
+      context: 1,
+    });
+    const parsed = JSON.parse(result as string);
+    expect(parsed.matches.length).toBe(1);
+    expect(parsed.matches[0].line).toBe(2);
+    expect(parsed.matches[0].text).toBe('line two');
+    expect(parsed.matches[0].context_before).toEqual(['line one']);
+    expect(parsed.matches[0].context_after).toEqual(['line three']);
+  });
+
+  // ── smart glob wrapping ──
+
+  it('smart-wraps glob without path separator into **/', async () => {
+    // When glob="*.ts" (no / or **), it should be auto-wrapped to "**/*.ts"
+    // This means it should find .ts files in subdirectories too
+    const result = await executeTool('files_grep', {
+      pattern: 'Hello',
+      path: searchDir,
+      glob: '*.ts',
+      output_mode: 'files',
+    });
+    const parsed = JSON.parse(result as string);
+    // Files are in src/ subdirectory — smart wrapping should find them
+    expect(parsed.files.length).toBeGreaterThan(0);
+    expect(parsed.files.every((f: string) => f.endsWith('.ts'))).toBe(true);
+  });
+
+  // ── truncation in files/count modes ──
+
+  it('truncates files mode at max_results', async () => {
+    const manyFilesDir = path.join(tmpDir, 'many-files');
+    const files: Record<string, string> = {};
+    for (let i = 0; i < 10; i++) {
+      files[`file${i}.txt`] = 'findme here';
+    }
+    await createTree(manyFilesDir, files);
+
+    const result = await executeTool('files_grep', {
+      pattern: 'findme',
+      path: manyFilesDir,
+      output_mode: 'files',
+      max_results: 3,
+    });
+    const parsed = JSON.parse(result as string);
+    expect(parsed.count).toBe(3);
+    expect(parsed.truncated).toBe(true);
+  });
+
+  it('truncates count mode at max_results files', async () => {
+    const manyFilesDir = path.join(tmpDir, 'many-count');
+    const files: Record<string, string> = {};
+    for (let i = 0; i < 10; i++) {
+      files[`file${i}.txt`] = 'findme here\nfindme again';
+    }
+    await createTree(manyFilesDir, files);
+
+    const result = await executeTool('files_grep', {
+      pattern: 'findme',
+      path: manyFilesDir,
+      output_mode: 'count',
+      max_results: 3,
+    });
+    const parsed = JSON.parse(result as string);
+    expect(parsed.counts.length).toBe(3);
+    expect(parsed.truncated).toBe(true);
+    expect(parsed.counts.every((c: { count: number }) => c.count === 2)).toBe(true);
+  });
 });

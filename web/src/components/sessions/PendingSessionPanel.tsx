@@ -5,9 +5,12 @@
  *
  * Includes timeout detection + session:error event listening to surface SSH/spawn
  * failures instead of spinning forever.
+ *
+ * Supports retry: when an error occurs, shows Retry + Dismiss buttons.
+ * On retry, clears error and resets phase to spinner state.
  */
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { useEvent } from '../../hooks/useWebSocket';
 
 /** Timeout thresholds (ms) */
@@ -22,19 +25,35 @@ interface PendingSessionPanelProps {
   host?: string;
   hostLabel?: string;
   label?: string;
+  /** Pre-populated error (e.g. from HTTP failure before WS events) */
+  initialError?: string;
+  /** Called when user clicks Retry — parent should re-invoke quickStartSession */
+  onRetry?: () => void;
   onClose: () => void;
 }
 
-export function PendingSessionPanel({ cwd, host, hostLabel, label, realTaskId, onClose }: PendingSessionPanelProps) {
+export function PendingSessionPanel({ cwd, host, hostLabel, label, realTaskId, initialError, onRetry, onClose }: PendingSessionPanelProps) {
   const dirName = cwd.replace(/\/+$/, '').split('/').pop() || '/';
-  const [error, setError] = useState<string | null>(null);
-  const [phase, setPhase] = useState<'starting' | 'slow' | 'timeout'>('starting');
+  const [error, setError] = useState<string | null>(initialError ?? null);
+  const [phase, setPhase] = useState<'starting' | 'slow' | 'timeout'>(initialError ? 'timeout' : 'starting');
+  const [retrying, setRetrying] = useState(false);
+  // Key to reset timers on retry
+  const retryKeyRef = useRef(0);
+
+  // Sync initialError from parent (e.g. when HTTP error arrives after mount)
+  useEffect(() => {
+    if (initialError) {
+      setError(initialError);
+      setRetrying(false);
+    }
+  }, [initialError]);
 
   // Listen for session:error events matching this task
   useEvent('session:error', (data: unknown) => {
     const d = data as { taskId?: string; error?: string };
     if (realTaskId && d.taskId === realTaskId) {
       setError(d.error || 'Session failed to start');
+      setRetrying(false);
     }
   });
 
@@ -43,17 +62,28 @@ export function PendingSessionPanel({ cwd, host, hostLabel, label, realTaskId, o
     const d = data as { taskId?: string; process_status?: string };
     if (realTaskId && d.taskId === realTaskId && d.process_status === 'error') {
       setError('Session process exited with an error');
+      setRetrying(false);
     }
   });
 
-  // Phase progression timer
+  // Phase progression timer — reset on retry via retryKey
+  const retryKey = retryKeyRef.current;
   useEffect(() => {
+    if (error && !retrying) return; // skip timers when showing error
     const slowTimer = setTimeout(() => setPhase('slow'), SLOW_THRESHOLD_MS);
     const timeoutTimer = setTimeout(() => setPhase('timeout'), TIMEOUT_THRESHOLD_MS);
     return () => { clearTimeout(slowTimer); clearTimeout(timeoutTimer); };
-  }, []);
+  }, [retryKey, error, retrying]);
 
-  const hasError = error || phase === 'timeout';
+  const handleRetry = useCallback(() => {
+    setError(null);
+    setPhase('starting');
+    setRetrying(true);
+    retryKeyRef.current += 1;
+    onRetry?.();
+  }, [onRetry]);
+
+  const hasError = !retrying && (error || phase === 'timeout');
   const isRemote = !!host;
 
   // Build error message
@@ -99,21 +129,26 @@ export function PendingSessionPanel({ cwd, host, hostLabel, label, realTaskId, o
               {cwd}
             </span>
           </div>
-          <button
-            className="pending-session-dismiss-btn"
-            onClick={onClose}
-          >
-            Dismiss
-          </button>
+          <div className="pending-session-actions">
+            {onRetry && (
+              <button className="pending-session-retry-btn" onClick={handleRetry}>
+                Retry
+              </button>
+            )}
+            <button className="pending-session-dismiss-btn" onClick={onClose}>
+              Dismiss
+            </button>
+          </div>
         </div>
       </div>
     );
   }
 
-  // Normal / slow spinner state
-  const statusLabel = label
-    || (phase === 'slow' ? 'Taking longer than expected...' : 'Starting session...');
-  const headerStatus = phase === 'slow' ? 'Slow...' : 'Starting...';
+  // Normal / slow spinner state (including retrying)
+  const statusLabel = retrying
+    ? 'Retrying...'
+    : (label || (phase === 'slow' ? 'Taking longer than expected...' : 'Starting session...'));
+  const headerStatus = retrying ? 'Retrying...' : (phase === 'slow' ? 'Slow...' : 'Starting...');
 
   return (
     <div className="session-panel pending-session-panel">

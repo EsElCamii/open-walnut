@@ -78,7 +78,7 @@ export function PriorityPicker({ priority, onChange, fixed }: PriorityPickerProp
         ref={btnRef}
         type="button"
         className={`badge badge-${cssClass} badge-clickable`}
-        title={PRIORITY_LABEL[displayPriority] ?? priority}
+        title={`Priority: ${PRIORITY_LABEL[displayPriority] ?? priority}`}
         onClick={handleToggle}
       >
         {PRIORITY_ICON[displayPriority] ?? priority}

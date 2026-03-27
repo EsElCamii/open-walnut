@@ -142,7 +142,7 @@ Messages reach Claude Code via two paths, which produce different JSONL patterns
 
 Each session has two JSONL files:
 - **Canonical JSONL** (`~/.claude/projects/<cwd>/<id>.jsonl`): owned by Claude Code, source of truth for `--resume` (uuid/parentUuid chain) — Walnut must never write to it.
-- **Output-stream JSONL** (`~/.open-walnut/sessions/streams/<id>.jsonl`): owned by Walnut (`_outputFile`), used for real-time tailing and `writeSyntheticUserEvent()`.
+- **Output-stream JSONL** (`~/.open-walnut/sessions/streams/<id>.jsonl`): owned by Walnut (`_outputFile`), used for real-time tailing and `writeSyntheticUserEvent()`. **Local sessions only** — remote sessions have no local output file (`RemoteSessionManager.outputFile` returns null).
 
 ## Chat History & Compaction Details
 

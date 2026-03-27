@@ -112,20 +112,21 @@ export class SessionHealthMonitor {
               activity: undefined,
               last_status_change: now,
             })
+          }
 
-            // Clear session slot on error
-            if (session.taskId) {
-              try {
-                const { clearSessionSlot } = await import('./task-manager.js')
-                const { task } = await clearSessionSlot(session.taskId, session.claudeSessionId)
-                bus.emit(EventNames.TASK_UPDATED, { task }, ['web-ui'], { source: 'session-error' })
-              } catch (err) {
-                log.session.warn('health monitor: failed to clear session slot', {
-                  sessionId: session.claudeSessionId,
-                  taskId: session.taskId,
-                  error: err instanceof Error ? err.message : String(err),
-                })
-              }
+          // Clear session slot for both normal completion and error —
+          // frees the task's 1-session slot so a new session can start.
+          if (session.taskId) {
+            try {
+              const { clearSessionSlot } = await import('./task-manager.js')
+              const { task } = await clearSessionSlot(session.taskId, session.claudeSessionId)
+              bus.emit(EventNames.TASK_UPDATED, { task }, ['web-ui'], { source: hasResult ? 'session-complete' : 'session-error' })
+            } catch (err) {
+              log.session.warn('health monitor: failed to clear session slot', {
+                sessionId: session.claudeSessionId,
+                taskId: session.taskId,
+                error: err instanceof Error ? err.message : String(err),
+              })
             }
           }
 

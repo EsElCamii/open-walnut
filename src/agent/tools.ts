@@ -1049,13 +1049,41 @@ and is always allowed.`,
         // ── Strict 1-session-per-task: block if task already has a non-archived session ──
         if (task) {
           const allSessions = await getSessionsForTask(task.id);
-          const activeSessions = allSessions.filter(s => !s.archived);
-          if (activeSessions.length > 0) {
-            const latest = activeSessions[activeSessions.length - 1];
+          const nonArchived = allSessions.filter(s => !s.archived);
+
+          // Auto-archive terminal sessions (stopped/error) to free the slot.
+          // This preserves the strict 1-session rule while letting new sessions
+          // start after old ones finish or fail.
+          const terminal = nonArchived.filter(s =>
+            s.process_status === 'stopped' || s.process_status === 'error'
+          );
+          if (terminal.length > 0) {
+            const { clearSessionSlot } = await import('../core/task-manager.js');
+            for (const s of terminal) {
+              await updateSessionRecord(s.claudeSessionId, {
+                archived: true,
+                archive_reason: 'auto_cleared_for_new_session',
+              });
+              if (s.taskId) {
+                try { await clearSessionSlot(s.taskId, s.claudeSessionId); } catch { /* best-effort */ }
+              }
+              log.agent.info('auto-archived terminal session to free task slot', {
+                sessionId: s.claudeSessionId, taskId: task.id,
+                process_status: s.process_status,
+              });
+            }
+          }
+
+          // After auto-archiving, check if any alive sessions remain
+          const alive = nonArchived.filter(s =>
+            s.process_status !== 'stopped' && s.process_status !== 'error'
+          );
+          if (alive.length > 0) {
+            const latest = alive[alive.length - 1];
             return json({
               blocked: true,
               reason: 'Task already has a session. Each task allows only ONE session (strict enforcement).',
-              session_ids: activeSessions.map(s => s.claudeSessionId),
+              session_ids: alive.map(s => s.claudeSessionId),
               existing_session: {
                 session_id: latest.claudeSessionId,
                 title: latest.title,

@@ -41,9 +41,10 @@ interface UseResizablePanelReturn {
 
 /**
  * Reusable hook for a resizable panel with width as % of viewport.
- * Dragging left increases width (panel is on the right side of the handle).
+ * @param direction 'right' (default) = panel is right of handle (drag left = increase).
+ *                  'left' = panel is left of handle (drag right = increase).
  */
-export function useResizablePanel(storageKey: string, defaultPct = PANEL_PCT_DEFAULT): UseResizablePanelReturn {
+export function useResizablePanel(storageKey: string, defaultPct = PANEL_PCT_DEFAULT, direction: 'left' | 'right' = 'right'): UseResizablePanelReturn {
   const [pct, setPct] = useState(() => readStoredPct(storageKey, defaultPct));
   const resizingRef = useRef(false);
   const startXRef = useRef(0);
@@ -61,7 +62,9 @@ export function useResizablePanel(storageKey: string, defaultPct = PANEL_PCT_DEF
 
     const onMouseMove = (ev: MouseEvent) => {
       if (!resizingRef.current) return;
-      const pxDelta = startXRef.current - ev.clientX; // drag left = increase
+      const pxDelta = direction === 'right'
+        ? startXRef.current - ev.clientX   // drag left = increase (panel right of handle)
+        : ev.clientX - startXRef.current;  // drag right = increase (panel left of handle)
       const pctDelta = (pxDelta / window.innerWidth) * 100;
       setPct(clampPct(startPctRef.current + pctDelta));
     };

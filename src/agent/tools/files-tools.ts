@@ -339,7 +339,7 @@ export const filesGrepTool: ToolDefinition = {
   name: 'files_grep',
   description: `Search file contents by regex. Returns matching lines with optional context.
 Output modes: "content" (lines + context), "files" (paths only, default), "count" (per-file counts).
-Use glob parameter to filter which files to search (e.g. "*.ts").`,
+Use glob or type to filter files. type maps common names (js, ts, py, go, rust, etc.) to extensions.`,
   input_schema: {
     type: 'object',
     properties: {
@@ -353,7 +353,11 @@ Use glob parameter to filter which files to search (e.g. "*.ts").`,
       },
       glob: {
         type: 'string',
-        description: 'Glob to filter files (e.g. "*.ts", "**/*.{ts,tsx}").',
+        description: 'Glob to filter files (e.g. "*.ts", "**/*.{ts,tsx}"). Mutually exclusive with type.',
+      },
+      type: {
+        type: 'string',
+        description: 'File type filter (e.g. "js", "ts", "py", "go", "rust", "java", "c", "cpp", "css", "html", "json", "yaml", "md", "sh"). Mutually exclusive with glob.',
       },
       output_mode: {
         type: 'string',
@@ -362,7 +366,15 @@ Use glob parameter to filter which files to search (e.g. "*.ts").`,
       },
       context: {
         type: 'number',
-        description: 'Lines of context before/after each match.',
+        description: 'Symmetric context lines before AND after each match (-C).',
+      },
+      context_before: {
+        type: 'number',
+        description: 'Lines of context before each match (-B). Overrides context for before direction.',
+      },
+      context_after: {
+        type: 'number',
+        description: 'Lines of context after each match (-A). Overrides context for after direction.',
       },
       case_insensitive: {
         type: 'boolean',
@@ -370,7 +382,15 @@ Use glob parameter to filter which files to search (e.g. "*.ts").`,
       },
       max_results: {
         type: 'number',
-        description: 'Max matches to return. Default: 50.',
+        description: 'Max entries to return. Default: 50.',
+      },
+      offset: {
+        type: 'number',
+        description: 'Skip first N entries before collecting results.',
+      },
+      multiline: {
+        type: 'boolean',
+        description: 'Enable multiline mode: . matches newlines, patterns can span lines. Default: false.',
       },
     },
     required: ['pattern'],
@@ -384,10 +404,15 @@ Use glob parameter to filter which files to search (e.g. "*.ts").`,
       const opts: GrepOptions = {
         path: params.path as string | undefined,
         glob: params.glob as string | undefined,
+        type: params.type as string | undefined,
         output_mode: params.output_mode as GrepOptions['output_mode'],
         context: params.context as number | undefined,
+        context_before: params.context_before as number | undefined,
+        context_after: params.context_after as number | undefined,
         case_insensitive: params.case_insensitive as boolean | undefined,
         max_results: params.max_results as number | undefined,
+        offset: params.offset as number | undefined,
+        multiline: params.multiline as boolean | undefined,
       };
       const result = filesGrep(pattern, opts);
       return json(result);

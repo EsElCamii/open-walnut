@@ -3,6 +3,7 @@ import { createPortal } from 'react-dom';
 import { NotesEditor } from './NotesEditor';
 import type { Editor } from '@tiptap/core';
 import type { Task } from '@open-walnut/core';
+import { ICON_COLLAPSE } from '@/components/common/Icons';
 
 interface GlobalNotesPopupProps {
   content: string;
@@ -36,14 +37,13 @@ export function GlobalNotesPopup({ content, onDirty, saving, onClose, tasks, foc
           <span className="notes-popup-title">Global Notes</span>
           <div className="notes-popup-actions">
             {saving && <span className="notes-popup-saving">Saving...</span>}
-            <button className="notes-popup-close" onClick={onClose} aria-label="Close">&times;</button>
+            <button className="notes-popup-close" onClick={onClose} aria-label="Collapse notes" title="Collapse notes">{ICON_COLLAPSE}</button>
           </div>
         </div>
         <div className="notes-popup-body">
           <NotesEditor
             content={content}
             onDirty={onDirty}
-            editing={saving}
             className="global-notes-editor-popup"
             autoFocus
             tasks={tasks}

@@ -736,8 +736,9 @@ export class ClaudeCodeSession {
 
     // Attach the transport: recovers FIFO (local) or reconnects WebSocket (daemon),
     // then starts tailing from the current end of file — only pick up NEW data.
-    // State has already been recovered from CloudCode JSONL (above), so there's
-    // no need to replay the entire Walnut stream capture from byte 0.
+    // State has already been recovered from Claude Code's canonical JSONL (above),
+    // so there's no need to replay from byte 0. (Local sessions have a streams
+    // capture file; remote sessions have no local file at all.)
     if (session._transport && record.claudeSessionId) {
       try {
         await session._transport.attach({
@@ -826,12 +827,16 @@ export class ClaudeCodeSession {
   /**
    * Append a synthetic user-text event to the local output file.
    * Claude Code's stdout stream does NOT echo user text messages — only tool_results
-   * and assistant responses appear in the JSONL. This means Phase 1 (local streams read)
+   * and assistant responses appear in the JSONL. This means the local streams file
    * never sees user messages, and the frontend relies entirely on optimistic copies
    * that can fail to dedup.
    *
    * Writes ONLY to the streams file (_outputFile), never to canonical JSONL.
    * The walnutMessageId enables deterministic dedup against optimistic copies.
+   *
+   * NOTE: Remote sessions have _outputFile=null (RemoteSessionManager.outputFile
+   * returns null), so this is effectively a no-op for remote sessions.
+   * RemoteSessionManager overrides this method as an explicit no-op.
    */
   writeSyntheticUserEvent(message: string, walnutMessageId: string): void {
     if (this._transport) {

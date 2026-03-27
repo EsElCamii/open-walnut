@@ -12,6 +12,7 @@
  */
 import { WORK_LABELS, PROCESS_LABELS, pillClassSuffix } from '@/utils/session-status';
 import type { WorkStatus, ProcessStatus } from '@/types/session';
+import { ICON_ROBOT } from '@/components/common/Icons';
 
 interface SessionStatus {
   work_status: string;
@@ -96,7 +97,7 @@ export function SessionPill({ sessionId, sessionStatus, planSessionId, execSessi
     return (
       <span className={`task-session-pill task-session-pill-${cls}${clickClass}${activeClass}`} title={title} onClick={handleClick}>
         <span className={`task-session-dot task-session-dot-${cls}`} />
-        {isEmbedded ? '\uD83E\uDD16 ' : ''}Session · {modeLabel} · {wl} / {pl}
+        {isEmbedded ? <>{ICON_ROBOT}{' '}</> : ''}Session · {modeLabel} · {wl} / {pl}
       </span>
     );
   }
@@ -140,7 +141,7 @@ export function SessionPill({ sessionId, sessionStatus, planSessionId, execSessi
   return (
     <span className={`task-session-pill task-session-pill-${cls}${clickClass}`} title={title} onClick={handleClick}>
       <span className={`task-session-dot task-session-dot-${cls}`} />
-      {isEmbedded ? '\uD83E\uDD16 ' : ''}Session · {legacyModeLabel} · {wl} / {pl}
+      {isEmbedded ? <>{ICON_ROBOT}{' '}</> : ''}Session · {legacyModeLabel} · {wl} / {pl}
     </span>
   );
 }

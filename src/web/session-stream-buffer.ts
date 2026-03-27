@@ -109,7 +109,10 @@ class SessionStreamBuffer {
   }
 
   markDone(sessionId: string): void {
+    const had = this.streaming.has(sessionId)
     this.streaming.delete(sessionId)
+    const blocks = this.buffers.get(sessionId)?.blocks.length ?? 0
+    log.ws.info('stream buffer markDone', { sessionId, wasStreaming: had, blocksRetained: blocks })
   }
 
   clear(sessionId: string): void {
@@ -122,12 +125,16 @@ class SessionStreamBuffer {
   getSnapshot(sessionId: string): StreamSnapshot {
     const entry = this.buffers.get(sessionId)
     if (!entry) {
-      return { blocks: [], isStreaming: this.streaming.has(sessionId) }
+      const isStr = this.streaming.has(sessionId)
+      log.ws.info('getSnapshot (no buffer)', { sessionId, isStreaming: isStr })
+      return { blocks: [], isStreaming: isStr }
     }
+    const isStr = this.streaming.has(sessionId)
+    log.ws.info('getSnapshot', { sessionId, blocks: entry.blocks.length, isStreaming: isStr })
     // Return a deep-enough copy so mutations don't leak
     return {
       blocks: entry.blocks.map((b) => ({ ...b })),
-      isStreaming: this.streaming.has(sessionId),
+      isStreaming: isStr,
     }
   }
 

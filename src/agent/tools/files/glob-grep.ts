@@ -24,6 +24,28 @@ const SKIP_DIRS = new Set([
   '.cache',
 ]);
 
+/** Common file-type → glob mappings (aligned with ripgrep --type). */
+const TYPE_GLOBS: Record<string, string> = {
+  js: '*.{js,jsx,mjs,cjs}',
+  ts: '*.{ts,tsx,mts,cts}',
+  py: '*.{py,pyi}',
+  rust: '*.rs',
+  go: '*.go',
+  java: '*.java',
+  c: '*.{c,h}',
+  cpp: '*.{cpp,cxx,cc,hpp,hxx,hh}',
+  css: '*.{css,scss,less}',
+  html: '*.{htm,html}',
+  json: '*.{json,jsonl}',
+  yaml: '*.{yaml,yml}',
+  md: '*.{md,markdown}',
+  sh: '*.{sh,bash,zsh}',
+  ruby: '*.rb',
+  php: '*.php',
+  swift: '*.swift',
+  kotlin: '*.{kt,kts}',
+};
+
 // ── Helpers ──
 
 function isBinaryBuffer(buf: Buffer): boolean {
@@ -111,20 +133,42 @@ export type GrepResult = GrepResultContent | GrepResultFiles | GrepResultCount;
 export interface GrepOptions {
   path?: string;
   glob?: string;
+  /** File type filter (e.g. "js", "ts", "py"). Maps to common extensions. Mutually exclusive with glob. */
+  type?: string;
   output_mode?: 'content' | 'files' | 'count';
+  /** Symmetric context lines before AND after each match. */
   context?: number;
+  /** Lines before each match (-B). Overrides context for before direction. */
+  context_before?: number;
+  /** Lines after each match (-A). Overrides context for after direction. */
+  context_after?: number;
   case_insensitive?: boolean;
   max_results?: number;
+  /** Skip first N entries before collecting results. */
+  offset?: number;
+  /** Enable multiline: . matches newlines, patterns can span lines. */
+  multiline?: boolean;
 }
 
 export function filesGrep(pattern: string, opts: GrepOptions = {}): GrepResult {
   const outputMode = opts.output_mode ?? 'files';
-  const contextLines = opts.context ?? 0;
+  const ctxBefore = opts.context_before ?? opts.context ?? 0;
+  const ctxAfter = opts.context_after ?? opts.context ?? 0;
   const maxResults = opts.max_results ?? MAX_GREP_RESULTS_DEFAULT;
+  const offset = opts.offset ?? 0;
   const basePath = opts.path || process.cwd();
 
-  // Build regex
-  const flags = opts.case_insensitive ? 'i' : '';
+  // Resolve type → glob (mutually exclusive)
+  if (opts.type && opts.glob) {
+    throw new Error('Cannot specify both "type" and "glob". Use one or the other.');
+  }
+  const effectiveGlob = opts.type
+    ? (TYPE_GLOBS[opts.type] ?? `*.${opts.type}`)
+    : opts.glob;
+
+  // Build regex — multiline adds g (exec loop), m (^ $ match line boundaries), s (. matches \n)
+  let flags = opts.case_insensitive ? 'i' : '';
+  if (opts.multiline) flags += 'gms';
   let regex: RegExp;
   try {
     regex = new RegExp(pattern, flags);
@@ -132,12 +176,16 @@ export function filesGrep(pattern: string, opts: GrepOptions = {}): GrepResult {
     throw new Error(`Invalid regex pattern: ${(e as Error).message}`);
   }
 
-  // Determine files to search
-  const filesToSearch = collectFiles(basePath, opts.glob);
+  // Collect up to effectiveLimit entries, then slice by offset at the end
+  const effectiveLimit = maxResults + offset;
 
-  // Search
+  // Determine files to search
+  const filesToSearch = collectFiles(basePath, effectiveGlob);
+
+  // Search state
   const contentMatches: GrepMatchContent[] = [];
-  const fileMatches = new Set<string>();
+  const fileMatchesArr: string[] = []; // ordered list for offset slicing
+  const fileMatchesSet = new Set<string>();
   const countMap = outputMode === 'count' ? new Map<string, number>() : null;
   let totalMatches = 0;
   let truncated = false;
@@ -168,83 +216,154 @@ export function filesGrep(pattern: string, opts: GrepOptions = {}): GrepResult {
     const content = buf.toString('utf-8');
     const lines = content.split(/\r?\n/);
     if (lines.length > 0 && lines[lines.length - 1] === '') {
-      lines.pop();
+      lines.pop(); // trailing empty line from split
     }
+
     let fileMatchCount = 0;
 
-    for (let i = 0; i < lines.length; i++) {
-      if (regex.test(lines[i])) {
+    if (opts.multiline) {
+      // ── Multiline mode: match against full content ──
+      regex.lastIndex = 0;
+      let execResult: RegExpExecArray | null;
+
+      while ((execResult = regex.exec(content)) !== null) {
         fileMatchCount++;
         totalMatches++;
 
         if (outputMode === 'content' && !truncated) {
-          const before = contextLines > 0
-            ? lines.slice(Math.max(0, i - contextLines), i)
+          const matchStart = execResult.index;
+          const matchEnd = matchStart + execResult[0].length;
+          // Line numbers (1-indexed) from character offset
+          const lineNum = content.slice(0, matchStart).split('\n').length;
+          const endLineNum = content.slice(0, matchEnd).split('\n').length;
+
+          const before = ctxBefore > 0
+            ? lines.slice(Math.max(0, lineNum - 1 - ctxBefore), lineNum - 1)
             : undefined;
-          const after = contextLines > 0
-            ? lines.slice(i + 1, Math.min(lines.length, i + 1 + contextLines))
+          const after = ctxAfter > 0
+            ? lines.slice(endLineNum, Math.min(lines.length, endLineNum + ctxAfter))
             : undefined;
 
           contentMatches.push({
             file: filePath,
-            line: i + 1,
-            text: lines[i],
+            line: lineNum,
+            text: execResult[0],
             ...(before && before.length > 0 ? { context_before: before } : {}),
             ...(after && after.length > 0 ? { context_after: after } : {}),
           });
 
-          if (contentMatches.length >= maxResults) {
+          if (contentMatches.length >= effectiveLimit) {
             truncated = true;
             break;
           }
         }
 
         if (outputMode === 'files') {
-          fileMatches.add(filePath);
-          if (fileMatches.size >= maxResults) {
-            truncated = true;
+          if (!fileMatchesSet.has(filePath)) {
+            fileMatchesSet.add(filePath);
+            fileMatchesArr.push(filePath);
+            if (fileMatchesArr.length >= effectiveLimit) {
+              truncated = true;
+            }
           }
           break; // one match per file is enough for files mode
+        }
+
+        // Prevent infinite loop on zero-length matches
+        if (execResult[0].length === 0) {
+          regex.lastIndex++;
+        }
+      }
+    } else {
+      // ── Single-line mode: match per line ──
+      for (let i = 0; i < lines.length; i++) {
+        if (regex.test(lines[i])) {
+          fileMatchCount++;
+          totalMatches++;
+
+          if (outputMode === 'content' && !truncated) {
+            const before = ctxBefore > 0
+              ? lines.slice(Math.max(0, i - ctxBefore), i)
+              : undefined;
+            const after = ctxAfter > 0
+              ? lines.slice(i + 1, Math.min(lines.length, i + 1 + ctxAfter))
+              : undefined;
+
+            contentMatches.push({
+              file: filePath,
+              line: i + 1,
+              text: lines[i],
+              ...(before && before.length > 0 ? { context_before: before } : {}),
+              ...(after && after.length > 0 ? { context_after: after } : {}),
+            });
+
+            if (contentMatches.length >= effectiveLimit) {
+              truncated = true;
+              break;
+            }
+          }
+
+          if (outputMode === 'files') {
+            if (!fileMatchesSet.has(filePath)) {
+              fileMatchesSet.add(filePath);
+              fileMatchesArr.push(filePath);
+              if (fileMatchesArr.length >= effectiveLimit) {
+                truncated = true;
+              }
+            }
+            break; // one match per file is enough
+          }
         }
       }
     }
 
-    // Bookkeeping: skip files mode (already added+broke inside inner loop)
+    // Bookkeeping for non-files modes (files mode already added inside inner loop)
     if (fileMatchCount > 0 && outputMode !== 'files') {
-      fileMatches.add(filePath);
+      if (!fileMatchesSet.has(filePath)) {
+        fileMatchesSet.add(filePath);
+        fileMatchesArr.push(filePath);
+      }
       if (countMap) {
         countMap.set(filePath, fileMatchCount);
       }
     }
 
     // Truncation for count mode: cap on number of files reported
-    if (outputMode === 'count' && countMap && countMap.size >= maxResults) {
+    if (outputMode === 'count' && countMap && countMap.size >= effectiveLimit) {
       truncated = true;
     }
   }
 
+  // Apply offset and build result
   switch (outputMode) {
-    case 'content':
+    case 'content': {
+      const sliced = contentMatches.slice(offset);
       return {
-        matches: contentMatches,
+        matches: sliced,
         total_matches: totalMatches,
         files_searched: filesSearched,
         truncated,
       };
-    case 'files':
+    }
+    case 'files': {
+      const sliced = fileMatchesArr.slice(offset);
       return {
-        files: [...fileMatches],
-        count: fileMatches.size,
+        files: sliced,
+        count: sliced.length,
         truncated,
       };
-    case 'count':
+    }
+    case 'count': {
+      const entries = [...(countMap ?? new Map()).entries()].map(([file, count]) => ({ file, count }));
+      const sliced = entries.slice(offset);
       return {
-        counts: [...(countMap ?? new Map()).entries()].map(([file, count]) => ({ file, count })),
+        counts: sliced,
         total: totalMatches,
         truncated,
       };
+    }
     default:
-      return { files: [...fileMatches], count: fileMatches.size, truncated };
+      return { files: fileMatchesArr.slice(offset), count: Math.max(0, fileMatchesArr.length - offset), truncated };
   }
 }
 

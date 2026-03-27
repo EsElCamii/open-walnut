@@ -324,7 +324,7 @@ After writing to the named FIFO, `processNext` starts a 30s timer. If the JSONL 
 
 When `--resume <id>` is used, `ClaudeCodeSession` sets `_expectedSessionId = id` before spawning. On the init event, if the returned session ID differs from expected (Claude CLI couldn't resume and started fresh), `renameSessionId()` is called to rename the original record in-place instead of creating a phantom record. This preserves task linkage and history continuity. If the rename fails (ID collision or missing record), a fresh `persistSessionRecord()` is attempted. `outputFile` and PID are also persisted immediately after spawn (before the init event) so early-death sessions leave a traceable record.
 
-For history reading, `readSessionHistory()` accepts an `outputFile` fallback — if the canonical `~/.claude/projects/` path and the local stream capture both miss, it tries the `outputFile` path stored on the session record directly.
+For history reading, `readSessionHistory()` tries sources in order: (1) canonical JSONL at `~/.claude/projects/` (local) or via SSH (remote), (2) local streams capture in `SESSION_STREAMS_DIR` (local sessions only — remote sessions have no local output file), (3) direct `outputFile` path from the session record (tmp file not yet renamed). Remote sessions only have source (1) via SSH; if that fails, there is no local fallback.
 
 ### AskUserQuestion auto-intercept
 
