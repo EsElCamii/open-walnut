@@ -2,6 +2,12 @@ import { useState, useEffect } from 'react';
 import { fetchSessionHistory } from '@/api/sessions';
 import { perf } from '@/utils/perf-logger';
 import type { SessionHistoryMessage } from '@/types/session';
+import {
+  trackSession,
+  getHistoryCache,
+  setHistoryCache,
+  clearStreamState,
+} from '@/cache/session-cache';
 
 interface UseSessionHistoryReturn {
   messages: SessionHistoryMessage[];
@@ -60,13 +66,16 @@ export function useSessionHistory(sessionId: string | null, version = 0): UseSes
     }
 
     let cancelled = false;
-    setLoading(true);
     setError(null);
     setForkBoundaryIndex(undefined);
     const sid = sessionId.substring(0, 8);
 
+    // Track session so global cache accumulates its events in background
+    trackSession(sessionId);
+
     // Re-fetch (version > 0): skip Phase 1, go directly to Phase 2
     if (version > 0) {
+      setLoading(true);
       setPhase2Pending(true);
       const endP2 = perf.start(`session:full:${sid}`);
       fetchSessionHistory(sessionId)
@@ -76,6 +85,14 @@ export function useSessionHistory(sessionId: string | null, version = 0): UseSes
             diagnoseOrdering('refetch', sid, result.messages);
             setMessages(result.messages);
             setForkBoundaryIndex(result.forkBoundaryIndex);
+            // Update cache
+            setHistoryCache(sessionId, {
+              messages: result.messages,
+              forkBoundaryIndex: result.forkBoundaryIndex,
+              msgCount: result.messages.length,
+            });
+            // version > 0 IS the authoritative signal that the turn completed — always clear
+            clearStreamState(sessionId);
           }
         })
         .catch((e: Error) => {
@@ -87,7 +104,45 @@ export function useSessionHistory(sessionId: string | null, version = 0): UseSes
       return () => { cancelled = true; };
     }
 
-    // Initial load (version === 0): Phase 1 (streams) → Phase 2 (full)
+    // Initial load (version === 0): check cache first
+    const cached = getHistoryCache(sessionId);
+    if (cached) {
+      // Cache hit → 0ms instant display, then background Phase 2 verification
+      setMessages(cached.messages);
+      setForkBoundaryIndex(cached.forkBoundaryIndex);
+      setLoading(false);
+      setPhase2Pending(true);
+
+      const endP2 = perf.start(`session:full:${sid}`);
+      fetchSessionHistory(sessionId)
+        .then((result) => {
+          if (cancelled) return;
+          endP2(`${result.messages.length} msgs`);
+          diagnoseOrdering('cache-verify', sid, result.messages);
+          // Detect if a new turn completed while we were away: if message count grew,
+          // clear stale streaming blocks so they don't display alongside the new history.
+          const turnCompleted = result.messages.length > cached.msgCount;
+          setHistoryCache(sessionId, {
+            messages: result.messages,
+            forkBoundaryIndex: result.forkBoundaryIndex,
+            msgCount: result.messages.length,
+          });
+          if (turnCompleted) clearStreamState(sessionId);
+          setMessages(result.messages);
+          setForkBoundaryIndex(result.forkBoundaryIndex);
+        })
+        .catch((e: Error) => {
+          if (!cancelled) { endP2('error'); setError(e.message); }
+        })
+        .finally(() => {
+          if (!cancelled) setPhase2Pending(false);
+        });
+
+      return () => { cancelled = true; };
+    }
+
+    // Cache miss → normal Phase 1 (streams) → Phase 2 (full)
+    setLoading(true);
     setPhase2Pending(true);
 
     // Phase 1: Fast local read (streams file, ~1ms)
@@ -117,6 +172,12 @@ export function useSessionHistory(sessionId: string | null, version = 0): UseSes
               diagnoseOrdering('P2:full', sid, result.messages);
               setMessages(result.messages);
               setForkBoundaryIndex(result.forkBoundaryIndex);
+              // Write to cache for next visit
+              setHistoryCache(sessionId, {
+                messages: result.messages,
+                forkBoundaryIndex: result.forkBoundaryIndex,
+                msgCount: result.messages.length,
+              });
             }
           })
           .catch((e: Error) => {

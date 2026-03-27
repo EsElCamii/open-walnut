@@ -2,6 +2,13 @@ import { useState, useCallback, useRef, useEffect } from 'react';
 import { useEvent } from './useWebSocket';
 import { wsClient, type ConnectionState } from '@/api/ws';
 import { isToolResultError } from '@/api/chat';
+import { log } from '@/utils/log';
+import {
+  trackSession,
+  getStreamState,
+  clearStreamState,
+  initStreamState,
+} from '@/cache/session-cache';
 
 /** A streaming block — text, tool call, or tool result */
 export interface StreamingTextBlock {
@@ -81,30 +88,42 @@ export function useSessionStream(sessionId: string | null): UseSessionStreamRetu
       return;
     }
 
-    // Subscribe and get snapshot from backend buffer.
-    // On fresh sessionId change we reset blocks for a clean slate.
-    // On WS reconnect (same sessionId) we keep existing blocks and merge the snapshot.
-    const isFreshSession = blocks.length === 0;
-    if (isFreshSession) {
+    // Track session so global cache listeners accumulate its events in the background
+    trackSession(sessionId);
+
+    // Show cached state instantly (0ms), then correct from server snapshot below.
+    // The cache may be stale (missed events during WS disconnect), so the RPC
+    // subscribe always runs as authoritative correction.
+    const cached = getStreamState(sessionId);
+    if (cached) {
+      log.info('stream', `cache hit: blocks=${cached.blocks.length} isStreaming=${cached.isStreaming}`, { sessionId });
+      setBlocks([...cached.blocks]);
+      setIsStreaming(cached.isStreaming);
+      streamBuffer.current = cached.textBuffer;
+    } else {
       setBlocks([]);
       setIsStreaming(false);
       streamBuffer.current = '';
     }
 
+    // Always subscribe to get server snapshot for correction (background)
     wsClient.sendRpc<StreamSnapshot>('session:stream-subscribe', { sessionId })
       .then((snapshot) => {
         // Guard: session may have changed during the async RPC
         if (activeSessionId.current !== sessionId) return;
         if (snapshot) {
+          log.info('stream', `subscribe snapshot: blocks=${snapshot.blocks.length} isStreaming=${snapshot.isStreaming}`, { sessionId });
           setBlocks(snapshot.blocks);
           setIsStreaming(snapshot.isStreaming);
           // Reconstruct text buffer from the last text block
           const lastText = [...snapshot.blocks].reverse().find((b): b is StreamingTextBlock => b.type === 'text');
           streamBuffer.current = lastText ? lastText.content : '';
+          // Seed global cache with server snapshot for correction
+          initStreamState(sessionId, snapshot.blocks, snapshot.isStreaming);
         }
       })
       .catch(() => {
-        // Subscription failed — stay with current state
+        // Subscription failed — stay with current state (cache or empty)
       });
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionId, wsConnected]);
@@ -140,7 +159,10 @@ export function useSessionStream(sessionId: string | null): UseSessionStreamRetu
       sessionId: string; work_status: string;
     };
     if (!sessionId || sid !== sessionId) return;
-    if (work_status !== 'in_progress') return;
+    if (work_status !== 'in_progress') {
+      log.info('stream', `status-changed → ${work_status} (non-in_progress, skipping)`, { sessionId: sid });
+      return;
+    }
 
     // Session just transitioned to in_progress — re-subscribe to ensure
     // the server-side subscription mapping is fresh and get any buffered data.
@@ -222,7 +244,10 @@ export function useSessionStream(sessionId: string | null): UseSessionStreamRetu
     const { sessionId: sid, delta } = data as { sessionId: string; delta: string; taskId: string };
     if (!sessionId || sid !== sessionId) return; // defensive client-side check
 
-    setIsStreaming(true);
+    setIsStreaming((prev) => {
+      if (!prev) log.info('stream', 'text-delta → isStreaming false→true', { sessionId: sid });
+      return true;
+    });
     streamBuffer.current += delta;
 
     if (textDeltaRaf.current === null) {
@@ -302,7 +327,14 @@ export function useSessionStream(sessionId: string | null): UseSessionStreamRetu
 
     // Flush any pending text before clearing — prevents last-frame data loss
     flushPendingTextRaf();
-    setIsStreaming(false);
+    setIsStreaming((prev) => {
+      log.info('stream', `session:result → isStreaming ${prev}→false`, { sessionId: sid });
+      return false;
+    });
+    setBlocks((prev) => {
+      log.info('stream', `session:result blocks=${prev.length} (kept, cleared by batch-completed)`, { sessionId: sid });
+      return prev;
+    });
     streamBuffer.current = '';
   });
 
@@ -324,9 +356,17 @@ export function useSessionStream(sessionId: string | null): UseSessionStreamRetu
 
   const clear = useCallback(() => {
     flushPendingTextRaf();
-    setBlocks([]);
-    setIsStreaming(false);
+    setBlocks((prev) => {
+      if (prev.length > 0) log.info('stream', `clear() blocks=${prev.length}→0`, { sessionId: activeSessionId.current });
+      return [];
+    });
+    setIsStreaming((prev) => {
+      if (prev) log.info('stream', `clear() isStreaming true→false`, { sessionId: activeSessionId.current });
+      return false;
+    });
     streamBuffer.current = '';
+    // Sync-clear global cache so switching away and back doesn't restore stale blocks
+    if (activeSessionId.current) clearStreamState(activeSessionId.current);
   }, [flushPendingTextRaf]);
 
   return { blocks, isStreaming, clear };
