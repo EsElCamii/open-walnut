@@ -1271,8 +1271,8 @@ defaults (same resolution chain as start_session).`,
           return `Error: Session ${sessionId} is already tracked (task: ${existing.taskId}). Use send_to_session to interact with it.`;
         }
 
-        // ③ Resolve host/cwd via shared inheritance chain
-        const { resolvedHost, resolvedCwd } = await resolveSessionContext(
+        // ③ Resolve host/cwd via shared inheritance chain (CWD is tentative — may be corrected by JSONL truth)
+        let { resolvedHost, resolvedCwd } = await resolveSessionContext(
           task,
           params.host as string | undefined,
           params.working_directory as string | undefined,
@@ -1286,13 +1286,10 @@ defaults (same resolution chain as start_session).`,
           }
         }
 
-        // ⑤ Validate JSONL exists — try canonical path first, then fallback search.
-        //    Canonical path uses CWD to compute the encoded project dir.
-        //    If that fails (SSH issue, path mismatch), we fallback to `find` (remote)
-        //    or directory scan (local) to locate the session JSONL.
-        //    The resolved CWD is still used for the session record regardless of where
-        //    the JSONL was found — unlike readSessionJsonlContent() which extracts CWD
-        //    from JSONL content, import uses the task/param CWD which is authoritative.
+        // ⑤ Locate JSONL — try canonical path first, then fallback search.
+        //    resolvedCwd is used to compute the canonical path, but may be wrong.
+        //    After finding the JSONL, we extract the actual CWD from it (source of truth)
+        //    and reconcile against resolvedCwd / task.cwd.
         const { canonicalJsonlPath, remoteJsonlPath, encodeProjectPath, findLocalJsonlPath } = await import('../core/session-file-reader.js');
 
         if (!resolvedCwd) {
@@ -1349,7 +1346,8 @@ defaults (same resolution chain as start_session).`,
               `  Tried canonical: ~/.claude/projects/${encoded}/${sessionId}.jsonl\n` +
               `  Also searched all directories under ~/.claude/projects/\n` +
               `  CWD used: ${resolvedCwd}\n` +
-              `Verify the session JSONL file exists.`;
+              `Verify the session JSONL file exists.\n` +
+              `Hint: If this session ran on a remote host, specify the host parameter (e.g. host: 'clouddev').`;
           }
         }
 
@@ -1389,6 +1387,37 @@ defaults (same resolution chain as start_session).`,
         const title = (params.title as string) || extractedTitle || `Imported session ${sessionId.slice(0, 8)}`;
         const workStatus = (params.work_status as 'agent_complete' | 'completed' | 'await_human_action') ?? 'agent_complete';
 
+        // ⑥b Extract actual CWD from JSONL (source of truth)
+        const { extractCwdFromJsonlContent } = await import('../core/session-file-reader.js');
+        const jsonlCwd = extractCwdFromJsonlContent(jsonlContent);
+        const cwdWarnings: string[] = [];
+
+        if (jsonlCwd) {
+          // JSONL CWD is the ground truth — reconcile everything against it
+          if (resolvedCwd && resolvedCwd !== jsonlCwd) {
+            cwdWarnings.push(`CWD corrected: "${resolvedCwd}" → "${jsonlCwd}" (from session JSONL)`);
+          }
+          // Also fix task.cwd if it doesn't match
+          if (task.cwd && task.cwd !== jsonlCwd) {
+            const { updateTask } = await import('../core/task-manager.js');
+            await updateTask(task.id, { cwd: jsonlCwd });
+            cwdWarnings.push(`Task CWD updated: "${task.cwd}" → "${jsonlCwd}"`);
+          } else if (!task.cwd) {
+            const { updateTask } = await import('../core/task-manager.js');
+            await updateTask(task.id, { cwd: jsonlCwd });
+            cwdWarnings.push(`Task CWD set to "${jsonlCwd}" (was empty)`);
+          }
+          resolvedCwd = jsonlCwd;
+        } else {
+          // JSONL has no CWD — can't verify, use resolved value but warn
+          cwdWarnings.push(`JSONL has no CWD field — using resolved value "${resolvedCwd}". Verify manually.`);
+          if (!resolvedCwd) {
+            return `Error: Cannot determine CWD for session ${sessionId}. ` +
+              `JSONL has no CWD, no working_directory passed, no task/project CWD configured. ` +
+              `Pass working_directory explicitly.`;
+          }
+        }
+
         // ⑦ Create SessionRecord (stopped — no running process)
         const record = await importSessionRecord({
           claudeSessionId: sessionId,
@@ -1410,11 +1439,14 @@ defaults (same resolution chain as start_session).`,
         // ⑨ Emit task updated event
         bus.emit(EventNames.TASK_UPDATED, { taskId: task.id }, [], { source: 'agent' });
 
-        // ⑩ Return success
+        // ⑩ Return success + CWD warnings
         const sRef = sessionRef(record.claudeSessionId, record.title ?? title);
         const hostNote = resolvedHost ? ` (${resolvedHost})` : '';
         const cwdNote = resolvedCwd ? ` cwd=${resolvedCwd}` : '';
-        return `Imported session ${sRef}${hostNote}${cwdNote} → task ${taskRef(task.id, task.title)}. Messages: ${messageCount}.`;
+        const warningBlock = cwdWarnings.length > 0
+          ? '\n' + cwdWarnings.map(w => `⚠️ ${w}`).join('\n')
+          : '';
+        return `Imported session ${sRef}${hostNote}${cwdNote} → task ${taskRef(task.id, task.title)}. Messages: ${messageCount}.${warningBlock}`;
       } catch (err) {
         return `Error: ${err instanceof Error ? err.message : String(err)}`;
       }
