@@ -137,38 +137,24 @@ export function SessionPathSelector({ open, onClose, onSelect }: Props) {
     const partial = activePath.endsWith('/') ? '' : activePath.slice(activePath.lastIndexOf('/') + 1);
 
     if (hostFilter === 'all') {
-      // "All" mode: query local + all SSH hosts in parallel, tag results
+      // "All" mode: only live-scan local filesystem.
+      // SSH hosts show through history entries — switch to SSH tab for live remote browsing.
+      setLiveError(null);
       if (liveTimerRef.current) clearTimeout(liveTimerRef.current);
       liveTimerRef.current = setTimeout(() => {
-        const sshHosts = new Set<string>();
-        for (const d of dirs) { if (d.host) sshHosts.add(d.host); }
-        const hostLabels = new Map<string, string>();
-        for (const d of dirs) { if (d.host && d.hostLabel) hostLabels.set(d.host, d.hostLabel); }
-
-        const promises: Array<Promise<Array<{ cwd: string; host: string | null; hostLabel?: string }>>> = [];
-        // Local
-        promises.push(
-          listDirs(activePath, null)
-            .then(res => filterChildren(res.dirs, res.parent, partial).map(p => ({ cwd: p, host: null })))
-            .catch(() => [])
-        );
-        // Each SSH host
-        const sshErrors: string[] = [];
-        for (const host of sshHosts) {
-          promises.push(
-            listDirs(activePath, host)
-              .then(res => filterChildren(res.dirs, res.parent, partial).map(p => ({ cwd: p, host, hostLabel: hostLabels.get(host) })))
-              .catch((err) => { sshErrors.push(`${host}: ${err.message || err}`); return []; })
-          );
-        }
         setLiveLoading(true);
-        setLiveError(null);
-        Promise.all(promises).then(results => {
-          setLiveTaggedDirs(results.flat());
-          setLiveDirs([]);
-          setLiveLoading(false);
-          if (sshErrors.length > 0) setLiveError(sshErrors.join('; '));
-        });
+        listDirs(activePath, null)
+          .then(res => {
+            setLiveTaggedDirs(filterChildren(res.dirs, res.parent, partial).map(p => ({ cwd: p, host: null })));
+            setLiveDirs([]);
+            setLiveLoading(false);
+          })
+          .catch((err) => {
+            setLiveTaggedDirs([]);
+            setLiveDirs([]);
+            setLiveLoading(false);
+            setLiveError(err.message || String(err));
+          });
       }, 150);
       return () => { if (liveTimerRef.current) clearTimeout(liveTimerRef.current); };
     }
