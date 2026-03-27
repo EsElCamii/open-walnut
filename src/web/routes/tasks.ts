@@ -573,6 +573,11 @@ tasksRouter.delete('/:id', async (req: Request, res: Response, next: NextFunctio
       })
       return
     }
+    const msg = err instanceof Error ? err.message : String(err)
+    if (msg.includes('No task found matching')) {
+      res.status(404).json({ error: msg })
+      return
+    }
     next(err)
   }
 })

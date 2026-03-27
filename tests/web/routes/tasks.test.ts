@@ -111,10 +111,10 @@ describe('GET /api/tasks/:id', () => {
     expect(res.body.task.id).toBe(task.id);
   });
 
-  it('returns 500 for non-existent task', async () => {
+  it('returns 404 for non-existent task', async () => {
     const app = createApp();
     const res = await request(app).get('/api/tasks/nonexistent-id');
-    expect(res.status).toBe(500);
+    expect(res.status).toBe(404);
     expect(res.body.error).toBeDefined();
   });
 });
@@ -310,10 +310,10 @@ describe('DELETE /api/tasks/:id', () => {
     expect(res.body.active_session_ids).toContain('sess-exec');
   });
 
-  it('returns 500 for non-existent task', async () => {
+  it('returns 404 for non-existent task', async () => {
     const app = createApp();
     const res = await request(app).delete('/api/tasks/nonexistent-id');
-    expect(res.status).toBe(500);
+    expect(res.status).toBe(404);
   });
 });
 
