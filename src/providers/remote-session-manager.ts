@@ -117,13 +117,29 @@ export class RemoteSessionManager implements SessionManager {
     // Upload local images to remote host and rewrite paths before sending
     const preparedMessage = await this.prepareOutbound(opts.message)
 
-    const result = await this.conn.send('start', {
+    const startPayload = {
       sid: this.tmpId,
       args: ['claude', ...opts.args],
       cwd: opts.cwd,
       message: preparedMessage,
       resume: opts.resume ?? false,
-    })
+    }
+
+    let result: Record<string, unknown>
+    try {
+      result = await this.conn!.send('start', startPayload)
+    } catch (err) {
+      // Stale/dead connection — reconnect and retry with idempotent probe
+      if (isDaemonConnError(err)) {
+        log.session.warn('RemoteSessionManager: start failed, reconnecting', {
+          host: this.hostKey, sid: this.tmpId,
+          error: err instanceof Error ? err.message : String(err),
+        })
+        result = await this.retryStartAfterReconnect(startPayload)
+      } else {
+        throw err
+      }
+    }
 
     if (!result.ok) {
       throw new Error(`Daemon start failed: ${result.error}`)
@@ -153,6 +169,50 @@ export class RemoteSessionManager implements SessionManager {
     }
   }
 
+  /**
+   * Reconnect and retry start with idempotent probe — checks if daemon already
+   * started the session (response lost on stale connection) before re-spawning.
+   */
+  private async retryStartAfterReconnect(
+    startPayload: Record<string, unknown>,
+  ): Promise<Record<string, unknown>> {
+    // Force reconnect
+    if (this.conn) {
+      this.conn.disconnect()
+      this.conn = null
+    }
+    await this.ensureConnected()
+
+    // Re-subscribe event listener on the fresh connection
+    if (this.unsubscribeEvent) {
+      this.unsubscribeEvent()
+    }
+    this.unsubscribeEvent = this.conn!.onEvent((event) => this.handleDaemonEvent(event))
+
+    // Idempotent probe: check if daemon already started this sid
+    const sid = startPayload.sid as string
+    try {
+      const status = await this.conn!.send('status', { sid })
+      if (status.ok && status.exists && status.alive) {
+        log.session.info('RemoteSessionManager: session already alive after reconnect, attaching', {
+          host: this.hostKey, sid, pid: status.pid,
+        })
+        // Session was started by the lost command — attach instead of re-starting
+        const attachResult = await this.conn!.send('attach', { sid, fromOffset: 0 })
+        // Merge pid from status into attach result for consistent return shape
+        return { ...attachResult, pid: status.pid, outputFile: status.outputFile, offset: 0 }
+      }
+    } catch {
+      // Status probe failed — daemon may not know this session, safe to retry start
+    }
+
+    // Session doesn't exist on daemon — safe to retry start
+    log.session.info('RemoteSessionManager: retrying start after reconnect', {
+      host: this.hostKey, sid,
+    })
+    return this.conn!.send('start', startPayload)
+  }
+
   // ── Attach ──
 
   async attach(opts: TransportAttachOptions): Promise<TransportAttachResult> {
@@ -168,10 +228,33 @@ export class RemoteSessionManager implements SessionManager {
     this._sid = opts.sessionId
     this.unsubscribeEvent = this.conn!.onEvent((event) => this.handleDaemonEvent(event))
 
-    const result = await this.conn!.send('attach', {
+    const attachPayload = {
       sid: opts.sessionId,
       fromOffset: opts.fromOffset ?? 0,
-    })
+    }
+
+    let result: Record<string, unknown>
+    try {
+      result = await this.conn!.send('attach', attachPayload)
+    } catch (err) {
+      // Stale/dead connection — reconnect and retry (attach is idempotent)
+      if (isDaemonConnError(err)) {
+        log.session.warn('RemoteSessionManager: attach failed, reconnecting', {
+          host: this.hostKey, sid: opts.sessionId,
+          error: err instanceof Error ? err.message : String(err),
+        })
+        if (this.conn) {
+          this.conn.disconnect()
+          this.conn = null
+        }
+        await this.ensureConnected()
+        if (this.unsubscribeEvent) this.unsubscribeEvent()
+        this.unsubscribeEvent = this.conn!.onEvent((event) => this.handleDaemonEvent(event))
+        result = await this.conn!.send('attach', attachPayload)
+      } else {
+        throw err
+      }
+    }
 
     if (!result.ok) {
       throw new Error(`Daemon attach failed: ${result.error}`)
@@ -466,6 +549,15 @@ export class RemoteSessionManager implements SessionManager {
       })
     }
   }
+}
+
+// ── Helpers ──
+
+/** Match daemon connection errors that are worth retrying after reconnect. */
+function isDaemonConnError(err: unknown): boolean {
+  if (!(err instanceof Error)) return false
+  const msg = err.message
+  return msg.includes('daemon command timeout') || msg.includes('not connected')
 }
 
 // Re-export for convenience

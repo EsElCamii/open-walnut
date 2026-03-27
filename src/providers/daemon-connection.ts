@@ -75,6 +75,8 @@ export class DaemonConnection {
   private eventHandlers: EventHandler[] = []
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null
   private pingTimer: ReturnType<typeof setInterval> | null = null
+  /** Timestamp of last pong received — used for stale connection detection. */
+  private lastPongAt = 0
 
   /** Command timeout in ms. Generous for initial deploy operations. */
   private static COMMAND_TIMEOUT_MS = 30_000
@@ -701,6 +703,7 @@ export class DaemonConnection {
 
       ws.on('open', () => {
         this.ws = ws
+        this.lastPongAt = Date.now()
         resolve()
       })
 
@@ -726,7 +729,7 @@ export class DaemonConnection {
       })
 
       ws.on('pong', () => {
-        // Keepalive response received
+        this.lastPongAt = Date.now()
       })
 
       // Timeout
@@ -894,6 +897,15 @@ export class DaemonConnection {
   private startPing(): void {
     if (this.pingTimer) clearInterval(this.pingTimer)
     this.pingTimer = setInterval(() => {
+      // Detect stale connection: if no pong received for 2 ping intervals, connection is dead
+      if (this.lastPongAt > 0 && Date.now() - this.lastPongAt > DaemonConnection.PING_INTERVAL_MS * 2) {
+        log.session.warn('DaemonConnection: no pong received, connection stale', {
+          host: this.hostKey,
+          lastPongAgoMs: Date.now() - this.lastPongAt,
+        })
+        this.handleConnectionLost()
+        return
+      }
       if (this.ws?.readyState === WebSocket.OPEN) {
         this.ws.ping()
       }
