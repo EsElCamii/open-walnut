@@ -44,9 +44,11 @@ interface ChatInputProps {
   onControlCommand?: (command: string) => void;
   /** localStorage key for persisting draft text. When set, input value is saved on change (debounced) and restored on mount. */
   draftKey?: string;
+  /** Toggle Execution / Plan mode (triggered by Shift+Tab) */
+  onToggleMode?: () => void;
 }
 
-export function ChatInput({ onSend, onCommand, onStop, onInterruptSend, onClearQueue, disabled, isStreaming, focusedTaskTitle, focusedTask, onClearFocus, queueCount, placeholder, showCommands = true, sessionCommands, searchSessionCommands, onControlCommand, draftKey }: ChatInputProps) {
+export function ChatInput({ onSend, onCommand, onStop, onInterruptSend, onClearQueue, disabled, isStreaming, focusedTaskTitle, focusedTask, onClearFocus, queueCount, placeholder, showCommands = true, sessionCommands, searchSessionCommands, onControlCommand, draftKey, onToggleMode }: ChatInputProps) {
   const [value, setValue] = useState(() => {
     if (!draftKey) return '';
     try { return localStorage.getItem(draftKey) ?? ''; } catch { return ''; }
@@ -239,6 +241,13 @@ export function ChatInput({ onSend, onCommand, onStop, onInterruptSend, onClearQ
   }, [onControlCommand, closePalette]);
 
   const handleKeyDown = (e: KeyboardEvent) => {
+    // Shift+Tab: toggle Execution / Plan mode
+    if (e.key === 'Tab' && e.shiftKey) {
+      e.preventDefault();
+      onToggleMode?.();
+      return;
+    }
+
     // Read palette state from ref to avoid stale closure issues —
     // React may not have flushed re-render from onChange before keydown fires
     const ps = paletteRef.current;

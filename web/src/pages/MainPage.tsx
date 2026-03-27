@@ -2,6 +2,7 @@ import { useState, useCallback, useEffect, useMemo, useRef, Fragment } from 'rea
 import type { NavigateFunction } from 'react-router-dom';
 import type { Task } from '@open-walnut/core';
 import { useChat, type TaskContext, type ImageAttachment } from '@/hooks/useChat';
+import { usePlanMode } from '@/hooks/usePlanMode';
 import type { ChatStats } from '@/api/chat';
 import { useWebSocket, useEvent } from '@/hooks/useWebSocket';
 import { useTasksContext } from '@/contexts/TasksContext';
@@ -157,6 +158,7 @@ interface MainPageProps {
 
 export function MainPage({ visible = true, navigateRef }: MainPageProps) {
   const chat = useChat();
+  const { mode: chatMode, toggleMode, getPlanPayload } = usePlanMode();
   const { connectionState } = useWebSocket();
   const { tasks, loading, toggleComplete, setPhase, star, create, update, reorder, moveTask, reparentTask, operationError, clearOperationError, showOperationError } = useTasksContext();
   const favorites = useFavorites();
@@ -835,13 +837,15 @@ export function MainPage({ visible = true, navigateRef }: MainPageProps) {
         exec_session_status: focusedTask.exec_session_status,
         subtasks: focusedTask.subtasks?.map(s => ({ id: s.id, title: s.title, done: s.done })),
       };
-      chat.sendMessage(text, taskContext, images);
+      const plan = getPlanPayload();
+      chat.sendMessage(text, taskContext, images, undefined, plan.mode, plan.planModeFirst);
       // Clear task quote after sending — quote is bound to the message, not persistent
       setFocusedTask(null);
     } else {
-      chat.sendMessage(text, undefined, images);
+      const plan = getPlanPayload();
+      chat.sendMessage(text, undefined, images, undefined, plan.mode, plan.planModeFirst);
     }
-  }, [chat, focusedTask]);
+  }, [chat, focusedTask, getPlanPayload]);
 
   const handleCommand = useCallback((cmd: SlashCommand, args?: string) => {
     const ctx: CommandContext = {
@@ -1009,7 +1013,7 @@ export function MainPage({ visible = true, navigateRef }: MainPageProps) {
               onClose={() => {/* closed automatically when tool result arrives */}}
             />
 
-            <QuickAccessBar onSessionClick={() => setPathSelectorOpen(true)} />
+            <QuickAccessBar onSessionClick={() => setPathSelectorOpen(true)} mode={chatMode} onModeToggle={toggleMode} />
 
             <ChatInput
               onSend={handleSendMessage}
@@ -1023,6 +1027,7 @@ export function MainPage({ visible = true, navigateRef }: MainPageProps) {
               onClearFocus={handleClearFocus}
               queueCount={chat.queueCount}
               draftKey="draft:main-chat"
+              onToggleMode={toggleMode}
             />
           </div>
         </div>

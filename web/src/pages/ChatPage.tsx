@@ -1,19 +1,27 @@
 import { useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useChat } from '@/hooks/useChat';
+import { usePlanMode } from '@/hooks/usePlanMode';
 import { useWebSocket } from '@/hooks/useWebSocket';
 import { ChatPanel } from '@/components/chat/ChatPanel';
 import { ChatMessage } from '@/components/chat/ChatMessage';
 import { ChatInput } from '@/components/chat/ChatInput';
+import { QuickAccessBar } from '@/components/chat/QuickAccessBar';
 import type { SlashCommand, CommandContext } from '@/commands/types';
 import { shouldHideUiOnlyMessage, useUiOnlySettings } from '@/hooks/useDeveloperSettings';
 
 export function ChatPage() {
   const navigate = useNavigate();
   const { messages, isStreaming, toolActivity, error, isLoading, queueCount, hasMore, isLoadingOlder, prependedRef, sendMessage, clearMessages, addLocalMessage, stopGeneration, cancelQueuedMessage, clearQueue, loadOlderMessages } = useChat();
+  const { mode: chatMode, toggleMode, getPlanPayload } = usePlanMode();
   const { connectionState } = useWebSocket();
   // Force re-render when UI Only settings change
   useUiOnlySettings();
+
+  const handleSend = useCallback((text: string, images?: Parameters<typeof sendMessage>[2]) => {
+    const plan = getPlanPayload();
+    sendMessage(text, undefined, images, undefined, plan.mode, plan.planModeFirst);
+  }, [sendMessage, getPlanPayload]);
 
   const handleCommand = useCallback((cmd: SlashCommand, args?: string) => {
     const ctx: CommandContext = {
@@ -89,8 +97,10 @@ export function ChatPage() {
         )}
       </ChatPanel>
 
+      <QuickAccessBar onSessionClick={() => {}} mode={chatMode} onModeToggle={toggleMode} />
+
       <ChatInput
-        onSend={(text, images) => sendMessage(text, undefined, images)}
+        onSend={handleSend}
         onCommand={handleCommand}
         onStop={stopGeneration}
         onClearQueue={clearQueue}
@@ -98,6 +108,7 @@ export function ChatPage() {
         isStreaming={isStreaming}
         queueCount={queueCount}
         draftKey="draft:chat-page"
+        onToggleMode={toggleMode}
       />
     </div>
   );

@@ -121,7 +121,27 @@ interface ChatPayload {
   taskContext?: TaskContext
   images?: ImagePayload[]
   source?: string
+  mode?: 'execution' | 'plan'
+  planModeFirst?: boolean
 }
+
+// ── Plan Mode prompt injection ──
+
+const PLAN_MODE_FULL_INSTRUCTION = `[PLAN MODE]
+You are currently in PLAN MODE. This is a discussion-only phase.
+
+Rules:
+- COMMUNICATE, don't execute. Discuss ideas, ask clarifying questions, explore options.
+- You may READ and SEARCH freely — query tasks, read files, search memory, browse the web.
+- Do NOT create/update/delete tasks, start sessions, write files, or execute commands.
+- Do NOT take any action that changes state. If unsure, ask first.
+- Focus on understanding the user's intent before proposing solutions.
+- When proposing a plan, be specific but don't execute it yet.
+
+The user will switch to Execution mode when they're ready to proceed.
+[/PLAN MODE]`
+
+const PLAN_MODE_REMINDER = '[Reminder: You are in PLAN MODE — discuss and explore only, do not execute.]'
 
 /**
  * Build a human-readable task context prefix for the agent.
@@ -627,7 +647,7 @@ export function registerChatRpc(): void {
   })
 
   registerMethod('chat', async (payload: unknown, client: WebSocket) => {
-    const { message, taskContext, images, source: payloadSource } = payload as ChatPayload
+    const { message, taskContext, images, source: payloadSource, mode, planModeFirst } = payload as ChatPayload
     const chatSource = payloadSource === 'quick-start' ? 'quick-start' as const : undefined
     log.web.info('chat message received', { taskId: taskContext?.id, messageLength: message.length, imageCount: images?.length ?? 0, source: payloadSource ?? 'chat' })
 
@@ -702,18 +722,52 @@ export function registerChatRpc(): void {
         cronPrefix = lines.join('\n') + '\n\n'
       }
 
-      const agentMessage = cronPrefix + contextPrefix + message
+      // Plan mode prompt injection
+      let planPrefix = ''
+      let planSuffix = ''
+      if (mode === 'plan') {
+        if (planModeFirst) {
+          planPrefix = PLAN_MODE_FULL_INSTRUCTION + '\n\n'
+        } else {
+          planSuffix = '\n\n' + PLAN_MODE_REMINDER
+        }
+      }
+
+      const agentMessage = cronPrefix + planPrefix + contextPrefix + message
 
       // Build user content with images if present
-      let userContent: string | unknown[] = agentMessage
+      let userContent: string | unknown[] = agentMessage + planSuffix
       if (imageContentBlocks) {
         const imageAnnotation = buildImageAnnotation(savedImages)
         imageContentBlocks.push({ type: 'text', text: imageAnnotation + agentMessage })
+        // Plan suffix as a separate text block so the model sees it after images
+        if (planSuffix) {
+          imageContentBlocks.push({ type: 'text', text: planSuffix.trim() })
+        }
         userContent = imageContentBlocks
       }
 
       const turnStartMs = Date.now()
       const toolsUsedInTurn = new Set<string>()
+
+      // ── Eager persist: write user message to disk BEFORE the agent loop.
+      // Ensures the message survives page refresh during processing (~5ms write).
+      // `history` was captured BEFORE this write, so no duplication in the API call. ──
+      const turnId = crypto.randomUUID()
+      const userContentForPersist = savedImages.length > 0 && Array.isArray(userContent)
+        ? (replaceImagesWithPaths(
+            [{ role: 'user', content: userContent } as MessageParam],
+            savedImages,
+          )[0] as { content: unknown }).content
+        : userContent
+      await chatHistory.addUserMessage(userContentForPersist, {
+        displayText: message,
+        turnId,
+        ...(contextHashes && { contextHashes }),
+        ...(taskContext?.id && { taskId: taskContext.id }),
+        ...(chatSource && { source: chatSource }),
+      })
+
       try {
         const result = await runAgentLoop(userContent, history, {
           onTextDelta: (delta) => {
@@ -755,29 +809,38 @@ export function registerChatRpc(): void {
         activeAbortControllers.delete(client)
 
         // Handle aborted turn: persist partial response but skip compaction.
+        // User message is already on disk (eagerly persisted above).
         if (result.aborted) {
-          const newApiMsgs = result.messages.slice(history.length) as MessageParam[]
-          while (newApiMsgs.length > 0) {
-            const last = newApiMsgs[newApiMsgs.length - 1] as { role: string; content: unknown }
+          const allNewMsgs = result.messages.slice(history.length) as MessageParam[]
+          // Skip the eagerly-persisted user message (first in the new batch)
+          const afterUser = allNewMsgs.length > 0 && (allNewMsgs[0] as { role: string }).role === 'user'
+            ? allNewMsgs.slice(1)
+            : allNewMsgs
+
+          // Clean trailing: remove trailing user (tool_result) and strip orphan tool_use
+          const cleaned = [...afterUser]
+          while (cleaned.length > 0) {
+            const last = cleaned[cleaned.length - 1] as { role: string; content: unknown }
             if (last.role === 'user') {
-              newApiMsgs.pop()
+              cleaned.pop()
               continue
             }
             if (last.role === 'assistant' && Array.isArray(last.content)
               && (last.content as Array<{ type: string }>).some(b => b.type === 'tool_use')) {
               const kept = (last.content as Array<{ type: string }>).filter(b => b.type !== 'tool_use')
               if (kept.length === 0) {
-                newApiMsgs.pop()
+                cleaned.pop()
                 continue
               }
-              newApiMsgs[newApiMsgs.length - 1] = { ...last, content: kept } as MessageParam
+              cleaned[cleaned.length - 1] = { ...last, content: kept } as MessageParam
             }
             break
           }
-          if (newApiMsgs.length > 0) {
-            const persistMsgs = replaceImagesWithPaths(newApiMsgs, savedImages)
-            await chatHistory.addAIMessages(persistMsgs, { displayText: message, ...(chatSource && { source: chatSource }) })
+          if (cleaned.length > 0) {
+            const persistMsgs = replaceImagesWithPaths(cleaned, savedImages)
+            await chatHistory.addAIMessages(persistMsgs, { ...(chatSource && { source: chatSource }) })
           }
+          // Even if cleaned is empty, user message is safe on disk ✅
           // Auto-append to conversation_log for aborted turns
           if (taskContext?.id) {
             autoAppendConversationLog(taskContext.id, message, result.response || '[Aborted]', [...toolsUsedInTurn]).catch((err) => {
@@ -788,8 +851,12 @@ export function registerChatRpc(): void {
           return
         }
 
-        // Extract the new messages added during this turn
-        const newApiMsgs = result.messages.slice(history.length) as MessageParam[]
+        // Extract the new messages added during this turn.
+        // Skip the first user message (already eagerly persisted with turnId).
+        const allNewMsgs = result.messages.slice(history.length) as MessageParam[]
+        const newApiMsgs = allNewMsgs.length > 0 && (allNewMsgs[0] as { role: string }).role === 'user'
+          ? allNewMsgs.slice(1)
+          : allNewMsgs
 
         // Resolve entity refs before persisting
         const resolvedMsgs = await resolveMessagesEntityRefs(newApiMsgs)
@@ -798,10 +865,8 @@ export function registerChatRpc(): void {
         // Replace base64 image blocks with path-based blocks before persisting
         const persistMsgs = replaceImagesWithPaths(resolvedMsgs, savedImages)
 
-        // Persist to disk (include contextHashes for dedup on next turn)
+        // Persist AI response only (displayText/contextHashes already on eagerly-persisted user entry)
         await chatHistory.addAIMessages(persistMsgs, {
-          displayText: message,
-          ...(contextHashes && { contextHashes }),
           ...(taskContext?.id && { taskId: taskContext.id }),
           ...(chatSource && { source: chatSource }),
         })
@@ -846,19 +911,11 @@ export function registerChatRpc(): void {
         const errMsg = err instanceof Error ? err.message : String(err)
         log.web.error('chat turn error', { taskId: taskContext?.id, source: 'chat', error: errMsg })
 
-        // Persist user message + synthetic assistant error to maintain role alternation.
-        const errorPersistContent = savedImages.length > 0 && Array.isArray(userContent)
-          ? replaceImagesWithPaths(
-              [{ role: 'user', content: userContent } as MessageParam],
-              savedImages,
-            )[0]
-          : { role: 'user', content: userContent }
+        // User message already on disk (eagerly persisted). Only add synthetic error response.
         await chatHistory.addAIMessages(
           [
-            errorPersistContent as MessageParam,
             { role: 'assistant', content: [{ type: 'text', text: `[Error: ${errMsg}]` }] },
           ] as MessageParam[],
-          { displayText: message },
         )
         await chatHistory.addNotification({
           role: 'assistant', content: `Error: ${errMsg}`,

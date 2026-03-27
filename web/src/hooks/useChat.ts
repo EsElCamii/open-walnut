@@ -290,7 +290,7 @@ interface UseChatReturn {
   /** Ref set to true right before older messages are prepended.
    *  Pass to ChatPanel so it can distinguish prepend from append for scroll preservation. */
   prependedRef: MutableRefObject<boolean>;
-  sendMessage: (text: string, taskContext?: TaskContext, images?: ImageAttachment[], source?: string) => void;
+  sendMessage: (text: string, taskContext?: TaskContext, images?: ImageAttachment[], source?: string, mode?: 'plan', planModeFirst?: boolean) => void;
   clearMessages: () => void;
   addLocalMessage: (content: string) => void;
   stopGeneration: () => void;
@@ -360,7 +360,7 @@ export function useChat(): UseChatReturn {
   const nextPageRef = useRef(2);
   // Queue for messages sent while AI is streaming
   const queueIdCounter = useRef(0);
-  const queueRef = useRef<{ id: number; text: string; taskContext?: TaskContext; images?: ImageAttachment[] }[]>([]);
+  const queueRef = useRef<{ id: number; text: string; taskContext?: TaskContext; images?: ImageAttachment[]; mode?: 'plan'; planModeFirst?: boolean }[]>([]);
   // Track whether an RPC is in flight (to know when to drain)
   const rpcInFlightRef = useRef(false);
   // Timer ID for delayed drain after errors (cleared on queue reset / unmount)
@@ -701,6 +701,23 @@ export function useChat(): UseChatReturn {
     }]);
   });
 
+  // Re-fetch chat history on WebSocket reconnect.
+  // During disconnect, the agent may have completed or the user refreshed mid-processing.
+  // Without this, main chat shows stale React state (session chat already has this).
+  useEvent('_ws:reconnected', () => {
+    fetchChatHistory(1, PAGE_SIZE)
+      .then((resp) => {
+        setMessages(chatEntriesToMessages(resp.messages));
+        setHasMore(resp.pagination.hasMore);
+        nextPageRef.current = 2;
+      })
+      .catch(() => {});
+    refreshStats();
+    // Reset streaming state — the turn may have completed during disconnect
+    setIsStreaming(false);
+    setToolActivity(null);
+  });
+
   // Handle errors — don't clear queue; after a delay, drain remaining queued messages
   useEvent('agent:error', (data) => {
     const { error: errMsg } = data as { error: string };
@@ -799,14 +816,14 @@ export function useChat(): UseChatReturn {
           return m;
         });
       });
-      sendRpcRef.current?.(next.text, next.taskContext, next.images);
+      sendRpcRef.current?.(next.text, next.taskContext, next.images, undefined, next.mode, next.planModeFirst);
     } else {
       setIsStreaming(false);
     }
   }, []);
 
   /** Send a message via RPC (not queued) */
-  const sendRpc = useCallback((text: string, taskContext?: TaskContext, images?: ImageAttachment[], source?: string) => {
+  const sendRpc = useCallback((text: string, taskContext?: TaskContext, images?: ImageAttachment[], source?: string, mode?: 'plan', planModeFirst?: boolean) => {
     setIsStreaming(true);
     setError(null);
     rpcInFlightRef.current = true;
@@ -822,6 +839,10 @@ export function useChat(): UseChatReturn {
     }
     if (source) {
       payload.source = source;
+    }
+    if (mode === 'plan') {
+      payload.mode = mode;
+      if (planModeFirst) payload.planModeFirst = true;
     }
 
     wsClient.sendRpc('chat', payload)
@@ -842,7 +863,7 @@ export function useChat(): UseChatReturn {
   }, [drainOrStop]);
   sendRpcRef.current = sendRpc;
 
-  const sendMessage = useCallback((text: string, taskContext?: TaskContext, images?: ImageAttachment[], source?: string) => {
+  const sendMessage = useCallback((text: string, taskContext?: TaskContext, images?: ImageAttachment[], source?: string, mode?: 'plan', planModeFirst?: boolean) => {
     if (isStreamingRef.current) {
       if (queueRef.current.length >= MAX_QUEUE_SIZE) return;
       const queueId = ++queueIdCounter.current;
@@ -853,7 +874,7 @@ export function useChat(): UseChatReturn {
         ...(source ? { source: source as ChatMessage['source'] } : {}),
       };
       setMessages((prev) => [...prev, userMsg]);
-      queueRef.current.push({ id: queueId, text, taskContext, images });
+      queueRef.current.push({ id: queueId, text, taskContext, images, mode, planModeFirst });
       setQueueCount(queueRef.current.length);
       return;
     }
@@ -865,7 +886,7 @@ export function useChat(): UseChatReturn {
       ...(source ? { source: source as ChatMessage['source'] } : {}),
     };
     setMessages((prev) => [...prev, userMsg]);
-    sendRpc(text, taskContext, images, source);
+    sendRpc(text, taskContext, images, source, mode, planModeFirst);
   }, [sendRpc]);
 
   const clearMessages = useCallback(() => {
