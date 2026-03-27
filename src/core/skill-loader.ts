@@ -13,7 +13,7 @@ import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import yaml from 'js-yaml';
 import { log } from '../logging/index.js';
-import { GLOBAL_SKILLS_DIR, CLAUDE_SKILLS_DIR } from '../constants.js';
+import { GLOBAL_SKILLS_DIR, CLAUDE_SKILLS_DIR, WALNUT_HOME } from '../constants.js';
 
 export interface SkillMeta {
   name: string;
@@ -178,12 +178,25 @@ export function clearSkillsCache(): void {
   cachedSkills = undefined;
 }
 
+/** Read the set of disabled skill dirNames from skill-settings.json. */
+async function getDisabledSkillSet(): Promise<Set<string>> {
+  try {
+    const raw = await fsp.readFile(path.join(WALNUT_HOME, 'skill-settings.json'), 'utf-8');
+    const parsed = JSON.parse(raw);
+    if (Array.isArray(parsed.disabled)) return new Set(parsed.disabled);
+  } catch {
+    // file doesn't exist or invalid — all skills enabled
+  }
+  return new Set();
+}
+
 /** Discover and cache all eligible skills with their directory names. */
 async function getEligibleSkills(): Promise<(SkillMeta & { dirName: string })[]> {
   if (cachedSkills !== undefined) return cachedSkills;
 
   const dirs = getSearchDirs();
   const discovered = await discoverSkills(dirs);
+  const disabledSet = await getDisabledSkillSet();
   const skills: (SkillMeta & { dirName: string })[] = [];
 
   for (const [dirName, { file }] of discovered) {
@@ -199,6 +212,7 @@ async function getEligibleSkills(): Promise<(SkillMeta & { dirName: string })[]>
     }
     const { frontmatter } = parseFrontmatter(raw);
     if (!isEligible(frontmatter)) continue;
+    if (disabledSet.has(dirName)) continue;
 
     skills.push({
       dirName,

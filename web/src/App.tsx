@@ -12,6 +12,7 @@ import { CronPage } from './pages/CronPage';
 import { UsagePage } from './pages/UsagePage';
 import { AgentsPage } from './pages/AgentsPage';
 import { CommandsPage } from './pages/CommandsPage';
+import { SkillsPage } from './pages/SkillsPage';
 import { TimelinePage } from './pages/TimelinePage';
 import { MemoryPage } from './pages/MemoryPage';
 import { HooksPage } from './pages/HooksPage';
@@ -53,6 +54,7 @@ export function App() {
         <Route path="/usage" element={<UsagePage />} />
         <Route path="/agents" element={<AgentsPage />} />
         <Route path="/commands" element={<CommandsPage />} />
+        <Route path="/skills" element={<SkillsPage />} />
         <Route path="/hooks" element={<HooksPage />} />
         <Route path="/timeline" element={<TimelinePage />} />
         <Route path="/chat" element={<Navigate to="/" replace />} />

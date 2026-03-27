@@ -827,11 +827,21 @@ export const SessionChatHistory = memo(function SessionChatHistory({ sessionId, 
     if (len > prevOptimisticLen.current) {
       isAtBottom.current = true;
       setShowScrollArrow(false);
-      const el = containerRef.current;
-      if (el) el.scrollTop = el.scrollHeight;
     }
     prevOptimisticLen.current = len;
   }, [optimisticMessages?.length]);
+
+  // Path A-0b: Follow-up scroll for optimistic message lifecycle changes.
+  // After sending, status badges (Queued → Delivered ✓) and indicators
+  // ("Resuming session...") render in subsequent frames, growing scrollHeight.
+  // Watch the full optimisticMessages array ref (changes on every status update)
+  // and phase (changes when session resumes → "Resuming session..." appears).
+  useEffect(() => {
+    if (!isAtBottom.current || !(optimisticMessages?.length)) return;
+    const el = containerRef.current;
+    if (!el) return;
+    el.scrollTop = el.scrollHeight;
+  }, [optimisticMessages, phase]);
 
   // Path A-1: Content changes — immediate scroll, before paint (useLayoutEffect)
   // Fires on every messages/loading change. This is NOT the source of jumps — jumps come

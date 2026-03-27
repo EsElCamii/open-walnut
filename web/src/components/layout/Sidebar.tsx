@@ -113,6 +113,10 @@ export function Sidebar({ open, collapsed, onToggleCollapse }: SidebarProps) {
           <AgentsIcon />
           <span className="sidebar-label">Agents</span>
         </NavLink>
+        <NavLink to="/skills" className={navLinkClass} title={collapsed ? 'Skills' : undefined}>
+          <SkillsIcon />
+          <span className="sidebar-label">Skills</span>
+        </NavLink>
         <NavLink to="/commands" className={navLinkClass} title={collapsed ? 'Commands' : undefined}>
           <CommandsIcon />
           <span className="sidebar-label">Commands</span>
@@ -243,6 +247,14 @@ function AgentsIcon() {
       <path d="M20 21a8 8 0 1 0-16 0" />
       <line x1="12" y1="12" x2="12" y2="16" />
       <circle cx="12" cy="18" r="2" />
+    </svg>
+  );
+}
+
+function SkillsIcon() {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2" />
     </svg>
   );
 }

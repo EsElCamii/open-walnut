@@ -37,6 +37,7 @@ import { localImageRouter } from './routes/local-image.js'
 import { createCronRouter, setCronService } from './routes/cron.js'
 import { createAgentsRouter } from './routes/agents.js'
 import { createCommandsRouter } from './routes/commands.js'
+import { createSkillsRouter } from './routes/skills.js'
 import { createSlashCommandsRouter } from './routes/slash-commands.js'
 import { timelineRouter } from './routes/timeline.js'
 import { CronService } from '../core/cron/index.js'
@@ -384,6 +385,7 @@ export async function startServer(options: ServerOptions = {}): Promise<HttpServ
   app.use('/api/local-image', localImageRouter)
   app.use('/api/agents', createAgentsRouter())
   app.use('/api/commands', createCommandsRouter())
+  app.use('/api/skills', createSkillsRouter())
   app.use('/api/slash-commands', createSlashCommandsRouter())
   app.use('/api/heartbeat', (await import('./routes/heartbeat.js')).heartbeatRouter)
   app.use('/api/timeline', timelineRouter)
