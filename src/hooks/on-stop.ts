@@ -94,11 +94,8 @@ function updateSessionStore(sessionId: string): void {
       if (!Array.isArray(store.sessions)) return;
 
       for (const session of store.sessions) {
-        if (session.claudeSessionId === sessionId && session.work_status !== 'completed' && session.process_status !== 'error') {
+        if (session.claudeSessionId === sessionId && session.process_status !== 'error') {
           session.process_status = 'stopped';
-          // Process stopping = turn completed, NOT work completed.
-          // Only the human (REST PATCH) can set 'completed'.
-          session.work_status = 'agent_complete';
           session.last_status_change = new Date().toISOString();
           session.lastActiveAt = new Date().toISOString();
           delete session.activity;

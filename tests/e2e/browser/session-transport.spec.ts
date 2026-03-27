@@ -161,7 +161,7 @@ test('session mode indicator shows correct mode', async ({ page }) => {
 })
 
 // ═══════════════════════════════════════════════════════════════════
-//  6. Session status indicators — work_status and process_status
+//  6. Session status indicators — process_status
 // ═══════════════════════════════════════════════════════════════════
 
 test('session shows correct status badges', async ({ page }) => {

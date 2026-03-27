@@ -43,7 +43,6 @@ function makeRecord(overrides: Record<string, unknown> = {}) {
     taskId: 'task-1',
     project: 'TestProject',
     process_status: 'stopped',
-    work_status: 'agent_complete',
     mode: 'plan',
     last_status_change: '2026-01-01T00:00:00Z',
     startedAt: '2026-01-01T00:00:00Z',

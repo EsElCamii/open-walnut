@@ -4,10 +4,10 @@ import type {
   SessionTreeTask,
   SessionRecord,
 } from '@/types/session';
-import { WORK_LABELS, PROCESS_LABELS, compositeColor } from '@/utils/session-status';
+import { PHASE_LABELS, PROCESS_LABELS, compositePhaseColor } from '@/utils/session-status';
+import type { TaskPhase } from '@/types/session';
 
 type ProcessFilter = 'all' | 'running' | 'idle' | 'stopped' | 'error';
-type WorkFilter = 'all' | 'in_progress' | 'agent_complete' | 'await_human_action' | 'completed';
 type TaskFilter = 'all' | 'starred' | 'high';
 
 interface SessionTreePanelProps {
@@ -42,18 +42,13 @@ function persistSet(key: string, set: Set<string>): void {
 
 // ── Status helpers ──
 
-function getSessionDotColor(s: SessionRecord): string {
-  return compositeColor(s.process_status, s.work_status);
+function getSessionDotColor(s: SessionRecord, taskPhase?: TaskPhase): string {
+  return compositePhaseColor(s.process_status, taskPhase);
 }
 
 function matchesProcessFilter(s: SessionRecord, filter: ProcessFilter): boolean {
   if (filter === 'all') return true;
   return s.process_status === filter;
-}
-
-function matchesWorkFilter(s: SessionRecord, filter: WorkFilter): boolean {
-  if (filter === 'all') return true;
-  return s.work_status === filter;
 }
 
 function matchesTaskFilter(t: SessionTreeTask, filter: TaskFilter): boolean {
@@ -85,14 +80,6 @@ const PROCESS_FILTERS: { label: string; value: ProcessFilter }[] = [
   { label: PROCESS_LABELS.error, value: 'error' },
 ];
 
-const WORK_FILTERS: { label: string; value: WorkFilter }[] = [
-  { label: 'All', value: 'all' },
-  { label: WORK_LABELS.in_progress, value: 'in_progress' },
-  { label: WORK_LABELS.agent_complete, value: 'agent_complete' },
-  { label: WORK_LABELS.await_human_action, value: 'await_human_action' },
-  { label: WORK_LABELS.completed, value: 'completed' },
-];
-
 const TASK_FILTERS: { label: string; value: TaskFilter }[] = [
   { label: 'All Tasks', value: 'all' },
   { label: 'Starred', value: 'starred' },
@@ -114,7 +101,6 @@ export function SessionTreePanel({
   const [collapsedProjs, setCollapsedProjs] = useState<Set<string>>(() => readSetFromStorage(LS_COLLAPSED_PROJS));
   const [collapsedTasks, setCollapsedTasks] = useState<Set<string>>(() => readSetFromStorage(LS_COLLAPSED_TASKS));
   const [processFilter, setProcessFilter] = useState<ProcessFilter>('all');
-  const [workFilter, setWorkFilter] = useState<WorkFilter>('all');
   const [taskFilter, setTaskFilter] = useState<TaskFilter>('all');
 
   const toggleCat = (cat: string) => {
@@ -147,10 +133,10 @@ export function SessionTreePanel({
   // Apply filters to compute a filtered tree
   const { filteredTree, filteredOrphans, totalCount } = useMemo(() => {
     const filterSessions = (sessions: SessionRecord[]) =>
-      sessions.filter((s) => matchesProcessFilter(s, processFilter) && matchesWorkFilter(s, workFilter));
+      sessions.filter((s) => matchesProcessFilter(s, processFilter));
 
     const filterTasks = (tasks: SessionTreeTask[]) => {
-      if (taskFilter === 'all' && processFilter === 'all' && workFilter === 'all') return tasks;
+      if (taskFilter === 'all' && processFilter === 'all') return tasks;
       return tasks.reduce<SessionTreeTask[]>((acc, t) => {
         if (!matchesTaskFilter(t, taskFilter)) return acc;
         const filtered = filterSessions(t.sessions);
@@ -185,7 +171,7 @@ export function SessionTreePanel({
     }
 
     return { filteredTree: fTree, filteredOrphans: fOrphans, totalCount: count };
-  }, [tree, orphanSessions, processFilter, workFilter, taskFilter]);
+  }, [tree, orphanSessions, processFilter, taskFilter]);
 
   const renderSession = (s: SessionRecord) => {
     const sid = s.claudeSessionId;
@@ -294,20 +280,6 @@ export function SessionTreePanel({
                 key={f.value}
                 className={`session-tree-chip${processFilter === f.value ? ' session-tree-chip-active' : ''}`}
                 onClick={() => setProcessFilter(f.value)}
-              >
-                {f.label}
-              </button>
-            ))}
-          </div>
-        </div>
-        <div className="session-tree-filter-group">
-          <span className="session-tree-filter-label">Work</span>
-          <div className="session-tree-filter-chips">
-            {WORK_FILTERS.map((f) => (
-              <button
-                key={f.value}
-                className={`session-tree-chip${workFilter === f.value ? ' session-tree-chip-active' : ''}`}
-                onClick={() => setWorkFilter(f.value)}
               >
                 {f.label}
               </button>

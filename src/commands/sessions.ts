@@ -33,13 +33,13 @@ export async function runSessions(globals: GlobalOptions): Promise<void> {
   );
 
   for (const session of sessions) {
-    const wsColor =
-      session.work_status === 'in_progress' ? chalk.green :
-      session.work_status === 'agent_complete' ? chalk.yellow :
-      session.work_status === 'await_human_action' ? chalk.magenta :
+    const psColor =
+      session.process_status === 'running' ? chalk.green :
+      session.process_status === 'idle' ? chalk.yellow :
+      session.process_status === 'error' ? chalk.red :
       chalk.dim;
 
-    const workStatus = wsColor(padRight(session.work_status, 18));
+    const procStatusLabel = psColor(padRight(session.process_status, 18));
     const procStatus = session.process_status === 'running' ? chalk.green(padRight('●', 8))
       : session.process_status === 'idle' ? chalk.yellow(padRight('◉', 8))
       : session.process_status === 'error' ? chalk.red(padRight('✕', 8))
@@ -49,7 +49,7 @@ export async function runSessions(globals: GlobalOptions): Promise<void> {
     const lastActive = padRight(shortDate(session.lastActiveAt), 14);
     const sessionId = chalk.dim(session.claudeSessionId.slice(0, 16));
 
-    console.log(`${workStatus}${procStatus}${project}${task}${lastActive}${sessionId}`);
+    console.log(`${procStatusLabel}${procStatus}${project}${task}${lastActive}${sessionId}`);
   }
 }
 

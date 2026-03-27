@@ -185,11 +185,10 @@ describe('Remote session Quick Start via RPC', () => {
         }
         const body = await res.json() as Record<string, unknown>
         session = body.session as Record<string, unknown>
-        if (session.work_status === 'agent_complete') break
+        if (session.process_status === 'stopped') break
         await new Promise(r => setTimeout(r, 300))
       }
       expect(session.host).toBe('mock-remote')
-      expect(session.work_status).toBe('agent_complete')
     } finally {
       ws.close()
     }
@@ -482,7 +481,7 @@ describe('Sequential follow-up messages', () => {
           if (res.status === 200) {
             const body = await res.json() as Record<string, unknown>
             const session = body.session as Record<string, unknown>
-            if (session.work_status === 'agent_complete' || session.process_status === 'error') break
+            if (session.process_status === 'stopped' || session.process_status === 'error') break
           }
           await new Promise(r => setTimeout(r, 300))
         }
@@ -521,18 +520,18 @@ describe('Error recovery', () => {
       const sessionId = result1.data!.sessionId as string
       expect(sessionId).toBeTruthy()
 
-      // Verify session is in agent_complete state (poll)
+      // Verify session is in stopped state (poll)
       let session: Record<string, unknown> = {}
       for (let i = 0; i < 15; i++) {
         const res = await fetch(`http://localhost:${port}/api/sessions/${sessionId}`)
         if (res.status === 200) {
           const body = await res.json() as Record<string, unknown>
           session = body.session as Record<string, unknown>
-          if (session.work_status === 'agent_complete') break
+          if (session.process_status === 'stopped') break
         }
         await new Promise(r => setTimeout(r, 300))
       }
-      expect(session.work_status).toBe('agent_complete')
+      expect(session.process_status).toBe('stopped')
 
       // Send a follow-up message — session should resume and produce a new result
       const recoveryResult = waitForWsEvent(ws, 'session:result', 30000)
@@ -599,7 +598,7 @@ describe('Session record fields', () => {
 // ═══════════════════════════════════════════════════════════════════
 
 describe('Health monitor detects process exit', () => {
-  it('slow session → process exits → work_status becomes agent_complete', async () => {
+  it('slow session → process exits → process_status becomes stopped', async () => {
     const ws = await connectWs()
     try {
       // Start a slow session (2s delay before output — fast enough but still exercises the delay path)
@@ -615,17 +614,17 @@ describe('Health monitor detects process exit', () => {
       const sessionId = result.data!.sessionId as string
       expect(result.data?.isError).toBe(false)
 
-      // Poll the REST API to verify work_status eventually becomes agent_complete
+      // Poll the REST API to verify process_status eventually becomes stopped
       let session: Record<string, unknown> = {}
       for (let i = 0; i < 30; i++) {
         const res = await fetch(`http://localhost:${port}/api/sessions/${sessionId}`)
         const body = await res.json() as Record<string, unknown>
         session = body.session as Record<string, unknown>
-        if (session.work_status === 'agent_complete') break
+        if (session.process_status === 'stopped') break
         await new Promise(r => setTimeout(r, 500))
       }
 
-      expect(session.work_status).toBe('agent_complete')
+      expect(session.process_status).toBe('stopped')
     } finally {
       ws.close()
     }
@@ -651,13 +650,13 @@ describe('No duplicate session:result on follow-up', () => {
       const sessionId = result1.data!.sessionId as string
       expect(sessionId).toBeTruthy()
 
-      // Wait for session to reach agent_complete
+      // Wait for session to reach stopped
       for (let i = 0; i < 20; i++) {
         const res = await fetch(`http://localhost:${port}/api/sessions/${sessionId}`)
         if (res.status === 200) {
           const body = await res.json() as Record<string, unknown>
           const session = body.session as Record<string, unknown>
-          if (session.work_status === 'agent_complete') break
+          if (session.process_status === 'stopped') break
         }
         await new Promise(r => setTimeout(r, 300))
       }
@@ -702,7 +701,7 @@ describe('No duplicate session:result on follow-up', () => {
 // ═══════════════════════════════════════════════════════════════════
 
 describe('Session status during follow-up execution', () => {
-  it('follow-up sets status to in_progress, then back to agent_complete', async () => {
+  it('follow-up sets process_status to running, then back to stopped', async () => {
     const ws = await connectWs()
     try {
       // Start a session
@@ -715,26 +714,25 @@ describe('Session status during follow-up execution', () => {
       const result1 = await startResult
       const sessionId = result1.data!.sessionId as string
 
-      // Wait for agent_complete
+      // Wait for stopped
       for (let i = 0; i < 20; i++) {
         const res = await fetch(`http://localhost:${port}/api/sessions/${sessionId}`)
         if (res.status === 200) {
           const body = await res.json() as Record<string, unknown>
           const session = body.session as Record<string, unknown>
-          if (session.work_status === 'agent_complete') break
+          if (session.process_status === 'stopped') break
         }
         await new Promise(r => setTimeout(r, 300))
       }
 
       // Send a slow follow-up (2s delay) and capture status transitions
-      const statusChanges: Array<{ work_status: string; process_status: string }> = []
+      const statusChanges: Array<{ process_status: string }> = []
       const statusHandler = (data: WebSocket.Data) => {
         try {
           const msg = JSON.parse(data.toString()) as WsEvent
           if (msg.type === 'event' && msg.name === 'session:status-changed'
               && msg.data?.sessionId === sessionId) {
             statusChanges.push({
-              work_status: msg.data.work_status as string,
               process_status: msg.data.process_status as string,
             })
           }
@@ -750,16 +748,15 @@ describe('Session status during follow-up execution', () => {
       await new Promise(r => setTimeout(r, 2000))
       ws.removeListener('message', statusHandler)
 
-      // Status should have gone through: in_progress → agent_complete
-      // Should NOT have spurious agent_complete BEFORE the real one
-      const inProgressEvents = statusChanges.filter(s => s.work_status === 'in_progress')
-      const agentCompleteEvents = statusChanges.filter(s => s.work_status === 'agent_complete')
+      // Status should have gone through: running → stopped
+      const runningEvents = statusChanges.filter(s => s.process_status === 'running')
+      const stoppedEvents = statusChanges.filter(s => s.process_status === 'stopped')
 
-      // Must have at least one in_progress transition
-      expect(inProgressEvents.length).toBeGreaterThanOrEqual(1)
+      // Must have at least one running transition
+      expect(runningEvents.length).toBeGreaterThanOrEqual(1)
 
-      // Final state should be agent_complete (exactly 1 — not duplicated)
-      expect(agentCompleteEvents.length).toBe(1)
+      // Final state should be stopped (exactly 1 — not duplicated)
+      expect(stoppedEvents.length).toBe(1)
     } finally {
       ws.close()
     }

@@ -34,33 +34,32 @@ describe('reconcileSessions', () => {
     expect(result.reconnectable).toEqual([])
   })
 
-  it('returns 0 when all sessions are already completed', async () => {
+  it('returns 0 when all sessions are already stopped', async () => {
     await createSessionRecord('s1', 'task-1', 'proj')
-    await updateSessionRecord('s1', { work_status: 'completed', process_status: 'stopped' })
+    await updateSessionRecord('s1', { process_status: 'stopped' })
     await createSessionRecord('s2', 'task-2', 'proj')
-    await updateSessionRecord('s2', { work_status: 'completed', process_status: 'stopped' })
+    await updateSessionRecord('s2', { process_status: 'stopped' })
 
     const result = await reconcileSessions()
     expect(result.reconciled).toBe(0)
     expect(result.reconnectable).toEqual([])
   })
 
-  it('marks active sessions without pid/outputFile as agent_complete (legacy)', async () => {
+  it('marks active sessions without pid/outputFile as stopped (legacy)', async () => {
     await createSessionRecord('active-1', 'task-1', 'proj')
-    // createSessionRecord defaults to process_status: 'running', work_status: 'in_progress', no pid/outputFile
+    // createSessionRecord defaults to process_status: 'running', no pid/outputFile
 
     const result = await reconcileSessions()
     expect(result.reconciled).toBe(1)
     expect(result.reconnectable).toEqual([])
 
     const sessions = await listSessions()
-    expect(sessions[0].work_status).toBe('agent_complete')
     expect(sessions[0].process_status).toBe('stopped')
   })
 
   it('skips already-stopped sessions (no redundant reconciliation)', async () => {
     await createSessionRecord('idle-1', 'task-1', 'proj')
-    await updateSessionRecord('idle-1', { work_status: 'agent_complete', process_status: 'stopped' })
+    await updateSessionRecord('idle-1', { process_status: 'stopped' })
 
     const result = await reconcileSessions()
     // Already stopped — reconciler skips (no point re-marking)
@@ -68,11 +67,10 @@ describe('reconcileSessions', () => {
     expect(result.reconnectable).toEqual([])
 
     const sessions = await listSessions()
-    expect(sessions[0].work_status).toBe('agent_complete')
     expect(sessions[0].process_status).toBe('stopped')
   })
 
-  it('marks sessions with dead PIDs as agent_complete', async () => {
+  it('marks sessions with dead PIDs as stopped', async () => {
     await createSessionRecord('dead-pid', 'task-1', 'proj', undefined, {
       pid: 999999999,
       outputFile: '/tmp/dead.jsonl',
@@ -83,35 +81,34 @@ describe('reconcileSessions', () => {
     expect(result.reconnectable).toEqual([])
 
     const sessions = await listSessions()
-    expect(sessions[0].work_status).toBe('agent_complete')
     expect(sessions[0].process_status).toBe('stopped')
   })
 
-  it('reconciles mix of active, idle, and completed sessions', async () => {
+  it('reconciles mix of active, idle, and stopped sessions', async () => {
     // Active zombie (no pid — legacy)
     await createSessionRecord('zombie-active', 'task-1', 'proj')
 
-    // Idle zombie (dead pid)
+    // Already stopped zombie (dead pid)
     await createSessionRecord('zombie-idle', 'task-2', 'proj', undefined, {
       pid: 999999998,
       outputFile: '/tmp/zombie-idle.jsonl',
     })
-    await updateSessionRecord('zombie-idle', { work_status: 'agent_complete', process_status: 'stopped' })
+    await updateSessionRecord('zombie-idle', { process_status: 'stopped' })
 
-    // Already completed (should not be touched)
+    // Already stopped (should not be touched)
     await createSessionRecord('already-done', 'task-3', 'proj')
-    await updateSessionRecord('already-done', { work_status: 'completed', process_status: 'stopped' })
+    await updateSessionRecord('already-done', { process_status: 'stopped' })
 
     const result = await reconcileSessions()
-    // Only zombie-active is reconciled; zombie-idle is already stopped (skipped)
+    // Only zombie-active is reconciled; zombie-idle and already-done are already stopped (skipped)
     expect(result.reconciled).toBe(1)
     expect(result.reconnectable).toEqual([])
 
     const sessions = await listSessions()
     const byId = new Map(sessions.map(s => [s.claudeSessionId, s]))
-    expect(byId.get('zombie-active')!.work_status).toBe('agent_complete')
-    expect(byId.get('zombie-idle')!.work_status).toBe('agent_complete')
-    expect(byId.get('already-done')!.work_status).toBe('completed')
+    expect(byId.get('zombie-active')!.process_status).toBe('stopped')
+    expect(byId.get('zombie-idle')!.process_status).toBe('stopped')
+    expect(byId.get('already-done')!.process_status).toBe('stopped')
   })
 
   it('handles sessions with no linked task (taskless sessions)', async () => {
@@ -121,10 +118,10 @@ describe('reconcileSessions', () => {
     expect(result.reconciled).toBe(1)
 
     const sessions = await listSessions()
-    expect(sessions[0].work_status).toBe('agent_complete')
+    expect(sessions[0].process_status).toBe('stopped')
   })
 
-  it('preserves task session slots for agent_complete sessions', async () => {
+  it('preserves task session slots for stopped sessions', async () => {
     // Create a task with an exec session slot referencing a zombie session
     const taskStore = {
       version: 1,
@@ -153,7 +150,7 @@ describe('reconcileSessions', () => {
     const result = await reconcileSessions()
     expect(result.reconciled).toBe(1)
 
-    // Verify task's session slot is PRESERVED (agent_complete keeps the link)
+    // Verify task's session slot is PRESERVED (stopped keeps the link)
     const raw = JSON.parse(await fsp.readFile(TASKS_FILE, 'utf-8'))
     const task = raw.tasks.find((t: { id: string }) => t.id === 'task-linked')
     expect(task.exec_session_id).toBe('linked-session')
@@ -167,9 +164,9 @@ describe('reconcileSessions', () => {
     const result = await reconcileSessions()
     expect(result.reconciled).toBe(1)
 
-    // Session should still be marked agent_complete even if task doesn't exist
+    // Session should still be marked stopped even if task doesn't exist
     const sessions = await listSessions()
-    expect(sessions[0].work_status).toBe('agent_complete')
+    expect(sessions[0].process_status).toBe('stopped')
   })
 
   it('does not re-reconcile already-stopped sessions on second run', async () => {
@@ -179,13 +176,13 @@ describe('reconcileSessions', () => {
     const first = await reconcileSessions()
     expect(first.reconciled).toBe(2)
 
-    // After first run: both are stopped + agent_complete → second run skips them
+    // After first run: both are stopped → second run skips them
     const second = await reconcileSessions()
     expect(second.reconciled).toBe(0)
 
     const sessions = await listSessions()
     for (const s of sessions) {
-      expect(s.work_status).toBe('agent_complete')
+      expect(s.process_status).toBe('stopped')
     }
   })
 
@@ -211,7 +208,7 @@ describe('reconcileSessions', () => {
     })
 
     const result = await reconcileSessions()
-    // No outputFile → can't reconnect → mark completed
+    // No outputFile → can't reconnect → mark stopped
     expect(result.reconciled).toBe(1)
     expect(result.reconnectable).toEqual([])
   })

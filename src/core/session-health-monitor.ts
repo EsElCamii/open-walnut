@@ -3,7 +3,7 @@
  *
  * Runs every 30 seconds inside the server process. For each non-terminal session:
  *   1. Check isProcessAlive (routes through session manager or daemon connection)
- *   2. If process dead: set process_status='error' (with errorMessage) or 'stopped'+'agent_complete'
+ *   2. If process dead: set process_status='error' (with errorMessage) or 'stopped'
  *   3. Clear task session slot on error (agent_complete keeps slot for resume)
  *   4. Emit session:status-changed
  *   5. Check idle timeout: kill sessions whose outputFile mtime exceeds the threshold.
@@ -15,6 +15,7 @@ import { log } from '../logging/index.js'
 import { isProcessAliveAsync } from '../utils/process.js'
 import { isSessionProcessAlive } from '../utils/session-liveness.js'
 import { bus, EventNames } from './event-bus.js'
+import type { SessionRecord, Task, TaskPhase } from './types.js'
 const HEALTH_CHECK_INTERVAL_MS = 30_000
 /** Default idle timeout: 30 minutes */
 const DEFAULT_IDLE_TIMEOUT_MS = 30 * 60 * 1000
@@ -54,11 +55,23 @@ export class SessionHealthMonitor {
 
     if (sessions.length === 0) return
 
-    // Detect stale await_human_action sessions (stuck sub-agents)
-    await this.checkStaleAwaitingSessions(sessions, updateSessionRecord)
+    // Batch-load all tasks upfront to avoid N+1 queries when checking task.phase
+    let taskMap = new Map<string, Task>()
+    try {
+      const { listTasks } = await import('./task-manager.js')
+      const allTasks = await listTasks()
+      for (const t of allTasks) taskMap.set(t.id, t)
+    } catch (err) {
+      log.session.warn('health monitor: failed to load tasks for phase lookup', {
+        error: err instanceof Error ? err.message : String(err),
+      })
+    }
+
+    // Detect stale AWAIT_HUMAN_ACTION sessions (stuck sub-agents)
+    await this.checkStaleAwaitingSessions(sessions, updateSessionRecord, taskMap)
 
     // Idle timeout — kill sessions with stale outputFile mtime past the configured threshold
-    await this.checkIdleTimeout(sessions, updateSessionRecord)
+    await this.checkIdleTimeout(sessions, updateSessionRecord, taskMap)
 
     for (const session of sessions) {
       const alive = await isSessionProcessAlive(session)
@@ -67,8 +80,10 @@ export class SessionHealthMonitor {
       // alive=false: process is dead or unreachable past grace period
       if (!alive && session.process_status !== 'stopped' && session.process_status !== 'error') {
         const now = new Date().toISOString()
+        const taskPhase = session.taskId ? taskMap.get(session.taskId)?.phase : undefined
+        const isWorkInProgress = taskPhase === 'IN_PROGRESS'
 
-        if (session.process_status === 'running' && session.work_status === 'in_progress') {
+        if (session.process_status === 'running' && isWorkInProgress) {
           // Process died while work was in progress — determine outcome.
 
           if (session.host) {
@@ -97,10 +112,9 @@ export class SessionHealthMonitor {
           const hasResult = session.outputFile ? this.outputFileHasResult(session.outputFile) : false
 
           if (hasResult) {
-            // Normal completion — process_status 'stopped', work_status 'agent_complete'
+            // Normal completion — process_status 'stopped'
             await updateSessionRecord(session.claudeSessionId, {
               process_status: 'stopped',
-              work_status: 'agent_complete',
               activity: undefined,
               last_status_change: now,
             })
@@ -141,21 +155,18 @@ export class SessionHealthMonitor {
             sessionId: session.claudeSessionId,
             taskId: session.taskId,
             process_status: newProcessStatus,
-            work_status: hasResult ? 'agent_complete' : session.work_status,
           }, ['*'], { source: 'health-monitor', urgency: 'urgent' })
         } else {
           // Process died while idle or in non-in_progress state.
-          const forceWorkStatus = session.work_status === 'in_progress'
           const updates: Record<string, unknown> = {
             last_status_change: now,
           }
 
-          if (forceWorkStatus) {
+          if (isWorkInProgress) {
             const hasResult = session.outputFile && !session.outputFile.startsWith('remote://')
               ? this.outputFileHasResult(session.outputFile) : false
             if (hasResult) {
               updates.process_status = 'stopped'
-              updates.work_status = 'agent_complete'
             } else {
               updates.process_status = 'error'
               updates.errorMessage = 'Process exited without result'
@@ -172,16 +183,15 @@ export class SessionHealthMonitor {
             taskId: session.taskId,
             pid: session.pid,
             previousProcessStatus: session.process_status,
-            workStatus: session.work_status,
-            ...(forceWorkStatus ? { newProcessStatus: updates.process_status } : {}),
+            taskPhase,
+            ...(isWorkInProgress ? { newProcessStatus: updates.process_status } : {}),
           })
 
-          if (forceWorkStatus) {
+          if (isWorkInProgress) {
             bus.emit(EventNames.SESSION_STATUS_CHANGED, {
               sessionId: session.claudeSessionId,
               taskId: session.taskId,
               process_status: updates.process_status as string,
-              work_status: updates.work_status as string | undefined,
             }, ['*'], { source: 'health-monitor', urgency: 'urgent' })
           }
         }
@@ -199,11 +209,12 @@ export class SessionHealthMonitor {
    *   1. SessionManager.lastEventAt — works for both local (file mtime) and remote (in-memory)
    *   2. Fallback: fs.statSync(outputFile).mtimeMs — for sessions without an active manager
    *
-   * Skips await_human_action sessions — they're waiting for user input, not truly idle.
+   * Skips sessions whose task phase is AWAIT_HUMAN_ACTION — they're waiting for user input, not truly idle.
    */
   private async checkIdleTimeout(
-    sessions: Array<{ claudeSessionId: string; taskId?: string; pid?: number; process_status?: string; work_status?: string; host?: string; outputFile?: string; provider?: string }>,
+    sessions: SessionRecord[],
     updateSessionRecord: (id: string, update: Record<string, unknown>) => Promise<unknown>,
+    taskMap: Map<string, Task>,
   ): Promise<void> {
     // Read config to get idle_timeout_minutes
     let idleTimeoutMs = DEFAULT_IDLE_TIMEOUT_MS
@@ -228,7 +239,9 @@ export class SessionHealthMonitor {
     const { getRegisteredSessionManager } = await import('../providers/session-manager.js')
 
     for (const session of sessions) {
-      if (session.work_status === 'await_human_action') continue  // waiting for user, not idle
+      // Skip sessions whose task is awaiting human action — they're waiting for user input, not truly idle
+      const taskPhase = session.taskId ? taskMap.get(session.taskId)?.phase : undefined
+      if (taskPhase === 'AWAIT_HUMAN_ACTION') continue
 
       // Check if process is actually alive before spending time on idle check
       if (!await isSessionProcessAlive(session)) continue
@@ -295,7 +308,6 @@ export class SessionHealthMonitor {
         sessionId: session.claudeSessionId,
         taskId: session.taskId,
         process_status: 'stopped',
-        work_status: session.work_status,
       }, ['*'], { source: 'health-monitor' })
     }
   }
@@ -306,17 +318,19 @@ export class SessionHealthMonitor {
    * Emits a status change event so the UI shows a warning.
    */
   private async checkStaleAwaitingSessions(
-    sessions: Array<{ claudeSessionId: string; taskId?: string; pid?: number; process_status?: string; work_status?: string; outputFile?: string; lastActiveAt?: string }>,
-    updateSessionRecord: (id: string, update: Record<string, unknown>) => Promise<void>,
+    sessions: SessionRecord[],
+    updateSessionRecord: (id: string, update: Record<string, unknown>) => Promise<unknown>,
+    taskMap: Map<string, Task>,
   ): Promise<void> {
     const STALE_THRESHOLD_MS = 60 * 60 * 1000  // 1 hour with no output = stale
 
     const { getRegisteredSessionManager } = await import('../providers/session-manager.js')
 
     for (const session of sessions) {
-      // Check both running and idle — await_human_action can be in either state
+      // Check both running and idle — AWAIT_HUMAN_ACTION can be in either state
       if (session.process_status === 'stopped' || session.process_status === 'error') continue
-      if (session.work_status !== 'await_human_action') continue
+      const taskPhase = session.taskId ? taskMap.get(session.taskId)?.phase : undefined
+      if (taskPhase !== 'AWAIT_HUMAN_ACTION') continue
 
       // Determine last activity time via session manager or file mtime
       const mgr = getRegisteredSessionManager(session.claudeSessionId)
@@ -354,7 +368,7 @@ export class SessionHealthMonitor {
         sessionId: session.claudeSessionId,
         taskId: session.taskId,
         process_status: session.process_status,
-        work_status: 'await_human_action',
+        phase: 'AWAIT_HUMAN_ACTION' as TaskPhase,
         activity: `Possibly stuck — no output for ${staleMinutes} min`,
       }, ['*'], { source: 'health-monitor' })
     }
@@ -409,7 +423,7 @@ export class SessionHealthMonitor {
         if (activePids.has(s.pid)) {
           log.session.warn('health monitor: skipping orphan kill — PID reuse collision detected', {
             staleSessionId: s.claudeSessionId, pid: s.pid,
-            staleWorkStatus: s.work_status, staleProcessStatus: s.process_status,
+            staleProcessStatus: s.process_status,
           })
           continue
         }
@@ -421,7 +435,6 @@ export class SessionHealthMonitor {
           taskId: s.taskId,
           pid: s.pid,
           process_status: s.process_status,
-          work_status: s.work_status,
         })
 
         try { process.kill(s.pid, 'SIGTERM') } catch { /* already dead */ }

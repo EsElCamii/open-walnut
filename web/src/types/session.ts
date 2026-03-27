@@ -1,5 +1,5 @@
 export type ProcessStatus = 'running' | 'idle' | 'stopped' | 'error';
-export type WorkStatus = 'in_progress' | 'agent_complete' | 'await_human_action' | 'completed';
+export type TaskPhase = 'TODO' | 'IN_PROGRESS' | 'AGENT_COMPLETE' | 'AWAIT_HUMAN_ACTION' | 'HUMAN_VERIFIED' | 'POST_WORK_COMPLETED' | 'PEER_CODE_REVIEW' | 'RELEASE_IN_PIPELINE' | 'COMPLETE';
 export type SessionMode = 'bypass' | 'accept' | 'default' | 'plan';
 export type SessionProvider = 'cli' | 'sdk' | 'embedded';
 
@@ -8,7 +8,6 @@ export interface SessionRecord {
   taskId: string;
   project: string;
   process_status: ProcessStatus;
-  work_status: WorkStatus;
   mode: SessionMode;
   activity?: string;
   last_status_change?: string;

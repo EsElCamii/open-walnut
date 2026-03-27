@@ -123,7 +123,7 @@ export async function buildSessionContext(taskId: string): Promise<SessionContex
         const sessionLines = recent.map((s) => {
           const parts = [
             `Session ${s.claudeSessionId.slice(0, 8)}`,
-            `process=${s.process_status}, work=${s.work_status}`,
+            `process=${s.process_status}`,
             `started=${s.startedAt}`,
             s.title ? `title="${s.title}"` : null,
           ]

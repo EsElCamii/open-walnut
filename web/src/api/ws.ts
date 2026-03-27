@@ -228,7 +228,7 @@ class WsClient {
       if (d.sessionId) summary.sessionId = d.sessionId;
       if (d.taskId) summary.taskId = d.taskId;
       if (d.process_status) summary.process_status = d.process_status;
-      if (d.work_status) summary.work_status = d.work_status;
+      if (d.phase) summary.phase = d.phase;
       if (d.mode) summary.mode = d.mode;
       if (d.activity) summary.activity = d.activity;
       if (d.planCompleted !== undefined) summary.planCompleted = d.planCompleted;

@@ -54,9 +54,9 @@ export interface TaskContext {
   conversation_log?: string;
   created_at?: string;
   plan_session_id?: string;
-  plan_session_status?: { work_status: string; process_status: string; activity?: string; provider?: string };
+  plan_session_status?: { process_status: string; activity?: string; provider?: string };
   exec_session_id?: string;
-  exec_session_status?: { work_status: string; process_status: string; activity?: string; provider?: string };
+  exec_session_status?: { process_status: string; activity?: string; provider?: string };
   subtasks?: { id: string; title: string; done: boolean }[];
 }
 

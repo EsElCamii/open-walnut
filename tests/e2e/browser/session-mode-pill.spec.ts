@@ -99,7 +99,6 @@ test.describe('SessionPill real-time mode change', () => {
     await injectEvent(page, 'session:status-changed', {
       sessionId: BYPASS_SESSION_ID,
       taskId: TASK_ID,
-      work_status: 'in_progress',
       process_status: 'running',
       mode: 'plan',
       activity: 'planning',
@@ -139,7 +138,6 @@ test.describe('SessionPill real-time mode change', () => {
     await injectEvent(page, 'session:status-changed', {
       sessionId: BYPASS_SESSION_ID,
       taskId: TASK_ID,
-      work_status: 'in_progress',
       process_status: 'running',
       mode: 'plan',
       activity: 'planning',
@@ -153,7 +151,6 @@ test.describe('SessionPill real-time mode change', () => {
     await injectEvent(page, 'session:status-changed', {
       sessionId: BYPASS_SESSION_ID,
       taskId: TASK_ID,
-      work_status: 'in_progress',
       process_status: 'running',
       mode: 'bypass',
       activity: 'implementing',
@@ -233,7 +230,7 @@ test.describe('SessionPill exec-slot mode change (missing session_id)', () => {
         source: 'ms-todo',
         // exec_session_id set — but NO session_id (this is the bug)
         exec_session_id: EXEC_SESSION_ID,
-        exec_session_status: { work_status: 'in_progress', process_status: 'running', mode: 'bypass' },
+        exec_session_status: { process_status: 'running', mode: 'bypass' },
         session_ids: [EXEC_SESSION_ID],
         active_session_ids: [EXEC_SESSION_ID],
         created_at: new Date().toISOString(),
@@ -255,7 +252,6 @@ test.describe('SessionPill exec-slot mode change (missing session_id)', () => {
     await injectEvent(page, 'session:status-changed', {
       sessionId: EXEC_SESSION_ID,
       taskId: EXEC_TASK_ID,
-      work_status: 'in_progress',
       process_status: 'running',
       mode: 'plan',
       activity: 'planning',

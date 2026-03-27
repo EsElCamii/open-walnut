@@ -1,7 +1,7 @@
 /**
  * SessionRetryButton — inline retry button for failed sessions.
- * Calls POST /api/sessions/:sessionId/retry to archive the failed session
- * and start a new one on the same task.
+ * Resume path: sends message to existing session (triggers --resume, preserves history).
+ * Fallback path: archives old session and starts new one on same task (no claudeSessionId).
  */
 
 import { useState, useCallback } from 'react';
@@ -9,21 +9,28 @@ import { retrySession } from '@/api/sessions';
 
 interface SessionRetryButtonProps {
   sessionId: string;
-  onRetried?: (taskId: string) => void;
+  onRetried?: (taskId: string) => void;   // fallback path (new session created)
+  onResuming?: () => void;                 // resume path (same session resumes)
 }
 
-export function SessionRetryButton({ sessionId, onRetried }: SessionRetryButtonProps) {
+export function SessionRetryButton({ sessionId, onRetried, onResuming }: SessionRetryButtonProps) {
   const [state, setState] = useState<'idle' | 'retrying' | 'error'>('idle');
 
   const handleRetry = useCallback(async () => {
     setState('retrying');
     try {
       const result = await retrySession(sessionId);
-      onRetried?.(result.taskId);
+      if (result.status === 'resuming') {
+        // Same session — processNext() emits status events, UI auto-updates
+        onResuming?.();
+      } else {
+        // Fallback: new session on same task
+        onRetried?.(result.taskId);
+      }
     } catch {
       setState('error');
     }
-  }, [sessionId, onRetried]);
+  }, [sessionId, onRetried, onResuming]);
 
   if (state === 'retrying') {
     return (

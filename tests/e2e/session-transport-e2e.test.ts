@@ -1019,7 +1019,6 @@ describe('Session record enrichment', () => {
         cwd?: string
         model?: string
         totalCost?: number
-        work_status?: string
         process_status?: string
       }>
     }
@@ -1030,8 +1029,7 @@ describe('Session record enrichment', () => {
     // Session should have a model from the mock CLI
     expect(session.model).toBeTruthy()
 
-    // Session should have work_status and process_status
-    expect(session.work_status).toBeTruthy()
+    // Session should have process_status
     expect(session.process_status).toBeTruthy()
 
     // For a completed session, process_status should be 'stopped'

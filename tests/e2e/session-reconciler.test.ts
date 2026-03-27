@@ -123,39 +123,36 @@ beforeAll(async () => {
     JSON.stringify({
       version: 2,
       sessions: [
-        // Zombie 1: in_progress with no PID (legacy-style)
+        // Zombie 1: running with no PID (legacy-style)
         {
           claudeSessionId: ZOMBIE_SESSION_IN_PROGRESS,
           taskId: 'task-with-zombie',
           project: 'Reconciler',
           process_status: 'running',
-          work_status: 'in_progress',
           mode: 'bypass',
           startedAt: now,
           lastActiveAt: now,
           messageCount: 5,
         },
-        // Zombie 2: agent_complete with no PID — already stopped, so reconciler skips it.
+        // Zombie 2: stopped with no PID — already stopped, so reconciler skips it.
         // last_status_change is pre-set (realistic: a stopped session always has this).
         {
           claudeSessionId: ZOMBIE_SESSION_TURN_COMPLETED,
           taskId: 'task-with-zombie',
           project: 'Reconciler',
           process_status: 'stopped',
-          work_status: 'agent_complete',
           mode: 'bypass',
           last_status_change: now,
           startedAt: now,
           lastActiveAt: now,
           messageCount: 3,
         },
-        // Zombie 3: in_progress with a dead PID
+        // Zombie 3: running with a dead PID
         {
           claudeSessionId: ZOMBIE_SESSION_DEAD_PID,
           taskId: 'task-with-dead-pid',
           project: 'Reconciler',
           process_status: 'running',
-          work_status: 'in_progress',
           mode: 'bypass',
           startedAt: now,
           lastActiveAt: now,
@@ -163,25 +160,23 @@ beforeAll(async () => {
           pid: 999999999,
           outputFile: '/tmp/nonexistent.jsonl',
         },
-        // Already completed — should not be touched
+        // Already stopped — should not be touched
         {
           claudeSessionId: COMPLETED_SESSION,
           taskId: 'task-with-zombie',
           project: 'Reconciler',
           process_status: 'stopped',
-          work_status: 'completed',
           mode: 'bypass',
           startedAt: now,
           lastActiveAt: now,
           messageCount: 10,
         },
-        // Zombie 4: taskless session in_progress
+        // Zombie 4: taskless session running
         {
           claudeSessionId: ZOMBIE_TASKLESS,
           taskId: '',
           project: '',
           process_status: 'running',
-          work_status: 'in_progress',
           mode: 'default',
           startedAt: now,
           lastActiveAt: now,
@@ -208,57 +203,52 @@ afterAll(async () => {
 // ── Tests ──
 
 describe('Zombie session reconciliation on startup', () => {
-  it('zombie sessions are marked agent_complete after server starts', async () => {
+  it('zombie sessions are marked stopped after server starts', async () => {
     const res = await fetch(apiUrl('/api/sessions'))
     expect(res.status).toBe(200)
     const body = (await res.json()) as {
       sessions: Array<{
         claudeSessionId: string
         process_status: string
-        work_status: string
       }>
     }
 
     const byId = (id: string) => body.sessions.find((s) => s.claudeSessionId === id)
 
-    // Zombie 1: legacy no-PID in_progress → agent_complete (only agent/human sets completed)
+    // Zombie 1: legacy no-PID running → stopped
     const z1 = byId(ZOMBIE_SESSION_IN_PROGRESS)
     expect(z1).toBeDefined()
-    expect(z1!.work_status).toBe('agent_complete')
     expect(z1!.process_status).toBe('stopped')
 
-    // Zombie 2: already agent_complete → stays agent_complete
+    // Zombie 2: already stopped → stays stopped
     const z2 = byId(ZOMBIE_SESSION_TURN_COMPLETED)
     expect(z2).toBeDefined()
-    expect(z2!.work_status).toBe('agent_complete')
     expect(z2!.process_status).toBe('stopped')
 
-    // Zombie 3: dead PID → agent_complete
+    // Zombie 3: dead PID → stopped
     const z3 = byId(ZOMBIE_SESSION_DEAD_PID)
     expect(z3).toBeDefined()
-    expect(z3!.work_status).toBe('agent_complete')
     expect(z3!.process_status).toBe('stopped')
 
-    // Zombie 4: taskless → agent_complete
+    // Zombie 4: taskless → stopped
     const z4 = byId(ZOMBIE_TASKLESS)
     expect(z4).toBeDefined()
-    expect(z4!.work_status).toBe('agent_complete')
     expect(z4!.process_status).toBe('stopped')
   })
 
-  it('already-completed session is untouched', async () => {
+  it('already-stopped session is untouched', async () => {
     const res = await fetch(apiUrl('/api/sessions'))
     const body = (await res.json()) as {
       sessions: Array<{
         claudeSessionId: string
-        work_status: string
+        process_status: string
         messageCount: number
       }>
     }
 
     const completed = body.sessions.find((s) => s.claudeSessionId === COMPLETED_SESSION)
     expect(completed).toBeDefined()
-    expect(completed!.work_status).toBe('completed')
+    expect(completed!.process_status).toBe('stopped')
     expect(completed!.messageCount).toBe(10) // unchanged
   })
 
@@ -355,17 +345,17 @@ describe('Zombie session reconciliation on startup', () => {
     const raw = JSON.parse(await fs.readFile(SESSIONS_FILE, 'utf-8')) as {
       sessions: Array<{
         claudeSessionId: string
-        work_status: string
+        process_status: string
         last_status_change?: string
       }>
     }
 
-    // Sessions that were reconciled (dead processes): reconciler set work_status=agent_complete
+    // Sessions that were reconciled (dead processes): reconciler set process_status=stopped
     // and last_status_change, proving updateSessionRecordConditionally ran.
     for (const id of [ZOMBIE_SESSION_IN_PROGRESS, ZOMBIE_SESSION_DEAD_PID, ZOMBIE_TASKLESS]) {
       const s = raw.sessions.find((s) => s.claudeSessionId === id)
       expect(s).toBeDefined()
-      expect(s!.work_status).toBe('agent_complete')
+      expect(s!.process_status).toBe('stopped')
       expect(s!.last_status_change).toBeTruthy()
     }
 
@@ -374,7 +364,6 @@ describe('Zombie session reconciliation on startup', () => {
     // We verify the seed state is preserved unchanged — this is NOT a reconciler output.
     const skipped = raw.sessions.find((s) => s.claudeSessionId === ZOMBIE_SESSION_TURN_COMPLETED)
     expect(skipped).toBeDefined()
-    expect(skipped!.work_status).toBe('agent_complete')
     expect(skipped!.process_status).toBe('stopped')
   })
 })

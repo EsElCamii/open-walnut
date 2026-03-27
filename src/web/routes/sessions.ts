@@ -14,7 +14,7 @@ import path from 'path'
 import { isSessionProcessAlive } from '../../utils/session-liveness.js'
 import { readPlanFromSession, buildPlanExecutionMessage } from '../../utils/plan-message.js'
 import { getFrequentDirs, compileFromSessions } from '../../core/frequent-dirs.js'
-import type { SessionRecord, Task, WorkStatus } from '../../core/types.js'
+import type { SessionRecord, Task } from '../../core/types.js'
 import type { SessionHistoryMessage } from '../../core/session-history.js'
 import { processAndSaveImages, buildSessionImageContext } from './images.js'
 import type { ImagePayload } from './images.js'
@@ -51,8 +51,6 @@ async function enrichWithLiveStatus(sessions: SessionRecord[]): Promise<SessionR
     const s = sessions[i]
     if (s.process_status === 'running' || s.process_status === 'idle') {
       needsCheck.push(i)
-    } else if (s.pid == null && s.work_status === 'completed') {
-      s.process_status = 'stopped'
     }
   }
 
@@ -464,7 +462,7 @@ sessionsRouter.get('/tree', async (req: Request, res: Response, next: NextFuncti
       // Non-triage embedded sessions (e.g. general agent) are shown.
       if (isTriageSession(s)) continue
       if (s.archived) continue
-      if (hideCompleted && s.work_status === 'completed') continue
+      // hideCompleted now uses task.phase (checked at display layer) — sessions no longer carry work_status
       if (!s.taskId || !taskMap.has(s.taskId)) {
         orphanSessions.push(s)
       } else {
@@ -598,7 +596,7 @@ sessionsRouter.get('/:sessionId', async (req: Request, res: Response, next: Next
 // PATCH /api/sessions/:sessionId
 sessionsRouter.patch('/:sessionId', async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const { title, work_status, activity, human_note, archived, archive_reason } = req.body as { title?: string; work_status?: WorkStatus; activity?: string; human_note?: string; archived?: boolean; archive_reason?: string }
+    const { title, activity, human_note, archived, archive_reason } = req.body as { title?: string; activity?: string; human_note?: string; archived?: boolean; archive_reason?: string }
 
     if (title !== undefined && (typeof title !== 'string' || title.length > 500)) {
       res.status(400).json({ error: 'title must be a string (max 500 chars)' })
@@ -608,14 +606,6 @@ sessionsRouter.patch('/:sessionId', async (req: Request, res: Response, next: Ne
     if (human_note !== undefined && (typeof human_note !== 'string' || human_note.length > 50000)) {
       res.status(400).json({ error: 'human_note must be a string (max 50000 chars)' })
       return
-    }
-
-    if (work_status !== undefined) {
-      const allowed: WorkStatus[] = ['await_human_action', 'agent_complete', 'completed']
-      if (!allowed.includes(work_status)) {
-        res.status(400).json({ error: `work_status must be one of: ${allowed.join(', ')}` })
-        return
-      }
     }
 
     if (archived !== undefined && typeof archived !== 'boolean') {
@@ -640,11 +630,6 @@ sessionsRouter.patch('/:sessionId', async (req: Request, res: Response, next: Ne
 
     const updates: Partial<SessionRecord> = {}
     if (title !== undefined) updates.title = title
-    if (work_status !== undefined) {
-      updates.work_status = work_status
-      updates.last_status_change = new Date().toISOString()
-      if (work_status === 'completed') updates.activity = undefined
-    }
     if (activity !== undefined) updates.activity = activity
     if (human_note !== undefined) updates.human_note = human_note
     if (archived !== undefined) {
@@ -657,12 +642,11 @@ sessionsRouter.patch('/:sessionId', async (req: Request, res: Response, next: Ne
     log.web.info('session updated via REST', { sessionId, fields: Object.keys(updates) })
 
     // Emit status change so frontend updates in real time
-    if (work_status !== undefined || archived !== undefined) {
+    if (archived !== undefined) {
       bus.emit(EventNames.SESSION_STATUS_CHANGED, {
         sessionId,
         taskId: updated.taskId,
         process_status: updated.process_status,
-        work_status: updated.work_status,
         activity: updated.activity,
         mode: updated.mode,
         ...(updated.planCompleted ? { planCompleted: true } : {}),
@@ -677,16 +661,6 @@ sessionsRouter.patch('/:sessionId', async (req: Request, res: Response, next: Ne
         await clearSession(updated.taskId, sessionId)
         const { task } = await clearSessionSlot(updated.taskId, sessionId)
         bus.emit(EventNames.TASK_UPDATED, { task }, ['web-ui'], { source: 'session-archived' })
-      } catch { /* task may not exist */ }
-    }
-
-    // When work is marked fully completed (human verification done), clear the task session slot.
-    // Only 'completed' (human-set) clears the task session slot.
-    if (work_status === 'completed' && updated.taskId) {
-      try {
-        const { clearSessionSlot } = await import('../../core/task-manager.js')
-        const { task } = await clearSessionSlot(updated.taskId, sessionId)
-        bus.emit(EventNames.TASK_UPDATED, { task }, ['web-ui'], { source: 'session-completed' })
       } catch { /* task may not exist */ }
     }
 
@@ -996,7 +970,9 @@ sessionsRouter.post('/:sessionId/execute', async (req: Request, res: Response, n
   }
 })
 
-// POST /api/sessions/:sessionId/retry — retry a failed session (archive old, start new)
+// POST /api/sessions/:sessionId/retry — retry a failed session
+// Two paths: (1) resume via --resume if claudeSessionId exists (preserves history),
+// (2) fallback to archive+new if no claudeSessionId (session failed before init).
 sessionsRouter.post('/:sessionId/retry', async (req: Request, res: Response, next: NextFunction) => {
   try {
     const sessionId = req.params.sessionId as string
@@ -1016,13 +992,28 @@ sessionsRouter.post('/:sessionId/retry', async (req: Request, res: Response, nex
       return
     }
 
+    // ── Resume path: session has claudeSessionId → use --resume to preserve history ──
+    // Don't touch process_status here — processNext() handles the full transition:
+    // work_status='in_progress', clear errorMessage, emit status event, spawn --resume.
+    // enrichWithLiveStatus() only checks running/idle sessions, so 'error' won't flash.
+    if (record.claudeSessionId) {
+      const { sendMessageToSession } = await import('../../core/session-message-queue.js')
+      await sendMessageToSession(sessionId, 'Continue where you left off — connection was restored.', {
+        source: 'retry',
+        taskId: record.taskId,
+      })
+      log.web.info('session retry: resuming via --resume', { sessionId, taskId: record.taskId })
+      res.json({ status: 'resuming', sessionId })
+      return
+    }
+
+    // ── Fallback: no claudeSessionId (failed before init) → archive + start new ──
     const task = await getTask(record.taskId)
     if (!task) {
       res.status(404).json({ error: 'Associated task not found' })
       return
     }
 
-    // Archive the old session
     await updateSessionRecord(sessionId, { archived: true, archive_reason: 'retry' })
     try {
       const { clearSession, clearSessionSlot } = await import('../../core/task-manager.js')
@@ -1030,7 +1021,6 @@ sessionsRouter.post('/:sessionId/retry', async (req: Request, res: Response, nex
       await clearSessionSlot(task.id, sessionId)
     } catch { /* task may not exist */ }
 
-    // Read first user message from old session for retry
     let retryMessage = 'Retry session'
     try {
       const messages = await readSessionHistory(sessionId, record.cwd, record.host, record.outputFile)
@@ -1038,7 +1028,6 @@ sessionsRouter.post('/:sessionId/retry', async (req: Request, res: Response, nex
       if (firstUser?.text) retryMessage = firstUser.text
     } catch { /* history may be unavailable */ }
 
-    // Start new session on the same task
     bus.emit(EventNames.SESSION_START, {
       taskId: task.id,
       message: retryMessage,
@@ -1049,8 +1038,9 @@ sessionsRouter.post('/:sessionId/retry', async (req: Request, res: Response, nex
       host: record.host,
     }, ['session-runner'], { source: 'retry' })
 
-    log.web.info('session retry: archived old session, started new', { oldSessionId: sessionId, taskId: task.id })
-
+    log.web.info('session retry: no claudeSessionId, started new session', {
+      oldSessionId: sessionId, taskId: task.id,
+    })
     res.json({ status: 'pending', taskId: task.id, oldSessionId: sessionId })
   } catch (err) {
     next(err)

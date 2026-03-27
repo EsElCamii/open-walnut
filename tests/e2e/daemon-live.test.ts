@@ -385,19 +385,19 @@ describeIf(`Live daemon tests (host: ${LIVE_HOST})`, () => {
       expect(target!.connected).toBe(true)
     }, 30_000)
 
-    it('L11: after session completes, work_status is agent_complete', async () => {
+    it('L11: after session completes, process_status is stopped or running (FIFO)', async () => {
       const sid = firstSessionId
       if (!sid) {
         console.log('L11: skipped — no sessionId available')
         return
       }
 
-      // Poll for up to 60s for work_status to become agent_complete
+      // Poll for up to 60s for process_status to settle (stopped or running with FIFO)
       const reached = await pollUntil(async () => {
         const res = await fetch(apiUrl(`/api/sessions/${sid}`))
         if (res.status !== 200) return false
         const body = await res.json() as { session: Record<string, unknown> }
-        return body.session.work_status === 'agent_complete'
+        return body.session.process_status === 'stopped' || body.session.process_status === 'running'
       }, 2_000, 60_000)
 
       expect(reached).toBe(true)

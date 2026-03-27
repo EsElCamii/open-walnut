@@ -38,7 +38,7 @@ import type { SshTarget } from './session-io.js'
 import { createSessionManager, registerSessionManager, unregisterSessionManager } from './session-manager.js'
 import type { SessionManager } from './session-manager.js'
 import { recoverStateFromJsonl, extractImageFilePathFromInput } from '../core/session-history.js'
-import type { SessionRecord, SessionMode, ProcessStatus, WorkStatus } from '../core/types.js'
+import type { SessionRecord, SessionMode, ProcessStatus, TaskPhase } from '../core/types.js'
 import type { SessionServerClient } from './session-server-client.js'
 import { sanitizeInitModel, CONTEXT_WINDOW_DEFAULT } from '../agent/providers/defaults.js'
 
@@ -252,9 +252,8 @@ export class ClaudeCodeSession {
   /** Host key from config.hosts — null means local execution */
   private _host: string | null = null
 
-  // Two-dimensional status tracking
+  // Status tracking
   private _processStatus: ProcessStatus = 'stopped'
-  private _workStatus: WorkStatus = 'in_progress'
   private _mode: SessionMode = 'default'
   private _activity: string | undefined
   /** Model ID from JSONL assistant messages (e.g. "claude-opus-4-6"). */
@@ -349,10 +348,6 @@ export class ClaudeCodeSession {
     this._transport?.deletePipe()
     this._active = false
     this._processStatus = 'stopped'
-  }
-
-  get workStatus(): WorkStatus {
-    return this._workStatus
   }
 
   get mode(): SessionMode {
@@ -476,7 +471,6 @@ export class ClaudeCodeSession {
 
     this._active = true
     this._processStatus = 'running'
-    this._workStatus = 'in_progress'
     this._exitCode = null
     this.resultEmitted = false
     this._turnResultEmitted = false
@@ -536,7 +530,6 @@ export class ClaudeCodeSession {
             outputFile: this._outputFile ?? undefined,
             pid: this.pid ?? undefined,
             process_status: 'running',
-            work_status: 'in_progress',
           }).catch(() => {}),
         ).catch(() => {})
       }
@@ -550,9 +543,8 @@ export class ClaudeCodeSession {
         this.resultEmitted = true
         this._active = false
         this._processStatus = 'stopped'
-        this._workStatus = 'error'
         this._activity = undefined
-        this.emitStatusChanged('error', 'in_progress')
+        this.emitStatusChanged('AGENT_COMPLETE')
         bus.emit(EventNames.SESSION_ERROR, {
           sessionId: this.claudeSessionId,
           taskId: this.taskId,
@@ -562,7 +554,7 @@ export class ClaudeCodeSession {
     })
 
     this._outputFile = transport.outputFile
-    this.emitStatusChanged('in_progress')
+    this.emitStatusChanged('IN_PROGRESS')
     this.startLivenessMonitor()
     this.startStallDiagTimer('resume-spawn')
   }
@@ -584,7 +576,6 @@ export class ClaudeCodeSession {
     session._cwd = record.cwd ?? null
     session._active = true
     session._processStatus = record.process_status ?? 'running'
-    session._workStatus = record.work_status ?? 'in_progress'
     session._mode = record.mode ?? 'default'
     session._activity = record.activity
     session.planFile = record.planFile ?? null
@@ -610,27 +601,27 @@ export class ClaudeCodeSession {
     // that was already fully processed (git pull, usage tracking, task phase update,
     // triage dispatch) before the restart — flooding the user with stale notifications.
     //
-    // We use `work_status` from sessions.json as the durable proxy for "server already
+    // We use the linked task's phase as the durable proxy for "server already
     // handled this result":
-    //   - The main-ai handler in server.ts sets work_status → 'agent_complete' only
-    //     AFTER completing all result bookkeeping
-    //   - sessions.json is written to disk and persists across restarts
-    //   - If work_status is terminal, the server already processed the real result
+    //   - The main-ai handler in server.ts advances task.phase to AGENT_COMPLETE
+    //     only AFTER completing all result bookkeeping
+    //   - tasks.json is written to disk and persists across restarts
+    //   - If task.phase is past IN_PROGRESS, the server already processed the real result
     //
-    // Why NOT check the JSONL output file instead:
-    //   - The JSONL is written by the detached Claude CLI process, completely
-    //     independently of the Walnut server
-    //   - It will always contain a final result event once the CLI session ends,
-    //     regardless of whether the server ever processed that event
-    //   - Checking JSONL answers "did the CLI finish?" — NOT "did the server handle it?"
-    //   - So JSONL would set resultEmitted=true for every completed session, even those
-    //     whose result the server never saw (e.g. crashed mid-processing)
-    //
-    // Race window: theoretically the server could crash between setting work_status
-    // and flushing sessions.json to disk. In practice this window is sub-millisecond.
+    // Race window: theoretically the server could crash between setting task.phase
+    // and flushing tasks.json to disk. In practice this window is sub-millisecond.
     // Worst case: one extra triage notification — acceptable.
-    const terminalWorkStatuses: WorkStatus[] = ['agent_complete', 'await_human_action', 'completed']
-    session.resultEmitted = terminalWorkStatuses.includes(record.work_status as WorkStatus)
+    let taskPhaseIsTerminal = false
+    if (record.taskId) {
+      try {
+        const { getTask } = await import('../core/task-manager.js')
+        const task = await getTask(record.taskId)
+        if (task && task.phase !== 'TODO' && task.phase !== 'IN_PROGRESS') {
+          taskPhaseIsTerminal = true
+        }
+      } catch { /* task not found — assume non-terminal */ }
+    }
+    session.resultEmitted = taskPhaseIsTerminal
       || record.process_status === 'error'
 
     // Create the appropriate session manager for attach:
@@ -701,10 +692,9 @@ export class ClaudeCodeSession {
         if (recovered.planFile) session.planFile = recovered.planFile
         if (recovered.planCompleted != null) session.planCompleted = recovered.planCompleted
         if (recovered.activity) session._activity = recovered.activity
-        if (recovered.workStatus) session._workStatus = recovered.workStatus as typeof session._workStatus
-        // Belt-and-suspenders: if the JSONL-recovered workStatus is also terminal,
-        // reinforce resultEmitted even if sessions.json was momentarily stale.
-        if (recovered.workStatus && terminalStatuses.includes(recovered.workStatus as WorkStatus)) {
+        // Belt-and-suspenders: if the JSONL has a result event (hasResult),
+        // reinforce resultEmitted even if tasks.json was momentarily stale.
+        if (recovered.workStatus === 'agent_complete' || recovered.workStatus === 'await_human_action') {
           session.resultEmitted = true
         }
         log.session.info('recovered state from canonical JSONL', {
@@ -797,8 +787,6 @@ export class ClaudeCodeSession {
     if (!this._transport) return false
     const ok = this._transport.writeMessage(message)
     if (!ok) return false
-    const prevWorkStatus = this._workStatus
-    this._workStatus = 'in_progress'
     this._processStatus = 'running'  // Back to running from idle
     this._activity = undefined
     this.resultEmitted = false
@@ -806,14 +794,13 @@ export class ClaudeCodeSession {
     this._turnStartOffset = this._transport?.fileSize ?? 0  // Track where this turn's data begins
     this._askUserIntercepted = false
     this._toolInputFilePaths.clear()  // Fresh turn — clear stale cached tool input paths
-    this.emitStatusChanged('in_progress', prevWorkStatus)
+    this.emitStatusChanged('IN_PROGRESS')
     // Persist running state to session tracker so API consumers (frontend tree, etc.)
     // see the updated status immediately — not just WebSocket subscribers.
     if (this.claudeSessionId) {
       import('../core/session-tracker.js').then(({ updateSessionRecord }) => {
         updateSessionRecord(this.claudeSessionId!, {
           process_status: 'running',
-          work_status: 'in_progress',
           activity: undefined,
           last_status_change: new Date().toISOString(),
         }).catch(() => {})
@@ -909,7 +896,6 @@ export class ClaudeCodeSession {
     }
     this._active = false
     this._processStatus = 'stopped'
-    this._workStatus = 'agent_complete'
     this._activity = undefined
   }
 
@@ -990,9 +976,8 @@ export class ClaudeCodeSession {
       this._turnResultEmitted = true
 
       if (hasResultInFile) {
-        this._workStatus = 'agent_complete'
         this._activity = undefined
-        this.emitStatusChanged('agent_complete', 'in_progress')
+        this.emitStatusChanged('AGENT_COMPLETE')
         if (this.claudeSessionId) {
           this.persistSessionRecord(this.claudeSessionId, this._cwd ?? undefined).catch((err) => {
             log.session.warn('persistSessionRecord failed (PID died, result found)', { sessionId: this.claudeSessionId, error: err instanceof Error ? err.message : String(err) })
@@ -1012,9 +997,8 @@ export class ClaudeCodeSession {
       } else if (resultErrorMessage) {
         // Result event exists but is_error:true — e.g. --resume "No conversation found".
         // Surface the error instead of silently treating it as success.
-        this._workStatus = 'error'
         this._activity = undefined
-        this.emitStatusChanged('error', 'in_progress')
+        this.emitStatusChanged('AGENT_COMPLETE')
         log.session.error('session PID died — error result in output file', {
           taskId: this.taskId,
           sessionId: this.claudeSessionId,
@@ -1037,18 +1021,16 @@ export class ClaudeCodeSession {
         const isRealError = stderr && !isBenignSshStderr(stderr)
 
         if (isRealError) {
-          this._workStatus = 'error'
           this._activity = undefined
-          this.emitStatusChanged('error', 'in_progress')
+          this.emitStatusChanged('AGENT_COMPLETE')
           bus.emit(EventNames.SESSION_ERROR, {
             sessionId: this.claudeSessionId,
             taskId: this.taskId,
             error: stderr,
           }, ['main-ai', 'session-runner'], { source: 'session-runner' })
         } else {
-          this._workStatus = 'agent_complete'
           this._activity = undefined
-          this.emitStatusChanged('agent_complete', 'in_progress')
+          this.emitStatusChanged('AGENT_COMPLETE')
           if (this.claudeSessionId) {
             this.persistSessionRecord(this.claudeSessionId, this._cwd ?? undefined).catch((err) => {
               log.session.warn('persistSessionRecord failed (PID died, no result)', { sessionId: this.claudeSessionId, error: err instanceof Error ? err.message : String(err) })
@@ -1119,7 +1101,6 @@ export class ClaudeCodeSession {
         pidAlive,
         host: this._host,
         processStatus: this._processStatus,
-        workStatus: this._workStatus,
         hasPipe: this._transport?.hasPipe ?? false,
         hasTailer,
         fileSizeAtDelivery: this._fileSizeAtDelivery,
@@ -1283,7 +1264,7 @@ export class ClaudeCodeSession {
           })()
 
           // Re-emit status now that claudeSessionId is set (first emit at spawn had null ID)
-          this.emitStatusChanged(this._workStatus)
+          this.emitStatusChanged('IN_PROGRESS')
         }
 
         // Parse permissionMode from ANY system event (init or status).
@@ -1301,7 +1282,7 @@ export class ClaudeCodeSession {
                 updateSessionRecord(this.claudeSessionId!, { mode: mapped }).catch(() => {}),
               )
             }
-            this.emitStatusChanged(this._workStatus)
+            this.emitStatusChanged('IN_PROGRESS')
             log.session.info('mode updated from JSONL system event', {
               sessionId: this.claudeSessionId, taskId: this.taskId,
               oldMode, newMode: mapped,
@@ -1446,7 +1427,7 @@ export class ClaudeCodeSession {
                 )
               }
               // Notify frontend so it can show the Execute button once the session stops
-              this.emitStatusChanged(this._workStatus)
+              this.emitStatusChanged('IN_PROGRESS')
             }
 
             // ── AskUserQuestion auto-intercept ──
@@ -1642,7 +1623,6 @@ export class ClaudeCodeSession {
         if (this._transport?.hasPipe && processStillAlive) {
           // stream-json FIFO mode: process is still alive between turns
           // Keep process running, ready for next writeMessage()
-          this._workStatus = result.is_error ? 'error' : 'agent_complete'
           this._processStatus = 'idle'  // Turn done, process alive, waiting for next writeMessage()
           this._activity = undefined
           this.resultEmitted = false  // Ready for next turn
@@ -1658,7 +1638,6 @@ export class ClaudeCodeSession {
           this.resultEmitted = true
           this._active = false
           this._processStatus = 'idle'
-          this._workStatus = 'agent_complete'
           this._activity = undefined
           // Clear PID — the remote --resume process exited. Prevents stale local PID checks.
           this.pid = null
@@ -1673,7 +1652,6 @@ export class ClaudeCodeSession {
           this.resultEmitted = true
           this._active = false
           this._processStatus = 'stopped'
-          this._workStatus = result.is_error ? 'error' : 'agent_complete'
           this._activity = undefined
           this.stopMonitoring()
 
@@ -1688,7 +1666,7 @@ export class ClaudeCodeSession {
           }
         }
 
-        this.emitStatusChanged(result.is_error ? 'error' : 'agent_complete', 'in_progress')
+        this.emitStatusChanged('AGENT_COMPLETE')
 
         this._turnResultEmitted = true
         log.session.info('session result emitted', { sessionId: this.claudeSessionId, taskId: this.taskId, resultLength: resultText?.length ?? 0 })
@@ -1717,13 +1695,12 @@ export class ClaudeCodeSession {
     }
   }
 
-  private emitStatusChanged(workStatus: WorkStatus, previousWorkStatus?: WorkStatus): void {
+  private emitStatusChanged(phase: TaskPhase): void {
     bus.emit(EventNames.SESSION_STATUS_CHANGED, {
       sessionId: this.claudeSessionId,
       taskId: this.taskId,
       process_status: this._processStatus,
-      work_status: workStatus,
-      previousWorkStatus,
+      phase,
       mode: this._mode,
       activity: this._activity,
       ...(this.planCompleted ? { planCompleted: true } : {}),
@@ -1944,7 +1921,6 @@ export class SessionRunner {
               import('../core/session-tracker.js').then(({ updateSessionRecord, getSessionByClaudeId }) => {
                 updateSessionRecord(sessionId, {
                   process_status: isError ? 'error' : 'stopped',
-                  work_status: isError ? undefined : 'agent_complete',
                   errorMessage: isError ? errorMessage : undefined,
                   activity: undefined,
                   last_status_change: new Date().toISOString(),
@@ -1966,7 +1942,6 @@ export class SessionRunner {
               import('../core/session-tracker.js').then(({ updateSessionRecord }) => {
                 updateSessionRecord(sessionId, {
                   process_status: isError ? 'error' : 'idle',
-                  work_status: isError ? undefined : 'agent_complete',
                   errorMessage: isError ? errorMessage : undefined,
                   activity: undefined,
                   last_status_change: new Date().toISOString(),
@@ -2098,7 +2073,7 @@ export class SessionRunner {
   /**
    * Kill orphaned claude processes from stopped/terminal sessions.
    * Scans sessions.json for sessions with PIDs where process_status is 'stopped'
-   * or work_status is terminal, but the OS process is still alive.
+   * or in terminal state, but the OS process is still alive.
    * This prevents accumulation of zombie claude processes over time.
    */
   private async killOrphanedSessionProcesses(): Promise<void> {
@@ -2124,7 +2099,6 @@ export class SessionRunner {
           taskId: s.taskId,
           pid: s.pid,
           process_status: s.process_status,
-          work_status: s.work_status,
         })
 
         try { process.kill(s.pid, 'SIGTERM') } catch { /* already dead */ }
@@ -2646,15 +2620,11 @@ export class SessionRunner {
 
     // Update session record — always reset on send (user is actively resuming)
     try {
-      const { getSessionByClaudeId, updateSessionRecord } = await import('../core/session-tracker.js')
-      const rec = await getSessionByClaudeId(sessionId)
-      if (rec && rec.work_status !== 'in_progress') {
-        await updateSessionRecord(sessionId, {
-          work_status: 'in_progress',
-          activity: 'Processing follow-up...',
-          lastActiveAt: new Date().toISOString(),
-        })
-      }
+      const { updateSessionRecord } = await import('../core/session-tracker.js')
+      await updateSessionRecord(sessionId, {
+        activity: 'Processing follow-up...',
+        lastActiveAt: new Date().toISOString(),
+      })
     } catch (err) {
       log.session.warn('handleSendSdk: status reset failed', { sessionId, error: err instanceof Error ? err.message : String(err) })
     }
@@ -2693,10 +2663,7 @@ export class SessionRunner {
       }
     }
 
-    // Defensive phase rollback + work_status reset (best-effort, don't block send).
-    // The work_status reset is critical for the FIFO path: when the CLI process is still
-    // alive, processNext() writes via stdin pipe without spawning a new process, so
-    // createSessionRecord() is never called and work_status would stay stale.
+    // Defensive phase rollback (best-effort, don't block send).
     try {
       const { getSessionByClaudeId, updateSessionRecord } = await import('../core/session-tracker.js')
       const record = await getSessionByClaudeId(sessionId)
@@ -2711,14 +2678,9 @@ export class SessionRunner {
             log.session.info('handleSend: rolled back phase to IN_PROGRESS', { taskId: record.taskId, oldPhase: task.phase })
           }
         }
-        // Reset work_status unconditionally — a user sending a message means the
-        // session is being actively resumed, even from terminal states (completed/error).
-        // Skipping terminal states caused the "Stopped + Completed" bug where a resumed
-        // session's DB record kept the old terminal status, and enrichWithLiveStatus()
-        // would force process_status='stopped' for completed sessions without checking PID.
-        if (record.work_status !== 'in_progress') {
+        // Clear stale error message and update activity on resume
+        if (record.process_status === 'error' || record.errorMessage) {
           await updateSessionRecord(sessionId, {
-            work_status: 'in_progress',
             activity: 'Processing follow-up...',
             errorMessage: undefined,  // Clear stale error on resume
           })
@@ -2727,9 +2689,8 @@ export class SessionRunner {
             sessionId,
             taskId: record.taskId,
             process_status: record.process_status,
-            work_status: 'in_progress',
+            phase: 'IN_PROGRESS',
             activity: 'Processing follow-up...',
-            previousWorkStatus: record.work_status,
           }, ['*'], { source: 'session-runner' })
         }
       }

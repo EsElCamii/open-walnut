@@ -377,7 +377,7 @@ function TaskContextSection({ ctx, onSessionClick }: TaskContextSectionProps) {
                   </span>
                   {ctx.plan_session_status && (
                     <span className="chat-task-context-session-status">
-                      ({ctx.plan_session_status.process_status}, {ctx.plan_session_status.work_status.replace(/_/g, ' ')})
+                      ({ctx.plan_session_status.process_status})
                     </span>
                   )}
                 </div>
@@ -390,7 +390,7 @@ function TaskContextSection({ ctx, onSessionClick }: TaskContextSectionProps) {
                   </span>
                   {ctx.exec_session_status && (
                     <span className="chat-task-context-session-status">
-                      ({ctx.exec_session_status.process_status}, {ctx.exec_session_status.work_status.replace(/_/g, ' ')})
+                      ({ctx.exec_session_status.process_status})
                     </span>
                   )}
                 </div>

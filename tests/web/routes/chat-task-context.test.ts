@@ -161,13 +161,13 @@ describe('buildTaskContextPrefix', () => {
       id: 'x',
       title: 'test',
       plan_session_id: 'plan-abc',
-      plan_session_status: { work_status: 'completed', process_status: 'stopped' },
+      plan_session_status: { process_status: 'stopped' },
       exec_session_id: 'exec-def',
-      exec_session_status: { work_status: 'in_progress', process_status: 'running', activity: 'Implementing auth' },
+      exec_session_status: { process_status: 'running', activity: 'Implementing auth' },
     });
 
-    expect(prefix).toContain('Plan session: plan-abc (stopped, completed)');
-    expect(prefix).toContain('Exec session: exec-def (running, in_progress, Implementing auth)');
+    expect(prefix).toContain('Plan session: plan-abc (stopped)');
+    expect(prefix).toContain('Exec session: exec-def (running, Implementing auth)');
   });
 
   it('includes session IDs without status when status is absent', () => {
@@ -186,10 +186,10 @@ describe('buildTaskContextPrefix', () => {
       id: 'x',
       title: 'test',
       plan_session_id: 'plan-only',
-      plan_session_status: { work_status: 'agent_complete', process_status: 'stopped' },
+      plan_session_status: { process_status: 'stopped' },
     });
 
-    expect(prefix).toContain('Plan session: plan-only (stopped, agent_complete)');
+    expect(prefix).toContain('Plan session: plan-only (stopped)');
     expect(prefix).not.toContain('Exec session:');
   });
 

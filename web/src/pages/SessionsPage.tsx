@@ -154,7 +154,7 @@ export function SessionsPage() {
   });
   useEvent('session:status-changed', (data: unknown) => {
     // Auto-switch to new exec session when "Clear Context & Execute" creates one
-    const d = data as { sessionId?: string; fromPlanSessionId?: string; process_status?: string; work_status?: string; activity?: string };
+    const d = data as { sessionId?: string; fromPlanSessionId?: string; process_status?: string; phase?: string; activity?: string };
     if (d.fromPlanSessionId && d.sessionId && d.fromPlanSessionId === selectedId) {
       setSelectedId(d.sessionId);
     }
@@ -163,14 +163,13 @@ export function SessionsPage() {
     // immediately — without waiting for the loadTree() API round-trip.
     // This fixes the stale-status bug where FIFO sessions show Idle/Agent Complete
     // even though they transitioned to Running/In Progress.
-    if (d.sessionId && treeData && (d.process_status || d.work_status)) {
+    if (d.sessionId && treeData && d.process_status) {
       setTreeData((prev) => {
         if (!prev) return prev;
         const patch = (sessions: SessionRecord[]) => {
           for (const s of sessions) {
             if (s.claudeSessionId === d.sessionId) {
               if (d.process_status) s.process_status = d.process_status as SessionRecord['process_status'];
-              if (d.work_status) s.work_status = d.work_status as SessionRecord['work_status'];
               if ('activity' in d) s.activity = d.activity;
               // Clear stale error when session recovers from error state
               if (d.process_status && d.process_status !== 'error') s.errorMessage = undefined;

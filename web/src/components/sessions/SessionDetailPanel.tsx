@@ -3,7 +3,7 @@ import { SessionChatHistory } from './SessionChatHistory';
 import { SessionNotes } from './SessionNotes';
 import { UserMessagesSummary } from './UserMessagesSummary';
 import { PlanPreviewSection } from './PlanPreviewSection';
-import { WorkStatusPicker } from './WorkStatusPicker';
+import { PhasePicker } from './WorkStatusPicker';
 import { SessionCopyButtons } from './SessionCopyButtons';
 import { TaskQuickActions } from './TaskQuickActions';
 import { updateSession, executePlanSession, executePlanContinue } from '@/api/sessions';
@@ -13,7 +13,7 @@ import { useSessionPlan } from '@/hooks/useSessionPlan';
 import { useSessionUsage, formatModelName, getContextWindowSize } from '@/hooks/useSessionUsage';
 import { useEvent } from '@/hooks/useWebSocket';
 import { PlanContentContext } from '@/contexts/PlanContentContext';
-import type { SessionRecord } from '@/types/session';
+import type { SessionRecord, TaskPhase } from '@/types/session';
 import { timeAgo } from '@/utils/time';
 import { ICON_CLIPBOARD, ICON_LIGHTNING, ICON_WARNING } from '@/components/common/Icons';
 
@@ -21,6 +21,8 @@ interface SessionDetailPanelProps {
   session: SessionRecord | null;
   taskTitle?: string;
   summary?: string;
+  /** Task phase — used for phase display (replaces old work_status). */
+  phase?: TaskPhase;
   /** @deprecated No longer used — kept for backward compat. */
   taskHasExecSession?: boolean;
   onTitleChanged?: () => void;
@@ -125,7 +127,7 @@ function EditableTitle({ sessionId, title, onSaved }: { sessionId: string; title
   );
 }
 
-export function SessionDetailPanel({ session, taskTitle, summary, onTitleChanged, onSessionReplaced, optimisticMessages, onMessagesDelivered, onBatchCompleted, onEditQueued, onDeleteQueued, onAgentQueued, onClearCommitted, onRetryFailed, onDismissFailed }: SessionDetailPanelProps) {
+export function SessionDetailPanel({ session, taskTitle, summary, phase: propPhase, onTitleChanged, onSessionReplaced, optimisticMessages, onMessagesDelivered, onBatchCompleted, onEditQueued, onDeleteQueued, onAgentQueued, onClearCommitted, onRetryFailed, onDismissFailed }: SessionDetailPanelProps) {
   const [executing, setExecuting] = useState(false);
   const [executeError, setExecuteError] = useState<string | null>(null);
   const [executeStarted, setExecuteStarted] = useState(false);
@@ -166,13 +168,16 @@ export function SessionDetailPanel({ session, taskTitle, summary, onTitleChanged
     }
   }
 
-  // Retry: when retrySession() succeeds, listen for the new session to appear on the task
+  // Retry — resume path: session auto-recovers via WS status events, nothing to do.
+  // Retry — fallback path: listen for task:updated to detect new session linked after retry.
   const retryTaskIdRef = useRef<string | null>(null);
+  const handleResuming = useCallback(() => {
+    // processNext() emits SESSION_STATUS_CHANGED which updates session state.
+    // Error banner clears automatically when errorMessage is cleared.
+  }, []);
   const handleRetried = useCallback((taskId: string) => {
     retryTaskIdRef.current = taskId;
   }, []);
-
-  // Listen for task:updated to detect when new session is linked after retry
   useEvent('task:updated', (data: unknown) => {
     const d = data as { task?: { id?: string; exec_session_id?: string; plan_session_id?: string } };
     const t = d.task;
@@ -224,11 +229,11 @@ export function SessionDetailPanel({ session, taskTitle, summary, onTitleChanged
   const sessionId = session.claudeSessionId || '';
   const title = session.title || session.description || session.slug || sessionId || 'Untitled session';
   const ps = session.process_status ?? 'stopped';
-  const ws = session.work_status ?? 'completed';
+  const taskPhase: TaskPhase = propPhase ?? 'TODO';
   const isEmbedded = session.provider === 'embedded';
   const showExecuteButtons =
     session.planCompleted === true
-    && ws !== 'error'
+    && ps !== 'error'
     && !executeStarted;
 
   /** "Execute" — resumes the same session with bypass permissions. */
@@ -308,13 +313,15 @@ export function SessionDetailPanel({ session, taskTitle, summary, onTitleChanged
                   SSH: {session.host}
                 </span>
               )}
-              <WorkStatusPicker
-                sessionId={sessionId}
-                processStatus={ps}
-                workStatus={ws}
-                size="md"
-                errorMessage={session.errorMessage}
-              />
+              {session.taskId && (
+                <PhasePicker
+                  taskId={session.taskId}
+                  processStatus={ps}
+                  phase={taskPhase}
+                  size="md"
+                  errorMessage={session.errorMessage}
+                />
+              )}
             </div>
           </div>
 
@@ -519,17 +526,17 @@ export function SessionDetailPanel({ session, taskTitle, summary, onTitleChanged
           sessionId={sessionId}
           initialNote={session.human_note}
         />
-        {(ws === 'error' || ps === 'error') && session.errorMessage && (
+        {ps === 'error' && session.errorMessage && (
           <div className="session-error-banner">
             <span className="session-error-banner-icon">{ICON_WARNING}</span>
             <span className="session-error-banner-text">{session.errorMessage}</span>
-            <SessionRetryButton sessionId={session.claudeSessionId} onRetried={handleRetried} />
+            <SessionRetryButton sessionId={session.claudeSessionId} onRetried={handleRetried} onResuming={handleResuming} />
           </div>
         )}
         <SessionChatHistory
           key={sessionId}
           sessionId={sessionId}
-          workStatus={session.work_status}
+          phase={taskPhase}
           initialPrompt={historyMessages.find(m => m.role === 'user')?.text}
           sessionCwd={session.cwd}
           optimisticMessages={optimisticMessages}

@@ -266,13 +266,13 @@ describe('use_daemon flag propagation', () => {
     const sessRes = await fetch(apiUrl('/api/sessions/task/daemon-flag-task-001'))
     expect(sessRes.status).toBe(200)
     const sessBody = (await sessRes.json()) as {
-      sessions: Array<{ host?: string; work_status?: string }>
+      sessions: Array<{ host?: string; process_status?: string }>
     }
 
-    // Either no sessions at all, or any that exist should not be in 'complete' state
+    // Either no sessions at all, or any that exist should not be in 'stopped' state (successfully completed)
     const daemonSessions = sessBody.sessions.filter((s) => s.host === 'daemon-host')
     for (const s of daemonSessions) {
-      expect(s.work_status).not.toBe('complete')
+      expect(s.process_status).not.toBe('stopped')
     }
 
     ws.close()
@@ -334,15 +334,14 @@ describe('use_daemon flag propagation', () => {
     const body = (await res.json()) as {
       sessions: Array<{
         host?: string
-        work_status?: string
         process_status?: string
       }>
     }
 
-    // Any sessions for daemon-host should NOT be in complete state
+    // Any sessions for daemon-host should NOT be in stopped state (successfully completed)
     const daemonSessions = body.sessions.filter((s) => s.host === 'daemon-host')
     for (const s of daemonSessions) {
-      expect(s.work_status).not.toBe('complete')
+      expect(s.process_status).not.toBe('stopped')
     }
   })
 })

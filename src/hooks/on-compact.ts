@@ -52,7 +52,7 @@ function updateSessionLastActive(): void {
       if (!Array.isArray(store.sessions)) return;
 
       for (const session of store.sessions) {
-        if (session.work_status === 'in_progress') {
+        if (session.process_status === 'running') {
           session.lastActiveAt = new Date().toISOString();
         }
       }

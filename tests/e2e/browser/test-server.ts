@@ -41,7 +41,7 @@ await fs.writeFile(
         session_ids: ['pw-mode-test-session'],
         active_session_ids: [],
         session_id: 'pw-mode-test-session',
-        session_status: { work_status: 'agent_complete', process_status: 'stopped', mode: 'bypass' },
+        session_status: { process_status: 'stopped', mode: 'bypass' },
         created_at: new Date().toISOString(),
         updated_at: new Date().toISOString(),
         description: '',
@@ -212,7 +212,7 @@ await fs.writeFile(
         project: 'Walnut',
         source: 'ms-todo',
         session_id: 'pw-model-switch-session',
-        session_status: { work_status: 'in_progress', process_status: 'running', mode: 'bypass' },
+        session_status: { process_status: 'running', mode: 'bypass' },
         session_ids: ['pw-model-switch-session'],
         active_session_ids: ['pw-model-switch-session'],
         created_at: new Date().toISOString(),
@@ -262,7 +262,7 @@ await fs.writeFile(
         taskId: 'pw-task-001',
         project: 'Walnut',
         process_status: 'stopped',
-        work_status: 'agent_complete',
+
         mode: 'plan',
         last_status_change: new Date().toISOString(),
         startedAt: new Date(Date.now() - 60_000).toISOString(),
@@ -278,7 +278,7 @@ await fs.writeFile(
         taskId: 'pw-task-001',
         project: 'Walnut',
         process_status: 'error',
-        work_status: 'in_progress',
+
         errorMessage: 'Process exited without result',
         mode: 'plan',
         last_status_change: new Date().toISOString(),
@@ -293,7 +293,7 @@ await fs.writeFile(
         taskId: 'pw-task-001',
         project: 'Walnut',
         process_status: 'stopped',
-        work_status: 'completed',
+
         mode: 'bypass',
         last_status_change: new Date().toISOString(),
         startedAt: new Date(Date.now() - 180_000).toISOString(),
@@ -307,7 +307,7 @@ await fs.writeFile(
         taskId: 'pw-task-model-switch',
         project: 'Walnut',
         process_status: 'running',
-        work_status: 'in_progress',
+
         mode: 'bypass',
         last_status_change: new Date().toISOString(),
         startedAt: new Date(Date.now() - 60_000).toISOString(),
@@ -322,7 +322,7 @@ await fs.writeFile(
         taskId: 'pw-task-001',
         project: 'Walnut',
         process_status: 'stopped',
-        work_status: 'agent_complete',
+
         mode: 'bypass',
         last_status_change: new Date().toISOString(),
         startedAt: new Date(Date.now() - 300_000).toISOString(),
@@ -336,7 +336,7 @@ await fs.writeFile(
         taskId: 'pw-task-exec-bug',
         project: 'Walnut',
         process_status: 'stopped',
-        work_status: 'agent_complete',
+
         mode: 'bypass',
         last_status_change: new Date().toISOString(),
         startedAt: new Date(Date.now() - 360_000).toISOString(),

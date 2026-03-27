@@ -254,9 +254,9 @@ describe('Local multi-turn conversation', () => {
       expect(sessionId).toBeTruthy()
 
       // Verify session record after turn 1
-      const session1 = await pollSession(sessionId, s => s.work_status === 'agent_complete')
+      const session1 = await pollSession(sessionId, s => s.process_status === 'stopped')
       expect(session1.process_status).toBe('stopped')
-      expect(session1.work_status).toBe('agent_complete')
+      expect(session1.process_status).toBe('stopped')
 
       // Turn 2: follow-up
       const result2Promise = waitForWsEvent(ws, 'session:result', 30000)
@@ -287,9 +287,9 @@ describe('Local multi-turn conversation', () => {
       expect(taskBody.sessions.length).toBe(1)
 
       // Final session state
-      const finalSession = await pollSession(sessionId, s => s.work_status === 'agent_complete')
+      const finalSession = await pollSession(sessionId, s => s.process_status === 'stopped')
       expect(finalSession.process_status).toBe('stopped')
-      expect(finalSession.work_status).toBe('agent_complete')
+      expect(finalSession.process_status).toBe('stopped')
     } finally {
       ws.close()
     }
@@ -319,7 +319,7 @@ describe('Remote multi-turn conversation', () => {
       expect(result1.data!.result).toContain('remote turn 1')
 
       // Verify session has host set
-      const session1 = await pollSession(sessionId, s => s.work_status === 'agent_complete')
+      const session1 = await pollSession(sessionId, s => s.process_status === 'stopped')
       expect(session1.host).toBe('mock-remote')
       expect(session1.process_status).toBe('stopped')
 
@@ -371,7 +371,7 @@ describe('SessionManager registry', () => {
       // The session should be in the registry while running
       // We need the sessionId — get it from the first status event
       const inProgressEvents = statusEvents.filter(e =>
-        e.data?.work_status === 'in_progress' && e.data?.taskId === 'mgr-local-007',
+        e.data?.process_status === 'running' && e.data?.taskId === 'mgr-local-007',
       )
       // May or may not have fired yet — wait for result instead
       const result = await resultPromise
@@ -570,7 +570,7 @@ describe('Session deduplication', () => {
       })
       const result1 = await result1Promise
       const sessionId = result1.data!.sessionId as string
-      await pollSession(sessionId, s => s.work_status === 'agent_complete')
+      await pollSession(sessionId, s => s.process_status === 'stopped')
 
       // Turn 2: collect ALL result events
       const allResults = collectWsEvents(ws, ['session:result'])
@@ -622,8 +622,8 @@ describe('Concurrent sessions', () => {
       expect(sid1).not.toBe(sid2)
 
       // Both should be in agent_complete
-      const s1 = await pollSession(sid1, s => s.work_status === 'agent_complete')
-      const s2 = await pollSession(sid2, s => s.work_status === 'agent_complete')
+      const s1 = await pollSession(sid1, s => s.process_status === 'stopped')
+      const s2 = await pollSession(sid2, s => s.process_status === 'stopped')
       expect(s1.process_status).toBe('stopped')
       expect(s2.process_status).toBe('stopped')
     } finally {
@@ -652,8 +652,8 @@ describe('Concurrent sessions', () => {
       // Check session records
       const sid1 = allResults[0].data!.sessionId as string
       const sid2 = allResults[1].data!.sessionId as string
-      const s1 = await pollSession(sid1, s => s.work_status === 'agent_complete')
-      const s2 = await pollSession(sid2, s => s.work_status === 'agent_complete')
+      const s1 = await pollSession(sid1, s => s.process_status === 'stopped')
+      const s2 = await pollSession(sid2, s => s.process_status === 'stopped')
 
       // One should be local, one remote (order may vary)
       const hosts = [s1.host, s2.host]
@@ -685,9 +685,9 @@ describe('Error recovery', () => {
       expect(result1.data!.isError).toBe(false)
 
       // Wait for agent_complete
-      const doneSession = await pollSession(sessionId, s => s.work_status === 'agent_complete')
+      const doneSession = await pollSession(sessionId, s => s.process_status === 'stopped')
       expect(doneSession.process_status).toBe('stopped')
-      expect(doneSession.work_status).toBe('agent_complete')
+      expect(doneSession.process_status).toBe('stopped')
 
       // Follow-up to a completed session → should resume and produce a new result
       const result2Promise = waitForWsEvent(ws, 'session:result', 30000)
@@ -700,9 +700,9 @@ describe('Error recovery', () => {
       expect(result2.data!.sessionId).toBe(sessionId)
 
       // Session should be back to agent_complete
-      const recoveredSession = await pollSession(sessionId, s => s.work_status === 'agent_complete')
+      const recoveredSession = await pollSession(sessionId, s => s.process_status === 'stopped')
       expect(recoveredSession.process_status).toBe('stopped')
-      expect(recoveredSession.work_status).toBe('agent_complete')
+      expect(recoveredSession.process_status).toBe('stopped')
     } finally {
       ws.close()
     }
@@ -743,15 +743,14 @@ describe('Status transitions', () => {
       const ourStatuses = statusEvents
         .filter(e => e.data?.sessionId === sessionId)
         .map(e => ({
-          work_status: e.data!.work_status,
           process_status: e.data!.process_status,
         }))
 
-      // Should see at least: in_progress, agent_complete (from turn 1)
-      // and: in_progress, agent_complete (from turn 2)
-      const workStatuses = ourStatuses.map(s => s.work_status)
-      expect(workStatuses.filter(s => s === 'in_progress').length).toBeGreaterThanOrEqual(1)
-      expect(workStatuses.filter(s => s === 'agent_complete').length).toBeGreaterThanOrEqual(1)
+      // Should see at least: running, stopped (from turn 1)
+      // and: running, stopped (from turn 2)
+      const processStatuses = ourStatuses.map(s => s.process_status)
+      expect(processStatuses.filter(s => s === 'running').length).toBeGreaterThanOrEqual(1)
+      expect(processStatuses.filter(s => s === 'stopped').length).toBeGreaterThanOrEqual(1)
     } finally {
       ws.close()
     }
@@ -842,7 +841,7 @@ describe('Health API', () => {
     for (const s of body.sessions) {
       expect(s.claudeSessionId).toBeTruthy()
       expect(typeof s.process_status).toBe('string')
-      expect(typeof s.work_status).toBe('string')
+      expect(typeof s.process_status).toBe('string')
     }
   })
 })
@@ -927,7 +926,7 @@ describe('Rapid sequential follow-ups', () => {
       })
       const result0 = await result0Promise
       const sessionId = result0.data!.sessionId as string
-      await pollSession(sessionId, s => s.work_status === 'agent_complete')
+      await pollSession(sessionId, s => s.process_status === 'stopped')
 
       // Send 3 follow-ups sequentially (waiting for each to complete before next)
       for (let i = 1; i <= 3; i++) {
@@ -942,13 +941,13 @@ describe('Rapid sequential follow-ups', () => {
         expect(result.data!.sessionId).toBe(sessionId)
 
         // Wait for completion before next
-        await pollSession(sessionId, s => s.work_status === 'agent_complete')
+        await pollSession(sessionId, s => s.process_status === 'stopped')
       }
 
       // Verify session is healthy after rapid follow-ups
-      const finalSession = await pollSession(sessionId, s => s.work_status === 'agent_complete')
+      const finalSession = await pollSession(sessionId, s => s.process_status === 'stopped')
       expect(finalSession.process_status).toBe('stopped')
-      expect(finalSession.work_status).toBe('agent_complete')
+      expect(finalSession.process_status).toBe('stopped')
     } finally {
       ws.close()
     }
@@ -974,7 +973,7 @@ describe('Remote rapid follow-ups', () => {
       })
       const result0 = await result0Promise
       const sessionId = result0.data!.sessionId as string
-      await pollSession(sessionId, s => s.work_status === 'agent_complete')
+      await pollSession(sessionId, s => s.process_status === 'stopped')
 
       // 2 follow-ups
       for (let i = 1; i <= 2; i++) {
@@ -989,7 +988,7 @@ describe('Remote rapid follow-ups', () => {
         // depending on how the daemon pipes it. The key assertion is success + same session.
         expect(typeof result.data!.result).toBe('string')
         expect(result.data!.sessionId).toBe(sessionId)
-        await pollSession(sessionId, s => s.work_status === 'agent_complete')
+        await pollSession(sessionId, s => s.process_status === 'stopped')
       }
     } finally {
       ws.close()

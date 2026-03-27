@@ -963,9 +963,8 @@ export async function startServer(options: ServerOptions = {}): Promise<HttpServ
         // Do NOT clear session slot here — turn_completed means the session
         // can still be resumed via send_to_session. The slot stays linked so the
         // UI shows which tasks have sessions. Slots are cleared only when:
-        //   1. work_status transitions to 'completed' (agent/human sets it)
-        //   2. work_status transitions to 'error' (handled above in isError branch)
-        //   3. Task phase reaches COMPLETE (applyPhase clears slots)
+        //   1. Task phase reaches COMPLETE (user sets via PhasePicker)
+        //   2. process_status transitions to 'error' (handled above in isError branch)
 
         // Auto-progress task phase: ≤IN_PROGRESS → AGENT_COMPLETE on successful session
         try {

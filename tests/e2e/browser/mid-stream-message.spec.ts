@@ -159,7 +159,7 @@ test.describe('Mid-stream user message persistence', () => {
             taskId: 'pw-task-001',
             project: 'Walnut',
             process_status: 'running',
-            work_status: 'in_progress',
+
             mode: 'bypass',
             startedAt: '2026-01-01T00:00:00.000Z',
             lastActiveAt: new Date().toISOString(),
@@ -333,7 +333,7 @@ test.describe('Mid-stream user message persistence', () => {
             taskId: 'pw-task-001',
             project: 'Walnut',
             process_status: 'running',
-            work_status: 'in_progress',
+
             mode: 'bypass',
             startedAt: '2026-01-01T00:00:00.000Z',
             lastActiveAt: new Date().toISOString(),
@@ -456,7 +456,7 @@ test.describe('Mid-stream user message persistence', () => {
             taskId: 'pw-task-001',
             project: 'Walnut',
             process_status: 'running',
-            work_status: 'in_progress',
+
             mode: 'bypass',
             startedAt: '2026-01-01T00:00:00.000Z',
             lastActiveAt: new Date().toISOString(),

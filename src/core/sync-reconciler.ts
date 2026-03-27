@@ -335,13 +335,13 @@ export class SyncReconciler {
     const sessionIds = [task.session_id, task.plan_session_id, task.exec_session_id].filter(Boolean) as string[];
     if (sessionIds.length === 0) return false;
 
-    // Look up actual session status — only block if work is actively in progress
+    // Look up actual session status — only block if process is actively running
     try {
       const { listSessions } = await import('./session-tracker.js');
       const sessions = await listSessions();
       for (const sid of sessionIds) {
         const session = sessions.find(s => s.claudeSessionId === sid);
-        if (session && session.work_status === 'in_progress') return true;
+        if (session && session.process_status === 'running') return true;
       }
     } catch {
       // If we can't check, be conservative — block removal if session_id is set

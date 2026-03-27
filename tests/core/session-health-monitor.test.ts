@@ -1,11 +1,9 @@
 /**
- * Tests for SessionHealthMonitor — specifically the process_status:'error' behavior
- * introduced by the "Migrate work_status:'error' → process_status:'error'" feature.
+ * Tests for SessionHealthMonitor — specifically the process_status:'error' behavior.
  *
  * Key assertions:
  *   - Health monitor sets process_status:'error' + errorMessage when process dies without result
- *   - Health monitor does NOT set work_status:'error' (old behavior, now removed)
- *   - Health monitor sets process_status:'stopped' + work_status:'agent_complete' when result found
+ *   - Health monitor sets process_status:'stopped' when result found
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
@@ -42,6 +40,12 @@ vi.mock('../../src/core/task-manager.js', () => ({
   clearSessionSlot: async (taskId: string, sessionId: string) => ({
     task: { id: taskId, session_id: sessionId, title: 'mock task' },
   }),
+  listTasks: async () => [
+    { id: 'task-1', phase: 'IN_PROGRESS' },
+    { id: 'task-2', phase: 'IN_PROGRESS' },
+    { id: 'task-3', phase: 'IN_PROGRESS' },
+    { id: 'task-4', phase: 'TODO' },
+  ],
 }));
 
 // Mock event bus — we don't need to verify events in these unit tests
@@ -84,7 +88,7 @@ afterEach(async () => {
 
 describe('SessionHealthMonitor — process_status:error behavior', () => {
   it('sets process_status:error and errorMessage when local process dies without result', async () => {
-    // Create a session with process_status:'running', work_status:'in_progress', dead PID
+    // Create a session with process_status:'running', dead PID
     // No outputFile → no result event → should trigger the error path
     await createSessionRecord('dead-no-result', 'task-1', 'proj', undefined, {
       pid: 999999999,  // Dead PID — isProcessAliveAsync mocked to return false
@@ -103,15 +107,9 @@ describe('SessionHealthMonitor — process_status:error behavior', () => {
 
     // Should set a human-readable error message
     expect(session!.errorMessage).toBe('Process exited without result');
-
-    // Should NOT have work_status:'error' (that's the old behavior — now removed)
-    expect(session!.work_status).not.toBe('error');
-
-    // work_status should remain 'in_progress' (unchanged from original)
-    expect(session!.work_status).toBe('in_progress');
   });
 
-  it('sets process_status:stopped and work_status:agent_complete when result found in output file', async () => {
+  it('sets process_status:stopped when result found in output file', async () => {
     // Create an output file with a successful result event
     const outputFile = path.join(tmpDir, 'session-with-result.jsonl');
     const resultLine = JSON.stringify({ type: 'result', subtype: 'success', is_error: false, result: 'All done' });
@@ -131,7 +129,6 @@ describe('SessionHealthMonitor — process_status:error behavior', () => {
 
     // Result found → normal completion
     expect(session!.process_status).toBe('stopped');
-    expect(session!.work_status).toBe('agent_complete');
 
     // Should NOT be error state
     expect(session!.process_status).not.toBe('error');
@@ -144,7 +141,6 @@ describe('SessionHealthMonitor — process_status:error behavior', () => {
     await updateSessionRecord('already-error', {
       process_status: 'error',
       errorMessage: 'Previous error',
-      work_status: 'in_progress',
     });
 
     const monitor = new SessionHealthMonitor();
@@ -159,11 +155,10 @@ describe('SessionHealthMonitor — process_status:error behavior', () => {
     expect(session!.errorMessage).toBe('Previous error');
   });
 
-  it('does not change completed sessions', async () => {
+  it('does not change stopped sessions', async () => {
     await createSessionRecord('already-done', 'task-4', 'proj');
     await updateSessionRecord('already-done', {
       process_status: 'stopped',
-      work_status: 'completed',
     });
 
     const monitor = new SessionHealthMonitor();
@@ -172,6 +167,5 @@ describe('SessionHealthMonitor — process_status:error behavior', () => {
     const sessions = await listSessions();
     const session = sessions.find(s => s.claudeSessionId === 'already-done');
     expect(session!.process_status).toBe('stopped');
-    expect(session!.work_status).toBe('completed');
   });
 });

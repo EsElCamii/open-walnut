@@ -155,12 +155,14 @@ export function useSessionStream(sessionId: string | null): UseSessionStreamRetu
   }, []);
 
   useEvent('session:status-changed', (data) => {
-    const { sessionId: sid, work_status } = data as {
-      sessionId: string; work_status: string;
+    const { sessionId: sid, phase, process_status } = data as {
+      sessionId: string; phase?: string; process_status?: string;
     };
     if (!sessionId || sid !== sessionId) return;
-    if (work_status !== 'in_progress') {
-      log.info('stream', `status-changed → ${work_status} (non-in_progress, skipping)`, { sessionId: sid });
+    // Re-subscribe when session transitions to running (IN_PROGRESS phase or running process)
+    const isActive = phase === 'IN_PROGRESS' || process_status === 'running';
+    if (!isActive) {
+      log.info('stream', `status-changed → phase=${phase} ps=${process_status} (not active, skipping)`, { sessionId: sid });
       return;
     }
 

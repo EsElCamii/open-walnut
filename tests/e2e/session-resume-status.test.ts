@@ -174,19 +174,18 @@ describe('Session resume status changes', () => {
 
     // The last status event should show agent_complete or stopped
     const lastFirstStatus = firstRunEvents[firstRunEvents.length - 1]
-    expect(lastFirstStatus.data?.work_status).toBe('agent_complete')
+    expect(lastFirstStatus.data?.process_status).toBe('stopped')
 
-    // 2. Verify DB record shows stopped/agent_complete (poll — async persist may lag)
-    let sessData1: { session: { process_status: string; work_status: string } } | null = null
+    // 2. Verify DB record shows stopped (poll — async persist may lag)
+    let sessData1: { session: { process_status: string } } | null = null
     for (let i = 0; i < 20; i++) {
       const sessRes1 = await fetch(apiUrl(`/api/sessions/${sessionId}`))
       expect(sessRes1.status).toBe(200)
-      sessData1 = (await sessRes1.json()) as { session: { process_status: string; work_status: string } }
-      if (sessData1.session.work_status === 'agent_complete') break
+      sessData1 = (await sessRes1.json()) as { session: { process_status: string } }
+      if (sessData1.session.process_status === 'stopped') break
       await delay(300)
     }
     expect(sessData1!.session.process_status).toBe('stopped')
-    expect(sessData1!.session.work_status).toBe('agent_complete')
 
     // 3. Resume the session by sending a new message
     const statusCountBefore = statusEvents.length
@@ -209,10 +208,10 @@ describe('Session resume status changes', () => {
       e => (e.data as { sessionId?: string })?.sessionId === sessionId,
     )
     // Should have at least one in_progress status (when resuming) and one agent_complete (when done)
-    const inProgressEvents = newStatusEvents.filter(e => e.data?.work_status === 'in_progress')
-    const completedEvents = newStatusEvents.filter(e => e.data?.work_status === 'agent_complete')
-    expect(inProgressEvents.length).toBeGreaterThanOrEqual(1)
-    expect(completedEvents.length).toBeGreaterThanOrEqual(1)
+    const runningEvents = newStatusEvents.filter(e => e.data?.process_status === 'running')
+    const stoppedEvents = newStatusEvents.filter(e => e.data?.process_status === 'stopped')
+    expect(runningEvents.length).toBeGreaterThanOrEqual(1)
+    expect(stoppedEvents.length).toBeGreaterThanOrEqual(1)
 
     // At least one in_progress event should carry process_status: 'running'
     // (the first may have 'stopped' from handleSend before the new process starts)
@@ -239,9 +238,8 @@ describe('Session resume status changes', () => {
 
     // Confirm DB shows stopped after first run
     const res1 = await fetch(apiUrl(`/api/sessions/${sessionId}`))
-    const data1 = (await res1.json()) as { session: { process_status: string; work_status: string } }
+    const data1 = (await res1.json()) as { session: { process_status: string } }
     expect(data1.session.process_status).toBe('stopped')
-    expect(data1.session.work_status).toBe('agent_complete')
 
     // Resume with a slow message to have time to check mid-flight
     const resumeResultPromise = waitForWsEvent(ws, 'session:result')
@@ -257,9 +255,8 @@ describe('Session resume status changes', () => {
 
     // Check DB mid-flight — should be running/in_progress
     const res2 = await fetch(apiUrl(`/api/sessions/${sessionId}`))
-    const data2 = (await res2.json()) as { session: { process_status: string; work_status: string } }
+    const data2 = (await res2.json()) as { session: { process_status: string } }
     expect(data2.session.process_status).toBe('running')
-    expect(data2.session.work_status).toBe('in_progress')
 
     // Wait for completion
     await resumeResultPromise
@@ -267,9 +264,8 @@ describe('Session resume status changes', () => {
 
     // After completion — should be stopped/agent_complete again
     const res3 = await fetch(apiUrl(`/api/sessions/${sessionId}`))
-    const data3 = (await res3.json()) as { session: { process_status: string; work_status: string } }
+    const data3 = (await res3.json()) as { session: { process_status: string } }
     expect(data3.session.process_status).toBe('stopped')
-    expect(data3.session.work_status).toBe('agent_complete')
 
     ws.close()
     await delay(50)
@@ -292,7 +288,7 @@ describe('Session resume status changes', () => {
     for (const evt of statusEvents) {
       expect(evt.data).toHaveProperty('sessionId')
       expect(evt.data).toHaveProperty('process_status')
-      expect(evt.data).toHaveProperty('work_status')
+      expect(evt.data).toHaveProperty('process_status')
       expect(evt.data).toHaveProperty('mode')
       // activity can be undefined, but the key should not break the merge
     }

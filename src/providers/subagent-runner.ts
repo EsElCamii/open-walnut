@@ -455,7 +455,6 @@ export class SubagentRunner {
         const { updateSessionRecord } = await import('../core/session-tracker.js');
         await updateSessionRecord(run.runId, {
           process_status: 'stopped',
-          work_status: 'agent_complete',
           activity: undefined,
           last_status_change: new Date().toISOString(),
         });
@@ -480,7 +479,7 @@ export class SubagentRunner {
         sessionId: run.runId,
         taskId: data.taskId,
         process_status: 'stopped',
-        work_status: 'agent_complete',
+        phase: 'AGENT_COMPLETE',
       }, ['*'], { source: 'subagent-runner', urgency: 'urgent' });
 
       // Notify UI to clear optimistic messages (the turn consumed 1 queued message)
@@ -533,7 +532,6 @@ export class SubagentRunner {
         sessionId: run.runId,
         taskId: data.taskId,
         process_status: 'error',
-        errorMessage: run.error,
       }, ['*'], { source: 'subagent-runner', urgency: 'urgent' });
 
       // Clear optimistic messages on error too
@@ -592,7 +590,6 @@ export class SubagentRunner {
       const { updateSessionRecord } = await import('../core/session-tracker.js');
       await updateSessionRecord(data.runId, {
         process_status: 'running',
-        work_status: 'in_progress',
         last_status_change: new Date().toISOString(),
       });
     } catch {}
@@ -607,7 +604,7 @@ export class SubagentRunner {
       sessionId: data.runId,
       taskId: run.taskId,
       process_status: 'running',
-      work_status: 'in_progress',
+      phase: 'IN_PROGRESS',
     }, ['*'], { source: 'subagent-runner', urgency: 'urgent' });
 
     await this.acquireSemaphore();

@@ -136,6 +136,11 @@ export function updateTaskFromSession(taskId: string, summary: SessionSummary): 
       }
       task.note = task.note ? task.note + '\n\n' + entry : entry;
 
+      // Advance task phase to AGENT_COMPLETE when session ends (if still TODO or IN_PROGRESS)
+      if (task.phase === 'TODO' || task.phase === 'IN_PROGRESS') {
+        task.phase = 'AGENT_COMPLETE';
+      }
+
       if (!task.session_ids.includes(summary.id)) {
         task.session_ids.push(summary.id);
       }

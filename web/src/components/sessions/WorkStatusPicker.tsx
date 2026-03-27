@@ -1,40 +1,39 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
-import { updateSession } from '@/api/sessions';
-import type { ProcessStatus, WorkStatus } from '@/types/session';
-import { WORK_LABELS, WORK_COLORS, PROCESS_LABELS, PROCESS_COLORS } from '@/utils/session-status';
+import { apiPatch } from '@/api/client';
+import type { ProcessStatus, TaskPhase } from '@/types/session';
+import { PHASE_LABELS, PHASE_COLORS, PROCESS_LABELS, PROCESS_COLORS } from '@/utils/session-status';
 
-/** Work statuses the user can manually set (backend-allowed). */
-const SETTABLE_STATUSES: WorkStatus[] = ['agent_complete', 'await_human_action', 'completed'];
+/** Phases the user can manually set via the picker. */
+const SETTABLE_PHASES: TaskPhase[] = ['AGENT_COMPLETE', 'AWAIT_HUMAN_ACTION', 'HUMAN_VERIFIED', 'COMPLETE'];
 
-interface WorkStatusPickerProps {
-  sessionId: string;
+interface PhasePickerProps {
+  taskId: string;
   processStatus: ProcessStatus;
-  workStatus: WorkStatus;
+  phase: TaskPhase;
   /** Badge size variant. */
   size?: 'sm' | 'md';
   /** Error detail shown on hover when process_status is 'error'. */
   errorMessage?: string;
-  /** Called after a successful status change so parent can update local state. */
-  onChanged?: (newStatus: WorkStatus) => void;
+  /** Called after a successful phase change so parent can update local state. */
+  onChanged?: (newPhase: TaskPhase) => void;
 }
 
-export function WorkStatusPicker({ sessionId, processStatus, workStatus, size = 'md', errorMessage, onChanged }: WorkStatusPickerProps) {
+export function PhasePicker({ taskId, processStatus, phase, size = 'md', errorMessage, onChanged }: PhasePickerProps) {
   const [open, setOpen] = useState(false);
   const [saving, setSaving] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
 
   const ps = processStatus;
-  const ws = workStatus;
   const isError = ps === 'error';
-  const wsColor = isError ? PROCESS_COLORS.error : WORK_COLORS[ws];
-  const wsLabel = isError ? PROCESS_LABELS.error : WORK_LABELS[ws];
+  const phaseColor = isError ? PROCESS_COLORS.error : PHASE_COLORS[phase] ?? '#6b7280';
+  const phaseLabel = isError ? PROCESS_LABELS.error : PHASE_LABELS[phase] ?? phase;
   const psColor = PROCESS_COLORS[ps];
 
-  // Can only change work_status when process is stopped (not error)
+  // Can only change phase when process is stopped (not error)
   const canChange = ps === 'stopped' && !saving;
 
-  // Options: all settable statuses except current
-  const options = SETTABLE_STATUSES.filter(s => s !== ws);
+  // Options: all settable phases except current
+  const options = SETTABLE_PHASES.filter(p => p !== phase);
 
   // Close on outside click
   useEffect(() => {
@@ -58,18 +57,18 @@ export function WorkStatusPicker({ sessionId, processStatus, workStatus, size = 
     return () => document.removeEventListener('keydown', handler);
   }, [open]);
 
-  const handleSelect = useCallback(async (newStatus: WorkStatus) => {
+  const handleSelect = useCallback(async (newPhase: TaskPhase) => {
     setOpen(false);
     setSaving(true);
     try {
-      await updateSession(sessionId, { work_status: newStatus });
-      onChanged?.(newStatus);
+      await apiPatch(`/api/tasks/${taskId}`, { phase: newPhase });
+      onChanged?.(newPhase);
     } catch (err) {
-      console.error('Failed to update work_status:', err);
+      console.error('Failed to update phase:', err);
     } finally {
       setSaving(false);
     }
-  }, [sessionId, onChanged]);
+  }, [taskId, onChanged]);
 
   const badgeBase = size === 'sm' ? 'session-panel-badge' : 'session-detail-badge';
 
@@ -94,36 +93,36 @@ export function WorkStatusPicker({ sessionId, processStatus, workStatus, size = 
         {PROCESS_LABELS[ps]}
       </span>
 
-      {/* Work status badge — clickable dropdown when process is stopped; shows Error when process_status is 'error' */}
+      {/* Phase badge — clickable dropdown when process is stopped; shows Error when process_status is 'error' */}
       <span
         className={badgeBase}
         style={{
-          color: wsColor,
+          color: phaseColor,
           background: size === 'sm'
-            ? `color-mix(in srgb, ${wsColor} 8%, transparent)`
-            : `${wsColor}14`,
+            ? `color-mix(in srgb, ${phaseColor} 8%, transparent)`
+            : `${phaseColor}14`,
           cursor: canChange ? 'pointer' : 'default',
         }}
         onClick={canChange ? () => setOpen(!open) : undefined}
-        title={isError && errorMessage ? errorMessage : (canChange ? 'Click to change work status' : wsLabel)}
+        title={isError && errorMessage ? errorMessage : (canChange ? 'Click to change phase' : phaseLabel)}
         role={canChange ? 'button' : undefined}
         tabIndex={canChange ? 0 : undefined}
         onKeyDown={canChange ? (e) => { if (e.key === 'Enter' || e.key === ' ') setOpen(!open); } : undefined}
       >
-        {saving ? 'Saving\u2026' : wsLabel}
+        {saving ? 'Saving\u2026' : phaseLabel}
         {canChange && <span style={{ fontSize: '8px', marginLeft: '2px', opacity: 0.6 }}>{open ? '\u25B4' : '\u25BE'}</span>}
       </span>
 
       {open && (
         <div className="work-status-picker-dropdown">
-          {options.map(status => (
+          {options.map(p => (
             <button
-              key={status}
+              key={p}
               className="work-status-picker-option"
-              onClick={() => handleSelect(status)}
+              onClick={() => handleSelect(p)}
             >
-              <span className="work-status-picker-dot" style={{ background: WORK_COLORS[status] }} />
-              {WORK_LABELS[status]}
+              <span className="work-status-picker-dot" style={{ background: PHASE_COLORS[p] }} />
+              {PHASE_LABELS[p]}
             </button>
           ))}
         </div>

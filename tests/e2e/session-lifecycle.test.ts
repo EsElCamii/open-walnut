@@ -271,11 +271,11 @@ describe('Session record created at init (before result)', () => {
 
     // Poll until the session record appears in the REST API (instead of a fixed delay).
     // The init event is emitted immediately; persistence is async.
-    let record: { taskId: string; claudeSessionId: string; process_status: string; work_status: string } | undefined
+    let record: { taskId: string; claudeSessionId: string; process_status: string } | undefined
     await pollUntil(async () => {
       const sessRes = await fetch(apiUrl('/api/sessions/task/sess-task-002'))
       if (sessRes.status !== 200) return false
-      const sessBody = (await sessRes.json()) as { sessions: Array<{ taskId: string; claudeSessionId: string; process_status: string; work_status: string }> }
+      const sessBody = (await sessRes.json()) as { sessions: Array<{ taskId: string; claudeSessionId: string; process_status: string }> }
       record = sessBody.sessions.find(s => s.taskId === 'sess-task-002')
       return record !== undefined
     })

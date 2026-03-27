@@ -12,7 +12,7 @@
 import { log } from '../logging/index.js'
 import { isSessionProcessAlive } from '../utils/session-liveness.js'
 import { bus, EventNames } from './event-bus.js'
-import type { SessionRecord } from './types.js'
+import type { SessionRecord, Task } from './types.js'
 
 export interface ReconcileResult {
   reconciled: number
@@ -24,9 +24,8 @@ export interface ReconcileResult {
  *
  * For each session not in a terminal state (completed/error):
  *   - If it has pid + outputFile AND the process is alive → reconnectable
- *     (set process_status='running', keep current work_status)
- *   - Otherwise → mark process_status='stopped', work_status='agent_complete'
- *     (only the agent/human can set 'completed') and clean up task references
+ *     (set process_status='running' or 'idle' based on task.phase)
+ *   - Otherwise → mark process_status='stopped' and clean up task references
  */
 export async function reconcileSessions(): Promise<ReconcileResult> {
   const { listSessions, updateSessionRecord, updateSessionRecordConditionally, isTerminalSession } = await import('./session-tracker.js')
@@ -61,6 +60,16 @@ export async function reconcileSessions(): Promise<ReconcileResult> {
 
   log.session.info('session reconciler: checking sessions', { count: zombieCandidates.length })
 
+  // Batch-load all tasks for phase lookups
+  let taskMap = new Map<string, Task>()
+  try {
+    const { listTasks } = await import('./task-manager.js')
+    const allTasks = await listTasks()
+    for (const t of allTasks) taskMap.set(t.id, t)
+  } catch {
+    // Tasks unavailable — fall back to 'idle' for all process_status decisions
+  }
+
   // Parallel liveness checks — routes to local PID check or remote daemon check
   const results = await Promise.allSettled(zombieCandidates.map(async (session) => {
     const alive = session.outputFile ? await isSessionProcessAlive(session) : false
@@ -80,7 +89,8 @@ export async function reconcileSessions(): Promise<ReconcileResult> {
 
     if (alive) {
       // Process survived server restart — reconnectable
-      const correctProcessStatus = session.work_status === 'in_progress' ? 'running' : 'idle'
+      const taskPhase = session.taskId ? taskMap.get(session.taskId)?.phase : undefined
+      const correctProcessStatus = taskPhase === 'IN_PROGRESS' ? 'running' : 'idle'
       await updateSessionRecord(session.claudeSessionId, {
         process_status: correctProcessStatus,
       }).catch(() => {})
@@ -95,8 +105,8 @@ export async function reconcileSessions(): Promise<ReconcileResult> {
       continue
     }
 
-    // Session is dead — mark as agent_complete (not completed).
-    // Only the agent or human can determine if the work is truly done.
+    // Session is dead — mark as stopped.
+    // Task phase progression (e.g. AGENT_COMPLETE) is handled by the task manager.
     // Use conditional update to prevent stale-snapshot race:
     //   - If the record was updated after we started (new process spawned), skip.
     //   - If the PID changed (new process), skip.
@@ -112,7 +122,6 @@ export async function reconcileSessions(): Promise<ReconcileResult> {
         session.claudeSessionId,
         {
           process_status: 'stopped',
-          work_status: 'agent_complete',
           activity: undefined,
           last_status_change: now,
         },
@@ -138,14 +147,11 @@ export async function reconcileSessions(): Promise<ReconcileResult> {
         sessionId: session.claudeSessionId,
         taskId: session.taskId,
         process_status: 'stopped',
-        work_status: 'agent_complete',
-        previousWorkStatus: session.work_status,
       }, ['*'], { source: 'reconciler', urgency: 'urgent' })
 
-      log.session.info('session reconciler: marked zombie session agent_complete', {
+      log.session.info('session reconciler: marked zombie session stopped', {
         sessionId: session.claudeSessionId,
         taskId: session.taskId || '(none)',
-        previousWorkStatus: session.work_status,
         hadPid: session.pid != null,
       })
     } catch (err) {

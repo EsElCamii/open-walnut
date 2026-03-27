@@ -155,7 +155,7 @@ Note update rules:
 Decide based on the Phase table. When in doubt, choose B.
 - Never mark the task as complete — only humans can do that.
 - Phase can only be set to AWAIT_HUMAN_ACTION or POST_WORK_COMPLETED; do not set other phases.
-- Do NOT change session work_status — it is system-managed. Only update the task.
+- Task phase is the single source of truth for work state. Only update the task.
 
 ### Step 5: Decide whether to notify the main agent
 

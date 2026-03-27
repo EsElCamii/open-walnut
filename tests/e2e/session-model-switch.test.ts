@@ -296,7 +296,6 @@ describe('Session model switch: E2E', () => {
       session: {
         claudeSessionId: string
         pendingModel?: string
-        work_status?: string
       }
     }
 

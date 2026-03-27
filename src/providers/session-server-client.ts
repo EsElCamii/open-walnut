@@ -363,7 +363,7 @@ export class SessionServerClient {
       bus.emit(busEventName, {
         sessionId,
         process_status: d.status === 'running' ? 'running' : 'stopped',
-        work_status: d.status === 'running' ? 'in_progress' : 'agent_complete',
+        phase: d.status === 'running' ? 'IN_PROGRESS' : 'AGENT_COMPLETE',
         activity: d.activity,
       }, ['*'], { source: 'session-server', urgency: 'urgent' })
       break

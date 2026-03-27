@@ -56,7 +56,7 @@ export async function runStart(
   if (options.resume) {
     const sessions = await getSessionsForTask(task.id);
     const existing = sessions.find(
-      (s) => s.work_status === 'in_progress' || s.work_status === 'agent_complete',
+      (s) => s.process_status === 'running' || s.process_status === 'idle',
     );
 
     if (existing) {

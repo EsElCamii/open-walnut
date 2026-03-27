@@ -381,21 +381,19 @@ describe.skipIf(!isLiveTest())('Session transport live (real SSH + real Claude)'
       host?: string
       outputFile?: string
       process_status: string
-      work_status: string
       project?: string
     }
     let session: SessionEntry | undefined
 
     // With the persistent FIFO writer fix, Claude stays alive between turns —
     // process_status remains 'running' while blocked on stdin waiting for the
-    // next message. Poll for work_status === 'agent_complete' to confirm the
-    // first turn completed successfully.
+    // next message. Poll for the session record to be fully populated.
     await pollUntil(async () => {
       const res = await fetch(apiUrl(`/api/sessions/task/${testTaskId}`))
       if (res.status !== 200) return false
       const body = (await res.json()) as { sessions: SessionEntry[] }
       session = body.sessions.find((s) => s.claudeSessionId === sessionId)
-      return session?.work_status === 'agent_complete'
+      return !!session?.host
     }, 500, 15_000)
 
     expect(session).toBeDefined()
@@ -410,9 +408,8 @@ describe.skipIf(!isLiveTest())('Session transport live (real SSH + real Claude)'
 
     // hasPipe=true: process stays alive between turns, ready for next message
     expect(session!.process_status).toBe('running')
-    expect(session!.work_status).toBe('agent_complete')
 
-    console.log(`Session record: host=${session!.host}, work_status=${session!.work_status}`)
+    console.log(`Session record: host=${session!.host}, process_status=${session!.process_status}`)
   })
 
   // ═══════════════════════════════════════════════════════════════════

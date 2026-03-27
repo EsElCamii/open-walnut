@@ -34,7 +34,7 @@ export async function fetchSessionHistory(sessionId: string, opts?: { source?: '
   return { messages: res.messages, forkBoundaryIndex: res.forkBoundaryIndex };
 }
 
-export async function updateSession(sessionId: string, updates: { title?: string; human_note?: string; work_status?: string; archived?: boolean; archive_reason?: string }): Promise<SessionRecord> {
+export async function updateSession(sessionId: string, updates: { title?: string; human_note?: string; archived?: boolean; archive_reason?: string }): Promise<SessionRecord> {
   const res = await apiPatch<{ session: SessionRecord }>(`/api/sessions/${sessionId}`, updates);
   return res.session;
 }
@@ -152,7 +152,10 @@ export async function quickStartSession(opts: {
   return result;
 }
 
-export async function retrySession(sessionId: string): Promise<{ status: string; taskId: string; oldSessionId: string }> {
+export async function retrySession(sessionId: string): Promise<
+  { status: 'resuming'; sessionId: string } |
+  { status: 'pending'; taskId: string; oldSessionId: string }
+> {
   return apiPost(`/api/sessions/${sessionId}/retry`, {});
 }
 

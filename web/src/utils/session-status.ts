@@ -6,7 +6,7 @@
  * Do NOT define local label/color maps in individual components.
  */
 import type { Task } from '@open-walnut/core';
-import type { ProcessStatus, WorkStatus } from '@/types/session';
+import type { ProcessStatus, TaskPhase } from '@/types/session';
 
 // ── Session ID resolution ──
 
@@ -29,11 +29,16 @@ export const PROCESS_LABELS: Record<ProcessStatus, string> = {
   error: 'Error',
 };
 
-export const WORK_LABELS: Record<WorkStatus, string> = {
-  in_progress: 'In Progress',
-  agent_complete: 'Agent Complete',
-  await_human_action: 'Awaiting Human',
-  completed: 'Completed',
+export const PHASE_LABELS: Record<TaskPhase, string> = {
+  TODO: 'To Do',
+  IN_PROGRESS: 'In Progress',
+  AGENT_COMPLETE: 'Agent Complete',
+  AWAIT_HUMAN_ACTION: 'Awaiting Human',
+  HUMAN_VERIFIED: 'Verified',
+  POST_WORK_COMPLETED: 'Post Work',
+  PEER_CODE_REVIEW: 'Code Review',
+  RELEASE_IN_PIPELINE: 'In Pipeline',
+  COMPLETE: 'Complete',
 };
 
 // ── Colors ──
@@ -45,34 +50,43 @@ export const PROCESS_COLORS: Record<ProcessStatus, string> = {
   error: 'var(--error)',
 };
 
-export const WORK_COLORS: Record<WorkStatus, string> = {
-  in_progress: 'var(--accent)',
-  agent_complete: 'var(--error)',
-  await_human_action: 'var(--error)',
-  completed: 'var(--fg-muted)',
+export const PHASE_COLORS: Record<TaskPhase, string> = {
+  TODO: '#6b7280',
+  IN_PROGRESS: '#f59e0b',
+  AGENT_COMPLETE: '#3b82f6',
+  AWAIT_HUMAN_ACTION: '#a855f7',
+  HUMAN_VERIFIED: '#10b981',
+  POST_WORK_COMPLETED: '#06b6d4',
+  PEER_CODE_REVIEW: '#ec4899',
+  RELEASE_IN_PIPELINE: '#f97316',
+  COMPLETE: '#22c55e',
 };
 
 // ── Composite helpers ──
 
-/** Single color for indicators that can only show one color (e.g. SessionPill dot).
- *  Running = green, idle = amber/warning, error = red, stopped = fall back to work_status color. */
-export function compositeColor(ps: ProcessStatus, ws: WorkStatus): string {
-  if (ps === 'running') return PROCESS_COLORS.running;
-  if (ps === 'idle') return PROCESS_COLORS.idle;
+/** Single color for indicators that combine process status and task phase.
+ *  Running = IN_PROGRESS color, error = red, otherwise = PHASE_COLORS[phase]. */
+export function compositePhaseColor(ps: ProcessStatus, phase: TaskPhase | undefined): string {
+  if (ps === 'running') return PHASE_COLORS.IN_PROGRESS;
   if (ps === 'error') return PROCESS_COLORS.error;
-  return WORK_COLORS[ws] ?? 'var(--fg-muted)';
+  return phase ? (PHASE_COLORS[phase] ?? '#6b7280') : '#6b7280';
 }
 
 // ── CSS class suffix for SessionPill ──
 
-/** Maps work_status to the CSS class suffix used by .task-session-pill-{suffix}.
+/** Maps phase to the CSS class suffix used by .task-session-pill-{suffix}.
  *  These match the renamed CSS classes in globals.css. */
-export function pillClassSuffix(ws: WorkStatus | string): string {
-  switch (ws) {
-    case 'in_progress': return 'running';
-    case 'agent_complete': return 'agent-complete';
-    case 'await_human_action': return 'await-human';
-    case 'completed': return 'completed';
+export function pillPhaseClassSuffix(phase: TaskPhase | string | undefined): string {
+  switch (phase) {
+    case 'IN_PROGRESS': return 'running';
+    case 'AGENT_COMPLETE': return 'agent-complete';
+    case 'AWAIT_HUMAN_ACTION': return 'await-human';
+    case 'COMPLETE': return 'completed';
+    case 'TODO': return 'agent-complete';
+    case 'HUMAN_VERIFIED': return 'completed';
+    case 'POST_WORK_COMPLETED': return 'completed';
+    case 'PEER_CODE_REVIEW': return 'agent-complete';
+    case 'RELEASE_IN_PIPELINE': return 'running';
     default: return 'agent-complete';
   }
 }

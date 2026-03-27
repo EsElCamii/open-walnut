@@ -5,7 +5,7 @@
  * `eventData<'event:name'>(event)` instead of manual `as { ... }` casts.
  */
 
-import type { Task, SessionMode, WorkStatus, ProcessStatus, SessionProvider } from './types.js';
+import type { Task, TaskPhase, SessionMode, ProcessStatus, SessionProvider } from './types.js';
 
 // ── Task events ──
 
@@ -110,9 +110,8 @@ export interface SessionToolResultEvent {
 export interface SessionStatusChangedEvent {
   sessionId: string;
   taskId?: string;
-  work_status?: WorkStatus;
+  phase?: TaskPhase;
   process_status?: ProcessStatus;
-  previousWorkStatus?: WorkStatus;
   activity?: string;
   mode?: SessionMode;
   planCompleted?: boolean;

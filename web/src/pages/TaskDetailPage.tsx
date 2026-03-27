@@ -593,8 +593,8 @@ export function TaskDetailPage() {
                   >
                     {label}
                   </span>
-                  {record?.work_status && (
-                    <span className="text-xs text-muted">{record.work_status}</span>
+                  {record?.process_status && (
+                    <span className="text-xs text-muted">{record.process_status}</span>
                   )}
                   {record?.process_status === 'stopped' && (
                     <button

@@ -1,22 +1,25 @@
 import { timeAgo } from '@/utils/time';
 import type { SessionRecord } from '@/types/session';
-import { PROCESS_COLORS, WORK_COLORS, WORK_LABELS } from '@/utils/session-status';
+import { PROCESS_COLORS, PHASE_COLORS, PHASE_LABELS } from '@/utils/session-status';
+import type { TaskPhase } from '@/types/session';
 
 interface SessionRowProps {
   session: SessionRecord;
   selected: boolean;
   onClick: () => void;
+  /** Task phase for display (replaces old work_status). */
+  phase?: TaskPhase;
 }
 
 
-export function SessionRow({ session, selected, onClick }: SessionRowProps) {
+export function SessionRow({ session, selected, onClick, phase }: SessionRowProps) {
   const sessionId = session.claudeSessionId || '';
   const title = session.title || session.description || session.slug || sessionId || 'Untitled session';
   const processStatus = session.process_status || 'stopped';
-  const workStatus = session.work_status || 'agent_complete';
+  const taskPhase = phase ?? 'TODO';
   const ago = timeAgo(session.lastActiveAt || session.startedAt);
 
-  const statusLabel = WORK_LABELS[workStatus] ?? workStatus;
+  const statusLabel = PHASE_LABELS[taskPhase] ?? taskPhase;
   const modeIcon = session.mode === 'plan' ? '\uD83D\uDCCB Plan' : session.mode && session.mode !== 'default' ? '\u26A1 Bypass' : null;
 
   return (
@@ -87,11 +90,11 @@ export function SessionRow({ session, selected, onClick }: SessionRowProps) {
       <div className="session-row-bottom" style={{ display: 'flex', alignItems: 'center', gap: '6px', paddingLeft: '18px' }}>
         <span
           className="text-xs"
-          style={{ color: WORK_COLORS[workStatus] ?? 'var(--fg-muted)' }}
+          style={{ color: PHASE_COLORS[taskPhase] ?? 'var(--fg-muted)' }}
         >
           {statusLabel}
         </span>
-        {session.activity && workStatus === 'in_progress' && (
+        {session.activity && processStatus === 'running' && (
           <span className="text-xs text-muted" style={{ fontStyle: 'italic' }}>
             — {session.activity}
           </span>

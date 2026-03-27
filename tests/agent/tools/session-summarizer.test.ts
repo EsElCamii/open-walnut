@@ -68,7 +68,6 @@ const record: SessionRecord = {
   taskId: 'task-1',
   project: 'test',
   process_status: 'stopped',
-  work_status: 'completed',
   mode: 'default',
   startedAt: '2025-01-01T00:00:00Z',
   lastActiveAt: '2025-01-01T01:00:00Z',

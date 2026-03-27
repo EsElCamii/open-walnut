@@ -76,7 +76,6 @@ describe('start_session auto-archives terminal sessions', () => {
     });
     await updateSessionRecord(stoppedSession.claudeSessionId, {
       process_status: 'stopped',
-      work_status: 'agent_complete',
     });
 
     // Link the session to the task slot so the task thinks it has a session
@@ -113,7 +112,6 @@ describe('start_session auto-archives terminal sessions', () => {
     });
     await updateSessionRecord(errorSession.claudeSessionId, {
       process_status: 'error',
-      work_status: 'in_progress',
     });
 
     // Link the session to the task slot

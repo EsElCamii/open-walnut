@@ -32,13 +32,6 @@ const ARCHIVE_STREAMS_DIR = path.join(ARCHIVE_DIR, 'streams')
  */
 const REAPABLE_TYPES: ReadonlySet<SessionType> = new Set(['triage', 'hook', 'cron'])
 
-/**
- * Work statuses that indicate a session is done enough to reap.
- * Includes `agent_complete` — triage sessions have no human review step.
- * Note: 'error' is now a process_status, checked separately.
- */
-const REAPER_DONE_STATUSES = new Set(['completed', 'agent_complete'])
-
 /** Get the relevant timestamp for a session (for age comparison and month grouping). */
 function sessionTimestamp(s: SessionRecord): string | undefined {
   return s.last_status_change ?? s.lastActiveAt ?? s.startedAt
@@ -94,7 +87,6 @@ export class SessionReaper {
     const toReap = sessions.filter(s => {
       if (!s.type || !REAPABLE_TYPES.has(s.type)) return false
       if (s.process_status !== 'stopped' && s.process_status !== 'error') return false
-      if (!REAPER_DONE_STATUSES.has(s.work_status) && s.process_status !== 'error') return false
       const ts = sessionTimestamp(s)
       return ts ? new Date(ts).getTime() < cutoff : false
     })

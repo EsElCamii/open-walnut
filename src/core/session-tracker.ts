@@ -5,7 +5,7 @@ import { readJsonFile, writeJsonFile, ensureDir } from '../utils/fs.js';
 import { withFileLock } from '../utils/file-lock.js';
 import { isSessionProcessAlive } from '../utils/session-liveness.js';
 import { log } from '../logging/index.js';
-import type { SessionSummary, SessionRecord, SessionMode, SessionType, Task } from './types.js';
+import type { SessionSummary, SessionRecord, SessionMode, SessionType, TaskPhase, Task } from './types.js';
 
 // ── Triage detection ──
 
@@ -73,13 +73,10 @@ async function readStore(): Promise<SessionStoreV2> {
 
       if (oldStatus === 'active') {
         session.process_status = 'stopped'; // can't verify PID during read — reconciler will fix
-        session.work_status = 'in_progress';
       } else if (oldStatus === 'idle') {
         session.process_status = 'stopped';
-        session.work_status = 'agent_complete';
       } else {
         session.process_status = 'stopped';
-        session.work_status = 'completed';
       }
 
       session.mode ??= 'default';
@@ -88,23 +85,11 @@ async function readStore(): Promise<SessionStoreV2> {
     }
   }
 
-  // Migrate renamed work_status values: turn_completed → agent_complete, pending_human_review → await_human_action
+  // Strip legacy work_status field from old session records
   for (const session of store.sessions) {
-    const ws = (session as unknown as Record<string, unknown>).work_status as string;
-    if (ws === 'turn_completed') {
-      (session as unknown as Record<string, string>).work_status = 'agent_complete';
-      migrated = true;
-    } else if (ws === 'pending_human_review') {
-      (session as unknown as Record<string, string>).work_status = 'await_human_action';
-      migrated = true;
-    }
-  }
-
-  // Migrate legacy work_status:'error' → process_status:'error'
-  for (const session of store.sessions) {
-    if ((session as unknown as Record<string, string>).work_status === 'error') {
-      session.process_status = 'error';
-      (session as unknown as Record<string, string>).work_status = 'in_progress';
+    const legacy = session as unknown as Record<string, unknown>;
+    if ('work_status' in legacy) {
+      delete (legacy as any).work_status;
       migrated = true;
     }
   }
@@ -116,16 +101,6 @@ async function readStore(): Promise<SessionStoreV2> {
       session.archived = true;
       session.archive_reason ??= 'plan_executed';
       delete legacy.absorbed;
-      migrated = true;
-    }
-  }
-
-  // Migrate process_status: running sessions that are not in_progress → idle
-  // This handles the transition to the 3-state ProcessStatus model.
-  for (const session of store.sessions) {
-    if (session.process_status === 'running' && session.work_status !== 'in_progress') {
-      (session as unknown as Record<string, string>).process_status = 'idle';
-      session.last_status_change ??= session.lastActiveAt;
       migrated = true;
     }
   }
@@ -174,9 +149,9 @@ export async function listSessions(): Promise<SessionRecord[]> {
   return store.sessions;
 }
 
-/** A session is terminal if work_status is 'completed' or process_status is 'error'. */
-export function isTerminalSession(s: { process_status?: string; work_status?: string }): boolean {
-  return s.work_status === 'completed' || s.process_status === 'error';
+/** A session is terminal if process_status is 'error' OR the task's phase is 'COMPLETE'. */
+export function isTerminalSession(s: { process_status?: string }, taskPhase?: TaskPhase): boolean {
+  return s.process_status === 'error' || taskPhase === 'COMPLETE';
 }
 
 /**
@@ -375,7 +350,6 @@ export async function checkSessionLimit(
       }
       await updateSessionRecord(victim.claudeSessionId, {
         process_status: 'stopped',
-        work_status: victim.work_status === 'in_progress' ? 'agent_complete' : victim.work_status,
         activity: undefined,
         last_status_change: new Date().toISOString(),
       });
@@ -450,7 +424,6 @@ export async function createSessionRecord(
             existing.process_status = 'running';
             existing.last_status_change = now;
           }
-          existing.work_status = 'in_progress';
         }
       }
       if (extra?.outputFile) existing.outputFile = extra.outputFile;
@@ -470,7 +443,6 @@ export async function createSessionRecord(
       taskId,
       project,
       process_status: 'running',
-      work_status: 'in_progress',
       mode: extra?.mode ?? 'default',
       last_status_change: now,
       startedAt: now,
@@ -510,7 +482,6 @@ export async function importSessionRecord(opts: {
   cwd?: string;
   host?: string;
   title?: string;
-  work_status?: 'agent_complete' | 'completed' | 'await_human_action';
   startedAt?: string;
   lastActiveAt?: string;
   messageCount?: number;
@@ -531,7 +502,6 @@ export async function importSessionRecord(opts: {
       taskId: opts.taskId,
       project: opts.project,
       process_status: 'stopped',
-      work_status: opts.work_status ?? 'agent_complete',
       mode: 'default',
       last_status_change: now,
       startedAt: opts.startedAt ?? now,
@@ -576,7 +546,7 @@ export async function updateSessionRecord(
     if (isTerminalSession(session) && session.pid != null) {
       log.session.info('clearing stale PID on terminal transition', {
         sessionId: claudeSessionId, pid: session.pid,
-        process_status: session.process_status, work_status: session.work_status,
+        process_status: session.process_status,
       });
       session.pid = undefined;
     }
@@ -610,7 +580,7 @@ export async function updateSessionRecordConditionally(
     if (isTerminalSession(session) && session.pid != null) {
       log.session.info('clearing stale PID on terminal transition (conditional)', {
         sessionId: claudeSessionId, pid: session.pid,
-        process_status: session.process_status, work_status: session.work_status,
+        process_status: session.process_status,
       });
       session.pid = undefined;
     }
@@ -683,7 +653,6 @@ export async function completeTaskSessions(sessionIds: string[]): Promise<number
       if (session.pid != null && session.provider !== 'embedded' && session.provider !== 'sdk') {
         pidsToKill.push(session.pid);
       }
-      session.work_status = 'completed';
       session.process_status = 'stopped';
       if (session.pid != null) {
         log.session.info('clearing stale PID on task completion', { sessionId: sid, pid: session.pid });

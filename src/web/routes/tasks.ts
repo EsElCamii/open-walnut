@@ -28,11 +28,10 @@ import {
 } from '../../core/task-manager.js'
 import { listSessions } from '../../core/session-tracker.js'
 import { bus, EventNames } from '../../core/event-bus.js'
-import { VALID_PRIORITIES, type Task, type WorkStatus, type ProcessStatus, type SessionMode } from '../../core/types.js'
+import { VALID_PRIORITIES, type Task, type ProcessStatus, type SessionMode } from '../../core/types.js'
 
 /** Session info used during enrichment (includes mode for slot inference). */
 interface SessionInfo {
-  work_status: WorkStatus
   process_status: ProcessStatus
   activity?: string
   mode: SessionMode
@@ -42,9 +41,8 @@ interface SessionInfo {
 }
 
 /** Map SessionInfo to the enriched status shape attached to tasks. */
-function toSlotStatus(info: SessionInfo, slot?: 'plan' | 'exec'): { work_status: WorkStatus; process_status: ProcessStatus; activity?: string; mode?: SessionMode; provider?: import('../../core/types.js').SessionProvider; planCompleted?: boolean } {
+function toSlotStatus(info: SessionInfo, slot?: 'plan' | 'exec'): { process_status: ProcessStatus; activity?: string; mode?: SessionMode; provider?: import('../../core/types.js').SessionProvider; planCompleted?: boolean } {
   return {
-    work_status: info.work_status,
     process_status: info.process_status,
     activity: info.activity,
     mode: info.mode,
@@ -55,7 +53,7 @@ function toSlotStatus(info: SessionInfo, slot?: 'plan' | 'exec'): { work_status:
 
 /** Whether a session is still active (not in a terminal state). */
 function isActiveSession(info: SessionInfo): boolean {
-  return info.work_status !== 'completed' && info.process_status !== 'error'
+  return info.process_status !== 'error'
 }
 
 /** Enrich tasks that have slot sessions with session status info. */
@@ -104,7 +102,6 @@ async function enrichTasksWithSessionStatus(tasks: Task[]): Promise<Task[]> {
   for (const rec of allSessions) {
     if (sessionIds.has(rec.claudeSessionId)) {
       sessionMap.set(rec.claudeSessionId, {
-        work_status: rec.work_status,
         process_status: rec.process_status,
         activity: rec.activity,
         mode: rec.mode,
@@ -151,7 +148,6 @@ async function enrichTasksWithSessionStatus(tasks: Task[]): Promise<Task[]> {
     const singleInfo = enriched.session_id ? sessionMap.get(enriched.session_id) : undefined
     if (singleInfo && !singleInfo.archived) {
       enriched.session_status = {
-        work_status: singleInfo.work_status,
         process_status: singleInfo.process_status,
         activity: singleInfo.activity,
         mode: singleInfo.mode,
@@ -188,19 +184,6 @@ async function enrichTasksWithSessionStatus(tasks: Task[]): Promise<Task[]> {
       }
     }
 
-    // Collect all unique work_statuses across all sessions for this task
-    const allSids = new Set<string>()
-    if (enriched.plan_session_id) allSids.add(enriched.plan_session_id)
-    if (enriched.exec_session_id) allSids.add(enriched.exec_session_id)
-    if (enriched.session_ids) for (const sid of enriched.session_ids) allSids.add(sid)
-    if (allSids.size > 0) {
-      const statuses = new Set<WorkStatus>()
-      for (const sid of allSids) {
-        const info = sessionMap.get(sid)
-        if (info) statuses.add(info.work_status)
-      }
-      if (statuses.size > 0) enriched.session_work_statuses = [...statuses]
-    }
     return enriched
   })
 }

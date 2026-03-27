@@ -48,7 +48,6 @@ describe('importSessionRecord', () => {
       cwd: '/home/user/walnut',
       host: 'olddev',
       title: 'Imported test session',
-      work_status: 'agent_complete',
       startedAt: '2026-02-25T10:00:00.000Z',
       lastActiveAt: '2026-02-25T11:00:00.000Z',
       messageCount: 42,
@@ -58,7 +57,6 @@ describe('importSessionRecord', () => {
     expect(record.taskId).toBe('task-1');
     expect(record.project).toBe('walnut');
     expect(record.process_status).toBe('stopped');
-    expect(record.work_status).toBe('agent_complete');
     expect(record.cwd).toBe('/home/user/walnut');
     expect(record.host).toBe('olddev');
     expect(record.title).toBe('Imported test session');
@@ -68,31 +66,13 @@ describe('importSessionRecord', () => {
     expect(record.mode).toBe('default');
   });
 
-  it('defaults work_status to agent_complete', async () => {
+  it('defaults process_status to stopped', async () => {
     const record = await importSessionRecord({
       claudeSessionId: 'import-002',
       taskId: 'task-1',
       project: 'proj',
     });
-    expect(record.work_status).toBe('agent_complete');
-  });
-
-  it('allows completed and await_human_action work statuses', async () => {
-    const r1 = await importSessionRecord({
-      claudeSessionId: 'import-003',
-      taskId: 'task-1',
-      project: 'proj',
-      work_status: 'completed',
-    });
-    expect(r1.work_status).toBe('completed');
-
-    const r2 = await importSessionRecord({
-      claudeSessionId: 'import-004',
-      taskId: 'task-1',
-      project: 'proj',
-      work_status: 'await_human_action',
-    });
-    expect(r2.work_status).toBe('await_human_action');
+    expect(record.process_status).toBe('stopped');
   });
 
   it('persists to store and is retrievable', async () => {

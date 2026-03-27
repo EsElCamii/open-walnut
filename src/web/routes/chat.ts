@@ -111,9 +111,9 @@ interface TaskContext {
   conversation_log?: string
   created_at?: string
   plan_session_id?: string
-  plan_session_status?: { work_status: string; process_status: string; activity?: string }
+  plan_session_status?: { process_status: string; activity?: string }
   exec_session_id?: string
-  exec_session_status?: { work_status: string; process_status: string; activity?: string }
+  exec_session_status?: { process_status: string; activity?: string }
 }
 
 interface ChatPayload {
@@ -197,12 +197,12 @@ export function buildTaskContextPrefix(ctx: TaskContext | null | undefined): str
   // Session slots — show IDs + status so the agent doesn't need extra get_session calls
   if (ctx.plan_session_id) {
     const ss = ctx.plan_session_status
-    const parts = ss ? [ss.process_status, ss.work_status, ...(ss.activity ? [ss.activity] : [])].join(', ') : ''
+    const parts = ss ? [ss.process_status, ...(ss.activity ? [ss.activity] : [])].join(', ') : ''
     lines.push(`Plan session: ${ctx.plan_session_id}${parts ? ` (${parts})` : ''}`)
   }
   if (ctx.exec_session_id) {
     const ss = ctx.exec_session_status
-    const parts = ss ? [ss.process_status, ss.work_status, ...(ss.activity ? [ss.activity] : [])].join(', ') : ''
+    const parts = ss ? [ss.process_status, ...(ss.activity ? [ss.activity] : [])].join(', ') : ''
     lines.push(`Exec session: ${ctx.exec_session_id}${parts ? ` (${parts})` : ''}`)
   }
 
@@ -375,12 +375,12 @@ export async function enrichTaskContext(ctx: TaskContext): Promise<EnrichedResul
   // Session slots — same as buildTaskContextPrefix
   if (ctx.plan_session_id) {
     const ss = ctx.plan_session_status;
-    const parts = ss ? [ss.process_status, ss.work_status, ...(ss.activity ? [ss.activity] : [])].join(', ') : '';
+    const parts = ss ? [ss.process_status, ...(ss.activity ? [ss.activity] : [])].join(', ') : '';
     lines.push(`Plan session: ${ctx.plan_session_id}${parts ? ` (${parts})` : ''}`);
   }
   if (ctx.exec_session_id) {
     const ss = ctx.exec_session_status;
-    const parts = ss ? [ss.process_status, ss.work_status, ...(ss.activity ? [ss.activity] : [])].join(', ') : '';
+    const parts = ss ? [ss.process_status, ...(ss.activity ? [ss.activity] : [])].join(', ') : '';
     lines.push(`Exec session: ${ctx.exec_session_id}${parts ? ` (${parts})` : ''}`);
   }
 

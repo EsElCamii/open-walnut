@@ -10,7 +10,7 @@ import { perf } from '@/utils/perf-logger';
  * Optimistic default status for a newly-linked session (before the first
  * session:status-changed event arrives). Avoids the brief "? / ?" flash.
  */
-const OPTIMISTIC_STARTING_STATUS = { work_status: 'in_progress' as const, process_status: 'running' as const };
+const OPTIMISTIC_STARTING_STATUS = { process_status: 'running' as const };
 
 /**
  * Merge an incoming WS task update with the existing local task,
@@ -53,8 +53,6 @@ function mergeTask(existing: Task, incoming: Task): Task {
         : incoming.exec_session_id
           ? OPTIMISTIC_STARTING_STATUS
           : undefined),
-    // Preserve session_work_statuses enrichment from REST API
-    session_work_statuses: incoming.session_work_statuses ?? existing.session_work_statuses,
   };
 }
 
@@ -318,8 +316,8 @@ export function useTasks(filter?: tasksApi.TaskFilter): UseTasksReturn {
 
   // When a session's status changes, update the enriched session status on the affected task
   useEvent('session:status-changed', (data) => {
-    const { sessionId, taskId, work_status, process_status, mode, activity, planCompleted } = data as {
-      sessionId?: string; taskId?: string; work_status?: string; process_status?: string;
+    const { sessionId, taskId, phase, process_status, mode, activity, planCompleted } = data as {
+      sessionId?: string; taskId?: string; phase?: string; process_status?: string;
       mode?: string; activity?: string; planCompleted?: boolean;
     };
     if (!sessionId) return;
@@ -330,7 +328,6 @@ export function useTasks(filter?: tasksApi.TaskFilter): UseTasksReturn {
       if (!matchesSingle && !matchesPlan && !matchesExec) return t;
       const updated = { ...t };
       const statusInfo = {
-        work_status: (work_status ?? 'agent_complete') as NonNullable<Task['plan_session_status']>['work_status'],
         process_status: (process_status ?? 'stopped') as NonNullable<Task['plan_session_status']>['process_status'],
         ...(activity ? { activity } : {}),
         ...(mode ? { mode: mode as NonNullable<Task['session_status']>['mode'] } : {}),
@@ -339,6 +336,8 @@ export function useTasks(filter?: tasksApi.TaskFilter): UseTasksReturn {
       if (matchesSingle) updated.session_status = { ...updated.session_status, ...statusInfo };
       if (matchesPlan) updated.plan_session_status = { ...updated.plan_session_status, ...statusInfo };
       if (matchesExec) updated.exec_session_status = { ...updated.exec_session_status, ...statusInfo };
+      // Update task phase if provided in the event
+      if (phase) updated.phase = phase as Task['phase'];
       return updated;
     }));
   });

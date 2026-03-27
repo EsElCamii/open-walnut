@@ -60,7 +60,6 @@ async function seedSessionRecord(sessionId: string, extras?: Record<string, unkn
     taskId: 'midstream-task-001',
     project: 'MidStreamTest',
     process_status: 'stopped',
-    work_status: 'completed',
     mode: 'bypass',
     startedAt: '2026-02-20T00:40:00.000Z',
     lastActiveAt: '2026-02-20T00:42:00.000Z',

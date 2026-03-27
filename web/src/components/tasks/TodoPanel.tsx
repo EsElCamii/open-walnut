@@ -10,8 +10,9 @@ import { fetchTriageHistory } from '@/api/chat';
 import { useEvent } from '@/hooks/useWebSocket';
 import { timeAgo } from '@/utils/time';
 import { scrollLog } from '@/utils/scroll-debug';
-import type { ProcessStatus, WorkStatus } from '@walnut/core';
-import { WORK_LABELS, WORK_COLORS, PROCESS_COLORS, PROCESS_LABELS, resolveTaskSessionId } from '@/utils/session-status';
+import type { ProcessStatus } from '@walnut/core';
+import type { TaskPhase } from '@/types/session';
+import { PHASE_LABELS, PHASE_COLORS, PROCESS_COLORS, PROCESS_LABELS, resolveTaskSessionId } from '@/utils/session-status';
 import type { UseFavoritesReturn } from '@/hooks/useFavorites';
 import type { UseOrderingReturn } from '@/hooks/useOrdering';
 import { PriorityPicker } from '../common/PriorityPicker';
@@ -807,7 +808,7 @@ const snapToCursor: Modifier = ({ activatorEvent, draggingNodeRect, transform })
 // Session info colors — imported from single source of truth.
 // Re-exported as local aliases for backwards compat with type signature.
 const processDotColors = PROCESS_COLORS as Record<ProcessStatus, string>;
-const workStatusColors = WORK_COLORS as Record<WorkStatus, string>;
+const phaseColors = PHASE_COLORS as Record<TaskPhase, string>;
 
 
 function truncateCwd(p: string): string {
@@ -935,9 +936,9 @@ function TaskDetailPane({ task, allTasks, onClose, onOpenSession, onOpenTriageFo
 
   // Live-update session records when status/mode changes via WebSocket
   useEvent('session:status-changed', (data) => {
-    const { sessionId, taskId, mode, work_status, process_status, planCompleted } = data as {
+    const { sessionId, taskId, mode, process_status, planCompleted } = data as {
       sessionId?: string; taskId?: string; mode?: string;
-      work_status?: string; process_status?: string; planCompleted?: boolean;
+      process_status?: string; planCompleted?: boolean;
     };
     if (taskId !== task.id || !sessionId) return;
     setSessionRecords((prev) => {
@@ -946,7 +947,6 @@ function TaskDetailPane({ task, allTasks, onClose, onOpenSession, onOpenTriageFo
       const updated = new Map(prev);
       const patched = { ...record };
       if (mode !== undefined) patched.mode = mode as SessionRecord['mode'];
-      if (work_status !== undefined) patched.work_status = work_status as SessionRecord['work_status'];
       if (process_status !== undefined) patched.process_status = process_status as SessionRecord['process_status'];
       if (planCompleted !== undefined) patched.planCompleted = planCompleted;
       updated.set(sessionId, patched);
@@ -1049,9 +1049,9 @@ function TaskDetailPane({ task, allTasks, onClose, onOpenSession, onOpenTriageFo
               allSessionIds.map((sid) => {
                 const taskStatus = task.session_status;
                 const processStatus = taskStatus?.process_status || 'stopped';
-                const workStatus = taskStatus?.work_status || 'agent_complete';
+                const taskPhase = (task.phase || 'TODO') as TaskPhase;
                 const isPlan = taskStatus?.mode === 'plan';
-                const statusLabel = WORK_LABELS[workStatus] ?? workStatus;
+                const statusLabel = PHASE_LABELS[taskPhase] ?? taskPhase;
                 return (
                   <div
                     key={sid}
@@ -1069,7 +1069,7 @@ function TaskDetailPane({ task, allTasks, onClose, onOpenSession, onOpenTriageFo
                       <span className="session-id-mono text-xs" title={`Session ID: ${sid}`}>{sid.slice(0, 8)} &#x2197;</span>
                     </div>
                     <div className="todo-detail-session-meta">
-                      <span className="todo-detail-ws-pill" style={{ color: workStatusColors[workStatus] ?? 'var(--fg-muted)', borderColor: workStatusColors[workStatus] ?? 'var(--fg-muted)' }}>
+                      <span className="todo-detail-ws-pill" style={{ color: phaseColors[taskPhase] ?? 'var(--fg-muted)', borderColor: phaseColors[taskPhase] ?? 'var(--fg-muted)' }}>
                         {statusLabel}
                       </span>
                     </div>
@@ -1080,12 +1080,12 @@ function TaskDetailPane({ task, allTasks, onClose, onOpenSession, onOpenTriageFo
               visibleSessionIds.filter((sid) => sessionRecords.has(sid)).map((sid) => {
                 const record = sessionRecords.get(sid);
                 const processStatus = record?.process_status || 'stopped';
-                const workStatus = record?.work_status || 'agent_complete';
+                const sessionPhase = (task.phase || 'TODO') as TaskPhase;
                 const label = record?.title || 'Untitled session';
                 const ago = timeAgo(record?.lastActiveAt || record?.startedAt || '');
                 const isPlan = record?.mode === 'plan';
                 const modeLabel = record?.mode && record.mode !== 'default' && record.mode !== 'plan' && !record?.planCompleted ? record.mode : null;
-                const statusLabel = (WORK_LABELS[workStatus] ?? workStatus) + (modeLabel ? ` · ${modeLabel}` : '');
+                const statusLabel = (PHASE_LABELS[sessionPhase] ?? sessionPhase) + (modeLabel ? ` · ${modeLabel}` : '');
                 return (
                   <div
                     key={sid}
@@ -1122,18 +1122,18 @@ function TaskDetailPane({ task, allTasks, onClose, onOpenSession, onOpenTriageFo
                         {sid.slice(0, 8)} &#x2197;
                       </span>
                     </div>
-                    {/* Row 2: work_status pill + activity */}
+                    {/* Row 2: phase pill + activity */}
                     <div className="todo-detail-session-meta">
                       <span
                         className="todo-detail-ws-pill"
                         style={{
-                          color: workStatusColors[workStatus] ?? 'var(--fg-muted)',
-                          borderColor: workStatusColors[workStatus] ?? 'var(--fg-muted)',
+                          color: phaseColors[sessionPhase] ?? 'var(--fg-muted)',
+                          borderColor: phaseColors[sessionPhase] ?? 'var(--fg-muted)',
                         }}
                       >
                         {statusLabel}
                       </span>
-                      {record?.activity && workStatus === 'in_progress' && (
+                      {record?.activity && processStatus === 'running' && (
                         <span className="text-xs text-muted" style={{ fontStyle: 'italic' }}>
                           — {record.activity}
                         </span>
@@ -1512,7 +1512,7 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
     if (phaseFilter && task.phase !== phaseFilter) {
       setPhaseFilter('');
     }
-    if (sessionFilter && (!task.session_work_statuses || !task.session_work_statuses.includes(sessionFilter as typeof task.session_work_statuses[number]))) {
+    if (sessionFilter && task.phase !== sessionFilter) {
       setSessionFilter('');
     }
     if (sourceFilter !== 'all' && (task.source || 'ms-todo') !== sourceFilter) {
@@ -1686,7 +1686,7 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
       if (priorityFilter && effectivePriority(t.priority) !== priorityFilter) return false;
       if (phaseFilter && t.phase !== phaseFilter) return false;
       if (sessionFilter) {
-        if (!t.session_work_statuses || !t.session_work_statuses.includes(sessionFilter as typeof t.session_work_statuses[number])) return false;
+        if (t.phase !== sessionFilter) return false;
       }
 
       // Source/provider filter (treat undefined as 'ms-todo')
@@ -1757,7 +1757,7 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
       if (phaseFilter && t.phase !== phaseFilter) return false;
       // Session work status
       if (sessionFilter) {
-        if (!t.session_work_statuses || !t.session_work_statuses.includes(sessionFilter as typeof t.session_work_statuses[number])) return false;
+        if (t.phase !== sessionFilter) return false;
       }
       // Source/provider
       if (sourceFilter !== 'all') {
@@ -1912,7 +1912,7 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
     };
     const matchesPrioritySessionSource = (t: Task) => {
       if (priorityFilter && effectivePriority(t.priority) !== priorityFilter) return false;
-      if (sessionFilter && (!t.session_work_statuses || !t.session_work_statuses.includes(sessionFilter as typeof t.session_work_statuses[number]))) return false;
+      if (sessionFilter && t.phase !== sessionFilter) return false;
       if (sourceFilter !== 'all' && (t.source || 'ms-todo') !== sourceFilter) return false;
       if (tagFilter && (!t.tags || !t.tags.includes(tagFilter))) return false;
       return true;
@@ -1929,7 +1929,7 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
     // Priority counts (apply phase + session + source + tag filters)
     const forPriority = baseTasks.filter((t) => {
       if (phaseFilter && t.phase !== phaseFilter) return false;
-      if (sessionFilter && (!t.session_work_statuses || !t.session_work_statuses.includes(sessionFilter as typeof t.session_work_statuses[number]))) return false;
+      if (sessionFilter && t.phase !== sessionFilter) return false;
       if (sourceFilter !== 'all' && (t.source || 'ms-todo') !== sourceFilter) return false;
       if (tagFilter && (!t.tags || !t.tags.includes(tagFilter))) return false;
       return true;
@@ -1960,20 +1960,17 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
       if (tagFilter && (!t.tags || !t.tags.includes(tagFilter))) return false;
       return true;
     });
-    const session: Record<string, number> = { in_progress: 0, agent_complete: 0, await_human_action: 0, completed: 0, error: 0 };
+    const session: Record<string, number> = {};
+    for (const p of PHASE_ORDER) session[p] = 0;
     for (const t of forSession) {
-      if (t.session_work_statuses) {
-        for (const ws of t.session_work_statuses) {
-          if (session[ws] !== undefined) session[ws]++;
-        }
-      }
+      if (t.phase && session[t.phase] !== undefined) session[t.phase]++;
     }
 
     // Source counts (apply priority + phase + session + tag filters)
     const forSource = baseTasks.filter((t) => {
       if (priorityFilter && effectivePriority(t.priority) !== priorityFilter) return false;
       if (phaseFilter && t.phase !== phaseFilter) return false;
-      if (sessionFilter && (!t.session_work_statuses || !t.session_work_statuses.includes(sessionFilter as typeof t.session_work_statuses[number]))) return false;
+      if (sessionFilter && t.phase !== sessionFilter) return false;
       if (tagFilter && (!t.tags || !t.tags.includes(tagFilter))) return false;
       return true;
     });
@@ -1991,7 +1988,7 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
     const forTags = baseTasks.filter((t) => {
       if (priorityFilter && effectivePriority(t.priority) !== priorityFilter) return false;
       if (phaseFilter && t.phase !== phaseFilter) return false;
-      if (sessionFilter && (!t.session_work_statuses || !t.session_work_statuses.includes(sessionFilter as typeof t.session_work_statuses[number]))) return false;
+      if (sessionFilter && t.phase !== sessionFilter) return false;
       if (sourceFilter !== 'all' && (t.source || 'ms-todo') !== sourceFilter) return false;
       return true;
     });

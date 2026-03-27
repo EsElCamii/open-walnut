@@ -4,18 +4,17 @@
  * Prefers the new single-slot model (sessionId + sessionStatus).
  * Falls back to legacy 2-slot props (planSessionId/execSessionId + statuses) for backward compat.
  *
- * Three-layer badge format: "Session · {Mode} · {WorkLabel} / {ProcessLabel}"
+ * Three-layer badge format: "Session · {Mode} · {PhaseLabel} / {ProcessLabel}"
  * Examples:
  *   Session · Plan · In Progress / Running
  *   Session · Bypass · Agent Complete / Stopped
  *   Session · Plan · Awaiting Human / Stopped
  */
-import { WORK_LABELS, PROCESS_LABELS, pillClassSuffix } from '@/utils/session-status';
-import type { WorkStatus, ProcessStatus } from '@/types/session';
+import { PHASE_LABELS, PROCESS_LABELS, pillPhaseClassSuffix } from '@/utils/session-status';
+import type { TaskPhase, ProcessStatus } from '@/types/session';
 import { ICON_ROBOT } from '@/components/common/Icons';
 
 interface SessionStatus {
-  work_status: string;
   process_status: string;
   activity?: string;
   provider?: string;
@@ -28,6 +27,8 @@ interface SessionPillProps {
   sessionId?: string;
   /** New single-slot session status (enriched from backend). */
   sessionStatus?: SessionStatus;
+  /** Task phase — used for display label and CSS class. */
+  phase?: TaskPhase;
   /** @deprecated Legacy 2-slot prop. */
   planSessionId?: string;
   /** @deprecated Legacy 2-slot prop. */
@@ -46,10 +47,10 @@ interface SessionPillProps {
   isActive?: boolean;
 }
 
-/** Human-readable work_status label from central constants. */
-function workLabel(status: SessionStatus | undefined): string {
-  if (!status) return '?';
-  return WORK_LABELS[status.work_status as WorkStatus] || status.work_status || '?';
+/** Human-readable phase label from central constants. */
+function phaseLabel(phase: TaskPhase | undefined): string {
+  if (!phase) return '?';
+  return PHASE_LABELS[phase] || phase || '?';
 }
 
 /** Human-readable process_status label from central constants. */
@@ -58,23 +59,20 @@ function processLabel(status: SessionStatus | undefined): string {
   return PROCESS_LABELS[status.process_status as ProcessStatus] || status.process_status || '?';
 }
 
-/** CSS class suffix from work_status via central utility. */
-function stateClassFromStatus(status: SessionStatus | undefined): string {
-  return pillClassSuffix(status?.work_status || '');
+/** CSS class suffix from phase via central utility. */
+function stateClassFromPhase(phase: TaskPhase | undefined): string {
+  return pillPhaseClassSuffix(phase);
 }
 
 /** CSS class suffix from two legacy statuses — picks the most important. */
-function stateClassLegacy(plan: SessionStatus | undefined, exec: SessionStatus | undefined): string {
-  const ws = (s: SessionStatus | undefined) => s?.work_status;
+function stateClassLegacy(plan: SessionStatus | undefined, exec: SessionStatus | undefined, phase: TaskPhase | undefined): string {
   const ps = (s: SessionStatus | undefined) => s?.process_status;
-  if (ws(plan) === 'in_progress' || ws(exec) === 'in_progress') return 'running';
+  if (ps(plan) === 'running' || ps(exec) === 'running') return 'running';
   if (ps(plan) === 'error' || ps(exec) === 'error') return 'error';
-  if (ws(plan) === 'await_human_action' || ws(exec) === 'await_human_action') return 'await-human';
-  if (ws(plan) === 'completed' || ws(exec) === 'completed') return 'completed';
-  return 'agent-complete';
+  return pillPhaseClassSuffix(phase);
 }
 
-export function SessionPill({ sessionId, sessionStatus, planSessionId, execSessionId, planStatus, execStatus, sessionIds, mode, onClick, isActive }: SessionPillProps) {
+export function SessionPill({ sessionId, sessionStatus, phase, planSessionId, execSessionId, planStatus, execStatus, sessionIds, mode, onClick, isActive }: SessionPillProps) {
   const clickable = !!onClick;
   const clickClass = clickable ? ' task-session-pill-clickable' : '';
   const activeClass = isActive ? ' task-session-pill-active' : '';
@@ -86,12 +84,12 @@ export function SessionPill({ sessionId, sessionStatus, planSessionId, execSessi
   // New single-slot model: prefer sessionId + sessionStatus
   if (sessionId || sessionStatus) {
     const status = sessionStatus;
-    const cls = stateClassFromStatus(status);
-    const wl = workLabel(status);
+    const cls = stateClassFromPhase(phase);
+    const wl = phaseLabel(phase);
     const pl = processLabel(status);
     const isEmbedded = status?.provider === 'embedded';
     const title = status
-      ? `Session · ${modeLabel}: ${status.work_status} / ${status.process_status}${isEmbedded ? ' (embedded)' : ''}`
+      ? `Session · ${modeLabel}: ${phase ?? 'unknown'} / ${status.process_status}${isEmbedded ? ' (embedded)' : ''}`
       : 'Session';
 
     return (
@@ -118,11 +116,11 @@ export function SessionPill({ sessionId, sessionStatus, planSessionId, execSessi
     return null;
   }
 
-  const cls = stateClassLegacy(planStatus, execStatus);
+  const cls = stateClassLegacy(planStatus, execStatus, phase);
 
-  // Pick the primary session for the work/process labels (prefer exec over plan)
+  // Pick the primary session for the process label (prefer exec over plan)
   const primary = hasExec ? execStatus : planStatus;
-  const wl = workLabel(primary);
+  const wl = phaseLabel(phase);
   const pl = processLabel(primary);
 
   // Detect embedded provider
@@ -134,8 +132,8 @@ export function SessionPill({ sessionId, sessionStatus, planSessionId, execSessi
 
   // Build title with full details for both slots
   const titleParts: string[] = [];
-  if (hasPlan && planStatus) titleParts.push(`plan: ${planStatus.work_status} / ${planStatus.process_status}${planStatus.provider === 'embedded' ? ' (embedded)' : ''}`);
-  if (hasExec && execStatus) titleParts.push(`exec: ${execStatus.work_status} / ${execStatus.process_status}${execStatus.provider === 'embedded' ? ' (embedded)' : ''}`);
+  if (hasPlan && planStatus) titleParts.push(`plan: ${phase ?? 'unknown'} / ${planStatus.process_status}${planStatus.provider === 'embedded' ? ' (embedded)' : ''}`);
+  if (hasExec && execStatus) titleParts.push(`exec: ${phase ?? 'unknown'} / ${execStatus.process_status}${execStatus.provider === 'embedded' ? ' (embedded)' : ''}`);
   const title = titleParts.join('  |  ') || 'Session';
 
   return (

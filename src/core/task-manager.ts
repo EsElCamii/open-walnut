@@ -116,7 +116,7 @@ async function migrateSessionSlots(store: TaskStore): Promise<boolean> {
           });
           continue;
         }
-        if (!rec || rec.work_status === 'completed' || rec.process_status === 'error') continue;
+        if (!rec || rec.process_status === 'error' || rec.process_status === 'stopped') continue;
         if (rec.mode === 'plan' && !task.plan_session_id) {
           task.plan_session_id = sid;
         } else if (rec.mode !== 'plan' && !task.exec_session_id) {
@@ -425,7 +425,7 @@ async function writeStore(store: TaskStore): Promise<void> {
   // save a backup first so data can be recovered.
   if (store.tasks.length === 0) {
     try {
-      const existing = await readJsonFile<TaskStore>(TASKS_FILE);
+      const existing = await readJsonFile<TaskStore>(TASKS_FILE, EMPTY_STORE);
       if (existing && existing.tasks && existing.tasks.length > 0) {
         const backupPath = TASKS_FILE.replace(/\.json$/, '.backup.json');
         await writeJsonFile(backupPath, existing);

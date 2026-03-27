@@ -30,7 +30,6 @@ export function makeSession(overrides: Partial<SessionRecord> = {}): SessionReco
     taskId: 'test-1234',
     project: 'personal',
     process_status: 'stopped',
-    work_status: 'agent_complete',
     mode: 'default',
     startedAt: '2026-01-01T00:00:00Z',
     lastActiveAt: '2026-01-01T00:00:00Z',

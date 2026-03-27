@@ -57,7 +57,6 @@ describe('createSessionRecord', () => {
     expect(session.taskId).toBe('task-1');
     expect(session.project).toBe('walnut');
     expect(session.process_status).toBe('running');
-    expect(session.work_status).toBe('in_progress');
     expect(session.startedAt).toBeDefined();
     expect(session.lastActiveAt).toBeDefined();
     expect(session.messageCount).toBe(1);
@@ -130,8 +129,8 @@ describe('getSessionsForTask', () => {
 describe('updateSessionRecord', () => {
   it('modifies session fields', async () => {
     await createSessionRecord('upd-1', 'task-1', 'proj');
-    const updated = await updateSessionRecord('upd-1', { work_status: 'agent_complete', project: 'new-proj' });
-    expect(updated.work_status).toBe('agent_complete');
+    const updated = await updateSessionRecord('upd-1', { process_status: 'stopped', project: 'new-proj' });
+    expect(updated.process_status).toBe('stopped');
     expect(updated.project).toBe('new-proj');
   });
 
@@ -142,22 +141,22 @@ describe('updateSessionRecord', () => {
     // Small delay to ensure timestamp differs
     await new Promise((r) => setTimeout(r, 10));
 
-    const updated = await updateSessionRecord('upd-2', { work_status: 'agent_complete' });
+    const updated = await updateSessionRecord('upd-2', { process_status: 'stopped' });
     expect(updated.lastActiveAt).not.toBe(originalActive);
   });
 
   it('throws for non-existent session', async () => {
-    await expect(updateSessionRecord('nonexistent', { work_status: 'agent_complete' })).rejects.toThrow(
+    await expect(updateSessionRecord('nonexistent', { process_status: 'stopped' })).rejects.toThrow(
       /Session not found/,
     );
   });
 
   it('persists updates', async () => {
     await createSessionRecord('upd-3', 'task-1', 'proj');
-    await updateSessionRecord('upd-3', { work_status: 'completed' });
+    await updateSessionRecord('upd-3', { process_status: 'stopped' });
 
     const found = await getSessionByClaudeId('upd-3');
-    expect(found!.work_status).toBe('completed');
+    expect(found!.process_status).toBe('stopped');
   });
 });
 
@@ -201,18 +200,16 @@ describe('getRecentSessions', () => {
 });
 
 describe('resume status reset', () => {
-  it('resets status to running/in_progress when upsert provides a new PID for a stopped session', async () => {
-    // Create a session and mark it as stopped/agent_complete (simulating a completed turn)
+  it('resets process_status to running when upsert provides a new PID for a stopped session', async () => {
+    // Create a session and mark it as stopped (simulating a completed turn)
     await createSessionRecord('resume-1', 'task-1', 'proj');
     await updateSessionRecord('resume-1', {
       process_status: 'stopped',
-      work_status: 'agent_complete',
     });
 
     // Verify it's stopped
     const before = await getSessionByClaudeId('resume-1');
     expect(before!.process_status).toBe('stopped');
-    expect(before!.work_status).toBe('agent_complete');
 
     // Upsert with a new PID (simulating session resume)
     const resumed = await createSessionRecord('resume-1', 'task-1', 'proj', undefined, {
@@ -221,7 +218,6 @@ describe('resume status reset', () => {
     });
 
     expect(resumed.process_status).toBe('running');
-    expect(resumed.work_status).toBe('in_progress');
     expect(resumed.pid).toBe(99999);
     expect(resumed.last_status_change).toBeDefined();
   });
@@ -230,7 +226,6 @@ describe('resume status reset', () => {
     await createSessionRecord('resume-2', 'task-1', 'proj');
     await updateSessionRecord('resume-2', {
       process_status: 'stopped',
-      work_status: 'agent_complete',
     });
 
     // Upsert without PID (e.g., just updating outputFile)
@@ -239,7 +234,6 @@ describe('resume status reset', () => {
     });
 
     expect(result.process_status).toBe('stopped');
-    expect(result.work_status).toBe('agent_complete');
   });
 
   it('does NOT reset status when session is already running', async () => {
@@ -251,7 +245,6 @@ describe('resume status reset', () => {
 
     const result = await createSessionRecord('resume-3', 'task-1', 'proj', undefined, { pid: 22222 });
     expect(result.process_status).toBe('running');
-    expect(result.work_status).toBe('in_progress');
     expect(result.pid).toBe(22222);
   });
 });
@@ -383,18 +376,18 @@ describe('checkSessionLimit', () => {
 });
 
 describe('getActiveSessionsByHost', () => {
-  it('only counts in_progress sessions', async () => {
-    // Active (in_progress) — should be counted
+  it('only counts running sessions', async () => {
+    // Active (running) — should be counted
     await createSessionRecord('active-1', 't1', 'p', undefined, { pid: 1001 });
     await createSessionRecord('active-2', 't2', 'p', undefined, { pid: 1002 });
 
-    // Idle (agent_complete) — should NOT be counted
+    // Idle (process_status: idle) — should NOT be counted
     await createSessionRecord('idle-1', 't3', 'p', undefined, { pid: 1003 });
-    await updateSessionRecord('idle-1', { work_status: 'agent_complete' });
+    await updateSessionRecord('idle-1', { process_status: 'idle' });
 
-    // Idle (await_human_action) — should NOT be counted
+    // Stopped — should NOT be counted
     await createSessionRecord('idle-2', 't4', 'p', undefined, { pid: 1004 });
-    await updateSessionRecord('idle-2', { work_status: 'await_human_action' });
+    await updateSessionRecord('idle-2', { process_status: 'stopped' });
 
     const byHost = await getActiveSessionsByHost();
     expect(byHost['local']).toHaveLength(2);
@@ -403,7 +396,7 @@ describe('getActiveSessionsByHost', () => {
 
   it('returns empty when all sessions are idle', async () => {
     await createSessionRecord('s1', 't1', 'p', undefined, { pid: 1001 });
-    await updateSessionRecord('s1', { work_status: 'agent_complete' });
+    await updateSessionRecord('s1', { process_status: 'idle' });
 
     const byHost = await getActiveSessionsByHost();
     expect(byHost).toEqual({});
@@ -411,12 +404,12 @@ describe('getActiveSessionsByHost', () => {
 });
 
 describe('getAllAliveSessionsByHost', () => {
-  it('counts all alive sessions regardless of work_status', async () => {
+  it('counts all alive sessions regardless of process_status (running + idle)', async () => {
     await createSessionRecord('active-1', 't1', 'p', undefined, { pid: 1001 });
     await createSessionRecord('idle-1', 't2', 'p', undefined, { pid: 1002 });
-    await updateSessionRecord('idle-1', { work_status: 'agent_complete' });
+    await updateSessionRecord('idle-1', { process_status: 'idle' });
     await createSessionRecord('idle-2', 't3', 'p', undefined, { pid: 1003 });
-    await updateSessionRecord('idle-2', { work_status: 'await_human_action' });
+    await updateSessionRecord('idle-2', { process_status: 'idle' });
 
     const byHost = await getAllAliveSessionsByHost();
     expect(byHost['local']).toHaveLength(3);
@@ -428,10 +421,10 @@ describe('checkSessionLimit — idle sessions do not block', () => {
     // 1 active session
     await createSessionRecord('active-1', 't1', 'p', undefined, { pid: 1001 });
 
-    // 6 idle sessions (agent_complete) — these used to block at limit=7
+    // 6 idle sessions (process_status: idle) — these should not block at limit=7
     for (let i = 2; i <= 7; i++) {
       await createSessionRecord(`idle-${i}`, `t${i}`, 'p', undefined, { pid: 1000 + i });
-      await updateSessionRecord(`idle-${i}`, { work_status: 'agent_complete' });
+      await updateSessionRecord(`idle-${i}`, { process_status: 'idle' });
     }
 
     const result = await checkSessionLimit(undefined, { local: 7 });
@@ -440,7 +433,7 @@ describe('checkSessionLimit — idle sessions do not block', () => {
     expect(result.totalAlive).toBe(7); // 7 total alive processes
   });
 
-  it('blocks only when active (in_progress) sessions reach the limit', async () => {
+  it('blocks only when active (running) sessions reach the limit', async () => {
     // 7 active sessions
     for (let i = 1; i <= 7; i++) {
       await createSessionRecord(`active-${i}`, `t${i}`, 'p', undefined, { pid: 1000 + i });
@@ -451,9 +444,9 @@ describe('checkSessionLimit — idle sessions do not block', () => {
     expect(result.running).toBe(7);
   });
 
-  it('await_human_action sessions do not count as active', async () => {
+  it('idle sessions do not count as active', async () => {
     await createSessionRecord('phr-1', 't1', 'p', undefined, { pid: 1001 });
-    await updateSessionRecord('phr-1', { work_status: 'await_human_action' });
+    await updateSessionRecord('phr-1', { process_status: 'idle' });
 
     const result = await checkSessionLimit(undefined, { local: 1 });
     expect(result.allowed).toBe(true);
@@ -463,11 +456,11 @@ describe('checkSessionLimit — idle sessions do not block', () => {
 
 describe('checkSessionLimit — idle limit with eviction', () => {
   it('evicts oldest idle session when idle count reaches max_idle', async () => {
-    // Create 6 sessions — all idle (migration will set process_status='idle').
+    // Create 6 sessions — all idle (process_status='idle').
     // Use max_idle=5 so 6 idle sessions triggers eviction.
     for (let i = 1; i <= 6; i++) {
       await createSessionRecord(`s${i}`, `t${i}`, 'p', undefined, { pid: 1000 + i });
-      await updateSessionRecord(`s${i}`, { work_status: 'agent_complete' });
+      await updateSessionRecord(`s${i}`, { process_status: 'idle' });
     }
 
     // With max_idle=5, having 6 idle sessions should trigger eviction
@@ -483,10 +476,10 @@ describe('checkSessionLimit — idle limit with eviction', () => {
   });
 
   it('does not evict when under idle limit', async () => {
-    // 5 sessions — at the max_idle=5 cap but not over
+    // 4 sessions — under the max_idle=5 cap
     for (let i = 1; i <= 4; i++) {
       await createSessionRecord(`s${i}`, `t${i}`, 'p', undefined, { pid: 1000 + i });
-      await updateSessionRecord(`s${i}`, { work_status: 'agent_complete' });
+      await updateSessionRecord(`s${i}`, { process_status: 'idle' });
     }
 
     const result = await checkSessionLimit(undefined, { local: 7 }, { max_idle: 5 });
@@ -497,7 +490,7 @@ describe('checkSessionLimit — idle limit with eviction', () => {
   it('returns idleCount and maxIdle in result', async () => {
     for (let i = 1; i <= 3; i++) {
       await createSessionRecord(`s${i}`, `t${i}`, 'p', undefined, { pid: 1000 + i });
-      await updateSessionRecord(`s${i}`, { work_status: 'agent_complete' });
+      await updateSessionRecord(`s${i}`, { process_status: 'idle' });
     }
 
     const result = await checkSessionLimit(undefined, { local: 7 }, { max_idle: 10 });
@@ -507,7 +500,7 @@ describe('checkSessionLimit — idle limit with eviction', () => {
 });
 
 describe('legacy status migration', () => {
-  it('migrates old status field to process_status/work_status on read', async () => {
+  it('migrates old status field to process_status on read', async () => {
     // Write a v2 store with the old single-status format
     const { SESSIONS_FILE } = await import('../../src/constants.js');
     await fsp.mkdir(path.dirname(SESSIONS_FILE), { recursive: true });
@@ -528,8 +521,8 @@ describe('legacy status migration', () => {
     const sessions = await listSessions();
     expect(sessions).toHaveLength(1);
     expect(sessions[0].process_status).toBe('stopped');
-    expect(sessions[0].work_status).toBe('agent_complete'); // idle → agent_complete
     expect(sessions[0]).not.toHaveProperty('status');
+    expect(sessions[0]).not.toHaveProperty('work_status');
   });
 });
 
@@ -537,30 +530,30 @@ describe('legacy status migration', () => {
 
 describe('isTerminalSession', () => {
   it('returns true when process_status is error', () => {
-    expect(isTerminalSession({ process_status: 'error', work_status: 'in_progress' })).toBe(true);
+    expect(isTerminalSession({ process_status: 'error' })).toBe(true);
   });
 
-  it('returns true when work_status is completed', () => {
-    expect(isTerminalSession({ process_status: 'stopped', work_status: 'completed' })).toBe(true);
+  it('returns true when taskPhase is COMPLETE', () => {
+    expect(isTerminalSession({ process_status: 'stopped' }, 'COMPLETE')).toBe(true);
   });
 
   it('returns false when session is actively running', () => {
-    expect(isTerminalSession({ process_status: 'running', work_status: 'in_progress' })).toBe(false);
+    expect(isTerminalSession({ process_status: 'running' })).toBe(false);
   });
 
-  it('returns false when session is idle but not in a terminal state', () => {
-    expect(isTerminalSession({ process_status: 'stopped', work_status: 'agent_complete' })).toBe(false);
+  it('returns false when session is stopped without COMPLETE phase', () => {
+    expect(isTerminalSession({ process_status: 'stopped' })).toBe(false);
   });
 
-  it('returns false for await_human_action', () => {
-    expect(isTerminalSession({ process_status: 'idle', work_status: 'await_human_action' })).toBe(false);
+  it('returns false for idle sessions', () => {
+    expect(isTerminalSession({ process_status: 'idle' })).toBe(false);
   });
 });
 
 // ── Test 2: Legacy data migration work_status:'error' → process_status:'error' ──
 
-describe('legacy work_status:error migration', () => {
-  it('migrates work_status:error to process_status:error on read', async () => {
+describe('legacy work_status migration', () => {
+  it('strips work_status:error from session on read (process_status preserved)', async () => {
     const { SESSIONS_FILE } = await import('../../src/constants.js');
     await fsp.mkdir(path.dirname(SESSIONS_FILE), { recursive: true });
 
@@ -583,14 +576,12 @@ describe('legacy work_status:error migration', () => {
 
     const sessions = await listSessions();
     expect(sessions).toHaveLength(1);
-    // Migration should move error from work_status → process_status
-    expect(sessions[0].process_status).toBe('error');
-    expect(sessions[0].work_status).toBe('in_progress');
-    // The work_status field should NOT be 'error' (it's no longer a valid WorkStatus)
-    expect(sessions[0].work_status).not.toBe('error');
+    // Migration strips work_status entirely — process_status is preserved as-is
+    expect(sessions[0].process_status).toBe('stopped');
+    expect(sessions[0]).not.toHaveProperty('work_status');
   });
 
-  it('does not migrate sessions without work_status:error', async () => {
+  it('strips work_status from sessions on read', async () => {
     const { SESSIONS_FILE } = await import('../../src/constants.js');
     await fsp.mkdir(path.dirname(SESSIONS_FILE), { recursive: true });
 
@@ -614,7 +605,7 @@ describe('legacy work_status:error migration', () => {
     const sessions = await listSessions();
     expect(sessions).toHaveLength(1);
     expect(sessions[0].process_status).toBe('stopped');
-    expect(sessions[0].work_status).toBe('agent_complete');
+    expect(sessions[0]).not.toHaveProperty('work_status');
   });
 });
 
@@ -629,34 +620,35 @@ describe('listNonTerminalSessions', () => {
     await createSessionRecord('error-1', 'task-2', 'proj', undefined, { pid: 1002 });
     await updateSessionRecord('error-1', { process_status: 'error', errorMessage: 'Process exited without result' });
 
-    // Create a completed session
+    // Create a stopped session (non-error — not terminal without COMPLETE task phase)
     await createSessionRecord('done-1', 'task-3', 'proj');
-    await updateSessionRecord('done-1', { process_status: 'stopped', work_status: 'completed' });
+    await updateSessionRecord('done-1', { process_status: 'stopped' });
 
     const nonTerminal = await listNonTerminalSessions();
 
-    // running-1 should be included; error-1 and done-1 should be excluded
+    // running-1 and done-1 should be included; error-1 should be excluded
+    // (listNonTerminalSessions only excludes process_status:'error' — no task phase check)
     const ids = nonTerminal.map(s => s.claudeSessionId);
     expect(ids).toContain('running-1');
     expect(ids).not.toContain('error-1');
-    expect(ids).not.toContain('done-1');
+    expect(ids).toContain('done-1');
   });
 
   it('includes sessions with non-terminal statuses', async () => {
     await createSessionRecord('s-running', 'task-1', 'proj', undefined, { pid: 2001 });
 
-    await createSessionRecord('s-agent-complete', 'task-2', 'proj', undefined, { pid: 2002 });
-    await updateSessionRecord('s-agent-complete', { process_status: 'stopped', work_status: 'agent_complete' });
+    await createSessionRecord('s-stopped', 'task-2', 'proj', undefined, { pid: 2002 });
+    await updateSessionRecord('s-stopped', { process_status: 'stopped' });
 
-    await createSessionRecord('s-await', 'task-3', 'proj', undefined, { pid: 2003 });
-    await updateSessionRecord('s-await', { work_status: 'await_human_action' });
+    await createSessionRecord('s-idle', 'task-3', 'proj', undefined, { pid: 2003 });
+    await updateSessionRecord('s-idle', { process_status: 'idle' });
 
     const nonTerminal = await listNonTerminalSessions();
     const ids = nonTerminal.map(s => s.claudeSessionId);
 
     expect(ids).toContain('s-running');
-    expect(ids).toContain('s-agent-complete');
-    expect(ids).toContain('s-await');
+    expect(ids).toContain('s-stopped');
+    expect(ids).toContain('s-idle');
   });
 
   it('excludes archived sessions', async () => {

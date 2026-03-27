@@ -16,7 +16,7 @@ import { fetchSession, executePlanContinue, executePlanSession } from '@/api/ses
 import { fetchTask } from '@/api/tasks';
 import { fetchPinnedTasks, pinTask, unpinTask } from '@/api/focus';
 import { timeAgo } from '@/utils/time';
-import { WorkStatusPicker } from './WorkStatusPicker';
+import { PhasePicker } from './WorkStatusPicker';
 import { SessionCopyButtons } from './SessionCopyButtons';
 import { ModelPicker } from './ModelPicker';
 import { TaskQuickActions } from './TaskQuickActions';
@@ -25,7 +25,7 @@ import { useSessionUsage, formatModelName, getContextWindowSize } from '@/hooks/
 import { useSessionPlan } from '@/hooks/useSessionPlan';
 import { SessionRetryButton } from './SessionRetryButton';
 import { wsClient } from '@/api/ws';
-import type { SessionRecord } from '@/types/session';
+import type { SessionRecord, TaskPhase } from '@/types/session';
 
 interface SessionPanelErrorBoundaryProps {
   sessionId: string;
@@ -243,12 +243,11 @@ export const SessionPanel = memo(function SessionPanel({ sessionId, onClose, onT
 
   // Merge event data directly on status changes (avoids stale DB reads)
   useEvent('session:status-changed', (data) => {
-    const d = data as { sessionId?: string; process_status?: string; work_status?: string; activity?: string; mode?: string; planCompleted?: boolean };
+    const d = data as { sessionId?: string; process_status?: string; phase?: string; activity?: string; mode?: string; planCompleted?: boolean };
     if (d.sessionId === sessionId) {
       setSession(prev => prev ? {
         ...prev,
         process_status: (d.process_status ?? prev.process_status) as SessionRecord['process_status'],
-        work_status: (d.work_status ?? prev.work_status) as SessionRecord['work_status'],
         activity: d.activity ?? prev.activity,
         mode: (d.mode ?? prev.mode) as SessionRecord['mode'],
         ...(d.planCompleted ? { planCompleted: true } : {}),
@@ -256,6 +255,10 @@ export const SessionPanel = memo(function SessionPanel({ sessionId, onClose, onT
         ...(d.process_status && d.process_status !== 'error' ? { errorMessage: undefined } : {}),
         lastActiveAt: new Date().toISOString(),
       } : prev);
+      // Update phase on sessionTask if present
+      if (d.phase) {
+        setSessionTask(prev => prev ? { ...prev, phase: d.phase as import('@open-walnut/core').Task['phase'] } : prev);
+      }
     }
   });
 
@@ -352,13 +355,16 @@ export const SessionPanel = memo(function SessionPanel({ sessionId, onClose, onT
     }
   }, [sessionId, onSessionReplaced]);
 
-  // Retry: when retrySession() succeeds, listen for the new session to appear on the task
+  // Retry — resume path: session auto-recovers via WS status events, nothing to do.
+  // Retry — fallback path: listen for task:updated to detect new session linked after retry.
   const retryTaskIdRef = useRef<string | null>(null);
+  const handleResuming = useCallback(() => {
+    // processNext() emits SESSION_STATUS_CHANGED which updates session state.
+    // Error banner clears automatically when errorMessage is cleared.
+  }, []);
   const handleRetried = useCallback((taskId: string) => {
     retryTaskIdRef.current = taskId;
   }, []);
-
-  // Listen for task:updated to detect when new session is linked after retry
   useEvent('task:updated', (data: unknown) => {
     const d = data as { task?: { id?: string; exec_session_id?: string; plan_session_id?: string } };
     const t = d.task;
@@ -391,7 +397,7 @@ export const SessionPanel = memo(function SessionPanel({ sessionId, onClose, onT
   }, [sessionId, retryFailed]);
 
   const ps = session?.process_status;
-  const ws = session?.work_status;
+  const taskPhase = (sessionTask?.phase ?? 'TODO') as TaskPhase;
 
   // Header content
   const title = session?.title || session?.description || session?.slug || null;
@@ -421,11 +427,11 @@ export const SessionPanel = memo(function SessionPanel({ sessionId, onClose, onT
                   {ICON_ROBOT} Embedded
                 </span>
               )}
-              {!loading && ps && ws && (
-                <WorkStatusPicker
-                  sessionId={sessionId}
+              {!loading && ps && session?.taskId && (
+                <PhasePicker
+                  taskId={session.taskId}
                   processStatus={ps}
-                  workStatus={ws}
+                  phase={taskPhase}
                   size="sm"
                   errorMessage={session?.errorMessage}
                 />
@@ -577,18 +583,18 @@ export const SessionPanel = memo(function SessionPanel({ sessionId, onClose, onT
           sessionId={sessionId}
           initialNote={session?.human_note}
         />
-        {(ws === 'error' || ps === 'error') && session?.errorMessage && (
+        {ps === 'error' && session?.errorMessage && (
           <div className="session-error-banner">
             <span className="session-error-banner-icon">&#x26A0;&#xFE0F;</span>
             <span className="session-error-banner-text">{session.errorMessage}</span>
-            <SessionRetryButton sessionId={sessionId} onRetried={handleRetried} />
+            <SessionRetryButton sessionId={sessionId} onRetried={handleRetried} onResuming={handleResuming} />
           </div>
         )}
         <div className="session-panel-body" ref={bodyRef}>
           <SessionChatHistory
             key={sessionId}
             sessionId={sessionId}
-            workStatus={session?.work_status}
+            phase={taskPhase}
             initialPrompt={historyMessages.find(m => m.role === 'user')?.text}
             sessionCwd={session?.cwd}
             optimisticMessages={optimisticMsgs}

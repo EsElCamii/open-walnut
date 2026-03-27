@@ -17,8 +17,8 @@ import { createMockConstants } from '../helpers/mock-constants.js';
 // Mock constants to use temp dir
 vi.mock('../../src/constants.js', () => createMockConstants('sync-reconciler'));
 
-// Mock session tracker — controls which sessions appear as "in_progress"
-const mockSessions: Array<{ claudeSessionId: string; work_status: string }> = [];
+// Mock session tracker — controls which sessions appear as "running"
+const mockSessions: Array<{ claudeSessionId: string; process_status: string }> = [];
 vi.mock('../../src/core/session-tracker.js', () => ({
   listSessions: vi.fn(async () => mockSessions),
 }));
@@ -356,10 +356,10 @@ describe('SyncReconciler', () => {
       expect(ctx.deletedIds).toHaveLength(0);
     });
 
-    it('does not remove tasks with in_progress session', async () => {
+    it('does not remove tasks with running session', async () => {
       // Simulate an actively-running session
       mockSessions.length = 0;
-      mockSessions.push({ claudeSessionId: 'sess-123', work_status: 'in_progress' });
+      mockSessions.push({ claudeSessionId: 'sess-123', process_status: 'running' });
 
       const localTask = makeTask({
         id: 'has-session',
@@ -375,10 +375,10 @@ describe('SyncReconciler', () => {
       mockSessions.length = 0;
     });
 
-    it('removes tasks with completed session (not actively running)', async () => {
-      // Session exists but is agent_complete — not blocking
+    it('removes tasks with stopped session (not actively running)', async () => {
+      // Session exists but is stopped — not blocking
       mockSessions.length = 0;
-      mockSessions.push({ claudeSessionId: 'sess-done', work_status: 'agent_complete' });
+      mockSessions.push({ claudeSessionId: 'sess-done', process_status: 'stopped' });
 
       const localTask = makeTask({
         id: 'has-done-session',

@@ -40,7 +40,7 @@ import {
 import type { SessionLimitResult } from '../core/session-tracker.js';
 import { bus, EventNames } from '../core/event-bus.js';
 import { getConfig, saveConfig } from '../core/config-manager.js';
-import type { SessionRecord, Task, TaskPhase, TaskPriority, TaskSource, WorkStatus } from '../core/types.js';
+import type { SessionRecord, Task, TaskPhase, TaskPriority, TaskSource } from '../core/types.js';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
 import { log } from '../logging/index.js';
@@ -171,7 +171,7 @@ function buildSessionLimitBlocked(host: string | undefined, limitResult: Session
       session_id: s.claudeSessionId,
       task_id: s.taskId,
       title: s.title,
-      work_status: s.work_status,
+      process_status: s.process_status,
       started_at: s.startedAt,
     })),
     hint: 'Wait for an active session to finish, use send_to_session to reuse an existing session, or increase the limit in config.yaml under session_limits.',
@@ -840,7 +840,7 @@ For projects (type='project'): set default_host and default_cwd for remote sessi
     input_schema: {
       type: 'object',
       properties: {
-        work_status: { type: 'string', enum: ['in_progress', 'agent_complete', 'await_human_action', 'completed', 'error'], description: 'Filter by work status' },
+        process_status: { type: 'string', enum: ['running', 'idle', 'stopped', 'error'], description: 'Filter by process status' },
         task_id: { type: 'string', description: 'Filter sessions for a specific task (supports ID prefix)' },
         runner: { type: 'string', enum: ['cli', 'embedded', 'all'], description: 'Filter by runner type. Default: all.' },
         include_triage: { type: 'boolean', description: 'Include triage/message-send-triage subagent sessions. Default: false — these are high-volume internal housekeeping runs.' },
@@ -873,8 +873,8 @@ For projects (type='project'): set default_host and default_cwd for remote sessi
         if (!includeArchived) {
           filtered = filtered.filter((s) => !s.archived);
         }
-        if (params.work_status) {
-          filtered = filtered.filter((s) => s.work_status === params.work_status);
+        if (params.process_status) {
+          filtered = filtered.filter((s) => s.process_status === params.process_status);
         }
         for (const s of filtered) {
           results.push({
@@ -883,7 +883,6 @@ For projects (type='project'): set default_host and default_cwd for remote sessi
             title: s.title,
             project: s.project,
             process_status: s.process_status,
-            work_status: s.work_status,
             mode: s.mode,
             activity: s.activity,
             task_id: s.taskId,
@@ -906,8 +905,8 @@ For projects (type='project'): set default_host and default_cwd for remote sessi
           if (resolvedTaskId) {
             runs = runs.filter((r) => r.taskId === resolvedTaskId);
           }
-          if (params.work_status) {
-            runs = runs.filter((r) => r.status === params.work_status);
+          if (params.process_status) {
+            runs = runs.filter((r) => r.status === params.process_status);
           }
           for (const r of runs) {
             results.push({
@@ -1090,7 +1089,6 @@ and is always allowed.`,
               existing_session: {
                 session_id: latest.claudeSessionId,
                 title: latest.title,
-                work_status: latest.work_status,
                 process_status: latest.process_status,
               },
               hint: `Use send_to_session({ session_id: "${latest.claudeSessionId}", message: "..." }) to continue in the existing session, or create a new task / subtask with create_task({ parent_task_id: "${task.id}", title: "..." }) for a fresh session.`,
@@ -1275,7 +1273,6 @@ defaults (same resolution chain as start_session).`,
         working_directory: { type: 'string', description: 'Working directory where the session ran. Optional — inherits from task/project defaults if omitted.' },
         host: { type: 'string', description: 'SSH host alias where the session ran. Optional — inherits from project default_host if omitted. Omit for local sessions.' },
         title: { type: 'string', description: 'Custom title. If omitted, extracted from the first user message in the JSONL.' },
-        work_status: { type: 'string', enum: ['agent_complete', 'completed', 'await_human_action'], description: 'Work status for the imported session. Default: agent_complete.' },
       },
       required: ['session_id', 'task_id'],
     },
@@ -1417,7 +1414,6 @@ defaults (same resolution chain as start_session).`,
         }
 
         const title = (params.title as string) || extractedTitle || `Imported session ${sessionId.slice(0, 8)}`;
-        const workStatus = (params.work_status as 'agent_complete' | 'completed' | 'await_human_action') ?? 'agent_complete';
 
         // ⑥b Extract actual CWD from JSONL (source of truth)
         const { extractCwdFromJsonlContent } = await import('../core/session-file-reader.js');
@@ -1458,7 +1454,6 @@ defaults (same resolution chain as start_session).`,
           cwd: resolvedCwd,
           host: resolvedHost,
           title,
-          work_status: workStatus,
           startedAt: firstTimestamp,
           lastActiveAt: lastTimestamp,
           messageCount,
@@ -1762,13 +1757,12 @@ defaults (same resolution chain as start_session).`,
 
   {
     name: 'update_session',
-    description: 'Update a Claude Code session — title, work status, activity, or archive state. Always set a descriptive title when a session lacks one or when the scope changes. Agent can set work_status to await_human_action or agent_complete. Use await_human_action when a critical decision needs human input. Keep sessions at agent_complete and resume via send_to_session until work is truly done. Only humans can set completed. Cannot set in_progress or error (system-managed). ⚠️ NEVER set archived=true unless the user EXPLICITLY asks for it. Do NOT archive sessions proactively — even if they appear idle, error, or completed. The user may still be actively working on the task.',
+    description: 'Update a Claude Code session — title, activity, or archive state. Always set a descriptive title when a session lacks one or when the scope changes. ⚠️ NEVER set archived=true unless the user EXPLICITLY asks for it. Do NOT archive sessions proactively — even if they appear idle, error, or completed. The user may still be actively working on the task.',
     input_schema: {
       type: 'object',
       properties: {
         session_id: { type: 'string', description: 'Claude session ID' },
         title: { type: 'string', description: 'Short title / one-sentence summary for the session' },
-        work_status: { type: 'string', enum: ['await_human_action', 'agent_complete'], description: 'New work status. await_human_action = critical decision needs human input. agent_complete = session turn finished, can be resumed. Only humans can set completed.' },
         activity: { type: 'string', description: 'Freetext activity description (e.g. "planning", "testing")' },
         cwd: { type: 'string', description: 'Override session working directory. Use to fix wrong CWD after import.' },
         task_id: { type: 'string', description: 'Move session to a different task (ID or prefix). Pass empty string "" to dissociate from current task entirely.' },
@@ -1781,7 +1775,6 @@ defaults (same resolution chain as start_session).`,
       try {
         const sessionId = params.session_id as string;
         const title = params.title as string | undefined;
-        const workStatus = params.work_status as WorkStatus | undefined;
         const activity = params.activity as string | undefined;
         const newCwd = params.cwd as string | undefined;
         const newTaskId = params.task_id as string | undefined;
@@ -1813,7 +1806,6 @@ defaults (same resolution chain as start_session).`,
               sessionId,
               taskId: session.taskId,
               process_status: session.process_status,
-              work_status: session.work_status,
               archived: true,
             }, ['*'], { source: 'agent' });
             const sRef = sessionRef(sessionId, session.title ?? sessionId.slice(0, 16));
@@ -1824,7 +1816,6 @@ defaults (same resolution chain as start_session).`,
               sessionId,
               taskId: session.taskId,
               process_status: session.process_status,
-              work_status: session.work_status,
               archived: false,
             }, ['*'], { source: 'agent' });
             const sRef = sessionRef(sessionId, session.title ?? sessionId.slice(0, 16));
@@ -1859,7 +1850,6 @@ defaults (same resolution chain as start_session).`,
               sessionId,
               taskId: undefined,
               process_status: session.process_status,
-              work_status: session.work_status,
             }, ['*'], { source: 'agent' });
             const sRef = sessionRef(sessionId, session.title ?? sessionId.slice(0, 16));
             return `Session ${sRef} dissociated from task. Session is now unlinked.`;
@@ -1889,48 +1879,8 @@ defaults (same resolution chain as start_session).`,
         if (activity !== undefined) updates.activity = activity;
         if (newCwd !== undefined) updates.cwd = newCwd;
 
-        if (workStatus) {
-          // Validate: agent can only set await_human_action or agent_complete.
-          // completed is human-only. in_progress and error are system-managed.
-          const agentSettable = new Set(['await_human_action', 'agent_complete']);
-          if (!agentSettable.has(workStatus)) {
-            return `Error: Cannot set work_status to "${workStatus}" — agent can set: await_human_action, agent_complete. Only humans can set completed.`;
-          }
-
-          // Look up current session to get previous status
-          const session = await getSessionByClaudeId(sessionId);
-          if (!session) return `Error: Session not found: ${sessionId}`;
-
-          const previousWorkStatus = session.work_status;
-          updates.work_status = workStatus;
-          updates.last_status_change = new Date().toISOString();
-
-          await updateSessionRecord(sessionId, updates as Partial<SessionRecord>);
-
-          // Session slot is never cleared by the agent. Slots are only cleared when
-          // the human sets 'completed' (via REST PATCH) or on error/task completion.
-
-          // Emit status change event
-          bus.emit(EventNames.SESSION_STATUS_CHANGED, {
-            sessionId,
-            taskId: session.taskId,
-            process_status: session.process_status,
-            work_status: workStatus,
-            previousWorkStatus,
-            activity,
-          }, ['*'], { source: 'agent', urgency: 'urgent' });
-
-          const sRef = sessionRef(sessionId, title ?? session.title ?? sessionId.slice(0, 16));
-          const parts = [];
-          if (title) parts.push(`title="${title}"`);
-          parts.push(`work_status=${workStatus}`);
-          if (activity) parts.push(`activity="${activity}"`);
-          if (newCwd) parts.push(`cwd="${newCwd}"`);
-          return `Session ${sRef} updated: ${parts.join(', ')}`;
-        }
-
         if (Object.keys(updates).length === 0) {
-          return 'Error: No updates provided. Specify title, work_status, activity, cwd, or task_id.';
+          return 'Error: No updates provided. Specify title, activity, cwd, or task_id.';
         }
 
         // Look up session for the ref tag label (no prior fetch in this branch)

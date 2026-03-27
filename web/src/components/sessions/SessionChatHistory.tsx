@@ -153,7 +153,7 @@ function OptimisticImagePreviews({ images }: { images?: ImageAttachment[] }) {
 
 interface SessionChatHistoryProps {
   sessionId: string;
-  workStatus?: string;
+  phase?: string;
   /** Initial prompt text to display at the top of the timeline (first user message). */
   initialPrompt?: string;
   /** Session working directory — used to resolve relative image paths in tool results */
@@ -458,7 +458,7 @@ function buildTimeline(
 // ── Auto-scroll constant ──
 const NEAR_BOTTOM_PX = 80;  // px from bottom to consider "at bottom"
 
-export const SessionChatHistory = memo(function SessionChatHistory({ sessionId, workStatus, initialPrompt, sessionCwd, optimisticMessages, onMessagesDelivered, onBatchCompleted, onEditQueued, onDeleteQueued, onAgentQueued, onClearCommitted, onRetryFailed, onDismissFailed, onTaskClick, onSessionClick }: SessionChatHistoryProps) {
+export const SessionChatHistory = memo(function SessionChatHistory({ sessionId, phase, initialPrompt, sessionCwd, optimisticMessages, onMessagesDelivered, onBatchCompleted, onEditQueued, onDeleteQueued, onAgentQueued, onClearCommitted, onRetryFailed, onDismissFailed, onTaskClick, onSessionClick }: SessionChatHistoryProps) {
   const [historyVersion, setHistoryVersion] = useState(0);
   const awaitingRefresh = useRef(false);
   const pendingBatchTotal = useRef(0);
@@ -948,7 +948,7 @@ export const SessionChatHistory = memo(function SessionChatHistory({ sessionId, 
 
   // ── Build interleaved timeline ──
   // All remaining optimistic messages participate in the timeline.
-  const isResuming = !isStreaming && workStatus === 'in_progress'
+  const isResuming = !isStreaming && phase === 'IN_PROGRESS'
     && deduped.length > 0;
   const timeline = buildTimeline(blocks, deduped, blockIndexMap.current, isStreaming, isResuming);
 

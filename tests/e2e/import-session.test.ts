@@ -131,7 +131,6 @@ describe('import_session tool E2E', () => {
     const session = await getSessionByClaudeId(MOCK_SESSION_ID);
     expect(session).not.toBeNull();
     expect(session!.process_status).toBe('stopped');
-    expect(session!.work_status).toBe('agent_complete');
     expect(session!.taskId).toBe(task.id);
     expect(session!.cwd).toBe(MOCK_CWD);
     expect(session!.messageCount).toBe(4);
@@ -226,7 +225,7 @@ describe('import_session tool E2E', () => {
     expect(session!.cwd).toBe(actualCwd); // CWD corrected to JSONL truth, not the wrong one passed in
   });
 
-  it('supports custom title and work_status', async () => {
+  it('supports custom title', async () => {
     const task = await createTask('Custom fields test', 'Work', 'AuthService');
 
     const customId = 'custom-fields-00000000-0000-0000';
@@ -240,14 +239,12 @@ describe('import_session tool E2E', () => {
       task_id: task.id,
       working_directory: MOCK_CWD,
       title: 'My Custom Title',
-      work_status: 'completed',
     });
 
     expect(result).toContain('My Custom Title');
 
     const session = await getSessionByClaudeId(customId);
     expect(session!.title).toBe('My Custom Title');
-    expect(session!.work_status).toBe('completed');
   });
 
   it('rejects import when task already has a non-archived session', async () => {

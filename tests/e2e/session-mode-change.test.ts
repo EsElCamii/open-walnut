@@ -190,14 +190,14 @@ describe('Session mode change: real-time updates', () => {
     expect(thisTaskEvents.length).toBeGreaterThanOrEqual(2)
 
     // THE CRITICAL ASSERTION: Find a MID-SESSION mode change event.
-    // This must be mode: 'plan' with work_status: 'in_progress' —
+    // This must be mode: 'plan' with process_status: 'running' —
     // proving the UI gets notified in real-time, not just at session end.
-    // The final 'agent_complete' event also carries mode: 'plan' (because _mode was updated),
+    // The final stopped event also carries mode: 'plan' (because _mode was updated),
     // but that's too late — the UI needs the update DURING the session.
     const midSessionPlanEvents = thisTaskEvents.filter(
       e => {
-        const d = e.data as { mode?: string; work_status?: string }
-        return d.mode === 'plan' && d.work_status === 'in_progress'
+        const d = e.data as { mode?: string; process_status?: string }
+        return d.mode === 'plan' && d.process_status === 'running'
       },
     )
     expect(midSessionPlanEvents.length).toBeGreaterThanOrEqual(1)
