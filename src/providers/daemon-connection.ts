@@ -887,8 +887,23 @@ export class DaemonConnection {
             log.session.info('DaemonConnection: auto-recovered session after reconnect', {
               sessionId: s.claudeSessionId, host: this.hostKey,
             })
+          } else {
+            // Process died during disconnect — clear error so session is resumable.
+            // Don't inject a message; user's next message will trigger --resume naturally.
+            await updateSessionRecord(s.claudeSessionId, {
+              process_status: 'idle',
+              errorMessage: undefined,
+              last_status_change: new Date().toISOString(),
+            })
+            bus.emit(EventNames.SESSION_STATUS_CHANGED, {
+              sessionId: s.claudeSessionId,
+              taskId: s.taskId,
+              process_status: 'idle',
+            }, ['*'], { source: 'daemon-reconnect', urgency: 'urgent' })
+            log.session.info('DaemonConnection: cleared error on dead session after reconnect', {
+              sessionId: s.claudeSessionId, host: this.hostKey,
+            })
           }
-          // If daemon says process is dead → keep error (accurate)
         } catch { /* daemon doesn't know this session — keep error */ }
       }
     } catch { /* session tracker not available */ }

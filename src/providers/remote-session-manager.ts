@@ -298,6 +298,12 @@ export class RemoteSessionManager implements SessionManager {
         log.session.warn('RemoteSessionManager: send failed', {
           host: this.hostKey, sid, reason: result.reason || result.error,
         })
+        // Daemon says session not found → process is dead. Clear hasPipe and
+        // trigger onExit so session runner falls through to --resume on next processNext.
+        if (String(result.reason || result.error || '').includes('not found')) {
+          this._hasPipe = false
+          this._onExit?.(1)
+        }
       }
     }).catch((err) => {
       log.session.warn('RemoteSessionManager: send error', {
