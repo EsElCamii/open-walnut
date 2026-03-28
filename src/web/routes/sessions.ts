@@ -992,13 +992,22 @@ sessionsRouter.post('/:sessionId/retry', async (req: Request, res: Response, nex
       return
     }
 
-    // ── Resume path: session has claudeSessionId → use --resume to preserve history ──
-    // Don't touch process_status here — processNext() handles the full transition:
-    // work_status='in_progress', clear errorMessage, emit status event, spawn --resume.
-    // enrichWithLiveStatus() only checks running/idle sessions, so 'error' won't flash.
+    // ── Resume path: session has claudeSessionId → check if process is alive ──
     if (record.claudeSessionId) {
+      const alive = await isSessionProcessAlive(record)
+
+      if (alive) {
+        // Case 2 — process alive, connection dropped: just clear error state
+        await updateSessionRecord(sessionId, { process_status: 'running', errorMessage: undefined })
+        bus.emit(EventNames.SESSION_STATUS_CHANGED, { sessionId, process_status: 'running', taskId: record.taskId })
+        log.web.info('session retry: reconnected (process alive)', { sessionId, taskId: record.taskId })
+        res.json({ status: 'reconnected', sessionId })
+        return
+      }
+
+      // Case 1 — process dead: resume via --resume
       const { sendMessageToSession } = await import('../../core/session-message-queue.js')
-      await sendMessageToSession(sessionId, 'Continue where you left off — connection was restored.', {
+      await sendMessageToSession(sessionId, 'continue', {
         source: 'retry',
         taskId: record.taskId,
       })

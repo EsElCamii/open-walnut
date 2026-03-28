@@ -64,6 +64,7 @@ import {
 import { addTask, _resetForTesting } from '../../../src/core/task-manager.js';
 import { WALNUT_HOME, SESSIONS_FILE } from '../../../src/constants.js';
 import { sendMessageToSession } from '../../../src/core/session-message-queue.js';
+import { isSessionProcessAlive } from '../../../src/utils/session-liveness.js';
 
 // ── App factory ──
 
@@ -168,6 +169,80 @@ describe('POST /api/sessions/:sessionId/retry — session NOT archived after res
 
     const record = await getSessionByClaudeId('stopped-resume-sess');
     expect(record!.archived).toBeFalsy();
+  });
+});
+
+// ── Reconnect path: process alive → reconnect without sending message ──
+
+describe('POST /api/sessions/:sessionId/retry — reconnect path (process alive)', () => {
+  it('returns { status: "reconnected" } when process is alive', async () => {
+    vi.mocked(isSessionProcessAlive).mockResolvedValueOnce(true);
+    const taskId = await makeTask();
+    await createSessionRecord('alive-sess-1', taskId, 'project-reconnect');
+    await updateSessionRecord('alive-sess-1', { process_status: 'error', errorMessage: 'Connection lost' });
+
+    const app = createApp();
+    const res = await request(app).post('/api/sessions/alive-sess-1/retry');
+
+    expect(res.status).toBe(200);
+    expect(res.body.status).toBe('reconnected');
+    expect(res.body.sessionId).toBe('alive-sess-1');
+  });
+
+  it('does NOT call sendMessageToSession when reconnecting', async () => {
+    vi.mocked(isSessionProcessAlive).mockResolvedValueOnce(true);
+    const taskId = await makeTask();
+    await createSessionRecord('alive-sess-2', taskId, 'project-reconnect');
+    await updateSessionRecord('alive-sess-2', { process_status: 'error' });
+
+    const app = createApp();
+    await request(app).post('/api/sessions/alive-sess-2/retry');
+
+    expect(sendMessageToSession).not.toHaveBeenCalled();
+  });
+
+  it('clears error state and sets process_status to running', async () => {
+    vi.mocked(isSessionProcessAlive).mockResolvedValueOnce(true);
+    const taskId = await makeTask();
+    await createSessionRecord('alive-sess-3', taskId, 'project-reconnect');
+    await updateSessionRecord('alive-sess-3', { process_status: 'error', errorMessage: 'SSH disconnected' });
+
+    const app = createApp();
+    await request(app).post('/api/sessions/alive-sess-3/retry');
+
+    const record = await getSessionByClaudeId('alive-sess-3');
+    expect(record!.process_status).toBe('running');
+    expect(record!.errorMessage).toBeFalsy();
+  });
+
+  it('does not archive the session when reconnecting', async () => {
+    vi.mocked(isSessionProcessAlive).mockResolvedValueOnce(true);
+    const taskId = await makeTask();
+    await createSessionRecord('alive-sess-4', taskId, 'project-reconnect');
+    await updateSessionRecord('alive-sess-4', { process_status: 'error' });
+
+    const app = createApp();
+    await request(app).post('/api/sessions/alive-sess-4/retry');
+
+    const record = await getSessionByClaudeId('alive-sess-4');
+    expect(record!.archived).toBeFalsy();
+  });
+});
+
+// ── Resume path: process dead → send message to resume ──
+
+describe('POST /api/sessions/:sessionId/retry — resume path (process dead)', () => {
+  it('sends "continue" as the retry message (not verbose text)', async () => {
+    const taskId = await makeTask();
+    await createSessionRecord('dead-sess-msg', taskId, 'project-resume');
+    await updateSessionRecord('dead-sess-msg', { process_status: 'error' });
+
+    const app = createApp();
+    await request(app).post('/api/sessions/dead-sess-msg/retry');
+
+    expect(sendMessageToSession).toHaveBeenCalledOnce();
+    const [, message] = vi.mocked(sendMessageToSession).mock.calls[0];
+    expect(message).toBe('continue');
   });
 });
 

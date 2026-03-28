@@ -153,6 +153,7 @@ export async function quickStartSession(opts: {
 }
 
 export async function retrySession(sessionId: string): Promise<
+  { status: 'reconnected'; sessionId: string } |
   { status: 'resuming'; sessionId: string } |
   { status: 'pending'; taskId: string; oldSessionId: string }
 > {

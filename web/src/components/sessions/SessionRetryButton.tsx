@@ -20,8 +20,8 @@ export function SessionRetryButton({ sessionId, onRetried, onResuming }: Session
     setState('retrying');
     try {
       const result = await retrySession(sessionId);
-      if (result.status === 'resuming') {
-        // Same session — processNext() emits status events, UI auto-updates
+      if (result.status === 'reconnected' || result.status === 'resuming') {
+        // Same session — UI auto-updates via WS status events
         onResuming?.();
       } else {
         // Fallback: new session on same task
