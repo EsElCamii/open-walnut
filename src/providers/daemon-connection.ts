@@ -878,7 +878,9 @@ export class DaemonConnection {
               process_status: 'running',
               errorMessage: undefined,
               last_status_change: new Date().toISOString(),
-            })
+              status_reason: 'daemon_reconnected',
+              status_changed_by: 'daemon',
+            } as any)
             bus.emit(EventNames.SESSION_STATUS_CHANGED, {
               sessionId: s.claudeSessionId,
               taskId: s.taskId,
@@ -894,7 +896,9 @@ export class DaemonConnection {
               process_status: 'stopped',
               errorMessage: undefined,
               last_status_change: new Date().toISOString(),
-            })
+              status_reason: 'daemon_reported_exit',
+              status_changed_by: 'daemon',
+            } as any)
             bus.emit(EventNames.SESSION_STATUS_CHANGED, {
               sessionId: s.claudeSessionId,
               taskId: s.taskId,

@@ -419,6 +419,40 @@ export type SessionMode = 'bypass' | 'accept' | 'default' | 'plan';
 export type SessionProvider = 'cli' | 'sdk' | 'embedded';
 export type SessionType = 'interactive' | 'triage' | 'hook' | 'cron' | 'subagent';
 
+export type StatusReason =
+  | 'session_started'
+  | 'turn_completed'
+  | 'message_sent'
+  | 'normal_completion'
+  | 'idle_timeout'
+  | 'idle_eviction'
+  | 'server_restart'
+  | 'process_exited_no_result'
+  | 'remote_unreachable'
+  | 'api_error'
+  | 'liveness_check_failed'
+  | 'daemon_reported_exit'
+  | 'daemon_reconnected'
+  | 'retry_reconnect'
+  | 'user_stopped';
+
+export type StatusChangedBy =
+  | 'health-monitor'
+  | 'reconciler'
+  | 'session-runner'
+  | 'subagent-runner'
+  | 'daemon'
+  | 'user'
+  | 'system';
+
+export interface StatusTransition {
+  timestamp: string;
+  process_status: ProcessStatus;
+  reason: StatusReason;
+  changed_by: StatusChangedBy;
+  message?: string | null;
+}
+
 export interface SessionRecord {
   claudeSessionId: string;
   taskId: string;
@@ -461,4 +495,10 @@ export interface SessionRecord {
   planContent?: string;
   /** Error message when process_status is 'error' — persisted for post-mortem display. */
   errorMessage?: string;
+  /** Why the last process_status change happened (K8s condition style). */
+  status_reason?: StatusReason;
+  /** Who triggered the last process_status change. */
+  status_changed_by?: StatusChangedBy;
+  /** Recent status transitions, newest first. Max 10 entries. */
+  status_history?: StatusTransition[];
 }

@@ -998,7 +998,7 @@ sessionsRouter.post('/:sessionId/retry', async (req: Request, res: Response, nex
 
       if (alive) {
         // Case 2 — process alive, connection dropped: just clear error state
-        await updateSessionRecord(sessionId, { process_status: 'running', errorMessage: undefined })
+        await updateSessionRecord(sessionId, { process_status: 'running', errorMessage: undefined, status_reason: 'retry_reconnect', status_changed_by: 'user' } as any)
         bus.emit(EventNames.SESSION_STATUS_CHANGED, { sessionId, process_status: 'running', taskId: record.taskId })
         log.web.info('session retry: reconnected (process alive)', { sessionId, taskId: record.taskId })
         res.json({ status: 'reconnected', sessionId })

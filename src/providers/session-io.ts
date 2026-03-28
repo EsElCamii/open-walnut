@@ -24,7 +24,7 @@ export interface SessionIO {
    * Write a stream-json message to the session's stdin FIFO.
    * Returns true on success, false if the pipe is broken / unavailable.
    */
-  write(message: string): boolean
+  write(message: string): Promise<boolean>
 
   /**
    * Start tailing the JSONL output file, calling onLine for each new line.
@@ -165,7 +165,7 @@ export class LocalIO implements SessionIO {
     log.session.debug('LocalIO: initial message written to FIFO', { messageLength: message.length })
   }
 
-  write(message: string): boolean {
+  async write(message: string): Promise<boolean> {
     if (!this.pipePath) {
       log.session.debug('LocalIO write skipped: no pipe', { messageLength: message.length })
       return false
@@ -174,32 +174,28 @@ export class LocalIO implements SessionIO {
       type: 'user',
       message: { role: 'user', content: message },
     })
+    const buf = Buffer.from(payload + '\n')
     try {
-      // Use O_NONBLOCK for BOTH open and write to never block the event loop.
-      //
-      // Without O_NONBLOCK:
-      //   open()  blocks forever if no reader has the pipe open
-      //   write() blocks forever if the pipe buffer is full (reader mid-turn)
-      //
-      // With O_NONBLOCK:
-      //   open()  returns ENXIO immediately if no reader
-      //   write() returns EAGAIN if buffer full, or a short count if > PIPE_BUF
-      //
-      // For writes ≤ PIPE_BUF (512 bytes on macOS), O_NONBLOCK write is atomic:
-      // either all bytes are written or EAGAIN. For larger messages, the kernel may
-      // write a partial count — we detect this and return false (caller falls back
-      // to --resume which is safe). macOS pipe buffer is 8–16 KB so most messages
-      // (typically < 8 KB) succeed in one atomic write.
-      const buf = Buffer.from(payload + '\n')
       const fd = fs.openSync(this.pipePath, fs.constants.O_WRONLY | fs.constants.O_NONBLOCK)
       try {
-        const written = fs.writeSync(fd, buf)
-        if (written !== buf.length) {
-          // Partial write — reader gets truncated JSON. Return false so caller
-          // falls back to --resume. The partial data will be skipped by the reader
-          // as an unparseable JSON line.
-          log.session.warn('LocalIO write: partial write to FIFO', {
-            pipePath: this.pipePath, written, total: buf.length,
+        let offset = 0
+        const deadline = Date.now() + 10_000
+        while (offset < buf.length) {
+          try {
+            const written = fs.writeSync(fd, buf, offset)
+            if (written === 0) break  // no progress
+            offset += written
+          } catch (err: any) {
+            if (err.code === 'EAGAIN' && Date.now() < deadline) {
+              await new Promise(r => setTimeout(r, 50))
+              continue
+            }
+            throw err
+          }
+        }
+        if (offset < buf.length) {
+          log.session.warn('LocalIO write: incomplete after timeout', {
+            pipePath: this.pipePath, written: offset, total: buf.length,
           })
           return false
         }

@@ -683,6 +683,7 @@ export class ClaudeCodeSession {
     // The session record in sessions.json may be stale if the server crashed
     // before an async updateSessionRecord() completed. The CloudCode JSONL
     // is maintained by Claude CLI itself and always has the ground truth.
+    let jsonlByteLength = 0
     try {
       const recovered = await recoverStateFromJsonl(record.claudeSessionId, record.cwd, record.host)
       if (recovered) {
@@ -695,6 +696,7 @@ export class ClaudeCodeSession {
         if (recovered.planFile) session.planFile = recovered.planFile
         if (recovered.planCompleted != null) session.planCompleted = recovered.planCompleted
         if (recovered.activity) session._activity = recovered.activity
+        if (recovered.jsonlByteLength) jsonlByteLength = recovered.jsonlByteLength
         // Belt-and-suspenders: if the JSONL has a result event (hasResult),
         // reinforce resultEmitted even if tasks.json was momentarily stale.
         if (recovered.workStatus === 'agent_complete' || recovered.workStatus === 'await_human_action') {
@@ -728,15 +730,17 @@ export class ClaudeCodeSession {
     })
 
     // Attach the transport: recovers FIFO (local) or reconnects WebSocket (daemon),
-    // then starts tailing from the current end of file — only pick up NEW data.
-    // State has already been recovered from Claude Code's canonical JSONL (above),
-    // so there's no need to replay from byte 0. (Local sessions have a streams
-    // capture file; remote sessions have no local file at all.)
+    // then starts tailing from AFTER the data we already recovered.
+    // For remote sessions, transport.fileSize is 0 (no local file) — use the JSONL
+    // byte length from recovery so the daemon skips already-processed events.
+    // Without this, the daemon replays from byte 0, re-sending stale result events
+    // that override the session's current running/idle state.
     if (session._transport && record.claudeSessionId) {
+      const fromOffset = session._transport.fileSize || jsonlByteLength
       try {
         await session._transport.attach({
           sessionId: record.claudeSessionId,
-          fromOffset: session._transport.fileSize,
+          fromOffset,
           onOutput: (event) => session.handleStreamLine(event.line),
           onExit: (code) => {
             session._exitCode = code
@@ -786,9 +790,9 @@ export class ClaudeCodeSession {
    * Named pipes survive server restarts: the FIFO file persists on disk,
    * and any server instance can open it for writing.
    */
-  writeMessage(message: string): boolean {
+  async writeMessage(message: string): Promise<boolean> {
     if (!this._transport) return false
-    const ok = this._transport.writeMessage(message)
+    const ok = await this._transport.writeMessage(message)
     if (!ok) return false
     this._processStatus = 'running'  // Back to running from idle
     this._activity = undefined
@@ -1442,12 +1446,13 @@ export class ClaudeCodeSession {
               const correction = 'You are running in non-interactive (-p) mode. '
                 + 'The user cannot see AskUserQuestion — it will always fail here. '
                 + 'Instead, print your questions or assumptions directly in your text output, and wait for user response.'
-              const injected = this._transport?.writeMessage(correction) ?? false
-              log.session.info('auto-intercepted AskUserQuestion in -p mode', {
-                sessionId: this.claudeSessionId,
-                taskId: this.taskId,
-                injected,
-              })
+              Promise.resolve(this._transport?.writeMessage(correction)).then((injected) => {
+                log.session.info('auto-intercepted AskUserQuestion in -p mode', {
+                  sessionId: this.claudeSessionId,
+                  taskId: this.taskId,
+                  injected: injected ?? false,
+                })
+              }).catch(() => {})
             }
 
             // For ExitPlanMode, resolve plan content: prefer captured Write content, fall back to input.plan
@@ -1927,34 +1932,31 @@ export class SessionRunner {
           const { sessionId } = eventData<'session:result'>(event)
           if (!sessionId) break
 
-          // Persist process_status to sessions.json for ALL provider types.
-          // CLI sessions update in-memory state via JSONL events, but the
-          // on-disk record must also be updated to prevent stale
-          // process_status:'running' records after the process exits.
+          // Persist process_status to sessions.json.
+          // Trust the in-memory processStatus that handleStreamEvent() already computed
+          // (idle for FIFO-alive and remote --resume, stopped for dead processes).
+          // Don't re-derive — that caused a bug where remote --resume sessions
+          // (active=false but processStatus='idle') were incorrectly written as 'stopped'.
           {
             const isError = event.name === EventNames.SESSION_ERROR
               || (eventData<'session:result'>(event) as { isError?: boolean }).isError === true
-            // Extract error message for persistence (truncated for storage)
             const errorMessage = isError
               ? ((eventData<'session:error'>(event) as { error?: string }).error ?? 'Unknown error').slice(0, 1000)
               : undefined
-            // For FIFO sessions (agent_complete but process still alive),
-            // only persist stopped status when the process is actually dead.
             const cliSession = this.findSessionByClaudeId(sessionId)
-            // FIFO sessions transition to 'idle' after turn complete (process alive, waiting for input).
-            // Both 'running' and 'idle' mean the OS process is alive.
-            const isProcessStillAlive = cliSession?.active
-              && (cliSession?.processStatus === 'running' || cliSession?.processStatus === 'idle')
+            const status = isError ? 'error' : (cliSession?.processStatus ?? 'stopped')
 
-            if (!isProcessStillAlive) {
-              import('../core/session-tracker.js').then(({ updateSessionRecord, getSessionByClaudeId }) => {
-                updateSessionRecord(sessionId, {
-                  process_status: isError ? 'error' : 'stopped',
-                  errorMessage: isError ? errorMessage : undefined,
-                  activity: undefined,
-                  last_status_change: new Date().toISOString(),
-                }).then(() =>
-                  // Clear task session slot so the 1-session-per-task rule allows new sessions
+            import('../core/session-tracker.js').then(({ updateSessionRecord, getSessionByClaudeId }) => {
+              updateSessionRecord(sessionId, {
+                process_status: status,
+                errorMessage: isError ? errorMessage : undefined,
+                activity: undefined,
+                last_status_change: new Date().toISOString(),
+                status_reason: isError ? 'api_error' : (status === 'idle' ? 'turn_completed' : 'normal_completion'),
+                status_changed_by: 'session-runner',
+              } as any).then(() => {
+                // Clear task session slot only when truly stopped/error
+                if (status === 'stopped' || status === 'error') {
                   getSessionByClaudeId(sessionId).then(rec => {
                     if (rec?.taskId) {
                       import('../core/task-manager.js').then(({ clearSessionSlot }) => {
@@ -1962,21 +1964,9 @@ export class SessionRunner {
                       }).catch(() => {})
                     }
                   }).catch(() => {})
-                ).catch(() => {})
+                }
               }).catch(() => {})
-            } else {
-              // FIFO session: process is alive between turns — mark idle so the
-              // health monitor's Layer 3 idle timeout can catch leaked processes.
-              // Previously left as 'running', which bypassed idle timeout checks.
-              import('../core/session-tracker.js').then(({ updateSessionRecord }) => {
-                updateSessionRecord(sessionId, {
-                  process_status: isError ? 'error' : 'idle',
-                  errorMessage: isError ? errorMessage : undefined,
-                  activity: undefined,
-                  last_status_change: new Date().toISOString(),
-                }).catch(() => {})
-              }).catch(() => {})
-            }
+            }).catch(() => {})
           }
 
           // Clear activeProcessing — try direct match first, fall back to taskId match.
@@ -2800,11 +2790,18 @@ export class SessionRunner {
 
     const combined = newMsgs.map((m) => m.message).join('\n\n')
 
-    if (targetSession.writeMessage(combined)) {
+    if (await targetSession.writeMessage(combined)) {
       // Injection succeeded — increment batch count so SESSION_BATCH_COMPLETED
       // includes these messages when the turn eventually completes
       this.batchCounts.set(sessionId, (this.batchCounts.get(sessionId) ?? 0) + newMsgs.length)
       log.session.info('handleSend: message injected mid-turn via stdin', { sessionId, count: newMsgs.length })
+
+      // Write synthetic user events so history has user messages for dedup.
+      // Without this, mid-turn injected messages are missing from JSONL history,
+      // causing optimistic message dedup to fail (user message appears twice).
+      for (const msg of newMsgs) {
+        if (msg.id) targetSession.writeSyntheticUserEvent(msg.message, msg.id)
+      }
 
       // Eagerly remove from disk queue — message written to FIFO, no re-delivery on crash
       removeProcessed(sessionId).catch((err) => {
@@ -2915,7 +2912,7 @@ export class SessionRunner {
           })
           targetSession.markProcessDead()
           // Fall through to --resume spawn path below
-        } else if (targetSession.writeMessage(combined)) {
+        } else if (await targetSession.writeMessage(combined)) {
           log.session.info('processNext: message sent via stdin (no new process)', { sessionId })
 
           // Write synthetic user events to streams file so Phase 1 has user messages.

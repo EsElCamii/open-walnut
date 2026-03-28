@@ -16,6 +16,8 @@ export const JITTER_FACTOR = 0.3;
 export function isRetryableError(err: unknown): boolean {
   if (err instanceof RateLimitError) return true;
   if (err instanceof APIError && (err.status === 529 || err.status === 503)) return true;
+  // Stream ended prematurely — transient API/network issue, safe to retry.
+  if (err instanceof Error && err.message?.includes('stream ended without producing')) return true;
   return false;
 }
 

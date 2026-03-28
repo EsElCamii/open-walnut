@@ -107,13 +107,13 @@ describe('LocalIO', () => {
     }
   })
 
-  it('write() returns false when pipePath is null (no createFiles called)', () => {
+  it('write() returns false when pipePath is null (no createFiles called)', async () => {
     const io = new LocalIO('test-no-pipe')
     expect(io.hasPipe).toBe(false)
-    expect(io.write('hello')).toBe(false)
+    expect(await io.write('hello')).toBe(false)
   })
 
-  it('write() returns false when FIFO is deleted, and flips hasPipe', () => {
+  it('write() returns false when FIFO is deleted, and flips hasPipe', async () => {
     const io = new LocalIO('test-broken-pipe')
     const { pipePath, pipeFd, outputFd, stderrFd } = io.createFiles()
 
@@ -125,7 +125,7 @@ describe('LocalIO', () => {
       fs.unlinkSync(pipePath)
 
       // write() should fail and flip hasPipe to false
-      const result = io.write('this should fail')
+      const result = await io.write('this should fail')
       expect(result).toBe(false)
       expect(io.hasPipe).toBe(false)
     } finally {

@@ -5,7 +5,9 @@ import { readJsonFile, writeJsonFile, ensureDir } from '../utils/fs.js';
 import { withFileLock } from '../utils/file-lock.js';
 import { isSessionProcessAlive } from '../utils/session-liveness.js';
 import { log } from '../logging/index.js';
-import type { SessionSummary, SessionRecord, SessionMode, SessionType, TaskPhase, Task } from './types.js';
+import type { SessionSummary, SessionRecord, SessionMode, SessionType, TaskPhase, Task, ProcessStatus, StatusTransition } from './types.js';
+
+const MAX_STATUS_HISTORY = 10;
 
 // ── Triage detection ──
 
@@ -247,7 +249,9 @@ function fixStaleRecords(sessionIds: string[]): void {
     updateSessionRecord(id, {
       process_status: 'stopped',
       last_status_change: now,
-    }).catch((err) => {
+      status_reason: 'liveness_check_failed',
+      status_changed_by: 'system',
+    } as any).catch((err) => {
       log.session.warn('failed to fix stale record', { sessionId: id, error: String(err) });
     });
   }
@@ -352,7 +356,9 @@ export async function checkSessionLimit(
         process_status: 'stopped',
         activity: undefined,
         last_status_change: new Date().toISOString(),
-      });
+        status_reason: 'idle_eviction',
+        status_changed_by: 'system',
+      } as any);
       evicted.push(victim);
     }
   }
@@ -539,7 +545,23 @@ export async function updateSessionRecord(
       throw new Error(`Session not found: ${claudeSessionId}`);
     }
 
+    // Auto-maintain status_history when process_status changes
+    const prevStatus = session.process_status;
     Object.assign(session, updates);
+
+    if (updates.process_status && updates.process_status !== prevStatus) {
+      const transition: StatusTransition = {
+        timestamp: new Date().toISOString(),
+        process_status: updates.process_status as ProcessStatus,
+        reason: (updates as any).status_reason ?? 'unknown',
+        changed_by: (updates as any).status_changed_by ?? 'unknown',
+        message: (updates as any).errorMessage ?? null,
+      };
+      session.status_history = [
+        transition,
+        ...(session.status_history ?? []),
+      ].slice(0, MAX_STATUS_HISTORY);
+    }
 
     // When session reaches terminal state, clear PID to prevent stale PID orphan kills.
     // OS can recycle PIDs — a stale PID on a completed session can collide with a new session's PID.
@@ -574,7 +596,23 @@ export async function updateSessionRecordConditionally(
 
     if (!shouldUpdate(session)) return null;
 
+    // Auto-maintain status_history when process_status changes
+    const prevStatus = session.process_status;
     Object.assign(session, updates);
+
+    if (updates.process_status && updates.process_status !== prevStatus) {
+      const transition: StatusTransition = {
+        timestamp: new Date().toISOString(),
+        process_status: updates.process_status as ProcessStatus,
+        reason: (updates as any).status_reason ?? 'unknown',
+        changed_by: (updates as any).status_changed_by ?? 'unknown',
+        message: (updates as any).errorMessage ?? null,
+      };
+      session.status_history = [
+        transition,
+        ...(session.status_history ?? []),
+      ].slice(0, MAX_STATUS_HISTORY);
+    }
 
     // Keep in sync with updateSessionRecord — duplicated because this path bypasses it.
     if (isTerminalSession(session) && session.pid != null) {

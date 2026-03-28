@@ -155,8 +155,8 @@ export class LocalSessionManager implements SessionManager {
 
   // ── Messaging ──
 
-  writeMessage(message: string): boolean {
-    return this.io.write(message)
+  async writeMessage(message: string): Promise<boolean> {
+    return await this.io.write(message)
   }
 
   writeSyntheticUserEvent(message: string, walnutMessageId: string): void {

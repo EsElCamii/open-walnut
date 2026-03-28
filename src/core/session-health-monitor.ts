@@ -94,7 +94,9 @@ export class SessionHealthMonitor {
               errorMessage: 'Connection lost — unable to reach remote host',
               activity: undefined,
               last_status_change: now,
-            })
+              status_reason: 'remote_unreachable',
+              status_changed_by: 'health-monitor',
+            } as any)
             log.session.warn('health monitor: remote session unreachable', {
               sessionId: session.claudeSessionId,
               taskId: session.taskId,
@@ -117,7 +119,9 @@ export class SessionHealthMonitor {
               process_status: 'stopped',
               activity: undefined,
               last_status_change: now,
-            })
+              status_reason: 'normal_completion',
+              status_changed_by: 'health-monitor',
+            } as any)
           } else {
             // Error — process_status 'error' with detail
             await updateSessionRecord(session.claudeSessionId, {
@@ -125,7 +129,9 @@ export class SessionHealthMonitor {
               errorMessage: 'Process exited without result',
               activity: undefined,
               last_status_change: now,
-            })
+              status_reason: 'process_exited_no_result',
+              status_changed_by: 'health-monitor',
+            } as any)
           }
 
           // Clear session slot for both normal completion and error —
@@ -167,13 +173,18 @@ export class SessionHealthMonitor {
               ? this.outputFileHasResult(session.outputFile) : false
             if (hasResult) {
               updates.process_status = 'stopped'
+              updates.status_reason = 'normal_completion'
             } else {
               updates.process_status = 'error'
               updates.errorMessage = 'Process exited without result'
+              updates.status_reason = 'process_exited_no_result'
             }
             updates.activity = undefined
+            updates.status_changed_by = 'health-monitor'
           } else {
             updates.process_status = 'stopped'
+            updates.status_reason = 'liveness_check_failed'
+            updates.status_changed_by = 'health-monitor'
           }
 
           await updateSessionRecord(session.claudeSessionId, updates)
@@ -300,9 +311,12 @@ export class SessionHealthMonitor {
       const updateNow = new Date().toISOString()
       await updateSessionRecord(session.claudeSessionId, {
         process_status: 'stopped',
+        errorMessage: `No output for ${idleMinutes} min`,
         activity: undefined,
         last_status_change: updateNow,
-      })
+        status_reason: 'idle_timeout',
+        status_changed_by: 'health-monitor',
+      } as any)
 
       bus.emit(EventNames.SESSION_STATUS_CHANGED, {
         sessionId: session.claudeSessionId,

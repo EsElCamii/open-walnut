@@ -142,7 +142,7 @@ export interface SessionManager {
    * Write a follow-up message via the FIFO pipe (stream-json format).
    * Returns true if written successfully, false if pipe is broken.
    */
-  writeMessage(message: string): boolean
+  writeMessage(message: string): Promise<boolean> | boolean
 
   /**
    * Write a synthetic user event to the output file (for dedup).

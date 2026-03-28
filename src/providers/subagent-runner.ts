@@ -457,7 +457,9 @@ export class SubagentRunner {
           process_status: 'stopped',
           activity: undefined,
           last_status_change: new Date().toISOString(),
-        });
+          status_reason: 'normal_completion',
+          status_changed_by: 'subagent-runner',
+        } as any);
       } catch (err) {
         log.subagent.warn('failed to update session record on completion', {
           runId: run.runId,
@@ -525,7 +527,9 @@ export class SubagentRunner {
           errorMessage: run.error,
           activity: undefined,
           last_status_change: new Date().toISOString(),
-        });
+          status_reason: 'api_error',
+          status_changed_by: 'subagent-runner',
+        } as any);
       } catch {}
 
       bus.emit(EventNames.SESSION_STATUS_CHANGED, {

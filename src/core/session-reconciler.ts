@@ -124,7 +124,10 @@ export async function reconcileSessions(): Promise<ReconcileResult> {
           process_status: 'stopped',
           activity: undefined,
           last_status_change: now,
-        },
+          status_reason: 'server_restart',
+          status_changed_by: 'reconciler',
+          errorMessage: 'Process no longer alive after server restart',
+        } as any,
         (current) => {
           if (current.last_status_change && current.last_status_change > reconcilerStartedAt) return false
           if (current.pid !== snapshotPid) return false
