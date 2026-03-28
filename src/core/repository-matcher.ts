@@ -13,6 +13,8 @@ export interface RepoMatch {
   slug: string;
   description?: string;
   tech_stack?: string;
+  overview?: string;
+  architecture?: string;
   architecture_notes?: string;
   common_commands?: string;
 }
@@ -55,6 +57,8 @@ export function findRepoByPath(cwd: string, host?: string): RepoMatch | undefine
               slug,
               description: parsed.description,
               tech_stack: parsed.tech_stack,
+              overview: parsed.overview,
+              architecture: parsed.architecture,
               architecture_notes: parsed.architecture_notes,
               common_commands: parsed.common_commands,
             };
@@ -81,6 +85,8 @@ interface ParsedRepo {
   name?: string;
   description?: string;
   tech_stack?: string;
+  overview?: string;
+  architecture?: string;
   architecture_notes?: string;
   common_commands?: string;
   hosts: Record<string, { path?: string }>;
@@ -142,6 +148,26 @@ function parseRepoYaml(content: string): ParsedRepo | undefined {
       currentHost = null;
     } else if (trimmed === 'hosts:') {
       currentSection = 'hosts';
+      currentHost = null;
+    } else if (trimmed.startsWith('overview:')) {
+      const val = extractValue(trimmed, 'overview:');
+      if (val === '|' || val === '>') {
+        multilineKey = 'overview';
+        multilineValue = [];
+      } else {
+        result.overview = val;
+      }
+      currentSection = null;
+      currentHost = null;
+    } else if (trimmed.startsWith('architecture:') && !trimmed.startsWith('architecture_notes:')) {
+      const val = extractValue(trimmed, 'architecture:');
+      if (val === '|' || val === '>') {
+        multilineKey = 'architecture';
+        multilineValue = [];
+      } else {
+        result.architecture = val;
+      }
+      currentSection = null;
       currentHost = null;
     } else if (trimmed.startsWith('architecture_notes:')) {
       const val = extractValue(trimmed, 'architecture_notes:');

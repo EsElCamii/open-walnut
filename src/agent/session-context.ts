@@ -23,7 +23,7 @@ const NOTE_BUDGET = 500
 const CONVERSATION_LOG_BUDGET = 300
 const SESSION_BUDGET = 600
 const PROJECT_MEMORY_BUDGET = 1500
-const REPOSITORY_BUDGET = 1000
+const REPOSITORY_BUDGET = 2000
 
 const MAX_SESSIONS = 3
 
@@ -213,11 +213,14 @@ export async function buildSessionContext(taskId: string, cwd?: string, host?: s
       const { findRepoByPath } = await import('../core/repository-matcher.js')
       const repo = findRepoByPath(cwd, host)
       if (repo) {
+        // Prefer rich fields (overview, architecture) over legacy (architecture_notes)
+        const archSection = repo.architecture || repo.architecture_notes
         const parts: string[] = [
           `Repository: ${repo.name}`,
           repo.description ? `Description: ${repo.description}` : null,
           repo.tech_stack ? `Tech Stack: ${repo.tech_stack}` : null,
-          repo.architecture_notes ? `\nArchitecture:\n${repo.architecture_notes}` : null,
+          repo.overview ? `\nOverview:\n${repo.overview}` : null,
+          archSection ? `\nArchitecture:\n${archSection}` : null,
           repo.common_commands ? `\nCommon Commands:\n${repo.common_commands}` : null,
         ].filter(Boolean) as string[]
 
