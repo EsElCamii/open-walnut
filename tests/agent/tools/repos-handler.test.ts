@@ -108,7 +108,10 @@ describe('reposHandler — write + read + list + edit', () => {
     // readResult could be FilesReadResult or ToolResultContent
     expect('content' in readResult).toBe(true);
     const result = readResult as { content: string; content_hash: string; total_lines: number };
-    expect(result.content).toBe(sampleYaml);
+    // readFileWithMeta adds line numbers (cat -n style), so check each line is present
+    expect(result.content).toContain('name: Test Repo');
+    expect(result.content).toContain('description: A test repository');
+    expect(result.content).toContain('path: /tmp/test-repo');
     expect(result.content_hash).toBeTruthy();
     expect(result.total_lines).toBe(6);
   });
@@ -330,7 +333,10 @@ describe('executeTool — repos/ integration', () => {
       source: 'repos/tool-test',
     });
     const readResult = JSON.parse(readRaw as string);
-    expect(readResult.content).toBe(yaml);
+    // readFileWithMeta adds line numbers, so check content contains the yaml lines
+    expect(readResult.content).toContain('name: Tool Test Repo');
+    expect(readResult.content).toContain('description: Created via executeTool');
+    expect(readResult.content).toContain('path: /tmp/tool-test');
     expect(readResult.content_hash).toBe(writeResult.content_hash);
   });
 
@@ -341,13 +347,13 @@ describe('executeTool — repos/ integration', () => {
       content: 'name: List Test\nhosts:\n  local:\n    path: /tmp/lt\n',
     });
 
-    const listRaw = await executeTool('files_list', { source: 'repos/' });
+    // files_list uses 'prefix' param, not 'source'
+    const listRaw = await executeTool('files_list', { prefix: 'repos/' });
     const listResult = JSON.parse(listRaw as string);
 
-    // files_list wraps in an items array
-    expect(Array.isArray(listResult.items || listResult)).toBe(true);
-    const items = listResult.items || listResult;
-    const found = items.find((i: any) => i.source === 'repos/list-test');
+    // files_list returns a flat array of items
+    expect(Array.isArray(listResult)).toBe(true);
+    const found = listResult.find((i: any) => i.source === 'repos/list-test');
     expect(found).toBeDefined();
     expect(found.name).toBe('List Test');
   });
