@@ -12036,6 +12036,146 @@ img[data-lightbox-src],
   margin: 0;
 }
 
+/* ── Session action chips (Plan / Notes / Messages) in meta bar ── */
+
+.session-meta-row-2 {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 4px;
+  font-size: 11px;
+  color: var(--fg-muted);
+  flex-wrap: wrap;
+}
+
+.session-action-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 1px 7px;
+  font-size: 10px;
+  font-weight: 500;
+  font-family: inherit;
+  color: var(--fg-muted);
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 0.15s, color 0.15s, border-color 0.15s;
+  line-height: 1.6;
+}
+
+.session-action-chip:hover {
+  background: var(--accent-subtle);
+  color: var(--accent);
+}
+
+.session-action-chip-active {
+  background: var(--accent-subtle, color-mix(in srgb, var(--accent) 12%, transparent));
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+.session-action-chip-count {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 14px;
+  height: 14px;
+  padding: 0 3px;
+  font-size: 9px;
+  font-weight: 600;
+  color: #fff;
+  background: var(--accent);
+  border-radius: 7px;
+  line-height: 1;
+}
+
+/* Plan popover — based on .session-fork-popover */
+.session-plan-popover-wrapper {
+  position: relative;
+  display: inline-flex;
+}
+
+.session-plan-popover {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  width: 320px;
+  background: #fff;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 10px;
+  box-shadow: 0 4px 20px rgba(0,0,0,0.15);
+  z-index: 100;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+@media (prefers-color-scheme: dark) {
+  .session-plan-popover { background: #1c1c1e; }
+}
+
+.session-plan-popover-file {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--fg-muted);
+}
+
+.session-plan-popover-file code {
+  font-size: 10px;
+  background: var(--bg-tertiary);
+  padding: 1px 5px;
+  border-radius: 4px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 200px;
+}
+
+.session-plan-popover-source {
+  font-size: 11px;
+  color: var(--fg-muted);
+}
+
+.session-plan-popover-source a {
+  color: var(--accent);
+  text-decoration: none;
+}
+
+.session-plan-popover-source a:hover {
+  text-decoration: underline;
+}
+
+.session-plan-popover-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.session-plan-popover .execute-plan-btn {
+  padding: 6px 10px;
+  font-size: 12px;
+}
+
+.session-plan-popover .execute-plan-btn-secondary {
+  padding: 6px 10px;
+  font-size: 12px;
+}
+
+.session-plan-popover .execute-plan-btn-desc {
+  font-size: 10px;
+}
+
+/* Toggled sections when opened via action chip */
+.session-action-panel {
+  border-top: 1px solid var(--border);
+}
+
 /* Session pill status dots */
 .session-pill-status-dot {
   display: inline-block;

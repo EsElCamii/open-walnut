@@ -1,9 +1,10 @@
 import { useState, useRef, useEffect, useCallback, type KeyboardEvent } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { SessionChatHistory } from './SessionChatHistory';
 import { SessionNotes } from './SessionNotes';
 import { FileViewer } from '../common/FileViewer';
 import { UserMessagesSummary } from './UserMessagesSummary';
-import { PlanPreviewSection } from './PlanPreviewSection';
+// PlanPreviewSection replaced by inline plan popover in meta bar
 import { PhasePicker } from './WorkStatusPicker';
 import { SessionCopyButtons } from './SessionCopyButtons';
 import { TaskQuickActions } from './TaskQuickActions';
@@ -129,16 +130,34 @@ function EditableTitle({ sessionId, title, onSaved }: { sessionId: string; title
 }
 
 export function SessionDetailPanel({ session, taskTitle, summary, phase: propPhase, onTitleChanged, onSessionReplaced, optimisticMessages, onMessagesDelivered, onBatchCompleted, onEditQueued, onDeleteQueued, onAgentQueued, onClearCommitted, onRetryFailed, onDismissFailed }: SessionDetailPanelProps) {
+  const navigate = useNavigate();
   const [executing, setExecuting] = useState(false);
   const [executeError, setExecuteError] = useState<string | null>(null);
   const [executeStarted, setExecuteStarted] = useState(false);
   const [detailsOpen, setDetailsOpen] = useState(false);
-  const [executeOpen, setExecuteOpen] = useState(false);
   const [fileViewerState, setFileViewerState] = useState<{ path: string; line?: number } | null>(null);
   const panelRef = useRef<HTMLDivElement>(null);
   // Track latest sessionId so async callbacks can detect navigation
   const sessionIdRef = useRef(session?.claudeSessionId);
   sessionIdRef.current = session?.claudeSessionId;
+
+  // Action chip toggle state
+  const [planPopoverOpen, setPlanPopoverOpen] = useState(false);
+  const [notesOpen, setNotesOpen] = useState(false);
+  const [messagesOpen, setMessagesOpen] = useState(false);
+  const planPopoverRef = useRef<HTMLDivElement>(null);
+
+  // Close plan popover on outside click
+  useEffect(() => {
+    if (!planPopoverOpen) return;
+    const handleClick = (e: MouseEvent) => {
+      if (planPopoverRef.current && !planPopoverRef.current.contains(e.target as Node)) {
+        setPlanPopoverOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', handleClick);
+    return () => document.removeEventListener('mousedown', handleClick);
+  }, [planPopoverOpen]);
 
   // Fetch messages for the UserMessagesSummary
   const sessionId_ = session?.claudeSessionId || '';
@@ -220,7 +239,9 @@ export function SessionDetailPanel({ session, taskTitle, summary, phase: propPha
     setExecuteError(null);
     setExecuteStarted(false);
     setDetailsOpen(false);
-    setExecuteOpen(false);
+    setPlanPopoverOpen(false);
+    setNotesOpen(false);
+    setMessagesOpen(false);
   }, [session?.claudeSessionId]);
 
   if (!session) {
@@ -398,6 +419,101 @@ export function SessionDetailPanel({ session, taskTitle, summary, phase: propPha
             )}
           </div>
 
+          {/* Action chips row: Plan / Notes / Messages */}
+          <div className="session-meta-row-2">
+            {(shouldFetchPlan || showExecuteButtons) && (
+              <div className="session-plan-popover-wrapper" ref={planPopoverRef}>
+                <button
+                  className={`session-action-chip${planPopoverOpen ? ' session-action-chip-active' : ''}`}
+                  onClick={() => setPlanPopoverOpen(o => !o)}
+                  title="Plan & Execute"
+                >
+                  Plan {planPopoverOpen ? '\u25B4' : '\u25BE'}
+                </button>
+                {planPopoverOpen && (
+                  <div className="session-plan-popover">
+                    {plan && (
+                      <>
+                        <div className="session-plan-popover-file">
+                          <code title={plan.planFile || ''}>{plan.planFile?.split('/').pop() ?? 'plan.md'}</code>
+                          <button
+                            className="task-action-btn plan-preview-refresh"
+                            onClick={async (e) => { e.stopPropagation(); await planRefresh(); }}
+                            title="Refresh plan content"
+                            style={{ marginLeft: 'auto' }}
+                          >
+                            <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round">
+                              <path d="M1.5 8a6.5 6.5 0 0111.3-4.4"/><polyline points="13 1 13 4.5 9.5 4.5"/>
+                              <path d="M14.5 8a6.5 6.5 0 01-11.3 4.4"/><polyline points="3 15 3 11.5 6.5 11.5"/>
+                            </svg>
+                          </button>
+                        </div>
+                        {isFromPlan && plan.sourceSessionId && (
+                          <div className="session-plan-popover-source">
+                            from session{' '}
+                            <a
+                              href={`/sessions?id=${plan.sourceSessionId}`}
+                              onClick={(e) => { e.preventDefault(); navigate(`/sessions?id=${plan.sourceSessionId}`); setPlanPopoverOpen(false); }}
+                            >
+                              {plan.sourceSessionId.slice(0, 12)}...
+                            </a>
+                          </div>
+                        )}
+                      </>
+                    )}
+                    {planLoading && !plan && (
+                      <div style={{ fontSize: '11px', color: 'var(--fg-muted)' }}>Loading plan...</div>
+                    )}
+                    {showExecuteButtons && (
+                      <div className="session-plan-popover-actions">
+                        <button
+                          className="execute-plan-btn"
+                          onClick={handleExecuteContinue}
+                          disabled={executing}
+                        >
+                          {executing ? 'Starting\u2026' : '\u25B6 Execute'}
+                          <span className="execute-plan-btn-desc">Resume with full permissions</span>
+                        </button>
+                        <button
+                          className="execute-plan-btn-secondary"
+                          onClick={handleClearContextExecute}
+                          disabled={executing}
+                        >
+                          Clear Context & Execute
+                          <span className="execute-plan-btn-desc">Fresh session with plan injected</span>
+                        </button>
+                      </div>
+                    )}
+                    {executeStarted && (
+                      <div style={{ fontSize: '11px', color: '#0d9488' }}>Execution started.</div>
+                    )}
+                    {executeError && (
+                      <div style={{ fontSize: '11px', color: 'var(--error)' }}>{executeError}</div>
+                    )}
+                  </div>
+                )}
+              </div>
+            )}
+            <button
+              className={`session-action-chip${notesOpen ? ' session-action-chip-active' : ''}`}
+              onClick={() => setNotesOpen(o => !o)}
+              title="Session notes"
+            >
+              Notes
+            </button>
+            <button
+              className={`session-action-chip${messagesOpen ? ' session-action-chip-active' : ''}`}
+              onClick={() => setMessagesOpen(o => !o)}
+              title="My messages in this session"
+            >
+              Msgs
+              {!historyLoading && (() => {
+                const count = historyMessages.filter(m => m.role === 'user' && m.text.trim()).length;
+                return count > 0 ? <span className="session-action-chip-count">{count}</span> : null;
+              })()}
+            </button>
+          </div>
+
           {/* Collapsible details */}
           {hasDetails && (
             <div className="session-detail-collapse">
@@ -475,64 +591,27 @@ export function SessionDetailPanel({ session, taskTitle, summary, phase: propPha
             </div>
           )}
 
-          <PlanPreviewSection session={session} plan={plan} loading={planLoading} refresh={planRefresh} />
-
           {summary && (
             <p className="session-detail-summary text-sm">{summary}</p>
           )}
-          {(showExecuteButtons || executeStarted) && (
-            <div className="execute-plan-section">
-              <button className="execute-plan-toggle" onClick={() => setExecuteOpen(o => !o)}>
-                <span className="execute-plan-arrow">{executeOpen ? '\u25BE' : '\u25B8'}</span>
-                <span className="execute-plan-label">
-                  {executeStarted ? 'Execution Started' : 'Execute Plan'}
-                </span>
-                {!executeStarted && !executeOpen && (
-                  <span className="execute-plan-hint">2 options</span>
-                )}
-              </button>
-              {executeOpen && !executeStarted && showExecuteButtons && (
-                <div className="execute-plan-body">
-                  <div className="execute-plan-options">
-                    <button
-                      className="execute-plan-btn"
-                      onClick={handleExecuteContinue}
-                      disabled={executing}
-                    >
-                      {executing ? 'Starting\u2026' : '\u25B6 Execute'}
-                      <span className="execute-plan-btn-desc">Resume with full permissions</span>
-                    </button>
-                    <button
-                      className="execute-plan-btn-secondary"
-                      onClick={handleClearContextExecute}
-                      disabled={executing}
-                    >
-                      Clear Context & Execute
-                      <span className="execute-plan-btn-desc">Fresh session with plan injected</span>
-                    </button>
-                  </div>
-                  {executeError && (
-                    <div className="execute-plan-error">{executeError}</div>
-                  )}
-                </div>
-              )}
-              {executeOpen && executeStarted && (
-                <div className="execute-plan-body">
-                  <p className="execute-plan-started">Session is now executing the plan.</p>
-                </div>
-              )}
-            </div>
-          )}
         </div>
-        <UserMessagesSummary
-          messages={historyMessages}
-          loading={historyLoading}
-          onMessageClick={handleMessageClick}
-        />
-        <SessionNotes
-          sessionId={sessionId}
-          initialNote={session.human_note}
-        />
+        {messagesOpen && (
+          <div className="session-action-panel">
+            <UserMessagesSummary
+              messages={historyMessages}
+              loading={historyLoading}
+              onMessageClick={handleMessageClick}
+            />
+          </div>
+        )}
+        {notesOpen && (
+          <div className="session-action-panel">
+            <SessionNotes
+              sessionId={sessionId}
+              initialNote={session.human_note}
+            />
+          </div>
+        )}
         {ps === 'error' && session.errorMessage && (
           <div className="session-error-banner">
             <span className="session-error-banner-icon">{ICON_WARNING}</span>
