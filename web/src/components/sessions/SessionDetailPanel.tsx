@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect, useCallback, type KeyboardEvent } from 'react';
 import { SessionChatHistory } from './SessionChatHistory';
 import { SessionNotes } from './SessionNotes';
+import { FileViewer } from '../common/FileViewer';
 import { UserMessagesSummary } from './UserMessagesSummary';
 import { PlanPreviewSection } from './PlanPreviewSection';
 import { PhasePicker } from './WorkStatusPicker';
@@ -133,6 +134,7 @@ export function SessionDetailPanel({ session, taskTitle, summary, phase: propPha
   const [executeStarted, setExecuteStarted] = useState(false);
   const [detailsOpen, setDetailsOpen] = useState(false);
   const [executeOpen, setExecuteOpen] = useState(false);
+  const [fileViewerState, setFileViewerState] = useState<{ path: string; line?: number } | null>(null);
   const panelRef = useRef<HTMLDivElement>(null);
   // Track latest sessionId so async callbacks can detect navigation
   const sessionIdRef = useRef(session?.claudeSessionId);
@@ -188,6 +190,11 @@ export function SessionDetailPanel({ session, taskTitle, summary, phase: propPha
       onSessionReplaced?.(newSessionId);
     }
   });
+
+  const handleFileOpen = useCallback((path: string, line?: number) => {
+    setFileViewerState({ path, line });
+  }, []);
+  const handleFileViewerClose = useCallback(() => setFileViewerState(null), []);
 
   // Scroll-to-message: find the message element in SessionChatHistory by data-msg-index
   const handleMessageClick = useCallback((messageIndex: number) => {
@@ -539,6 +546,7 @@ export function SessionDetailPanel({ session, taskTitle, summary, phase: propPha
           phase={taskPhase}
           initialPrompt={historyMessages.find(m => m.role === 'user')?.text}
           sessionCwd={session.cwd}
+          sessionHost={session.host}
           optimisticMessages={optimisticMessages}
           onMessagesDelivered={onMessagesDelivered}
           onBatchCompleted={onBatchCompleted}
@@ -548,7 +556,16 @@ export function SessionDetailPanel({ session, taskTitle, summary, phase: propPha
           onClearCommitted={onClearCommitted}
           onRetryFailed={onRetryFailed}
           onDismissFailed={onDismissFailed}
+          onFileOpen={handleFileOpen}
         />
+        {fileViewerState && (
+          <FileViewer
+            path={fileViewerState.path}
+            line={fileViewerState.line}
+            host={session.host}
+            onClose={handleFileViewerClose}
+          />
+        )}
       </div>
     </PlanContentContext.Provider>
   );

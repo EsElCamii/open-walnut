@@ -8,6 +8,128 @@ import { useEntityClickHandler } from '@/hooks/useEntityClickHandler';
 import { useLivePlanContent } from '@/contexts/PlanContentContext';
 import { PlanPopup } from './PlanPopup';
 
+// ── Edit Diff View ──
+
+/** Simple line diff: finds common prefix and suffix lines, marks the middle as changed. */
+function computeLineDiff(oldStr: string, newStr: string): { type: 'context' | 'removed' | 'added'; text: string }[] {
+  const oldLines = oldStr.split('\n');
+  const newLines = newStr.split('\n');
+  const result: { type: 'context' | 'removed' | 'added'; text: string }[] = [];
+
+  // Find common prefix
+  let prefixLen = 0;
+  while (prefixLen < oldLines.length && prefixLen < newLines.length
+    && oldLines[prefixLen] === newLines[prefixLen]) {
+    prefixLen++;
+  }
+
+  // Find common suffix (from the end, not overlapping with prefix)
+  let suffixLen = 0;
+  while (suffixLen < oldLines.length - prefixLen && suffixLen < newLines.length - prefixLen
+    && oldLines[oldLines.length - 1 - suffixLen] === newLines[newLines.length - 1 - suffixLen]) {
+    suffixLen++;
+  }
+
+  // Prefix lines = context
+  for (let i = 0; i < prefixLen; i++) {
+    result.push({ type: 'context', text: oldLines[i] });
+  }
+
+  // Middle: removed from old, added from new
+  const oldMiddleEnd = oldLines.length - suffixLen;
+  const newMiddleEnd = newLines.length - suffixLen;
+
+  for (let i = prefixLen; i < oldMiddleEnd; i++) {
+    result.push({ type: 'removed', text: oldLines[i] });
+  }
+  for (let i = prefixLen; i < newMiddleEnd; i++) {
+    result.push({ type: 'added', text: newLines[i] });
+  }
+
+  // Suffix lines = context
+  for (let i = oldLines.length - suffixLen; i < oldLines.length; i++) {
+    result.push({ type: 'context', text: oldLines[i] });
+  }
+
+  return result;
+}
+
+interface EditDiffViewProps {
+  filePath: string;
+  oldString: string;
+  newString: string;
+  replaceAll?: boolean;
+  status: 'calling' | 'done' | 'error';
+  result?: string;
+  onViewFile?: (path: string) => void;
+}
+
+function EditDiffView({ filePath, oldString, newString, replaceAll, status, result, onViewFile }: EditDiffViewProps) {
+  const [collapsed, setCollapsed] = useState(false);
+  const totalLines = oldString.split('\n').length + newString.split('\n').length;
+  const isLarge = totalLines > 100;
+  const [expanded, setExpanded] = useState(!isLarge);
+
+  const diffLines = useMemo(
+    () => computeLineDiff(oldString, newString),
+    [oldString, newString],
+  );
+
+  const statusIcon = status === 'error' ? '\u2717' : status === 'done' ? '\u2713' : '\u25B6';
+  const statusClass = status === 'error' ? 'chat-tool-block-error'
+    : status === 'done' ? 'chat-tool-block-done' : 'chat-tool-block-calling';
+
+  const filename = filePath.split('/').pop() ?? filePath;
+
+  return (
+    <div className={`chat-tool-block ${statusClass}`}>
+      <button className="chat-tool-block-header" onClick={() => setCollapsed(p => !p)}>
+        <span className="chat-tool-block-icon">{statusIcon}</span>
+        <span className="chat-tool-block-name">Edit</span>
+        <span className="edit-diff-filename" title={filePath}>{filename}</span>
+        {replaceAll && <span className="edit-diff-replace-all">(replace all)</span>}
+        {status === 'calling' && <span className="chat-tool-block-calling-dot" />}
+        <span className="chat-tool-block-arrow">{collapsed ? '\u25B6' : '\u25BC'}</span>
+        {onViewFile && (
+          <span
+            className="edit-diff-view-file"
+            role="button"
+            tabIndex={0}
+            title="View full file"
+            onClick={(e) => { e.stopPropagation(); onViewFile(filePath); }}
+            onKeyDown={(e) => { if (e.key === 'Enter') { e.stopPropagation(); onViewFile(filePath); } }}
+          >
+            &#x1F4C4;
+          </span>
+        )}
+      </button>
+      {!collapsed && (
+        <div className="edit-diff-body">
+          {!expanded ? (
+            <button className="edit-diff-expand" onClick={() => setExpanded(true)}>
+              Show diff ({totalLines} lines)
+            </button>
+          ) : (
+            <pre className="edit-diff-pre">
+              {diffLines.map((dl, i) => (
+                <div key={i} className={`edit-diff-line edit-diff-line--${dl.type}`}>
+                  <span className="edit-diff-prefix">
+                    {dl.type === 'removed' ? '-' : dl.type === 'added' ? '+' : ' '}
+                  </span>
+                  <span className="edit-diff-text">{dl.text || '\u00A0'}</span>
+                </div>
+              ))}
+            </pre>
+          )}
+          {status === 'error' && result && (
+            <div className="edit-diff-error">{result}</div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 /** Hide the image's parent container on load error (broken remote images, etc.).
  *  Hides .tool-result-image-item if present (caption + img), else hides parent element. */
 const hideOnImgError = (e: React.SyntheticEvent<HTMLImageElement>) => {
@@ -21,6 +143,7 @@ interface SessionMessageProps {
   sessionCwd?: string;
   onTaskClick?: (taskId: string) => void;
   onSessionClick?: (sessionId: string) => void;
+  onFileOpen?: (path: string, line?: number) => void;
 }
 
 function formatTime(ts: string): string {
@@ -123,14 +246,17 @@ interface GenericToolCallProps {
   sessionCwd?: string;
   onTaskClick?: (taskId: string) => void;
   onSessionClick?: (sessionId: string) => void;
+  onFileOpen?: (path: string) => void;
 }
 
-export function GenericToolCall({ tool, status = 'done', result: resultProp, sessionCwd, onTaskClick, onSessionClick }: GenericToolCallProps) {
+export function GenericToolCall({ tool, status = 'done', result: resultProp, sessionCwd, onTaskClick, onSessionClick, onFileOpen }: GenericToolCallProps) {
   const [open, setOpen] = useState(false);
   // Merge result from explicit prop (streaming path) and tool.result (persisted history path)
   const result = resultProp ?? (tool as { result?: string }).result;
   const safeInput = (tool.input && typeof tool.input === 'object') ? tool.input : {};
+  const description = typeof safeInput.description === 'string' ? safeInput.description : null;
   const inputSummary = Object.entries(safeInput)
+    .filter(([k]) => k !== 'description')
     .map(([k, v]) => {
       const val = typeof v === 'string' ? v : JSON.stringify(v);
       return `${k}: ${val.length > 60 ? val.slice(0, 60) + '...' : val}`;
@@ -198,19 +324,38 @@ export function GenericToolCall({ tool, status = 'done', result: resultProp, ses
     return resolved ? `/api/local-image?path=${encodeURIComponent(resolved)}` : null;
   }, [safeInput, open, resultImages, sessionCwd]);
 
-  // Unified click handler for entity ref links (.task-link, .session-link) inside tool blocks
-  const handlePreClick = useEntityClickHandler(onTaskClick, onSessionClick);
+  // Unified click handler for entity ref links (.task-link, .session-link, .file-link) inside tool blocks
+  const handlePreClick = useEntityClickHandler(onTaskClick, onSessionClick, onFileOpen ? (p) => onFileOpen(p) : undefined);
+
+  // [View File] button for tools that operate on files
+  const toolFilePath = typeof safeInput.file_path === 'string' ? safeInput.file_path : null;
+  const showViewFile = onFileOpen && toolFilePath && ['Edit', 'Read', 'Write', 'NotebookEdit'].includes(tool.name);
 
   return (
     <div className={`chat-tool-block ${statusClass}`}>
       <button className="chat-tool-block-header" onClick={() => setOpen((p) => !p)}>
         <span className="chat-tool-block-icon">{statusIcon}</span>
         <span className="chat-tool-block-name">{tool.name}</span>
+        {description && (
+          <span className="chat-tool-block-desc">· {description}</span>
+        )}
         {!open && inputSummary && (
           <span className="chat-tool-block-summary">{inputSummary}</span>
         )}
         {status === 'calling' && <span className="chat-tool-block-calling-dot" />}
         <span className="chat-tool-block-arrow">{open ? '\u25BC' : '\u25B6'}</span>
+        {showViewFile && (
+          <span
+            className="edit-diff-view-file"
+            role="button"
+            tabIndex={0}
+            title="View full file"
+            onClick={(e) => { e.stopPropagation(); onFileOpen!(toolFilePath!); }}
+            onKeyDown={(e) => { if (e.key === 'Enter') { e.stopPropagation(); onFileOpen!(toolFilePath!); } }}
+          >
+            &#x1F4C4;
+          </span>
+        )}
       </button>
       {open && (
         <div className="chat-tool-block-body">
@@ -267,13 +412,14 @@ interface SessionToolCallProps {
   sessionCwd?: string;
   onTaskClick?: (taskId: string) => void;
   onSessionClick?: (sessionId: string) => void;
+  onFileOpen?: (path: string, line?: number) => void;
 }
 
 /** Tool names that should render as collapsible groups with child messages. */
 const GROUPABLE_HISTORY_TOOLS = new Set(['Task', 'Agent']);
 
 /** Collapsible group for a Task/Agent tool call with child messages */
-function TaskGroup({ tool, sessionCwd, onTaskClick, onSessionClick }: SessionToolCallProps) {
+function TaskGroup({ tool, sessionCwd, onTaskClick, onSessionClick, onFileOpen }: SessionToolCallProps) {
   const [open, setOpen] = useState(false);
   const description = typeof tool.input?.description === 'string'
     ? tool.input.description
@@ -303,7 +449,7 @@ function TaskGroup({ tool, sessionCwd, onTaskClick, onSessionClick }: SessionToo
         <div className="task-group-body">
           {tool.childMessages && tool.childMessages.length > 0 ? (
             tool.childMessages.map((child, ci) => (
-              <SessionMessage key={ci} message={child} sessionCwd={sessionCwd} onTaskClick={onTaskClick} onSessionClick={onSessionClick} />
+              <SessionMessage key={ci} message={child} sessionCwd={sessionCwd} onTaskClick={onTaskClick} onSessionClick={onSessionClick} onFileOpen={onFileOpen} />
             ))
           ) : tool.result ? (
             <div className="task-group-result">
@@ -321,10 +467,10 @@ function TaskGroup({ tool, sessionCwd, onTaskClick, onSessionClick }: SessionToo
   );
 }
 
-function SessionToolCall({ tool, sessionCwd, onTaskClick, onSessionClick }: SessionToolCallProps) {
+function SessionToolCall({ tool, sessionCwd, onTaskClick, onSessionClick, onFileOpen }: SessionToolCallProps) {
   // Task/Agent tool with childMessages or agentId → render as collapsible group
   if (GROUPABLE_HISTORY_TOOLS.has(tool.name) && (tool.childMessages || tool.agentId || tool.result)) {
-    return <TaskGroup tool={tool} sessionCwd={sessionCwd} onTaskClick={onTaskClick} onSessionClick={onSessionClick} />;
+    return <TaskGroup tool={tool} sessionCwd={sessionCwd} onTaskClick={onTaskClick} onSessionClick={onSessionClick} onFileOpen={onFileOpen} />;
   }
 
   // ExitPlanMode with plan content → render PlanCard
@@ -338,10 +484,28 @@ function SessionToolCall({ tool, sessionCwd, onTaskClick, onSessionClick }: Sess
     return <CollapsedPlanWrite filePath={tool.input.file_path as string} />;
   }
 
-  return <GenericToolCall tool={tool} sessionCwd={sessionCwd} onTaskClick={onTaskClick} onSessionClick={onSessionClick} />;
+  // Edit tool with old_string/new_string → render as diff view
+  if (tool.name === 'Edit'
+    && typeof tool.input?.file_path === 'string'
+    && typeof tool.input?.old_string === 'string'
+    && typeof tool.input?.new_string === 'string') {
+    return (
+      <EditDiffView
+        filePath={tool.input.file_path}
+        oldString={tool.input.old_string}
+        newString={tool.input.new_string}
+        replaceAll={tool.input.replace_all === true}
+        status={(tool as { status?: string }).status === 'error' ? 'error' : 'done'}
+        result={(tool as { result?: string }).result}
+        onViewFile={onFileOpen ? (p) => onFileOpen(p) : undefined}
+      />
+    );
+  }
+
+  return <GenericToolCall tool={tool} sessionCwd={sessionCwd} onTaskClick={onTaskClick} onSessionClick={onSessionClick} onFileOpen={onFileOpen ? (p) => onFileOpen(p) : undefined} />;
 }
 
-export const SessionMessage = memo(function SessionMessage({ message, sessionCwd, onTaskClick, onSessionClick }: SessionMessageProps) {
+export const SessionMessage = memo(function SessionMessage({ message, sessionCwd, onTaskClick, onSessionClick, onFileOpen }: SessionMessageProps) {
   const { role, text, timestamp, tools, thinking, model, usage } = message;
   const time = formatTime(timestamp);
   const isUser = role === 'user';
@@ -352,8 +516,8 @@ export const SessionMessage = memo(function SessionMessage({ message, sessionCwd
     return findImagePaths(text);
   }, [text, isUser]);
 
-  // Unified click handler for entity ref links in message content
-  const handleContentClick = useEntityClickHandler(onTaskClick, onSessionClick);
+  // Unified click handler for entity ref links + file links in message content
+  const handleContentClick = useEntityClickHandler(onTaskClick, onSessionClick, onFileOpen);
 
   return (
     <div className={`session-msg ${isUser ? 'session-msg-user' : 'session-msg-assistant'}`}>
@@ -365,7 +529,7 @@ export const SessionMessage = memo(function SessionMessage({ message, sessionCwd
       <div className="session-msg-content" onClick={handleContentClick}>
         {thinking && <SessionThinking text={thinking} />}
         {tools && tools.length > 0 && tools.map((t, i) => (
-          <SessionToolCall key={i} tool={t} sessionCwd={sessionCwd} onTaskClick={onTaskClick} onSessionClick={onSessionClick} />
+          <SessionToolCall key={i} tool={t} sessionCwd={sessionCwd} onTaskClick={onTaskClick} onSessionClick={onSessionClick} onFileOpen={onFileOpen} />
         ))}
         {text && (
           <div

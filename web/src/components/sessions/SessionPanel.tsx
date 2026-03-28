@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback, useRef, Component, type ReactNode, ty
 import { useNavigate } from 'react-router-dom';
 import { SessionChatHistory } from './SessionChatHistory';
 import { SessionNotes } from './SessionNotes';
+import { FileViewer } from '../common/FileViewer';
 import { ICON_ROBOT, ICON_EXPAND, ICON_COLLAPSE, ICON_PIN, ICON_PIN_FILLED, ICON_CLOSE } from '../common/Icons';
 import { UserMessagesSummary } from './UserMessagesSummary';
 import { PlanPreviewSection } from './PlanPreviewSection';
@@ -157,6 +158,13 @@ export const SessionPanel = memo(function SessionPanel({ sessionId, onClose, onT
       contextPercent = Math.round(totalInput / ctxSize * 100);
     }
   }
+
+  // FileViewer state
+  const [fileViewerState, setFileViewerState] = useState<{ path: string; line?: number } | null>(null);
+  const handleFileOpen = useCallback((path: string, line?: number) => {
+    setFileViewerState({ path, line });
+  }, []);
+  const handleFileViewerClose = useCallback(() => setFileViewerState(null), []);
 
   // Scroll-to-message handler for UserMessagesSummary
   const handleMessageClick = useCallback((messageIndex: number) => {
@@ -597,6 +605,7 @@ export const SessionPanel = memo(function SessionPanel({ sessionId, onClose, onT
             phase={taskPhase}
             initialPrompt={historyMessages.find(m => m.role === 'user')?.text}
             sessionCwd={session?.cwd}
+            sessionHost={session?.host}
             optimisticMessages={optimisticMsgs}
             onMessagesDelivered={handleMessagesDelivered}
             onBatchCompleted={handleBatchCompleted}
@@ -608,6 +617,7 @@ export const SessionPanel = memo(function SessionPanel({ sessionId, onClose, onT
             onDismissFailed={dismissFailed}
             onTaskClick={onTaskClick}
             onSessionClick={onSessionClick}
+            onFileOpen={handleFileOpen}
           />
         </div>
 
@@ -636,6 +646,14 @@ export const SessionPanel = memo(function SessionPanel({ sessionId, onClose, onT
             />
           )}
         </div>
+        {fileViewerState && (
+          <FileViewer
+            path={fileViewerState.path}
+            line={fileViewerState.line}
+            host={session?.host}
+            onClose={handleFileViewerClose}
+          />
+        )}
       </div>
     </SessionPanelErrorBoundary>
   );

@@ -44,8 +44,8 @@ export function entityRefsToMarkdownLinks(text: string): string {
   return result;
 }
 
-/** DOMPurify attributes preserved for entity ref and image rendering */
-const SANITIZE_ATTRS = ['data-task-id', 'data-session-id', 'data-lightbox-src', 'loading'];
+/** DOMPurify attributes preserved for entity ref, image, and file link rendering */
+const SANITIZE_ATTRS = ['data-task-id', 'data-session-id', 'data-lightbox-src', 'data-file-path', 'data-file-line', 'loading'];
 
 // ── JSON ID pill injection for tool call INPUT/RESULT areas ──
 
@@ -81,6 +81,15 @@ export function injectJsonIdLinks(escapedText: string): string {
     return `${prefix}<a class="task-link" data-task-id="${id}" href="/tasks/${id}">${id}</a>${suffix}`;
   });
 
+  // file_path / path values — make clickable
+  // Matches: "file_path": "/abs/path/to/file.ts" or "path": "/abs/path"
+  result = result.replace(
+    /(&quot;(?:file_path|path)&quot;:\s*&quot;)(\/[^&]+?)(&quot;)/g,
+    (_m, prefix, filePath, suffix) => {
+      return `${prefix}<a class="file-link" data-file-path="${filePath}" href="#">${filePath}</a>${suffix}`;
+    },
+  );
+
   return result;
 }
 
@@ -105,14 +114,127 @@ export function renderToolResultWithRefs(text: string): string {
   }
 }
 
+// ── File path detection & linkification ──
+
+/** Image extensions to exclude from file-path linkification */
+const IMAGE_EXTENSIONS = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'ico', 'bmp', 'tiff']);
+
+/** Common code/text extensions that indicate a real file path */
+const CODE_EXTENSIONS = new Set([
+  'ts', 'tsx', 'js', 'jsx', 'mjs', 'cjs', 'json', 'yaml', 'yml', 'toml',
+  'py', 'rb', 'go', 'rs', 'java', 'kt', 'swift', 'c', 'cpp', 'h', 'hpp',
+  'css', 'scss', 'less', 'html', 'xml', 'sql', 'graphql', 'proto',
+  'sh', 'bash', 'zsh', 'fish', 'ps1', 'bat', 'cmd',
+  'md', 'mdx', 'txt', 'log', 'csv', 'tsv', 'env', 'conf', 'cfg', 'ini',
+  'lock', 'gitignore', 'dockerignore', 'editorconfig',
+  'dockerfile', 'makefile',
+]);
+
 /**
- * Render markdown text with entity ref support.
+ * Convert file paths in text to clickable <a class="file-link"> elements.
+ * Runs as a preprocessing step before marked.parse().
+ *
+ * Two-pass approach:
+ * 1. Absolute paths: /dir/dir/file.ext (with optional :line suffix)
+ * 2. Relative paths with extension: dir/file.ext (needs sessionCwd to resolve)
+ *
+ * Exclusions: URLs, image paths, code fences, already-linked text.
+ */
+export function filePathsToHtml(text: string, sessionCwd?: string): string {
+  // Track code fence regions to skip
+  const fenceRanges: [number, number][] = [];
+  const fenceRe = /```[\s\S]*?```|`[^`\n]+`/g;
+  let fm: RegExpExecArray | null;
+  while ((fm = fenceRe.exec(text)) !== null) {
+    fenceRanges.push([fm.index, fm.index + fm[0].length]);
+  }
+
+  function isInFence(idx: number): boolean {
+    return fenceRanges.some(([start, end]) => idx >= start && idx < end);
+  }
+
+  // Also skip if preceded by :// (URL), or if inside <a> tag
+  function shouldSkip(matchIdx: number, matchStr: string): boolean {
+    if (isInFence(matchIdx)) return true;
+    // Check for URL context (://path)
+    if (matchIdx >= 3 && text.slice(matchIdx - 3, matchIdx).includes('://')) return true;
+    // Check for markdown image ![...](path)
+    if (matchIdx >= 2 && text[matchIdx - 1] === '(' && text.slice(0, matchIdx).lastIndexOf('![') > text.slice(0, matchIdx).lastIndexOf(']')) return true;
+    return false;
+  }
+
+  let result = text;
+  const replacements: { start: number; end: number; replacement: string }[] = [];
+
+  // Pass 1: Absolute paths — /dir/file.ext or /dir/file.ext:42
+  const absRe = /(\/(?:[\w@.+-]+\/)+[\w@.+-]+\.[\w]+)(?::(\d+))?/g;
+  let m: RegExpExecArray | null;
+  while ((m = absRe.exec(text)) !== null) {
+    const fullMatch = m[0];
+    const filePath = m[1];
+    const lineNum = m[2];
+
+    if (shouldSkip(m.index, fullMatch)) continue;
+
+    const ext = filePath.split('.').pop()?.toLowerCase() ?? '';
+    if (IMAGE_EXTENSIONS.has(ext)) continue;
+
+    const lineAttr = lineNum ? ` data-file-line="${lineNum}"` : '';
+    const display = lineNum ? `${filePath}:${lineNum}` : filePath;
+    const replacement = `<a class="file-link" data-file-path="${filePath}"${lineAttr} href="#">${display}</a>`;
+    replacements.push({ start: m.index, end: m.index + fullMatch.length, replacement });
+  }
+
+  // Pass 2: Relative paths with extension — dir/file.ext or ./file.ext:42
+  // Only linkify if sessionCwd is available (needed to resolve absolute path)
+  if (sessionCwd) {
+    const relRe = /(?:^|[\s"'`(])((\.\/|[\w@][\w@.+-]*\/)+[\w@.+-]+\.(\w+))(?::(\d+))?/gm;
+    while ((m = relRe.exec(text)) !== null) {
+      // m[1] = the path, m[3] = extension, m[4] = line number
+      const pathPart = m[1];
+      const ext = m[3]?.toLowerCase();
+      const lineNum = m[4];
+
+      if (!ext || IMAGE_EXTENSIONS.has(ext)) continue;
+      if (!CODE_EXTENSIONS.has(ext)) continue;
+
+      // Calculate the actual match position (m[1] may start after whitespace)
+      const pathStart = m.index + m[0].indexOf(pathPart);
+      const fullEnd = lineNum ? pathStart + pathPart.length + 1 + lineNum.length : pathStart + pathPart.length;
+
+      if (shouldSkip(pathStart, pathPart)) continue;
+
+      // Skip if this overlaps with an already-found absolute path
+      const overlaps = replacements.some(r => pathStart < r.end && fullEnd > r.start);
+      if (overlaps) continue;
+
+      const absPath = sessionCwd.replace(/\/$/, '') + '/' + pathPart.replace(/^\.\//, '');
+      const lineAttr = lineNum ? ` data-file-line="${lineNum}"` : '';
+      const display = lineNum ? `${pathPart}:${lineNum}` : pathPart;
+      const replacement = `<a class="file-link" data-file-path="${absPath}"${lineAttr} href="#">${display}</a>`;
+      replacements.push({ start: pathStart, end: fullEnd, replacement });
+    }
+  }
+
+  // Apply replacements in reverse order to preserve indices
+  replacements.sort((a, b) => b.start - a.start);
+  for (const r of replacements) {
+    result = result.slice(0, r.start) + r.replacement + result.slice(r.end);
+  }
+
+  return result;
+}
+
+/**
+ * Render markdown text with entity ref support and file path linkification.
  * Preprocesses <task-ref> and <session-ref> XML tags into clickable HTML anchors,
+ * converts file paths to clickable links,
  * then runs marked.parse() + DOMPurify.sanitize().
  */
-export function renderMarkdownWithRefs(text: string): string {
+export function renderMarkdownWithRefs(text: string, sessionCwd?: string): string {
   try {
-    const preprocessed = entityRefsToHtml(text);
+    let preprocessed = entityRefsToHtml(text);
+    preprocessed = filePathsToHtml(preprocessed, sessionCwd);
     const raw = marked.parse(preprocessed);
     return typeof raw === 'string' ? DOMPurify.sanitize(raw, { ADD_ATTR: SANITIZE_ATTRS }) : '';
   } catch {
