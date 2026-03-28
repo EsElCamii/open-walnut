@@ -1312,7 +1312,8 @@ function SortablePinnedCard({ task, isFocused, onClick, onUnpinTask }: SortableP
   );
 }
 
-const RECENT_CAP = 10;
+const RECENT_VISIBLE_MAX = 3;
+const PINNED_VISIBLE_MAX = 7;
 
 // ── RecentCard — recent-activity task card (no drag, has pin button) ──
 
@@ -1379,6 +1380,8 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
 
   const integrations = useIntegrations();
   const [newTitle, setNewTitle] = useState('');
+  const [pinnedCollapsed, setPinnedCollapsed] = useState(false);
+  const [recentCollapsed, setRecentCollapsed] = useState(false);
   const [collapsedCategories, setCollapsedCategories] = useState<Set<string>>(() => readSetFromStorage(LS_COLLAPSED_CATS_KEY));
   const [collapsedProjects, setCollapsedProjects] = useState<Set<string>>(() => readSetFromStorage(LS_COLLAPSED_PROJS_KEY));
   // Tracks which parent tasks the user has EXPANDED (default = all collapsed)
@@ -1601,8 +1604,7 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
     return tasks
       .filter(t => t.last_session_update && !pinSet.has(t.id)
                    && t.status !== 'done' && t.phase !== 'COMPLETE')
-      .sort((a, b) => (b.last_session_update ?? '').localeCompare(a.last_session_update ?? ''))
-      .slice(0, RECENT_CAP);
+      .sort((a, b) => (b.last_session_update ?? '').localeCompare(a.last_session_update ?? ''));
   }, [tasks, pinnedTaskIds]);
 
   const sensors = useSensors(
@@ -2545,51 +2547,57 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
         />
       </div>
 
-      {/* Pinned tasks section — drag-to-reorder */}
+      {/* Pinned tasks section — collapsible, drag-to-reorder, scrollable */}
       {pinnedTasks.length > 0 && (
         <div className="todo-pinned-section">
-          <div className="todo-pinned-header">
+          <div className="todo-pinned-header" onClick={() => setPinnedCollapsed(c => !c)} role="button" tabIndex={0} onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') setPinnedCollapsed(c => !c); }} style={{ cursor: 'pointer' }}>
+            <span className={`todo-pinned-chevron${pinnedCollapsed ? '' : ' todo-pinned-chevron-open'}`}>{'\u25B8'}</span>
             <span className="todo-pinned-icon">{'\uD83D\uDCCC'}</span>
             <span className="todo-pinned-label">Pinned</span>
             <span className="todo-pinned-count">{pinnedTasks.length}</span>
           </div>
-          <DndContext sensors={pinnedSensors} collisionDetection={closestCenter} onDragEnd={handlePinnedDragEnd}>
-            <SortableContext items={pinnedTaskIds_arr} strategy={verticalListSortingStrategy}>
-              <div className="todo-pinned-list">
-                {pinnedTasks.map((task) => (
-                  <SortablePinnedCard
-                    key={task.id}
-                    task={task}
-                    isFocused={focusedTaskId === task.id}
-                    onClick={handlePinnedCardClick}
-                    onUnpinTask={onUnpinTask}
-                  />
-                ))}
-              </div>
-            </SortableContext>
-          </DndContext>
+          {!pinnedCollapsed && (
+            <DndContext sensors={pinnedSensors} collisionDetection={closestCenter} onDragEnd={handlePinnedDragEnd}>
+              <SortableContext items={pinnedTaskIds_arr} strategy={verticalListSortingStrategy}>
+                <div className="todo-pinned-list todo-pinned-list-scroll" style={{ maxHeight: PINNED_VISIBLE_MAX * 30 }}>
+                  {pinnedTasks.map((task) => (
+                    <SortablePinnedCard
+                      key={task.id}
+                      task={task}
+                      isFocused={focusedTaskId === task.id}
+                      onClick={handlePinnedCardClick}
+                      onUnpinTask={onUnpinTask}
+                    />
+                  ))}
+                </div>
+              </SortableContext>
+            </DndContext>
+          )}
         </div>
       )}
 
-      {/* Recent tasks section — sorted by last session activity */}
+      {/* Recent tasks section — collapsible, scrollable */}
       {recentTasks.length > 0 && (
         <div className="todo-pinned-section">
-          <div className="todo-pinned-header">
+          <div className="todo-pinned-header" onClick={() => setRecentCollapsed(c => !c)} role="button" tabIndex={0} onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') setRecentCollapsed(c => !c); }} style={{ cursor: 'pointer' }}>
+            <span className={`todo-pinned-chevron${recentCollapsed ? '' : ' todo-pinned-chevron-open'}`}>{'\u25B8'}</span>
             <span className="todo-pinned-icon">{'\uD83D\uDD50'}</span>
             <span className="todo-pinned-label">Recent</span>
             <span className="todo-pinned-count">{recentTasks.length}</span>
           </div>
-          <div className="todo-pinned-list">
-            {recentTasks.map((task) => (
-              <RecentCard
-                key={task.id}
-                task={task}
-                isFocused={focusedTaskId === task.id}
-                onClick={handlePinnedCardClick}
-                onPinTask={onPinTask}
-              />
-            ))}
-          </div>
+          {!recentCollapsed && (
+            <div className="todo-pinned-list todo-pinned-list-scroll" style={{ maxHeight: RECENT_VISIBLE_MAX * 30 }}>
+              {recentTasks.map((task) => (
+                <RecentCard
+                  key={task.id}
+                  task={task}
+                  isFocused={focusedTaskId === task.id}
+                  onClick={handlePinnedCardClick}
+                  onPinTask={onPinTask}
+                />
+              ))}
+            </div>
+          )}
         </div>
       )}
 
