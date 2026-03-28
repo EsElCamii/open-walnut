@@ -7,21 +7,167 @@ interface RepoFormProps {
   onCancel: () => void;
 }
 
-const TEMPLATE = `name:
-description:
-tech_stack: []
-hosts:
-  local:
-    path:
-architecture_notes: |
+interface HostEntry {
+  label: string;
+  path: string;
+  ssh_host: string;
+}
 
-common_commands: |
+interface FormData {
+  name: string;
+  description: string;
+  tech_stack: string;
+  hosts: HostEntry[];
+  architecture_notes: string;
+  common_commands: string;
+}
 
-`;
+const EMPTY_FORM: FormData = {
+  name: '',
+  description: '',
+  tech_stack: '',
+  hosts: [{ label: 'local', path: '', ssh_host: '' }],
+  architecture_notes: '',
+  common_commands: '',
+};
+
+/** Generate YAML from structured form data. */
+function formToYaml(data: FormData): string {
+  const lines: string[] = [];
+  lines.push(`name: ${data.name}`);
+  lines.push(`description: ${data.description}`);
+
+  if (data.tech_stack.trim()) {
+    const techs = data.tech_stack.split(',').map(t => t.trim()).filter(Boolean);
+    lines.push(`tech_stack: [${techs.join(', ')}]`);
+  }
+
+  lines.push('hosts:');
+  for (const host of data.hosts) {
+    if (!host.label.trim()) continue;
+    lines.push(`  ${host.label.trim()}:`);
+    lines.push(`    path: ${host.path.trim()}`);
+    if (host.ssh_host.trim()) {
+      lines.push(`    ssh_host: ${host.ssh_host.trim()}`);
+    }
+  }
+
+  if (data.architecture_notes.trim()) {
+    lines.push('architecture_notes: |');
+    for (const line of data.architecture_notes.trim().split('\n')) {
+      lines.push(`  ${line}`);
+    }
+  }
+
+  if (data.common_commands.trim()) {
+    lines.push('common_commands: |');
+    for (const line of data.common_commands.trim().split('\n')) {
+      lines.push(`  ${line}`);
+    }
+  }
+
+  return lines.join('\n') + '\n';
+}
+
+/** Parse YAML content back into structured form data. */
+function yamlToForm(content: string): FormData {
+  const data: FormData = { ...EMPTY_FORM, hosts: [] };
+  const lines = content.split('\n');
+
+  let currentSection: string | null = null;
+  let currentHost: string | null = null;
+  let multilineKey: string | null = null;
+  const multilineLines: string[] = [];
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const trimmed = line.trimEnd();
+
+    // Flush multiline when we hit a non-indented line
+    if (multilineKey && trimmed && !line.startsWith(' ') && !line.startsWith('\t')) {
+      (data as Record<string, string>)[multilineKey] = multilineLines.join('\n');
+      multilineKey = null;
+      multilineLines.length = 0;
+    }
+
+    if (multilineKey) {
+      // Strip 2-space indent
+      multilineLines.push(line.startsWith('  ') ? line.slice(2) : line);
+      continue;
+    }
+
+    if (line.startsWith('name:') && !line.startsWith('  ')) {
+      data.name = line.slice('name:'.length).trim().replace(/^["']|["']$/g, '');
+      currentSection = null;
+      currentHost = null;
+    } else if (line.startsWith('description:') && !line.startsWith('  ')) {
+      const val = line.slice('description:'.length).trim().replace(/^["']|["']$/g, '');
+      if (val === '|' || val === '>') {
+        multilineKey = 'description';
+      } else {
+        data.description = val;
+      }
+      currentSection = null;
+      currentHost = null;
+    } else if (line.startsWith('tech_stack:') && !line.startsWith('  ')) {
+      const val = line.slice('tech_stack:'.length).trim();
+      data.tech_stack = val.startsWith('[') ? val.replace(/[\[\]]/g, '').trim() : val;
+      currentSection = null;
+      currentHost = null;
+    } else if (line.startsWith('hosts:') && !line.startsWith('  ')) {
+      currentSection = 'hosts';
+      currentHost = null;
+    } else if (line.startsWith('architecture_notes:') && !line.startsWith('  ')) {
+      const val = line.slice('architecture_notes:'.length).trim();
+      if (val === '|' || val === '>') {
+        multilineKey = 'architecture_notes';
+      } else {
+        data.architecture_notes = val;
+      }
+      currentSection = null;
+      currentHost = null;
+    } else if (line.startsWith('common_commands:') && !line.startsWith('  ')) {
+      const val = line.slice('common_commands:'.length).trim();
+      if (val === '|' || val === '>') {
+        multilineKey = 'common_commands';
+      } else {
+        data.common_commands = val;
+      }
+      currentSection = null;
+      currentHost = null;
+    } else if (currentSection === 'hosts') {
+      const hostMatch = trimmed.match(/^  (\S+):$/);
+      if (hostMatch) {
+        currentHost = hostMatch[1];
+        data.hosts.push({ label: currentHost, path: '', ssh_host: '' });
+      } else if (currentHost && data.hosts.length > 0) {
+        const last = data.hosts[data.hosts.length - 1];
+        const pathMatch = trimmed.match(/^\s+path:\s*(.+)/);
+        if (pathMatch) last.path = pathMatch[1].trim().replace(/^["']|["']$/g, '');
+        const sshMatch = trimmed.match(/^\s+ssh_host:\s*(.+)/);
+        if (sshMatch) last.ssh_host = sshMatch[1].trim().replace(/^["']|["']$/g, '');
+      } else if (!line.startsWith(' ') && trimmed) {
+        currentSection = null;
+      }
+    }
+  }
+
+  // Flush trailing multiline
+  if (multilineKey) {
+    (data as Record<string, string>)[multilineKey] = multilineLines.join('\n');
+  }
+
+  // Ensure at least one host entry
+  if (data.hosts.length === 0) {
+    data.hosts = [{ label: 'local', path: '', ssh_host: '' }];
+  }
+
+  return data;
+}
 
 export function RepoForm({ editSlug, onSave, onCancel }: RepoFormProps) {
   const [slug, setSlug] = useState(editSlug || '');
-  const [content, setContent] = useState(TEMPLATE);
+  const [form, setForm] = useState<FormData>({ ...EMPTY_FORM, hosts: [{ label: 'local', path: '', ssh_host: '' }] });
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(!!editSlug);
@@ -31,7 +177,7 @@ export function RepoForm({ editSlug, onSave, onCancel }: RepoFormProps) {
     let cancelled = false;
     fetchRepository(editSlug).then((detail) => {
       if (!cancelled) {
-        setContent(detail.content);
+        setForm(yamlToForm(detail.content));
         setSlug(editSlug);
         setLoading(false);
       }
@@ -44,27 +190,71 @@ export function RepoForm({ editSlug, onSave, onCancel }: RepoFormProps) {
     return () => { cancelled = true; };
   }, [editSlug]);
 
+  // Auto-derive slug from name for new repos
+  const handleNameChange = useCallback((name: string) => {
+    setForm(prev => ({ ...prev, name }));
+    if (!editSlug) {
+      setSlug(name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, ''));
+    }
+  }, [editSlug]);
+
+  const updateField = useCallback((key: keyof FormData, value: string) => {
+    setForm(prev => ({ ...prev, [key]: value }));
+  }, []);
+
+  const updateHost = useCallback((index: number, field: keyof HostEntry, value: string) => {
+    setForm(prev => {
+      const hosts = [...prev.hosts];
+      hosts[index] = { ...hosts[index], [field]: value };
+      return { ...prev, hosts };
+    });
+  }, []);
+
+  const addHost = useCallback(() => {
+    setForm(prev => ({
+      ...prev,
+      hosts: [...prev.hosts, { label: '', path: '', ssh_host: '' }],
+    }));
+  }, []);
+
+  const removeHost = useCallback((index: number) => {
+    setForm(prev => ({
+      ...prev,
+      hosts: prev.hosts.filter((_, i) => i !== index),
+    }));
+  }, []);
+
   const handleSubmit = useCallback(async (e: React.FormEvent) => {
     e.preventDefault();
     const trimmedSlug = slug.trim().toLowerCase().replace(/\s+/g, '-');
     if (!trimmedSlug) {
-      setError('Repository slug is required');
+      setError('Repository name is required');
       return;
     }
     if (!/^[a-z0-9][a-z0-9._-]*$/.test(trimmedSlug)) {
       setError('Slug must start with alphanumeric and contain only lowercase letters, numbers, hyphens, dots, or underscores.');
       return;
     }
+    if (!form.name.trim()) {
+      setError('Name is required');
+      return;
+    }
+    const validHosts = form.hosts.filter(h => h.label.trim() && h.path.trim());
+    if (validHosts.length === 0) {
+      setError('At least one host with a label and path is required');
+      return;
+    }
     try {
       setSaving(true);
       setError(null);
-      await onSave(trimmedSlug, content);
+      const yaml = formToYaml({ ...form, hosts: validHosts });
+      await onSave(trimmedSlug, yaml);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
       setSaving(false);
     }
-  }, [slug, content, onSave]);
+  }, [slug, form, onSave]);
 
   if (loading) return <p className="text-muted">Loading...</p>;
 
@@ -76,28 +266,127 @@ export function RepoForm({ editSlug, onSave, onCancel }: RepoFormProps) {
 
       {error && <div className="repo-form-error">{error}</div>}
 
-      <div className="repo-form-field">
-        <label htmlFor="repo-slug">Slug (filename)</label>
-        <input
-          id="repo-slug"
-          type="text"
-          value={slug}
-          onChange={(e) => setSlug(e.target.value)}
-          placeholder="my-project"
-          disabled={!!editSlug}
-          className="repo-form-input"
-        />
-        <span className="repo-form-hint">Lowercase, hyphenated. This becomes the filename: {slug || 'name'}.yaml</span>
+      {/* Name + auto-slug */}
+      <div className="repo-form-row">
+        <div className="repo-form-field repo-form-field-grow">
+          <label htmlFor="repo-name">Name</label>
+          <input
+            id="repo-name"
+            type="text"
+            value={form.name}
+            onChange={(e) => handleNameChange(e.target.value)}
+            placeholder="My Project"
+            className="repo-form-input"
+            autoFocus
+          />
+        </div>
+        <div className="repo-form-field">
+          <label htmlFor="repo-slug">Slug</label>
+          <input
+            id="repo-slug"
+            type="text"
+            value={slug}
+            onChange={(e) => setSlug(e.target.value)}
+            placeholder="my-project"
+            disabled={!!editSlug}
+            className="repo-form-input repo-form-input-mono"
+          />
+          <span className="repo-form-hint">{slug || 'name'}.yaml</span>
+        </div>
       </div>
 
+      {/* Description */}
       <div className="repo-form-field">
-        <label htmlFor="repo-content">YAML Content</label>
+        <label htmlFor="repo-desc">Description</label>
+        <input
+          id="repo-desc"
+          type="text"
+          value={form.description}
+          onChange={(e) => updateField('description', e.target.value)}
+          placeholder="Brief one-line description of the project"
+          className="repo-form-input"
+        />
+      </div>
+
+      {/* Tech Stack */}
+      <div className="repo-form-field">
+        <label htmlFor="repo-tech">Tech Stack</label>
+        <input
+          id="repo-tech"
+          type="text"
+          value={form.tech_stack}
+          onChange={(e) => updateField('tech_stack', e.target.value)}
+          placeholder="TypeScript, React, Node.js"
+          className="repo-form-input"
+        />
+        <span className="repo-form-hint">Comma-separated list of technologies</span>
+      </div>
+
+      {/* Hosts */}
+      <div className="repo-form-field">
+        <label>Hosts</label>
+        <div className="repo-form-hosts">
+          {form.hosts.map((host, i) => (
+            <div key={i} className="repo-form-host-row">
+              <input
+                type="text"
+                value={host.label}
+                onChange={(e) => updateHost(i, 'label', e.target.value)}
+                placeholder="local"
+                className="repo-form-input repo-form-host-label"
+                title="Host label"
+              />
+              <input
+                type="text"
+                value={host.path}
+                onChange={(e) => updateHost(i, 'path', e.target.value)}
+                placeholder="/absolute/path/to/repo"
+                className="repo-form-input repo-form-host-path"
+                title="Absolute path"
+              />
+              <input
+                type="text"
+                value={host.ssh_host}
+                onChange={(e) => updateHost(i, 'ssh_host', e.target.value)}
+                placeholder="ssh host (optional)"
+                className="repo-form-input repo-form-host-ssh"
+                title="SSH hostname (optional)"
+              />
+              {form.hosts.length > 1 && (
+                <button type="button" className="btn-icon btn-icon-danger" onClick={() => removeHost(i)} title="Remove host">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" width="14" height="14"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+                </button>
+              )}
+            </div>
+          ))}
+          <button type="button" className="btn btn-ghost btn-sm" onClick={addHost}>+ Add Host</button>
+        </div>
+      </div>
+
+      {/* Architecture Notes */}
+      <div className="repo-form-field">
+        <label htmlFor="repo-arch">Architecture Notes</label>
         <textarea
-          id="repo-content"
-          value={content}
-          onChange={(e) => setContent(e.target.value)}
+          id="repo-arch"
+          value={form.architecture_notes}
+          onChange={(e) => updateField('architecture_notes', e.target.value)}
+          placeholder={"Frontend: React SPA (web/src/)\nBackend: Node.js + Express (src/)\nDatabase: SQLite for local data"}
           className="repo-form-textarea"
-          rows={20}
+          rows={5}
+          spellCheck={false}
+        />
+      </div>
+
+      {/* Common Commands */}
+      <div className="repo-form-field">
+        <label htmlFor="repo-cmds">Common Commands</label>
+        <textarea
+          id="repo-cmds"
+          value={form.common_commands}
+          onChange={(e) => updateField('common_commands', e.target.value)}
+          placeholder={"npm run build          # Build\nnpm test               # Run tests\nnpm run dev            # Dev mode"}
+          className="repo-form-textarea"
+          rows={5}
           spellCheck={false}
         />
       </div>
