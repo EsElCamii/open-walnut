@@ -14,6 +14,7 @@ export function useNoteContent(notePath: string | null) {
   const savingRef = useRef(false);
   const dirtyRef = useRef(false);
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const savedFadeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const currentPathRef = useRef<string | null>(null);
   const editorRef = useRef<Editor | null>(null);
 
@@ -88,6 +89,9 @@ export function useNoteContent(notePath: string | null) {
         setUpdatedAt(result.updatedAt);
         setSaveStatus('saved');
         dirtyRef.current = false;
+        // Fade "Saved" indicator after 2s
+        if (savedFadeTimerRef.current) clearTimeout(savedFadeTimerRef.current);
+        savedFadeTimerRef.current = setTimeout(() => setSaveStatus('idle'), 2000);
       }
     } catch (err: any) {
       log.error('notes', 'Failed to save note', { path: pathToSave, error: err.message });
@@ -125,6 +129,10 @@ export function useNoteContent(notePath: string | null) {
       if (timerRef.current) {
         clearTimeout(timerRef.current);
         timerRef.current = null;
+      }
+      if (savedFadeTimerRef.current) {
+        clearTimeout(savedFadeTimerRef.current);
+        savedFadeTimerRef.current = null;
       }
       if (dirtyRef.current && editorRef.current) {
         // Fire-and-forget save

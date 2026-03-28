@@ -58,6 +58,17 @@ export function WikiLinkAutocomplete({
     }
   }, [editor, state.range.from, filtered]);
 
+  // Select handler — declared before keyboard effect that depends on it
+  const handleSelect = useCallback((idx: number) => {
+    if (idx < filtered.length) {
+      onSelect(filtered[idx]);
+    } else {
+      // "Create new" option
+      const name = state.query.trim();
+      if (name) onCreateNew(name);
+    }
+  }, [filtered, onSelect, onCreateNew, state.query]);
+
   // Keyboard navigation
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -97,8 +108,7 @@ export function WikiLinkAutocomplete({
     // editor is focused.
     document.addEventListener('keydown', handleKeyDown, true);
     return () => document.removeEventListener('keydown', handleKeyDown, true);
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [filtered, selectedIdx, onClose]);
+  }, [filtered, selectedIdx, onClose, handleSelect]);
 
   // Click outside
   useEffect(() => {
@@ -110,16 +120,6 @@ export function WikiLinkAutocomplete({
     document.addEventListener('mousedown', handleClick);
     return () => document.removeEventListener('mousedown', handleClick);
   }, [onClose]);
-
-  const handleSelect = useCallback((idx: number) => {
-    if (idx < filtered.length) {
-      onSelect(filtered[idx]);
-    } else {
-      // "Create new" option
-      const name = state.query.trim();
-      if (name) onCreateNew(name);
-    }
-  }, [filtered, onSelect, onCreateNew, state.query]);
 
   if (!coords) return null;
 

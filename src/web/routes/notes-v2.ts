@@ -21,8 +21,10 @@ async function ensureNotesDir(): Promise<void> {
 /** Resolve and validate a note path — prevent directory traversal */
 function resolveSafePath(relativePath: string): string | null {
   const cleaned = relativePath.replace(/\\/g, '/').replace(/^\/+/, '')
+  if (!cleaned || cleaned === '.' || cleaned === '..') return null
   const resolved = path.resolve(NOTES_DIR, cleaned)
-  if (!resolved.startsWith(NOTES_DIR + path.sep) && resolved !== NOTES_DIR) {
+  // Must be strictly inside NOTES_DIR (not NOTES_DIR itself)
+  if (!resolved.startsWith(NOTES_DIR + path.sep)) {
     return null
   }
   return resolved
@@ -288,7 +290,9 @@ notesV2Router.get('/search', async (req: Request, res: Response, next: NextFunct
     const qLower = q.toLowerCase()
     const results: Array<{ path: string; name: string; snippet: string }> = []
 
+    const MAX_RESULTS = 50
     for (const filePath of allFiles) {
+      if (results.length >= MAX_RESULTS) break
       const content = await fsp.readFile(filePath, 'utf-8')
       const idx = content.toLowerCase().indexOf(qLower)
       if (idx >= 0) {

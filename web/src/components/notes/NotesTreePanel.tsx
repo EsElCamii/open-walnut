@@ -104,15 +104,16 @@ export function NotesTreePanel({
     const parentPath = creatingIn || '';
     const fullPath = parentPath ? `${parentPath}/${name}` : name;
 
-    if (newItemType === 'folder') {
-      await onCreateFolder(fullPath);
-    } else {
-      const notePath = fullPath.endsWith('.md') ? fullPath : `${fullPath}.md`;
-      // Create with empty content
-      await saveNoteContent(notePath, '');
-      onRefresh();
-      onCreateNote(notePath);
-    }
+    try {
+      if (newItemType === 'folder') {
+        await onCreateFolder(fullPath);
+      } else {
+        const notePath = fullPath.endsWith('.md') ? fullPath : `${fullPath}.md`;
+        await saveNoteContent(notePath, '');
+        onRefresh();
+        onCreateNote(notePath);
+      }
+    } catch { /* silently fail, tree will refresh */ }
     setCreatingIn(null);
     setNewItemName('');
   }, [newItemName, creatingIn, newItemType, onCreateFolder, onCreateNote, onRefresh]);
