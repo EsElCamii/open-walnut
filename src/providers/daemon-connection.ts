@@ -888,17 +888,17 @@ export class DaemonConnection {
               sessionId: s.claudeSessionId, host: this.hostKey,
             })
           } else {
-            // Process died during disconnect — clear error so session is resumable.
+            // Process died during disconnect — mark stopped so session is resumable.
             // Don't inject a message; user's next message will trigger --resume naturally.
             await updateSessionRecord(s.claudeSessionId, {
-              process_status: 'idle',
+              process_status: 'stopped',
               errorMessage: undefined,
               last_status_change: new Date().toISOString(),
             })
             bus.emit(EventNames.SESSION_STATUS_CHANGED, {
               sessionId: s.claudeSessionId,
               taskId: s.taskId,
-              process_status: 'idle',
+              process_status: 'stopped',
             }, ['*'], { source: 'daemon-reconnect', urgency: 'urgent' })
             log.session.info('DaemonConnection: cleared error on dead session after reconnect', {
               sessionId: s.claudeSessionId, host: this.hostKey,
