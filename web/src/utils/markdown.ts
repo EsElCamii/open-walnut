@@ -167,7 +167,9 @@ export function filePathsToHtml(text: string, sessionCwd?: string): string {
   const replacements: { start: number; end: number; replacement: string }[] = [];
 
   // Pass 1: Absolute paths — /dir/file.ext or /dir/file.ext:42
-  const absRe = /(\/(?:[\w@.+-]+\/)+[\w@.+-]+\.[\w]+)(?::(\d+))?/g;
+  // Negative lookbehind: leading `/` must NOT be preceded by a word char or another `/`.
+  // This prevents matching mid-path substrings like `/providers/foo.ts` from `src/providers/foo.ts`.
+  const absRe = /(?<![\/\w])(\/(?:[\w@.+-]+\/)+[\w@.+-]+\.[\w]+)(?::(\d+))?/g;
   let m: RegExpExecArray | null;
   while ((m = absRe.exec(text)) !== null) {
     const fullMatch = m[0];
