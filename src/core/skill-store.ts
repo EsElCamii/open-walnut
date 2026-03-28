@@ -8,7 +8,7 @@ import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
 import { log } from '../logging/index.js';
-import { GLOBAL_SKILLS_DIR, CLAUDE_SKILLS_DIR, WALNUT_HOME } from '../constants.js';
+import { GLOBAL_SKILLS_DIR, CLAUDE_SKILLS_DIR, BUILTIN_SKILLS_DIR, WALNUT_HOME } from '../constants.js';
 import {
   discoverSkills,
   getSearchDirs,
@@ -60,6 +60,7 @@ function resolveSource(skillDir: string): 'workspace' | 'walnut' | 'claude' {
   const workspaceSkills = path.resolve('skills');
   if (skillDir.startsWith(workspaceSkills)) return 'workspace';
   if (skillDir.startsWith(GLOBAL_SKILLS_DIR)) return 'walnut';
+  if (skillDir.startsWith(BUILTIN_SKILLS_DIR)) return 'walnut';
   return 'claude';
 }
 

@@ -13,7 +13,7 @@ import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import yaml from 'js-yaml';
 import { log } from '../logging/index.js';
-import { GLOBAL_SKILLS_DIR, CLAUDE_SKILLS_DIR, WALNUT_HOME } from '../constants.js';
+import { GLOBAL_SKILLS_DIR, CLAUDE_SKILLS_DIR, BUILTIN_SKILLS_DIR } from '../constants.js';
 
 export interface SkillMeta {
   name: string;
@@ -45,6 +45,7 @@ function getSearchDirs(): string[] {
   return [
     path.resolve('skills'),       // workspace-local (highest priority)
     GLOBAL_SKILLS_DIR,            // ~/.open-walnut/skills/
+    BUILTIN_SKILLS_DIR,           // dist/data/skills/ (shipped with walnut)
     CLAUDE_SKILLS_DIR,            // ~/.claude/skills/
   ];
 }

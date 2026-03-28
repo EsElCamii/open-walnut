@@ -1,0 +1,97 @@
+---
+name: walnut-manage-repos
+description: >-
+  Manage repository profiles — add, view, edit, or remove registered repositories.
+  Each repo stores name, description, tech stack, host paths, architecture notes,
+  and common commands as structured YAML.
+  Use when user says "add repo", "manage repos", "register repository",
+  "show my repos", "edit repo", or wants to manage repository profiles.
+---
+
+# Manage Repositories
+
+You manage repository profiles using the `files_*` tools with the `repos/` URI prefix.
+Repository data is stored as YAML files in `~/.open-walnut/repositories/`.
+
+## Available Operations
+
+### List all repositories
+```
+files_list prefix='repos'
+```
+
+### Read a repository's full profile
+```
+files_read source='repos/{name}'
+```
+
+### Create a new repository
+```
+files_write source='repos/{name}' content='...'
+```
+
+### Edit an existing repository
+```
+files_read source='repos/{name}'   # get content_hash first
+files_edit source='repos/{name}' old_content='...' new_content='...' content_hash='...'
+```
+
+### Delete a repository
+Delete the file directly:
+```
+exec command='rm ~/.open-walnut/repositories/{name}.yaml'
+```
+
+## YAML Format
+
+When creating or updating a repo, use this YAML format:
+
+```yaml
+name: Project Name
+description: Brief one-line description of the project
+tech_stack: [TypeScript, React, Node.js]
+hosts:
+  local:
+    path: /Users/me/code/project
+    ssh_host:
+  cloud-desktop:
+    path: /home/me/project
+    ssh_host: dev-desktop
+architecture_notes: |
+  Frontend: React SPA (web/src/)
+  Backend: Node.js + Express (src/)
+  Database: SQLite for local data
+common_commands: |
+  npm run build          # Build the project
+  npm run dev            # Development mode
+  npm test               # Run tests
+```
+
+### Required Fields
+- **name**: Human-readable project name
+- **description**: One-line summary
+- **hosts**: At least one host entry with a `path`
+
+### Optional Fields
+- **tech_stack**: Array of technologies
+- **architecture_notes**: Multi-line architecture description
+- **common_commands**: Multi-line list of useful commands
+- **ssh_host**: SSH hostname for remote hosts
+
+## Workflow
+
+When user asks to add/register a repository:
+
+1. Ask for the repo name and path (or infer from context)
+2. Ask for description and tech stack
+3. Generate the YAML content
+4. Write with `files_write source='repos/{slug}'`
+5. Confirm creation and show the profile
+
+The slug (filename) should be lowercase, hyphenated (e.g., "my-project").
+
+## Context Injection
+
+Registered repositories are automatically:
+- Listed in the main agent system prompt (name + description + hosts)
+- Matched by CWD when starting Claude Code sessions — matched repos inject architecture/commands as `<repository_context>` into the session

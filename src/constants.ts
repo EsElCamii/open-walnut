@@ -135,6 +135,15 @@ export const BUILTIN_COMMANDS_DIR = (() => {
   // Fallback: original relative path (works from src/ via tsx)
   return path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'data', 'slash-commands');
 })();
+export const BUILTIN_SKILLS_DIR = (() => {
+  let dir = path.dirname(fileURLToPath(import.meta.url));
+  for (let i = 0; i < 5; i++) {
+    const candidate = path.join(dir, 'data', 'skills');
+    try { if (fs.statSync(candidate).isDirectory()) return candidate; } catch {}
+    dir = path.dirname(dir);
+  }
+  return path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'data', 'skills');
+})();
 export const FREQUENT_DIRS_FILE = path.join(WALNUT_HOME, 'frequent-directories.json');
 export const GLOBAL_NOTES_FILE = path.join(WALNUT_HOME, 'global-notes.md');
 export const NOTES_DIR = path.join(WALNUT_HOME, 'notes');
