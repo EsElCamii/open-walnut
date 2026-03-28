@@ -137,6 +137,7 @@ export const BUILTIN_COMMANDS_DIR = (() => {
 })();
 export const FREQUENT_DIRS_FILE = path.join(WALNUT_HOME, 'frequent-directories.json');
 export const GLOBAL_NOTES_FILE = path.join(WALNUT_HOME, 'global-notes.md');
+export const NOTES_DIR = path.join(WALNUT_HOME, 'notes');
 export const TIMELINE_DIR = path.join(WALNUT_HOME, 'timeline');
 export const LOG_DIR = '/tmp/open-walnut';
 export const LOG_PREFIX = 'open-walnut-';

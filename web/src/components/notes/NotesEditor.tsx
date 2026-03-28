@@ -22,6 +22,10 @@ import { log } from '@/utils/log';
 import { SlashCommandExtension } from './slash-commands/SlashCommandExtension';
 import { SlashCommandPortal } from './slash-commands/SlashCommandPortal';
 import type { SlashCommandState } from './slash-commands/types';
+import type { WikiLinkState } from './wiki-link/WikiLinkExtension';
+import { WikiLinkExtension } from './wiki-link/WikiLinkExtension';
+import { WikiLinkAutocomplete } from './wiki-link/WikiLinkAutocomplete';
+import type { NoteListItem } from '@/api/notes-v2';
 import type { Task } from '@open-walnut/core';
 
 interface NotesEditorProps {
@@ -37,6 +41,12 @@ interface NotesEditorProps {
   focusedTaskId?: string;
   /** Called when user clicks a task reference link in the editor */
   onTaskClick?: (taskId: string) => void;
+  /** Enable wiki link [[ ]] support */
+  enableWikiLinks?: boolean;
+  /** Available notes for wiki link autocomplete */
+  wikiLinkNotes?: NoteListItem[];
+  /** Called when a wiki link is clicked */
+  onWikiLinkClick?: (target: string) => void;
 }
 
 /**
@@ -251,7 +261,7 @@ function detachListItemChildren(editor: Editor): boolean {
   }
 }
 
-export function NotesEditor({ content, onDirty, placeholder, className, autoFocus, tasks, focusedTaskId, onTaskClick }: NotesEditorProps) {
+export function NotesEditor({ content, onDirty, placeholder, className, autoFocus, tasks, focusedTaskId, onTaskClick, enableWikiLinks, wikiLinkNotes, onWikiLinkClick }: NotesEditorProps) {
   const isExternalUpdate = useRef(false);
   const editorRef = useRef<Editor | null>(null);
   /**
@@ -262,6 +272,7 @@ export function NotesEditor({ content, onDirty, placeholder, className, autoFocu
    */
   const isSourceRef = useRef(false);
   const [slashState, setSlashState] = useState<SlashCommandState>({ phase: 'closed' });
+  const [wikiLinkState, setWikiLinkState] = useState<WikiLinkState>({ phase: 'closed' });
   // Ref so ProseMirror's handleClick closure always sees the latest callback
   const onTaskClickRef = useRef(onTaskClick);
   onTaskClickRef.current = onTaskClick;
@@ -318,6 +329,9 @@ export function NotesEditor({ content, onDirty, placeholder, className, autoFocu
       SlashCommandExtension.configure({
         onStateChange: setSlashState,
       }),
+      ...(enableWikiLinks ? [WikiLinkExtension.configure({
+        onStateChange: setWikiLinkState,
+      })] : []),
     ],
     content: entityRefsToMarkdownLinks(content),
     autofocus: autoFocus ? 'end' : false,
@@ -519,6 +533,43 @@ export function NotesEditor({ content, onDirty, placeholder, className, autoFocu
     setSlashState({ phase: 'closed' });
   }, []);
 
+  const handleWikiLinkClose = useCallback(() => {
+    setWikiLinkState({ phase: 'closed' });
+  }, []);
+
+  const handleWikiLinkSelect = useCallback((note: NoteListItem) => {
+    if (!editor || wikiLinkState.phase !== 'searching') return;
+    const { range } = wikiLinkState;
+    const docSize = editor.state.doc.content.size;
+    if (range.from >= docSize || range.to > docSize) { handleWikiLinkClose(); return; }
+
+    // Replace [[query with [[target]] as plain text (preserved in markdown)
+    editor
+      .chain()
+      .focus()
+      .deleteRange(range)
+      .insertContent(`[[${note.name}]] `)
+      .run();
+    handleWikiLinkClose();
+  }, [editor, wikiLinkState, handleWikiLinkClose]);
+
+  const handleWikiLinkCreate = useCallback((name: string) => {
+    if (!editor || wikiLinkState.phase !== 'searching') return;
+    const { range } = wikiLinkState;
+    const docSize = editor.state.doc.content.size;
+    if (range.from >= docSize || range.to > docSize) { handleWikiLinkClose(); return; }
+
+    editor
+      .chain()
+      .focus()
+      .deleteRange(range)
+      .insertContent(`[[${name}]] `)
+      .run();
+    handleWikiLinkClose();
+    // Navigate to the new note
+    if (onWikiLinkClick) onWikiLinkClick(`${name}.md`);
+  }, [editor, wikiLinkState, handleWikiLinkClose, onWikiLinkClick]);
+
   return (
     <>
       <EditorContent
@@ -532,6 +583,16 @@ export function NotesEditor({ content, onDirty, placeholder, className, autoFocu
           tasks={tasks}
           focusedTaskId={focusedTaskId}
           onClose={handleSlashClose}
+        />
+      )}
+      {editor && wikiLinkState.phase === 'searching' && enableWikiLinks && wikiLinkNotes && (
+        <WikiLinkAutocomplete
+          editor={editor}
+          state={wikiLinkState}
+          notes={wikiLinkNotes}
+          onClose={handleWikiLinkClose}
+          onSelect={handleWikiLinkSelect}
+          onCreateNew={handleWikiLinkCreate}
         />
       )}
     </>

@@ -15,6 +15,7 @@ import { CommandsPage } from './pages/CommandsPage';
 import { SkillsPage } from './pages/SkillsPage';
 import { TimelinePage } from './pages/TimelinePage';
 import { MemoryPage } from './pages/MemoryPage';
+import { NotesPage } from './pages/NotesPage';
 import { HooksPage } from './pages/HooksPage';
 
 /**
@@ -50,6 +51,7 @@ export function App() {
         <Route path="/search" element={<SearchPage />} />
         <Route path="/sessions" element={<SessionsPage />} />
         <Route path="/memory" element={<MemoryPage />} />
+        <Route path="/notes" element={<NotesPage />} />
         <Route path="/cron" element={<CronPage />} />
         <Route path="/usage" element={<UsagePage />} />
         <Route path="/agents" element={<AgentsPage />} />

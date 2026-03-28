@@ -34,6 +34,7 @@ import { registerBrowserLogsRpc, browserLogsRouter } from './routes/browser-logs
 import { usageRouter } from './routes/usage.js'
 import { imagesRouter } from './routes/images.js'
 import { localImageRouter } from './routes/local-image.js'
+import { fileContentRouter } from './routes/file-content.js'
 import { createCronRouter, setCronService } from './routes/cron.js'
 import { createAgentsRouter } from './routes/agents.js'
 import { createCommandsRouter } from './routes/commands.js'
@@ -59,6 +60,8 @@ import { syncReconciler } from '../core/sync-reconciler.js'
 import { integrationsRouter } from './routes/integrations.js'
 import { systemRouter } from './routes/system.js'
 import { notesRouter } from './routes/notes.js'
+import { notesV2Router } from './routes/notes-v2.js'
+import { migrateGlobalNotes } from '../core/notes-migration.js'
 import { authMiddleware } from './middleware/auth.js'
 import { pushRouter } from './routes/push.js'
 import { authRouter } from './routes/auth.js'
@@ -165,6 +168,9 @@ export async function startServer(options: ServerOptions = {}): Promise<HttpServ
 
   // Seed config defaults (e.g. available_models) on first run
   await seedConfigDefaults()
+
+  // Migrate global-notes.md → notes/global.md (one-time, idempotent)
+  await migrateGlobalNotes()
 
   // Recover orphaned user messages from a previous crash
   await chatHistory.recoverOrphanedUserMessage()
@@ -383,6 +389,7 @@ export async function startServer(options: ServerOptions = {}): Promise<HttpServ
   app.use('/api/usage', usageRouter)
   app.use('/api/images', imagesRouter)
   app.use('/api/local-image', localImageRouter)
+  app.use('/api/file-content', fileContentRouter)
   app.use('/api/agents', createAgentsRouter())
   app.use('/api/commands', createCommandsRouter())
   app.use('/api/skills', createSkillsRouter())
@@ -390,6 +397,7 @@ export async function startServer(options: ServerOptions = {}): Promise<HttpServ
   app.use('/api/heartbeat', (await import('./routes/heartbeat.js')).heartbeatRouter)
   app.use('/api/timeline', timelineRouter)
   app.use('/api/notes', notesRouter)
+  app.use('/api/notes-v2', notesV2Router)
   app.use('/api/integrations', integrationsRouter)
 
   // Plugin routes — mounted as a single router that gets populated after plugin loading.
