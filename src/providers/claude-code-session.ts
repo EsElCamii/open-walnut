@@ -244,6 +244,8 @@ export class ClaudeCodeSession {
   private _turnResultEmitted = false
   /** Byte offset in the output file where the current turn started (for resume). */
   private _turnStartOffset = 0
+  /** Cumulative cost from the last result event — used to detect stale/replayed results. */
+  private _lastResultCost: number | undefined
   private livenessTimer: ReturnType<typeof setInterval> | null = null
   private _outputFile: string | null = null
   private cliCommand: string
@@ -474,6 +476,7 @@ export class ClaudeCodeSession {
     this._exitCode = null
     this.resultEmitted = false
     this._turnResultEmitted = false
+    this._lastResultCost = undefined  // Fresh session — no previous cost to compare
     this._askUserIntercepted = false
     this.fullText = ''
     this._cwd = cwd ?? null
@@ -1576,6 +1579,32 @@ export class ClaudeCodeSession {
 
         const result = event as StreamResultEvent
 
+        // Detect stale/replayed result events for remote sessions.
+        // If the cumulative cost is identical to the previous turn's cost, the CLI
+        // didn't make an API call — the daemon replayed old JSONL events (e.g., after
+        // a FIFO write to a stuck process that echoed the old result without processing).
+        // Skip this check for the first result (no previous cost) and for error results.
+        if (this._transport?.isRemote
+          && this._lastResultCost !== undefined
+          && result.total_cost_usd !== undefined
+          && result.total_cost_usd === this._lastResultCost
+          && !result.is_error) {
+          log.session.warn('stale result detected (cost unchanged) — forcing --resume on next message', {
+            sessionId: this.claudeSessionId, taskId: this.taskId,
+            cost: result.total_cost_usd, prevCost: this._lastResultCost,
+          })
+          // Mark pipe as dead so processNext falls through to --resume spawn
+          // instead of writing to a potentially broken FIFO.
+          if (this._transport) {
+            (this._transport as import('./remote-session-manager.js').RemoteSessionManager).deletePipe()
+          }
+        }
+
+        // Track cost for stale detection on next turn
+        if (result.total_cost_usd !== undefined) {
+          this._lastResultCost = result.total_cost_usd
+        }
+
         // On error, keep the original session ID so events reach the frontend
         // (Claude CLI assigns a new throwaway ID even when --resume fails)
         if (result.session_id && !result.is_error) {
@@ -1612,34 +1641,34 @@ export class ClaudeCodeSession {
           })
         }
 
-        // Quick non-blocking PID check (no subprocess, no execSync).
-        // process.kill(pid, 0) only checks existence — sufficient for the FIFO
-        // idle-vs-stopped decision. Full binary name validation is done lazily
-        // by the health monitor.
+        // Process liveness check for deciding FIFO-alive vs exited.
+        // Local: process.kill(pid, 0) — quick and reliable.
+        // Remote: local PID check is meaningless (PID is on the remote host).
+        //   For remote sessions, trust _hasPipe — it's cleared when the daemon
+        //   sends an 'exit' event or when the FIFO write fails (ENXIO/EAGAIN).
         let processStillAlive = false
-        if (this.pid !== null) {
+        if (this._transport?.isRemote) {
+          // Remote: process.kill can't reach remote PID. Trust hasPipe instead.
+          processStillAlive = this._transport.hasPipe
+        } else if (this.pid !== null) {
           try { process.kill(this.pid, 0); processStillAlive = true } catch { /* dead */ }
         }
         if (this._transport?.hasPipe && processStillAlive) {
-          // stream-json FIFO mode: process is still alive between turns
-          // Keep process running, ready for next writeMessage()
+          // stream-json FIFO mode: process is still alive between turns.
+          // Works for both local and remote sessions now that remote uses hasPipe
+          // for the liveness signal instead of local PID checks.
           this._processStatus = 'idle'  // Turn done, process alive, waiting for next writeMessage()
           this._activity = undefined
           this.resultEmitted = false  // Ready for next turn
         } else if (this._transport?.isRemote && !result.is_error) {
-          // Remote daemon session: the --resume process exited, but the daemon connection
-          // is still alive and can spawn a new process for the next message. Show 'idle'
-          // instead of 'stopped' because the session is still usable — the user can send
-          // follow-up messages. process.kill(pid, 0) above fails for remote PIDs since
-          // they don't exist on the local machine, but the daemon handles process lifecycle.
-          // Remote daemon: process exited but daemon still connected → show 'idle' not 'stopped'.
-          // _active = false so processNext uses --resume (not writeMessage to dead FIFO).
-          // RemoteSessionManager.writeMessage also checks _hasPipe (cleared on exit) as a second guard.
+          // Remote daemon session: process exited (hasPipe was cleared by daemon exit
+          // event or FIFO write failure), but daemon connection is still alive.
+          // Show 'idle' so user can send follow-up messages (triggers --resume).
           this.resultEmitted = true
           this._active = false
           this._processStatus = 'idle'
           this._activity = undefined
-          // Clear PID — the remote --resume process exited. Prevents stale local PID checks.
+          // Clear PID — the remote process exited. Prevents stale local PID checks.
           this.pid = null
           if (this.claudeSessionId) {
             const sid = this.claudeSessionId

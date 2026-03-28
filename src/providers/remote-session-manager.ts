@@ -295,12 +295,16 @@ export class RemoteSessionManager implements SessionManager {
       return conn.send('send', { sid, message: prepared })
     }).then((result) => {
       if (!result.ok) {
+        const reason = String(result.reason || result.error || '')
         log.session.warn('RemoteSessionManager: send failed', {
-          host: this.hostKey, sid, reason: result.reason || result.error,
+          host: this.hostKey, sid, reason,
         })
-        // Daemon says session not found → process is dead. Clear hasPipe and
-        // trigger onExit so session runner falls through to --resume on next processNext.
-        if (String(result.reason || result.error || '').includes('not found')) {
+        // FIFO write failed — CLI process is dead or pipe is broken.
+        // Clear hasPipe and trigger onExit so session runner falls through
+        // to --resume on the next processNext call.
+        // Covers: 'not found' (session unknown), 'ENXIO' (no reader on pipe),
+        // 'EAGAIN' (pipe buffer full, nobody draining).
+        if (reason.includes('not found') || reason === 'ENXIO' || reason === 'EAGAIN') {
           this._hasPipe = false
           this._onExit?.(1)
         }
