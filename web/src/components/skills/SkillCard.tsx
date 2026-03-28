@@ -24,15 +24,20 @@ export function SkillCard({ skill, selected, onSelect, onToggle }: SkillCardProp
             <span className="skill-card-name">{skill.name}</span>
             <span className={`skill-source-badge ${skill.source}`}>{skill.source}</span>
             {!skill.eligible && <span className="skill-badge-ineligible">ineligible</span>}
-            <span className="skill-size-badge" title={`desc ${fmtSize(skill.description.length)} · doc ${fmtSize(skill.content.length)}`}>
-              {fmtSize(skill.content.length)}
-            </span>
           </div>
           {skill.description && (
             <span className="skill-card-desc text-sm text-muted">
               {skill.description.length > 120 ? skill.description.slice(0, 120) + '...' : skill.description}
             </span>
           )}
+          <div className="skill-card-sizes">
+            <span className="skill-size-pill" title="Description injected into every system prompt (always loaded)">
+              prompt <strong>{fmtSize(skill.description.length)}</strong>
+            </span>
+            <span className="skill-size-pill" title="Full SKILL.md loaded on-demand when skill is activated">
+              doc <strong>{fmtSize(skill.content.length)}</strong>
+            </span>
+          </div>
         </div>
         <label
           className="skill-toggle"

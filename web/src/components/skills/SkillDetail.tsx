@@ -86,10 +86,14 @@ export function SkillDetail({ skill, onSave, onDelete, onToggle }: SkillDetailPr
         </div>
         <div className="skill-detail-meta text-sm text-muted">
           <span title={skill.location}>{skill.dirName}</span>
-          <span>&middot;</span>
-          <span>desc {formatSize(skill.description.length)}</span>
-          <span>&middot;</span>
-          <span>doc {formatSize(skill.content.length)}</span>
+        </div>
+        <div className="skill-detail-sizes">
+          <span className="skill-size-pill" title="Description text between --- markers, injected into every system prompt for all enabled skills">
+            prompt <strong>{formatSize(skill.description.length)}</strong>
+          </span>
+          <span className="skill-size-pill" title="Full SKILL.md file, loaded on-demand only when agent activates this skill">
+            doc <strong>{formatSize(skill.content.length)}</strong>
+          </span>
         </div>
         <div className="skill-detail-toggle-row">
           <label className="skill-toggle">

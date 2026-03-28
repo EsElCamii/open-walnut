@@ -13972,16 +13972,29 @@ img[data-lightbox-src],
   color: #34C759;
 }
 
-.skill-size-badge {
-  display: inline-block;
-  padding: 1px 5px;
+.skill-card-sizes,
+.skill-detail-sizes {
+  display: flex;
+  gap: 6px;
+  margin-top: 4px;
+}
+
+.skill-size-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 1px 7px;
   border-radius: 8px;
   font-size: 10px;
-  font-weight: 500;
   font-family: 'SF Mono', Menlo, monospace;
-  background: var(--bg-tertiary);
   color: var(--fg-muted);
+  background: var(--bg-tertiary);
   white-space: nowrap;
+  cursor: help;
+}
+.skill-size-pill strong {
+  font-weight: 600;
+  color: var(--fg-secondary);
 }
 
 .skill-badge-ineligible {
