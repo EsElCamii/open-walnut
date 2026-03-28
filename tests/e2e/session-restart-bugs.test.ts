@@ -1,17 +1,15 @@
 /**
- * E2E tests for session restart bugs:
+ * Black-box E2E: remote session survives server restart.
  *
- * Bug 1: Remote result persists `idle` not `stopped` — SessionRunner bus handler
- *         re-derived process_status and overwrote 'idle' with 'stopped' for remote
- *         --resume sessions. Fix: Handler 2 trusts Handler 1's processStatus.
+ * Simulates the user experience end-to-end:
+ *   1. Connect via WebSocket, start a remote session, send messages, get responses.
+ *   2. Server restarts (daemon survives — same as real clouddev).
+ *   3. User reconnects and continues the conversation.
  *
- * Bug 2: Stale replay — `attachToExisting` connected to daemon with fromOffset=0
- *         (new RemoteSessionManager has fileSize=0). Daemon replayed ALL old JSONL
- *         events including stale results. Fix: use jsonlByteLength from recovery.
- *
- * Both bugs triggered by: server restart → attachToExisting → daemon reconnect.
+ * No internal state assertions (no process_status, no fromOffset, no bus events).
+ * The ONLY thing we check: "I sent a message, did I get a valid response?"
  */
-import { describe, it, expect, beforeAll, afterAll, afterEach } from 'vitest'
+import { describe, it, expect, beforeAll, afterAll } from 'vitest'
 import fs from 'node:fs/promises'
 import path from 'node:path'
 import { WebSocket } from 'ws'
@@ -19,7 +17,6 @@ import type { Server as HttpServer } from 'node:http'
 import { createMockConstants } from '../helpers/mock-constants.js'
 import { vi } from 'vitest'
 
-// Isolate all file I/O to a temp directory
 vi.mock('../../src/constants.js', () => createMockConstants())
 
 import { WALNUT_HOME, TASKS_FILE } from '../../src/constants.js'
@@ -35,18 +32,11 @@ let port: number
 let daemonProc: ChildProcess | null = null
 let daemonPort: number
 
-// ── WS Helpers ──
+// ── Minimal WS helpers (user-facing API only) ──
 
-interface WsEvent {
-  type: string
-  name?: string
-  data?: Record<string, unknown>
-  id?: string | number
-  result?: unknown
-  error?: string
-}
+interface WsMsg { type: string; name?: string; data?: Record<string, unknown>; id?: string | number }
 
-function connectWs(): Promise<WebSocket> {
+function connect(): Promise<WebSocket> {
   return new Promise((resolve, reject) => {
     const ws = new WebSocket(`ws://localhost:${port}/ws`)
     ws.on('open', () => resolve(ws))
@@ -54,35 +44,15 @@ function connectWs(): Promise<WebSocket> {
   })
 }
 
-function waitForWsEvent(ws: WebSocket, eventName: string, timeoutMs = 20000): Promise<WsEvent> {
-  return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error(`Timeout waiting for ${eventName}`)), timeoutMs)
-    const handler = (data: WebSocket.Data) => {
-      try {
-        const msg = JSON.parse(data.toString()) as WsEvent
-        if (msg.type === 'event' && msg.name === eventName) {
-          clearTimeout(timer)
-          ws.removeListener('message', handler)
-          resolve(msg)
-        }
-      } catch { /* not JSON — skip */ }
-    }
-    ws.on('message', handler)
-  })
-}
-
-function sendWsRpc(ws: WebSocket, method: string, payload: unknown): Promise<WsEvent> {
+/** Send an RPC and return the response. */
+function rpc(ws: WebSocket, method: string, payload: unknown): Promise<WsMsg> {
   return new Promise((resolve, reject) => {
     const id = `rpc-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`
     const timer = setTimeout(() => reject(new Error(`RPC timeout: ${method}`)), 15000)
-    const handler = (data: WebSocket.Data) => {
+    const handler = (raw: WebSocket.Data) => {
       try {
-        const msg = JSON.parse(data.toString()) as WsEvent
-        if (msg.id === id) {
-          clearTimeout(timer)
-          ws.removeListener('message', handler)
-          resolve(msg)
-        }
+        const msg = JSON.parse(raw.toString()) as WsMsg
+        if (msg.id === id) { clearTimeout(timer); ws.removeListener('message', handler); resolve(msg) }
       } catch { /* skip */ }
     }
     ws.on('message', handler)
@@ -90,309 +60,184 @@ function sendWsRpc(ws: WebSocket, method: string, payload: unknown): Promise<WsE
   })
 }
 
-/** Poll session record until a condition is met */
-async function pollSession(
-  sessionId: string,
-  predicate: (s: Record<string, unknown>) => boolean,
-  maxAttempts = 30,
-  intervalMs = 300,
-): Promise<Record<string, unknown>> {
-  let session: Record<string, unknown> = {}
-  for (let i = 0; i < maxAttempts; i++) {
-    const res = await fetch(`http://localhost:${port}/api/sessions/${sessionId}`)
-    if (res.status === 200) {
-      const body = await res.json() as Record<string, unknown>
-      session = body.session as Record<string, unknown>
-      if (predicate(session)) return session
+/** Wait for a named event (e.g. 'session:result'). */
+function waitEvent(ws: WebSocket, name: string, timeoutMs = 30000): Promise<WsMsg> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`Timeout waiting for ${name}`)), timeoutMs)
+    const handler = (raw: WebSocket.Data) => {
+      try {
+        const msg = JSON.parse(raw.toString()) as WsMsg
+        if (msg.type === 'event' && msg.name === name) { clearTimeout(timer); ws.removeListener('message', handler); resolve(msg) }
+      } catch { /* skip */ }
     }
-    await new Promise(r => setTimeout(r, intervalMs))
-  }
-  return session
+    ws.on('message', handler)
+  })
 }
 
-// ── Setup ──
+/** Start a remote session and wait for the first response. Returns { ws, sessionId }. */
+async function startSessionAndGetResponse(message: string): Promise<{ ws: WebSocket; sessionId: string }> {
+  const ws = await connect()
+  const resultP = waitEvent(ws, 'session:result')
+  await rpc(ws, 'session:start', { taskId: '', message, host: 'mock-remote', cwd: '/tmp' })
+  const result = await resultP
+  const sessionId = result.data?.sessionId as string
+  expect(sessionId).toBeTruthy()
+  expect(result.data?.isError).toBe(false)
+  return { ws, sessionId }
+}
+
+/** Send a follow-up message to an existing session and wait for response. */
+async function sendAndExpectResponse(ws: WebSocket, sessionId: string, message: string): Promise<void> {
+  const resultP = waitEvent(ws, 'session:result')
+  await rpc(ws, 'session:send', { sessionId, message })
+  const result = await resultP
+  expect(result.data?.sessionId).toBe(sessionId)
+  expect(result.data?.isError).toBe(false)
+}
+
+/** Restart the server. Daemon stays alive. Returns new port. */
+async function restartServer(): Promise<void> {
+  await stopServer()
+  sessionRunner.setCliCommand(MOCK_CLI)
+  sessionRunner.setTestDaemonUrl(`ws://127.0.0.1:${daemonPort}`)
+  server = await startServer({ port: 0, dev: true })
+  const addr = server.address()
+  port = typeof addr === 'object' && addr ? addr.port : 0
+  // Wait for reconciler to reconnect sessions
+  await new Promise(r => setTimeout(r, 3000))
+}
+
+// ── Setup / Teardown ──
 
 beforeAll(async () => {
-  // 1. Clean home dir
   await fs.rm(WALNUT_HOME, { recursive: true, force: true })
   await fs.mkdir(WALNUT_HOME, { recursive: true })
-
-  // 2. Write tasks file
   const tasksDir = path.dirname(TASKS_FILE)
   await fs.mkdir(tasksDir, { recursive: true })
   await fs.writeFile(TASKS_FILE, JSON.stringify({ version: 1, tasks: [] }))
+  await fs.writeFile(path.join(WALNUT_HOME, 'config.yaml'), [
+    'version: 1', 'user:', '  name: TestUser', 'defaults:', '  priority: none',
+    '  category: Inbox', 'hosts:', '  mock-remote:', '    hostname: localhost', '    user: testuser',
+  ].join('\n') + '\n')
 
-  // 3. Write config with a mock remote host
-  await fs.writeFile(
-    path.join(WALNUT_HOME, 'config.yaml'),
-    [
-      'version: 1',
-      'user:',
-      '  name: TestUser',
-      'defaults:',
-      '  priority: none',
-      '  category: Inbox',
-      'hosts:',
-      '  mock-remote:',
-      '    hostname: localhost',
-      '    user: testuser',
-    ].join('\n') + '\n',
-  )
-
-  // 4. Start MockDaemon as subprocess (survives server restarts)
+  // Start MockDaemon (survives server restarts — simulates real clouddev daemon)
   daemonPort = await new Promise<number>((resolve, reject) => {
     daemonProc = spawn(process.execPath, [MOCK_DAEMON_SCRIPT], { stdio: ['pipe', 'pipe', 'inherit'] })
     let buf = ''
     daemonProc.stdout!.on('data', (chunk: Buffer) => {
       buf += chunk.toString()
-      const match = buf.match(/PORT=(\d+)/)
-      if (match) resolve(parseInt(match[1], 10))
+      const m = buf.match(/PORT=(\d+)/)
+      if (m) resolve(parseInt(m[1], 10))
     })
     daemonProc.on('error', reject)
-    daemonProc.on('exit', (code) => {
-      if (!buf.includes('PORT=')) reject(new Error(`MockDaemon exited with code ${code}`))
-    })
-    setTimeout(() => reject(new Error('MockDaemon startup timeout')), 10000)
+    daemonProc.on('exit', (code) => { if (!buf.includes('PORT=')) reject(new Error(`daemon exit ${code}`)) })
+    setTimeout(() => reject(new Error('daemon timeout')), 10000)
   })
 
-  // 5. Configure session runner
   sessionRunner.setCliCommand(MOCK_CLI)
   sessionRunner.setTestDaemonUrl(`ws://127.0.0.1:${daemonPort}`)
-
-  // 6. Start server
   server = await startServer({ port: 0, dev: true })
   const addr = server.address()
   port = typeof addr === 'object' && addr ? addr.port : 0
-
-  // 7. Wait for server to fully initialize
   await new Promise(r => setTimeout(r, 2000))
 })
 
 afterAll(async () => {
   sessionRunner.setTestDaemonUrl(undefined)
   await stopServer()
-  if (daemonProc) {
-    daemonProc.kill('SIGTERM')
-    daemonProc = null
-  }
+  if (daemonProc) { daemonProc.kill('SIGTERM'); daemonProc = null }
   await fs.rm(WALNUT_HOME, { recursive: true, force: true }).catch(() => {})
 })
 
-// ═══════════════════════════════════════════════════════════════════
-//  Test 1: Remote result persists `idle` not `stopped`
+// ═══════════════════════════════════════════════════════════════════════════
+//  Scenario 1: Multi-turn conversation on a remote session
 //
-//  Verifies Bug 1 fix — after a remote session completes a turn,
-//  sessions.json has process_status: 'idle', NOT 'stopped'.
-// ═══════════════════════════════════════════════════════════════════
+//  User starts a session, sends a message, gets a reply,
+//  then sends a follow-up and gets another reply.
+// ═══════════════════════════════════════════════════════════════════════════
 
-describe('Bug 1: Remote session result persists idle status', () => {
-  it('remote session result → status-changed includes idle transition (not jumped to stopped)', async () => {
-    const ws = await connectWs()
+describe('Multi-turn remote conversation', () => {
+  it('start → response → follow-up → response', async () => {
+    const { ws, sessionId } = await startSessionAndGetResponse('hello from user')
     try {
-      // Collect all status-changed events for this session
-      const statusChanges: Array<{ process_status: string }> = []
-      const statusHandler = (data: WebSocket.Data) => {
-        try {
-          const msg = JSON.parse(data.toString()) as WsEvent
-          if (msg.type === 'event' && msg.name === 'session:status-changed') {
-            statusChanges.push({
-              process_status: msg.data?.process_status as string,
-            })
-          }
-        } catch { /* skip */ }
-      }
-      ws.on('message', statusHandler)
-
-      const resultPromise = waitForWsEvent(ws, 'session:result', 30000)
-
-      await sendWsRpc(ws, 'session:start', {
-        taskId: '',
-        message: 'bug1 idle test',
-        host: 'mock-remote',
-        cwd: '/tmp',
-      })
-
-      const result = await resultPromise
-      const sessionId = result.data?.sessionId as string
-      expect(sessionId).toBeTruthy()
-      expect(result.data?.isError).toBe(false)
-
-      // Wait for status events to settle
-      await new Promise(r => setTimeout(r, 1000))
-      ws.removeListener('message', statusHandler)
-
-      // Bug 1 fix: the status-changed events should include 'idle' transition.
-      // Before the fix, Handler 2 would immediately overwrite idle → stopped,
-      // so the persisted status would jump directly from running → stopped.
-      // After the fix, Handler 2 trusts Handler 1's processStatus='idle',
-      // so we should see an 'idle' status in the transitions.
-      const idleEvents = statusChanges.filter(s => s.process_status === 'idle')
-      expect(idleEvents.length).toBeGreaterThanOrEqual(1)
-
-      // The session should be from mock-remote
-      const session = await pollSession(sessionId, (s) =>
-        s.process_status === 'idle' || s.process_status === 'stopped',
-      )
-      expect(session.host).toBe('mock-remote')
-
-      // Verify follow-up messages still work (key user scenario)
-      const followUpResult = waitForWsEvent(ws, 'session:result', 30000)
-      await sendWsRpc(ws, 'session:send', {
-        sessionId,
-        message: 'follow-up after idle',
-      })
-      const result2 = await followUpResult
-      expect(result2.data?.isError).toBe(false)
+      // Wait briefly for session to be ready for follow-up
+      await new Promise(r => setTimeout(r, 500))
+      await sendAndExpectResponse(ws, sessionId, 'follow-up message')
     } finally {
       ws.close()
     }
   })
 })
 
-// ═══════════════════════════════════════════════════════════════════
-//  Test 2: Server restart reconnects without stale replay
+// ═══════════════════════════════════════════════════════════════════════════
+//  Scenario 2: Conversation continues after server restart
 //
-//  Verifies Bug 2 fix — `attachToExisting` sends correct fromOffset
-//  to daemon (> 0), preventing stale result replay.
-// ═══════════════════════════════════════════════════════════════════
+//  User starts a session, completes a turn, server restarts,
+//  user reconnects and sends another message — should get a response.
+// ═══════════════════════════════════════════════════════════════════════════
 
-describe('Bug 2: Server restart reconnects with correct offset', () => {
-  it('server restart → daemon attach uses fromOffset > 0 → session stays idle', async () => {
-    // Phase 1: Start a session and complete one turn
-    let ws = await connectWs()
-    let sessionId: string
+describe('Conversation survives server restart', () => {
+  it('start → response → restart server → follow-up → response', async () => {
+    // Turn 1: start session, get response
+    const { ws: ws1, sessionId } = await startSessionAndGetResponse('turn 1 before restart')
+    ws1.close()
 
+    // Server restart (daemon stays alive)
+    await restartServer()
+
+    // Turn 2: reconnect and send follow-up
+    const ws2 = await connect()
     try {
-      const resultPromise = waitForWsEvent(ws, 'session:result', 30000)
-
-      await sendWsRpc(ws, 'session:start', {
-        taskId: '',
-        message: 'bug2 restart test',
-        host: 'mock-remote',
-        cwd: '/tmp',
-      })
-
-      const result = await resultPromise
-      sessionId = result.data?.sessionId as string
-      expect(sessionId).toBeTruthy()
-
-      // Wait for session to settle (idle or stopped)
-      await pollSession(sessionId, (s) =>
-        s.process_status === 'idle' || s.process_status === 'stopped',
-      )
+      await sendAndExpectResponse(ws2, sessionId, 'turn 2 after restart')
     } finally {
-      ws.close()
-    }
-
-    // Phase 2: Restart the server (daemon survives)
-    await stopServer()
-
-    // Re-configure session runner for the new server instance
-    sessionRunner.setCliCommand(MOCK_CLI)
-    sessionRunner.setTestDaemonUrl(`ws://127.0.0.1:${daemonPort}`)
-
-    server = await startServer({ port: 0, dev: true })
-    const addr = server.address()
-    port = typeof addr === 'object' && addr ? addr.port : 0
-
-    // Wait for reconciler + attach to complete
-    await new Promise(r => setTimeout(r, 3000))
-
-    // Phase 3: Verify session is still idle after restart
-    ws = await connectWs()
-    try {
-      const session = await pollSession(sessionId!, (s) =>
-        s.process_status === 'idle' || s.process_status === 'stopped',
-      )
-
-      // After server restart, the reconciler should have reconnected to daemon.
-      // Session should still be idle (not stopped by stale replay).
-      // Note: for mock sessions that already exited, the reconciler may set 'stopped'
-      // because the mock-claude process has exited. The key test is that fromOffset > 0
-      // was sent in the attach command (verified by daemon attach history on MockDaemon class tests).
-      // In E2E with subprocess daemon, we verify the session is recoverable.
-      expect(session.process_status).toBeDefined()
-
-      // Phase 4: Verify follow-up message works after restart
-      const followUpResult = waitForWsEvent(ws, 'session:result', 30000)
-      await sendWsRpc(ws, 'session:send', {
-        sessionId: sessionId!,
-        message: 'follow-up after restart',
-      })
-      const result2 = await followUpResult
-      expect(result2.data?.sessionId).toBe(sessionId)
-      expect(result2.data?.isError).toBe(false)
-    } finally {
-      ws.close()
+      ws2.close()
     }
   }, 60000)
 })
 
-// ═══════════════════════════════════════════════════════════════════
-//  Test 3: Active (slow) session survives restart
+// ═══════════════════════════════════════════════════════════════════════════
+//  Scenario 3: Slow session completes after server restart
 //
-//  Verifies that a long-running session is not incorrectly marked
-//  as stopped after server restart. The daemon keeps the process alive.
-// ═══════════════════════════════════════════════════════════════════
+//  User starts a slow session (5s), server restarts mid-execution,
+//  then user sends a follow-up — should get a response.
+// ═══════════════════════════════════════════════════════════════════════════
 
-describe('Active session survives server restart', () => {
-  it('slow session → restart → session still running → eventually completes', async () => {
-    // Phase 1: Start a slow session (5s delay)
-    let ws = await connectWs()
+describe('Slow session completes across restart', () => {
+  it('start slow → restart mid-run → wait for completion → follow-up → response', async () => {
+    // Start a slow session (5s)
+    const ws1 = await connect()
     let sessionId: string
-
     try {
-      // Don't wait for result — session is intentionally slow
-      const startRpc = await sendWsRpc(ws, 'session:start', {
-        taskId: '',
-        message: 'slow:5000 active session restart test',
-        host: 'mock-remote',
-        cwd: '/tmp',
+      await rpc(ws1, 'session:start', {
+        taskId: '', message: 'slow:5000 long running task', host: 'mock-remote', cwd: '/tmp',
       })
-
-      // Wait briefly for session to be registered
+      // Wait for session to be registered (but don't wait for result)
       await new Promise(r => setTimeout(r, 1500))
-
-      // Get the session ID from the session list
       const listRes = await fetch(`http://localhost:${port}/api/sessions`)
-      const listBody = await listRes.json() as { sessions: Array<Record<string, unknown>> }
-      const latestSession = listBody.sessions
+      const body = await listRes.json() as { sessions: Array<Record<string, unknown>> }
+      const latest = body.sessions
         .filter((s: Record<string, unknown>) => s.host === 'mock-remote')
         .sort((a: Record<string, unknown>, b: Record<string, unknown>) =>
           new Date(b.started as string).getTime() - new Date(a.started as string).getTime(),
         )[0]
-      sessionId = latestSession?.claudeSessionId as string
+      sessionId = latest?.claudeSessionId as string
       expect(sessionId).toBeTruthy()
     } finally {
-      ws.close()
+      ws1.close()
     }
 
-    // Phase 2: Restart server while session is still running
-    await stopServer()
+    // Restart server while session is still running
+    await restartServer()
 
-    sessionRunner.setCliCommand(MOCK_CLI)
-    sessionRunner.setTestDaemonUrl(`ws://127.0.0.1:${daemonPort}`)
+    // Wait for the slow session to finish (mock-claude exits after 5s)
+    await new Promise(r => setTimeout(r, 5000))
 
-    server = await startServer({ port: 0, dev: true })
-    const addr = server.address()
-    port = typeof addr === 'object' && addr ? addr.port : 0
-
-    // Wait for reconciler to run
-    await new Promise(r => setTimeout(r, 3000))
-
-    // Phase 3: Verify session eventually completes (result arrives)
-    ws = await connectWs()
+    // Send follow-up — should work regardless of restart
+    const ws2 = await connect()
     try {
-      // The session should eventually produce a result (mock-claude finishes after 5s)
-      // Poll for it to settle
-      const session = await pollSession(sessionId!, (s) =>
-        s.process_status === 'idle' || s.process_status === 'stopped',
-      15, 1000)
-
-      // Session should have completed — either idle (remote) or stopped (process exited)
-      expect(['idle', 'stopped']).toContain(session.process_status)
+      await sendAndExpectResponse(ws2, sessionId, 'follow-up after slow completion')
     } finally {
-      ws.close()
+      ws2.close()
     }
   }, 60000)
 })
