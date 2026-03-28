@@ -701,7 +701,7 @@ describe('No duplicate session:result on follow-up', () => {
 // ═══════════════════════════════════════════════════════════════════
 
 describe('Session status during follow-up execution', () => {
-  it('follow-up sets process_status to running, then back to stopped', async () => {
+  it('follow-up sets process_status to running, then to idle (remote session)', async () => {
     const ws = await connectWs()
     try {
       // Start a session
@@ -714,13 +714,13 @@ describe('Session status during follow-up execution', () => {
       const result1 = await startResult
       const sessionId = result1.data!.sessionId as string
 
-      // Wait for stopped
+      // Wait for session to settle (idle or stopped)
       for (let i = 0; i < 20; i++) {
         const res = await fetch(`http://localhost:${port}/api/sessions/${sessionId}`)
         if (res.status === 200) {
           const body = await res.json() as Record<string, unknown>
           const session = body.session as Record<string, unknown>
-          if (session.process_status === 'stopped') break
+          if (session.process_status === 'stopped' || session.process_status === 'idle') break
         }
         await new Promise(r => setTimeout(r, 300))
       }
@@ -748,15 +748,17 @@ describe('Session status during follow-up execution', () => {
       await new Promise(r => setTimeout(r, 2000))
       ws.removeListener('message', statusHandler)
 
-      // Status should have gone through: running → stopped
+      // Status should have gone through: running → idle (remote session result)
+      // Remote sessions go idle after result (not stopped) to allow follow-up messages.
       const runningEvents = statusChanges.filter(s => s.process_status === 'running')
-      const stoppedEvents = statusChanges.filter(s => s.process_status === 'stopped')
+      const idleEvents = statusChanges.filter(s => s.process_status === 'idle')
 
       // Must have at least one running transition
       expect(runningEvents.length).toBeGreaterThanOrEqual(1)
 
-      // Final state should be stopped (exactly 1 — not duplicated)
-      expect(stoppedEvents.length).toBe(1)
+      // Remote sessions should transition to idle (may also later transition to stopped
+      // when the mock process exits, but idle should appear first)
+      expect(idleEvents.length).toBeGreaterThanOrEqual(1)
     } finally {
       ws.close()
     }

@@ -41,6 +41,7 @@ export class MockDaemon {
   private _port = 0
   private _fault: string | null = null
   private _cliCommand = MOCK_CLI
+  private _attachHistory: Array<{ sid: string; fromOffset: number }> = []
 
   get port(): number { return this._port }
 
@@ -116,6 +117,11 @@ export class MockDaemon {
     this._fault = fault
   }
 
+  /** Return history of all attach commands for test assertions */
+  getAttachHistory(): Array<{ sid: string; fromOffset: number }> {
+    return [...this._attachHistory]
+  }
+
   // ── Protocol Handler ──
 
   private handleMessage(ws: WebSocket, raw: string): void {
@@ -136,6 +142,7 @@ export class MockDaemon {
 
     switch (cmd.cmd) {
       case 'start': return this.cmdStart(ws, id, cmd)
+      case 'attach': return this.cmdAttach(ws, id, cmd)
       case 'send': return this.cmdSend(ws, id, cmd)
       case 'stop': return this.cmdStop(ws, id, cmd)
       case 'status': return this.cmdStatus(ws, id, cmd)
@@ -233,6 +240,38 @@ export class MockDaemon {
     }, 50)  // 50ms poll (faster than real daemon's 100ms for test speed)
 
     this.sendOk(ws, id, { pid, outputFile: jsonlPath, offset: 0 })
+  }
+
+  private cmdAttach(ws: WebSocket, id: number, cmd: Record<string, unknown>): void {
+    const sid = cmd.sid as string
+    const fromOffset = (cmd.fromOffset as number) ?? 0
+    const session = this.sessions.get(sid)
+
+    // Record for test inspection
+    this._attachHistory.push({ sid, fromOffset })
+
+    if (!session) {
+      return this.sendError(ws, id, `session not found: ${sid}`)
+    }
+
+    // Resume polling from the requested offset
+    session.offset = fromOffset
+
+    // Stop any existing poll timer for this session (e.g. from a previous WS connection)
+    if (session.pollTimer) {
+      clearInterval(session.pollTimer)
+      session.pollTimer = null
+    }
+
+    // Start polling JSONL for the new WS connection
+    session.pollTimer = setInterval(() => {
+      this.pollJsonl(ws, session.sid, session)
+    }, 50)
+
+    this.sendOk(ws, id, {
+      pid: session.pid,
+      alive: session.exitCode === null,
+    })
   }
 
   private cmdSend(ws: WebSocket, id: number, cmd: Record<string, unknown>): void {

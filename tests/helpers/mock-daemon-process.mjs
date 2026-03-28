@@ -63,6 +63,7 @@ function handleMessage(ws, raw) {
 
   switch (cmd.cmd) {
     case 'start': return cmdStart(ws, id, cmd)
+    case 'attach': return cmdAttach(ws, id, cmd)
     case 'send': return cmdSend(ws, id, cmd)
     case 'stop': return cmdStop(ws, id, cmd)
     case 'status': return cmdStatus(ws, id, cmd)
@@ -166,6 +167,28 @@ function cmdRename(ws, id, cmd) {
   try { fs.renameSync(session.pipePath, path.join(streamsDir, `${newSid}.pipe`)); session.pipePath = path.join(streamsDir, `${newSid}.pipe`) } catch {}
   try { fs.renameSync(session.jsonlPath, path.join(streamsDir, `${newSid}.jsonl`)); session.jsonlPath = path.join(streamsDir, `${newSid}.jsonl`) } catch {}
   sendOk(ws, id, {})
+}
+
+function cmdAttach(ws, id, cmd) {
+  const sid = cmd.sid
+  const fromOffset = cmd.fromOffset ?? 0
+  const session = sessions.get(sid)
+
+  if (!session) return sendError(ws, id, `session not found: ${sid}`)
+
+  // Resume polling from the requested offset
+  session.offset = fromOffset
+
+  // Stop any existing poll timer (e.g. from a previous WS connection)
+  if (session.pollTimer) {
+    clearInterval(session.pollTimer)
+    session.pollTimer = null
+  }
+
+  // Start polling JSONL for the new WS connection
+  session.pollTimer = setInterval(() => pollJsonl(ws, sid, session), 50)
+
+  sendOk(ws, id, { pid: session.pid, alive: session.exitCode === null })
 }
 
 function cmdSend(ws, id, cmd) {
