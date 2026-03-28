@@ -5,6 +5,7 @@
  *   /absolute/path   → FileHandler
  *   memory/*         → MemoryHandler
  *   notes/*          → NotesHandler
+ *   repos/*          → ReposHandler
  */
 import path from 'node:path';
 import {
@@ -13,6 +14,7 @@ import {
   DAILY_DIR,
   GLOBAL_NOTES_FILE,
   WALNUT_HOME,
+  REPOSITORIES_DIR,
 } from '../../../constants.js';
 import { formatDateKey } from '../../../core/daily-log.js';
 import type { ResolvedSource } from './types.js';
@@ -128,7 +130,31 @@ export function resolveSource(source: string): ResolvedSource {
     };
   }
 
+  // ── repos/* → ReposHandler ──
+  if (source === 'repos' || source === 'repos/') {
+    return {
+      type: 'repos',
+      filePath: REPOSITORIES_DIR,
+      source,
+      variant: 'repos-list',
+    };
+  }
+
+  if (source.startsWith('repos/')) {
+    const name = source.slice('repos/'.length);
+    if (!name || name.includes('..') || name.includes('/')) {
+      throw new Error(`Invalid repo name in source "${source}".`);
+    }
+    return {
+      type: 'repos',
+      filePath: path.join(REPOSITORIES_DIR, `${name}.yaml`),
+      source,
+      variant: 'named',
+      meta: { name },
+    };
+  }
+
   throw new Error(
-    `Invalid source "${source}". Expected: /absolute/path, memory/global, memory/project/{path}, memory/daily[/YYYY-MM-DD], notes/global, or notes/{name}.`,
+    `Invalid source "${source}". Expected: /absolute/path, memory/global, memory/project/{path}, memory/daily[/YYYY-MM-DD], notes/global, notes/{name}, repos/, or repos/{name}.`,
   );
 }

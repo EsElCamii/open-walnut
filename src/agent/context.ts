@@ -9,6 +9,7 @@ import { getMemoryFile } from '../core/memory-file.js';
 import { getAllProjectSummaries } from '../core/project-memory.js';
 import { getCompactionSummary } from '../core/chat-history.js';
 import { buildAgentsSection } from './subagent-context.js';
+import { listRepoSummaries } from './tools/files/repos-handler.js';
 import { TASKS_FILE } from '../constants.js';
 import type { Task } from '../core/types.js';
 
@@ -72,6 +73,16 @@ export function buildMemoryContext(budget: number = 20000): string {
     ? projectSummaries.map((s) => `- **${s.name}** (${s.path}): ${s.description}`).join('\n')
     : '(No projects yet.)';
 
+  // Repo summaries for context
+  const repoSummaries = listRepoSummaries();
+  const repoLines = repoSummaries.length > 0
+    ? repoSummaries.map(r => `- **${r.name}**: ${r.description}${r.hosts.length > 0 ? ` [${r.hosts.join(', ')}]` : ''}`).join('\n')
+    : '';
+
+  const repoSection = repoLines
+    ? `\n\n## Your repositories\n${repoLines}\nUse \`files_read source='repos/{name}'\` for full details, \`files_list prefix='repos'\` to list all.`
+    : '';
+
   return `## Task Categories & Projects
 ${taskCategories}
 
@@ -79,7 +90,7 @@ ${taskCategories}
 ${globalMemoryResult?.content ?? '(No global memory yet.)'}
 
 ## Your projects
-${projectLines}
+${projectLines}${repoSection}
 
 ## Recent activity
 ${dailyLogs || '(No recent activity.)'}`;

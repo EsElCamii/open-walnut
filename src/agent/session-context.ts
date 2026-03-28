@@ -23,6 +23,7 @@ const NOTE_BUDGET = 500
 const CONVERSATION_LOG_BUDGET = 300
 const SESSION_BUDGET = 600
 const PROJECT_MEMORY_BUDGET = 1500
+const REPOSITORY_BUDGET = 1000
 
 const MAX_SESSIONS = 3
 
@@ -37,7 +38,7 @@ export interface SessionContext {
  * Returns `{ systemPrompt }` — an empty string if the task doesn't exist
  * or all sections fail.
  */
-export async function buildSessionContext(taskId: string): Promise<SessionContext> {
+export async function buildSessionContext(taskId: string, cwd?: string, host?: string): Promise<SessionContext> {
   const sections: string[] = []
 
   // ── Task metadata ──
@@ -204,6 +205,32 @@ export async function buildSessionContext(taskId: string): Promise<SessionContex
       taskId,
       error: err instanceof Error ? err.message : String(err),
     })
+  }
+
+  // ── Repository context (matched by CWD) ──
+  if (cwd) {
+    try {
+      const { findRepoByPath } = await import('../core/repository-matcher.js')
+      const repo = findRepoByPath(cwd, host)
+      if (repo) {
+        const parts: string[] = [
+          `Repository: ${repo.name}`,
+          repo.description ? `Description: ${repo.description}` : null,
+          repo.tech_stack ? `Tech Stack: ${repo.tech_stack}` : null,
+          repo.architecture_notes ? `\nArchitecture:\n${repo.architecture_notes}` : null,
+          repo.common_commands ? `\nCommon Commands:\n${repo.common_commands}` : null,
+        ].filter(Boolean) as string[]
+
+        sections.push(
+          truncateToTokenBudget(
+            `<repository_context>\n${parts.join('\n')}\n</repository_context>`,
+            REPOSITORY_BUDGET,
+          ),
+        )
+      }
+    } catch {
+      // non-critical — repository matching is best-effort
+    }
   }
 
   // Always include the server safety warning, even when there are no task-specific

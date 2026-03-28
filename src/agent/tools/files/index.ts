@@ -5,6 +5,7 @@ export { resolveSource } from './resolver.js';
 export { parseMarkdown } from './markdown-parser.js';
 export { memoryHandler } from './memory-handler.js';
 export { notesHandler } from './notes-handler.js';
+export { reposHandler } from './repos-handler.js';
 export { fileHandler } from './file-handler.js';
 export { filesGlob, filesGrep } from './glob-grep.js';
 export type {

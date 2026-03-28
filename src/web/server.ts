@@ -61,6 +61,7 @@ import { integrationsRouter } from './routes/integrations.js'
 import { systemRouter } from './routes/system.js'
 import { notesRouter } from './routes/notes.js'
 import { notesV2Router } from './routes/notes-v2.js'
+import { repositoriesRouter } from './routes/repositories.js'
 import { migrateGlobalNotes } from '../core/notes-migration.js'
 import { authMiddleware } from './middleware/auth.js'
 import { pushRouter } from './routes/push.js'
@@ -398,6 +399,7 @@ export async function startServer(options: ServerOptions = {}): Promise<HttpServ
   app.use('/api/timeline', timelineRouter)
   app.use('/api/notes', notesRouter)
   app.use('/api/notes-v2', notesV2Router)
+  app.use('/api/repositories', repositoriesRouter)
   app.use('/api/integrations', integrationsRouter)
 
   // Plugin routes — mounted as a single router that gets populated after plugin loading.

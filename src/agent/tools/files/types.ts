@@ -10,7 +10,7 @@ import type { ToolResultContent } from '../../tools.js';
 
 // ── Source resolution ──
 
-export type SourceType = 'memory' | 'notes' | 'file';
+export type SourceType = 'memory' | 'notes' | 'file' | 'repos';
 
 export interface ResolvedSource {
   type: SourceType;

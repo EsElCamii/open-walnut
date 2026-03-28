@@ -2342,7 +2342,7 @@ export class SessionRunner {
     if (taskId) {
       try {
         const { buildSessionContext } = await import('../agent/session-context.js')
-        const ctx = await buildSessionContext(taskId)
+        const ctx = await buildSessionContext(taskId, cwd, data.host)
         if (ctx.systemPrompt) {
           // Combine: caller-provided prompt takes priority, task context appended after
           appendSystemPrompt = appendSystemPrompt
@@ -2529,7 +2529,7 @@ export class SessionRunner {
     if (taskId) {
       try {
         const { buildSessionContext } = await import('../agent/session-context.js')
-        const ctx = await buildSessionContext(taskId)
+        const ctx = await buildSessionContext(taskId, cwd, data.host)
         if (ctx.systemPrompt) {
           systemPrompt = systemPrompt
             ? `${systemPrompt}\n\n---\n\n## Task Context\n\n${ctx.systemPrompt}`
