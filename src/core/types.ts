@@ -65,6 +65,8 @@ export interface Task {
   needs_attention?: boolean;
   /** Last sync error message — set on push failure, cleared on success. */
   sync_error?: string;
+  /** ISO timestamp — last session interaction (start/resume). Drives "Recent" sort in sidebar. */
+  last_session_update?: string;
   /** Task-level working directory override. Takes precedence over project default_cwd in session resolution. */
   cwd?: string;
   /** Plugin-specific extension data. Keys are plugin IDs (e.g. 'ms-todo', 'plugin-a'). */

@@ -2207,10 +2207,29 @@ export async function linkSession(
     if (!task.session_ids.includes(sessionId)) {
       task.session_ids.push(sessionId);
     }
+    // Separate from updated_at: updated_at is bumped by any field change (plugin sync,
+    // notes, phase changes) which would pollute "Recent" sort. last_session_update only
+    // tracks actual user session interactions.
+    task.last_session_update = new Date().toISOString();
     task.updated_at = new Date().toISOString();
 
     await writeStore(store);
     return { task };
+  });
+}
+
+/**
+ * Lightweight touch: update last_session_update without full updateTask() validation.
+ * Used on session resume (handleSend) to keep "Recent" sort accurate.
+ */
+export async function touchLastSessionUpdate(taskIdPrefix: string): Promise<void> {
+  return withWriteLock(async () => {
+    const store = await readStore();
+    const task = store.tasks.find((t) => t.id.startsWith(taskIdPrefix));
+    if (!task) return;
+    task.last_session_update = new Date().toISOString();
+    await writeStore(store);
+    bus.emit(EventNames.TASK_UPDATED, { task }, ['web-ui'], { source: 'session-touch' });
   });
 }
 

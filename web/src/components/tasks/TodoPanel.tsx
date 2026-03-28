@@ -1312,6 +1312,45 @@ function SortablePinnedCard({ task, isFocused, onClick, onUnpinTask }: SortableP
   );
 }
 
+const RECENT_CAP = 10;
+
+// ── RecentCard — recent-activity task card (no drag, has pin button) ──
+
+interface RecentCardProps {
+  task: Task;
+  isFocused: boolean;
+  onClick?: (task: Task) => void;
+  onPinTask?: (taskId: string) => void;
+}
+
+function RecentCard({ task, isFocused, onClick, onPinTask }: RecentCardProps) {
+  const needsAttention = task.phase === 'AGENT_COMPLETE' || task.phase === 'AWAIT_HUMAN_ACTION';
+  const phaseLabel = PHASE_LABEL[task.phase] ?? task.phase;
+  const ago = task.last_session_update ? timeAgo(task.last_session_update) : '';
+
+  return (
+    <div
+      className={`todo-pinned-card${isFocused ? ' todo-pinned-card-active' : ''}${needsAttention ? ' todo-pinned-card-attention' : ''}`}
+      onClick={() => onClick?.(task)}
+      role="button"
+      tabIndex={0}
+      onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onClick?.(task); } }}
+    >
+      <span className="todo-pinned-title" title={task.title}>{task.title}</span>
+      <span className={`todo-pinned-phase${needsAttention ? ' todo-pinned-phase-attention' : ''}`} title={phaseLabel} />
+      {ago && <span className="todo-recent-ago" title={task.last_session_update}>{ago}</span>}
+      <button
+        className="todo-recent-pin"
+        onClick={(e) => { e.stopPropagation(); onPinTask?.(task.id); }}
+        title="Pin"
+        aria-label="Pin task"
+      >
+        {'\uD83D\uDCCC'}
+      </button>
+    </div>
+  );
+}
+
 // ── TodoPanel ──
 
 export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onComplete, onSetPhase, onCreate, onUpdate, onStar, onSetPriority, onFocusTask, onClearFocus, focusedTaskId, focusNonce, favorites, ordering, onReorder, onMoveTask, onReparentTask, onOpenSession, onOpenTriageForTask, onPinTask, onUnpinTask, onReorderPinned, pinnedTaskIds, suppressDetail, openSessionIds, operationError, onClearOperationError, onOperationError, externalCategory, onCategoryChange }: TodoPanelProps) {
@@ -1554,6 +1593,16 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
     return [...pinnedTaskIds]
       .map((id) => taskMap.get(id))
       .filter((t): t is Task => !!t && t.status !== 'done' && t.phase !== 'COMPLETE');
+  }, [tasks, pinnedTaskIds]);
+
+  // Recent tasks: tasks with session activity, excluding pinned and completed
+  const recentTasks = useMemo(() => {
+    const pinSet = pinnedTaskIds ?? new Set<string>();
+    return tasks
+      .filter(t => t.last_session_update && !pinSet.has(t.id)
+                   && t.status !== 'done' && t.phase !== 'COMPLETE')
+      .sort((a, b) => (b.last_session_update ?? '').localeCompare(a.last_session_update ?? ''))
+      .slice(0, RECENT_CAP);
   }, [tasks, pinnedTaskIds]);
 
   const sensors = useSensors(
@@ -2519,6 +2568,28 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
               </div>
             </SortableContext>
           </DndContext>
+        </div>
+      )}
+
+      {/* Recent tasks section — sorted by last session activity */}
+      {recentTasks.length > 0 && (
+        <div className="todo-pinned-section">
+          <div className="todo-pinned-header">
+            <span className="todo-pinned-icon">{'\uD83D\uDD50'}</span>
+            <span className="todo-pinned-label">Recent</span>
+            <span className="todo-pinned-count">{recentTasks.length}</span>
+          </div>
+          <div className="todo-pinned-list">
+            {recentTasks.map((task) => (
+              <RecentCard
+                key={task.id}
+                task={task}
+                isFocused={focusedTaskId === task.id}
+                onClick={handlePinnedCardClick}
+                onPinTask={onPinTask}
+              />
+            ))}
+          </div>
         </div>
       )}
 

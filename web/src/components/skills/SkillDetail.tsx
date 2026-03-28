@@ -87,7 +87,9 @@ export function SkillDetail({ skill, onSave, onDelete, onToggle }: SkillDetailPr
         <div className="skill-detail-meta text-sm text-muted">
           <span title={skill.location}>{skill.dirName}</span>
           <span>&middot;</span>
-          <span>{skill.location}</span>
+          <span>desc {formatSize(skill.description.length)}</span>
+          <span>&middot;</span>
+          <span>doc {formatSize(skill.content.length)}</span>
         </div>
         <div className="skill-detail-toggle-row">
           <label className="skill-toggle">

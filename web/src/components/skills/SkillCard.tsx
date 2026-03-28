@@ -7,6 +7,11 @@ interface SkillCardProps {
   onToggle: (dirName: string, enabled: boolean) => void;
 }
 
+function fmtSize(chars: number): string {
+  if (chars < 1024) return `${chars} B`;
+  return `${(chars / 1024).toFixed(1)} KB`;
+}
+
 export function SkillCard({ skill, selected, onSelect, onToggle }: SkillCardProps) {
   return (
     <div
@@ -19,6 +24,9 @@ export function SkillCard({ skill, selected, onSelect, onToggle }: SkillCardProp
             <span className="skill-card-name">{skill.name}</span>
             <span className={`skill-source-badge ${skill.source}`}>{skill.source}</span>
             {!skill.eligible && <span className="skill-badge-ineligible">ineligible</span>}
+            <span className="skill-size-badge" title={`desc ${fmtSize(skill.description.length)} · doc ${fmtSize(skill.content.length)}`}>
+              {fmtSize(skill.content.length)}
+            </span>
           </div>
           {skill.description && (
             <span className="skill-card-desc text-sm text-muted">

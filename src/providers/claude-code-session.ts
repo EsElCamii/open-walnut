@@ -2598,13 +2598,16 @@ export class SessionRunner {
       const { getSessionByClaudeId } = await import('../core/session-tracker.js')
       const record = await getSessionByClaudeId(sessionId)
       if (record?.taskId) {
-        const { getTask, updateTask } = await import('../core/task-manager.js')
+        const { getTask, updateTask, touchLastSessionUpdate } = await import('../core/task-manager.js')
         const { shouldRollbackToInProgress } = await import('../core/phase.js')
         const task = await getTask(record.taskId)
         if (task && shouldRollbackToInProgress(task.phase)) {
           await updateTask(record.taskId, { phase: 'IN_PROGRESS' }, { source: 'phase-rollback' })
           log.session.info('handleSendSdk: rolled back phase to IN_PROGRESS', { taskId: record.taskId, oldPhase: task.phase })
         }
+        // Touch last_session_update on resume for "Recent" sidebar sort
+        touchLastSessionUpdate(record.taskId).catch(err =>
+          log.session.warn('touchLastSessionUpdate failed', { taskId: record.taskId, error: String(err) }))
       }
     } catch { /* best-effort — don't block send */ }
 
@@ -2670,13 +2673,16 @@ export class SessionRunner {
       if (record) {
         // Phase rollback
         if (record.taskId) {
-          const { getTask, updateTask } = await import('../core/task-manager.js')
+          const { getTask, updateTask, touchLastSessionUpdate } = await import('../core/task-manager.js')
           const { shouldRollbackToInProgress } = await import('../core/phase.js')
           const task = await getTask(record.taskId)
           if (task && shouldRollbackToInProgress(task.phase)) {
             await updateTask(record.taskId, { phase: 'IN_PROGRESS' }, { source: 'phase-rollback' })
             log.session.info('handleSend: rolled back phase to IN_PROGRESS', { taskId: record.taskId, oldPhase: task.phase })
           }
+          // Touch last_session_update on resume for "Recent" sidebar sort
+          touchLastSessionUpdate(record.taskId).catch(err =>
+            log.session.warn('touchLastSessionUpdate failed', { taskId: record.taskId, error: String(err) }))
         }
         // Clear stale error message and update activity on resume
         if (record.process_status === 'error' || record.errorMessage) {
