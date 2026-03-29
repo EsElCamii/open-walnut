@@ -58,6 +58,13 @@ export function NotesTreePanel({
     return () => window.removeEventListener('click', handler);
   }, [contextMenu]);
 
+  // Cleanup search debounce timer on unmount
+  useEffect(() => {
+    return () => {
+      if (searchTimerRef.current) clearTimeout(searchTimerRef.current);
+    };
+  }, []);
+
   // Search handler with debounce
   const handleSearchChange = useCallback((value: string) => {
     setSearchQuery(value);
@@ -315,11 +322,14 @@ export function NotesTreePanel({
               <button onClick={() => { handleNewItem(contextMenu.node.path, 'folder'); setContextMenu(null); }}>
                 New Folder
               </button>
-              <div className="notes-context-menu-divider" />
             </>
           )}
-          <button onClick={() => handleStartRename(contextMenu.node)}>Rename</button>
-          <button className="danger" onClick={handleDeleteFromMenu}>Delete</button>
+          {contextMenu.node.type === 'file' && (
+            <>
+              <button onClick={() => handleStartRename(contextMenu.node)}>Rename</button>
+              <button className="danger" onClick={handleDeleteFromMenu}>Delete</button>
+            </>
+          )}
         </div>
       )}
     </div>

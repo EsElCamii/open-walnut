@@ -243,10 +243,12 @@ notesV2Router.post('/move', async (req: Request, res: Response, next: NextFuncti
     await fsp.mkdir(path.dirname(toFile), { recursive: true })
     await fsp.rename(fromFile, toFile)
 
-    // Update wiki links in all files that reference the old name
+    // Update wiki links in all files that reference the old name.
+    // Guard: skip if either name is empty (e.g. a file literally named ".md")
+    // to prevent a wildcard regex from matching every [[]] pattern.
     const oldName = path.basename(from, '.md')
     const newName = path.basename(to, '.md')
-    if (oldName !== newName) {
+    if (oldName && newName && oldName !== newName) {
       await updateWikiLinksInAll(oldName, newName)
     }
 

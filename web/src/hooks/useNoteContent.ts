@@ -32,9 +32,18 @@ export function useNoteContent(notePath: string | null) {
       return;
     }
 
+    // Clear any "Saved" fade timer from the previous note so it can't
+    // overwrite the new note's save status (e.g. masking "Saving...").
+    if (savedFadeTimerRef.current) {
+      clearTimeout(savedFadeTimerRef.current);
+      savedFadeTimerRef.current = null;
+    }
+
     // Flush pending save for previous note before switching.
     // If there is a dirty, unsaved edit and a timer is pending, cancel the timer
     // and fire the save synchronously so the old note's content is not lost.
+    // Note: timerRef is nulled by the timer callback on fire, so a non-null
+    // value here means the timer hasn't fired yet (safe to flush ourselves).
     if (timerRef.current) {
       clearTimeout(timerRef.current);
       timerRef.current = null;
@@ -119,6 +128,9 @@ export function useNoteContent(notePath: string | null) {
 
     if (timerRef.current) clearTimeout(timerRef.current);
     timerRef.current = setTimeout(() => {
+      // Null the ref BEFORE doSave so the note-switch flush logic can
+      // distinguish "timer pending" from "timer already fired (save in-flight)".
+      timerRef.current = null;
       doSave(editor);
     }, DEBOUNCE_MS);
   }, [doSave]);

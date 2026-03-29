@@ -44,15 +44,17 @@ export function WikiLinkAutocomplete({
   // Reset selection when results change
   useEffect(() => { setSelectedIdx(0); }, [filtered]);
 
-  // Position the popup
+  // Position the popup, clamped to viewport boundaries
   useEffect(() => {
     try {
       const c = editor.view.coordsAtPos(state.range.from);
       const panelH = panelRef.current?.getBoundingClientRect().height || 200;
+      const panelW = panelRef.current?.getBoundingClientRect().width || 300;
       const aboveTop = c.top - panelH - 4;
       const belowTop = c.bottom + 4;
-      const top = aboveTop >= 0 ? aboveTop : belowTop;
-      setCoords({ left: c.left, top });
+      const top = Math.max(4, aboveTop >= 0 ? aboveTop : belowTop);
+      const left = Math.max(4, Math.min(c.left, window.innerWidth - panelW - 8));
+      setCoords({ left, top });
     } catch {
       setCoords(null);
     }
@@ -145,6 +147,7 @@ export function WikiLinkAutocomplete({
             <div
               key={note.path}
               className={`notes-wikilink-item ${i === selectedIdx ? 'selected' : ''}`}
+              ref={i === selectedIdx ? el => el?.scrollIntoView({ block: 'nearest' }) : undefined}
               onMouseEnter={() => setSelectedIdx(i)}
               onClick={() => { onSelect(note); }}
             >
@@ -157,6 +160,7 @@ export function WikiLinkAutocomplete({
           {showCreateOption && (
             <div
               className={`notes-wikilink-item notes-wikilink-create ${filtered.length === selectedIdx ? 'selected' : ''}`}
+              ref={filtered.length === selectedIdx ? el => el?.scrollIntoView({ block: 'nearest' }) : undefined}
               onMouseEnter={() => setSelectedIdx(filtered.length)}
               onClick={() => onCreateNew(state.query.trim())}
             >
