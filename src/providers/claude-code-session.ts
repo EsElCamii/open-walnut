@@ -231,6 +231,10 @@ const LIVENESS_INTERVAL_MS = 3000
 export class ClaudeCodeSession {
   private pid: number | null = null
   private fullText = ''
+  /** Dedup set for streaming text/tool events — prevents replay duplicates.
+   *  Key format: `{message.id}:text:{hash}` or `{message.id}:tool_use:{block.id}`.
+   *  Cleared on session result/error/turn completion. */
+  private _emittedStreamKeys = new Set<string>()
   private claudeSessionId: string | null = null
   private _cwd: string | null = null
   private _active = false
@@ -479,6 +483,7 @@ export class ClaudeCodeSession {
     this._lastResultCost = undefined  // Fresh session — no previous cost to compare
     this._askUserIntercepted = false
     this.fullText = ''
+    this._emittedStreamKeys.clear()
     this._cwd = cwd ?? null
 
     const isResume = !!resumeSessionId && !forkSession
@@ -1341,9 +1346,16 @@ export class ClaudeCodeSession {
       case 'assistant': {
         const msg = event as StreamMessageEvent
         if (!Array.isArray(msg.message?.content)) break
+        const msgId = msg.message?.id ?? ''
         const parentToolUseId = msg.parent_tool_use_id ?? undefined
         for (const block of msg.message.content) {
           if (block.type === 'text' && block.text) {
+            // Dedup: skip text blocks already emitted for this message
+            // (daemon reconnect with fromOffset:0 replays entire JSONL)
+            const dedupKey = `${msgId}:text:${block.text}`
+            if (this._emittedStreamKeys.has(dedupKey)) continue
+            this._emittedStreamKeys.add(dedupKey)
+
             // Rewrite remote image paths to local paths (no-op for local sessions)
             const text = this.rewriteRemoteImages(block.text)
             if (this.fullText.length < MAX_FULL_TEXT) {
@@ -1356,6 +1368,12 @@ export class ClaudeCodeSession {
               delta: text,
             }, ['main-ai'], { source: 'session-runner', urgency: 'urgent' })
           } else if (block.type === 'tool_use') {
+            // Dedup: skip tool_use blocks already emitted (daemon replay protection)
+            if (block.id) {
+              const toolDedupKey = `${msgId}:tool_use:${block.id}`
+              if (this._emittedStreamKeys.has(toolDedupKey)) continue
+              this._emittedStreamKeys.add(toolDedupKey)
+            }
             this._activity = `Using ${block.name}`
 
             // Cache image file paths from tool inputs (e.g. Read tool's file_path).
