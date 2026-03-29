@@ -12,17 +12,22 @@ interface RepoDetailProps {
 export function RepoDetail({ repo, onBack, onEdit, onDelete }: RepoDetailProps) {
   const [content, setContent] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
+    setError(null);
     fetchRepository(repo.slug).then((detail) => {
       if (!cancelled) {
         setContent(detail.content);
         setLoading(false);
       }
-    }).catch(() => {
-      if (!cancelled) setLoading(false);
+    }).catch((err) => {
+      if (!cancelled) {
+        setError(err instanceof Error ? err.message : String(err));
+        setLoading(false);
+      }
     });
     return () => { cancelled = true; };
   }, [repo.slug]);
@@ -66,6 +71,8 @@ export function RepoDetail({ repo, onBack, onEdit, onDelete }: RepoDetailProps) 
         <h4>Raw YAML</h4>
         {loading ? (
           <p className="text-muted">Loading...</p>
+        ) : error ? (
+          <p className="text-muted" style={{ color: 'var(--color-error, #ff3b30)' }}>Failed to load: {error}</p>
         ) : (
           <pre className="repo-yaml-content">{content}</pre>
         )}

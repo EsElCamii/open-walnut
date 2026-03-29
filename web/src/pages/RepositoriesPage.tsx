@@ -44,8 +44,12 @@ export function RepositoriesPage() {
 
   const handleDelete = useCallback(async (slug: string) => {
     if (!confirm(`Delete repository "${slug}"?`)) return;
-    await remove(slug);
-    if (selected?.slug === slug) setSelected(null);
+    try {
+      await remove(slug);
+      if (selected?.slug === slug) setSelected(null);
+    } catch {
+      // useRepositories.refresh() handles re-fetching; error is transient
+    }
   }, [remove, selected]);
 
   const handleSelect = useCallback((repo: RepoSummary) => {

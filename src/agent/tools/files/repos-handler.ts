@@ -29,7 +29,8 @@ function parseYamlHeader(content: string): { name?: string; description?: string
   const hosts: string[] = [];
   let inHosts = false;
 
-  for (const line of lines) {
+  for (let li = 0; li < lines.length; li++) {
+    const line = lines[li];
     if (line.startsWith('name:')) {
       name = line.slice('name:'.length).trim().replace(/^["']|["']$/g, '');
       inHosts = false;
@@ -37,8 +38,7 @@ function parseYamlHeader(content: string): { name?: string; description?: string
       description = line.slice('description:'.length).trim().replace(/^["']|["']$/g, '');
       if (description === '|' || description === '>') {
         // Multi-line description — grab next non-empty indented line
-        const idx = lines.indexOf(line);
-        for (let i = idx + 1; i < lines.length; i++) {
+        for (let i = li + 1; i < lines.length; i++) {
           const nextLine = lines[i].trim();
           if (nextLine && lines[i].startsWith(' ')) {
             description = nextLine;

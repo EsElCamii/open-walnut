@@ -10,6 +10,20 @@ import { REPOSITORIES_DIR } from '../../constants.js'
 import { log } from '../../logging/index.js'
 
 const MAX_REPO_SIZE = 100_000 // 100 KB
+const SLUG_RE = /^[a-z0-9][a-z0-9._-]*$/i
+
+/**
+ * Validate a repo slug and send 400 if invalid.
+ * Applied to ALL routes (GET/POST/DELETE) — Express decodes %2F in params,
+ * so without this, path traversal via e.g. /api/repositories/..%2F..%2Fetc is possible.
+ */
+function validateSlug(name: string | string[], res: Response): name is string {
+  if (typeof name !== 'string' || !SLUG_RE.test(name)) {
+    res.status(400).json({ error: 'Invalid repository name. Use alphanumeric, hyphens, dots, underscores.' })
+    return false
+  }
+  return true
+}
 
 export const repositoriesRouter = Router()
 
@@ -48,6 +62,7 @@ repositoriesRouter.get('/', async (_req: Request, res: Response, next: NextFunct
 repositoriesRouter.get('/:name', async (req: Request, res: Response, next: NextFunction) => {
   try {
     const { name } = req.params
+    if (!validateSlug(name, res)) return
     const filePath = path.join(REPOSITORIES_DIR, `${name}.yaml`)
     try {
       const content = await fsp.readFile(filePath, 'utf-8')
@@ -78,11 +93,7 @@ repositoriesRouter.post('/:name', async (req: Request, res: Response, next: Next
       res.status(413).json({ error: `Content too large (max ${MAX_REPO_SIZE} bytes)` })
       return
     }
-    // Validate slug
-    if (!/^[a-z0-9][a-z0-9._-]*$/i.test(name)) {
-      res.status(400).json({ error: 'Invalid repository name. Use alphanumeric, hyphens, dots, underscores.' })
-      return
-    }
+    if (!validateSlug(name, res)) return
 
     await fsp.mkdir(REPOSITORIES_DIR, { recursive: true })
     const filePath = path.join(REPOSITORIES_DIR, `${name}.yaml`)
@@ -99,6 +110,7 @@ repositoriesRouter.post('/:name', async (req: Request, res: Response, next: Next
 repositoriesRouter.delete('/:name', async (req: Request, res: Response, next: NextFunction) => {
   try {
     const { name } = req.params
+    if (!validateSlug(name, res)) return
     const filePath = path.join(REPOSITORIES_DIR, `${name}.yaml`)
     try {
       await fsp.unlink(filePath)
@@ -128,7 +140,8 @@ function parseYamlHeader(content: string): { name?: string; description?: string
   let inHosts = false
   let currentHost: string | null = null
 
-  for (const line of lines) {
+  for (let li = 0; li < lines.length; li++) {
+    const line = lines[li]
     if (line.startsWith('name:')) {
       name = line.slice('name:'.length).trim().replace(/^["']|["']$/g, '')
       inHosts = false
@@ -137,8 +150,7 @@ function parseYamlHeader(content: string): { name?: string; description?: string
       if (val !== '|' && val !== '>') description = val
       else {
         // Read next indented line
-        const idx = lines.indexOf(line)
-        for (let i = idx + 1; i < lines.length; i++) {
+        for (let i = li + 1; i < lines.length; i++) {
           if (lines[i].startsWith(' ') && lines[i].trim()) {
             description = lines[i].trim()
             break
