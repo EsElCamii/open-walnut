@@ -262,12 +262,38 @@ function parseSessionMessages(content: string): SessionHistoryMessage[] {
     const existing = messageMap.get(msgId);
 
     if (existing) {
-      // Merge content blocks from duplicate lines
+      // Merge content blocks from duplicate lines (with deduplication).
+      // Claude Code writes each content block as a separate JSONL line sharing
+      // the same message.id. Daemon reconnects or stream replays can cause the
+      // same line to appear multiple times. Without dedup, identical text blocks
+      // get joined by '\n' producing repeated output (e.g. 4x the same sentence).
       if (raw.message.content) {
         const blocks = typeof raw.message.content === 'string'
           ? [{ type: 'text' as const, text: raw.message.content }]
           : raw.message.content;
-        existing.contentBlocks.push(...blocks);
+        // Dedup strategy: text/thinking use content equality (no stable ID); tool_use uses block.id (UUID).
+        for (const block of blocks) {
+          if (block.type === 'text' && block.text) {
+            const isDup = existing.contentBlocks.some(
+              b => b.type === 'text' && b.text === block.text
+            );
+            if (isDup) continue;
+          }
+          if (block.type === 'thinking' && block.thinking) {
+            const isDup = existing.contentBlocks.some(
+              b => b.type === 'thinking' && b.thinking === block.thinking
+            );
+            if (isDup) continue;
+          }
+          // tool_use blocks: deduplicate by block.id
+          if (block.type === 'tool_use' && block.id) {
+            const isDup = existing.contentBlocks.some(
+              b => b.type === 'tool_use' && b.id === block.id
+            );
+            if (isDup) continue;
+          }
+          existing.contentBlocks.push(block);
+        }
       }
       if (raw.message.usage) {
         existing.usage = raw.message.usage;
@@ -735,6 +761,9 @@ export interface RecoveredSessionState {
   activity?: string;
   /** 'error' or 'agent_complete' if a result event was found. */
   workStatus?: string;
+  /** Byte length of the JSONL content that was read during recovery.
+   *  Used as fromOffset when attaching to remote daemons to skip stale replays. */
+  jsonlByteLength?: number;
 }
 
 /**
@@ -775,7 +804,9 @@ export async function recoverStateFromJsonl(sessionId: string, cwd?: string, hos
   try {
     const lines = content.split('\n').filter(Boolean);
 
-    const state: RecoveredSessionState = {};
+    const state: RecoveredSessionState = {
+      jsonlByteLength: Buffer.byteLength(content, 'utf-8'),
+    };
 
     for (const line of lines) {
       let parsed: Record<string, unknown>;

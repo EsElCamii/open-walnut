@@ -197,10 +197,13 @@ export class RemoteSessionManager implements SessionManager {
         log.session.info('RemoteSessionManager: session already alive after reconnect, attaching', {
           host: this.hostKey, sid, pid: status.pid,
         })
-        // Session was started by the lost command — attach instead of re-starting
-        const attachResult = await this.conn!.send('attach', { sid, fromOffset: 0 })
+        // Session was started by the lost command — attach instead of re-starting.
+        // Use tracked _fileSize so we skip already-processed bytes and avoid replaying
+        // the entire JSONL (which causes duplicate content blocks → repeated text in UI).
+        // _fileSize === 0 means no bytes were delivered yet, so fromOffset 0 replays all — correct.
+        const attachResult = await this.conn!.send('attach', { sid, fromOffset: this._fileSize || 0 })
         // Merge pid from status into attach result for consistent return shape
-        return { ...attachResult, pid: status.pid, outputFile: status.outputFile, offset: 0 }
+        return { ...attachResult, pid: status.pid, outputFile: status.outputFile, offset: this._fileSize || 0 }
       }
     } catch {
       // Status probe failed — daemon may not know this session, safe to retry start
@@ -516,7 +519,7 @@ export class RemoteSessionManager implements SessionManager {
       case 'jsonl':
         if ((event.sid === this._sid || event.sid === this._prevSid) && event.line) {
           this._lastEventAt = Date.now()
-          this._fileSize += Buffer.byteLength(event.line + '\n', 'utf-8')
+          this._fileSize += Buffer.byteLength(event.line + '\n', 'utf-8') // feeds fromOffset in retryStartAfterReconnect()
 
           // Forward to handler
           this._onOutput?.({ line: event.line })

@@ -124,6 +124,56 @@ describe('readSessionHistory', () => {
     expect(messages[0].text).toBe('Part 1\nPart 2');
   });
 
+  it('deduplicates identical text blocks from replayed lines (4x repeat bug)', async () => {
+    // Simulates daemon reconnect replaying the same JSONL line 4 times.
+    // Without dedup, textParts.join('\n') would produce the text 4 times.
+    const textLine = { type: 'assistant', timestamp: '2025-01-01T00:00:00Z', message: { id: 'a1', role: 'assistant', content: [{ type: 'text', text: 'Let me check the quota.' }] } };
+    await writeJsonl('s-dedup-text', '/test', [
+      textLine, textLine, textLine, textLine,
+    ]);
+
+    const messages = await readSessionHistory('s-dedup-text', '/test');
+    expect(messages).toHaveLength(1);
+    expect(messages[0].text).toBe('Let me check the quota.');
+  });
+
+  it('deduplicates identical thinking blocks from replayed lines', async () => {
+    const thinkLine = { type: 'assistant', timestamp: '2025-01-01T00:00:00Z', message: { id: 'a1', role: 'assistant', content: [{ type: 'thinking', thinking: 'Deep thought' }] } };
+    await writeJsonl('s-dedup-think', '/test', [
+      thinkLine, thinkLine, thinkLine,
+    ]);
+
+    const messages = await readSessionHistory('s-dedup-think', '/test');
+    expect(messages).toHaveLength(1);
+    expect(messages[0].thinking).toBe('Deep thought');
+  });
+
+  it('deduplicates identical tool_use blocks by block id', async () => {
+    const toolLine = { type: 'assistant', timestamp: '2025-01-01T00:00:00Z', message: { id: 'a1', role: 'assistant', content: [{ type: 'tool_use', id: 'tu_1', name: 'Read', input: { file: 'test.ts' } }] } };
+    await writeJsonl('s-dedup-tool', '/test', [
+      toolLine, toolLine,
+    ]);
+
+    const messages = await readSessionHistory('s-dedup-tool', '/test');
+    expect(messages).toHaveLength(1);
+    expect(messages[0].tools).toHaveLength(1);
+    expect(messages[0].tools![0].name).toBe('Read');
+  });
+
+  it('keeps distinct text blocks even with same message id', async () => {
+    // Normal case: same message.id but genuinely different content blocks
+    await writeJsonl('s-dedup-distinct', '/test', [
+      { type: 'assistant', timestamp: '2025-01-01T00:00:00Z', message: { id: 'a1', role: 'assistant', content: [{ type: 'text', text: 'First part' }] } },
+      { type: 'assistant', timestamp: '2025-01-01T00:00:01Z', message: { id: 'a1', role: 'assistant', content: [{ type: 'text', text: 'Second part' }] } },
+      { type: 'assistant', timestamp: '2025-01-01T00:00:02Z', message: { id: 'a1', role: 'assistant', content: [{ type: 'tool_use', id: 'tu_2', name: 'Bash', input: { cmd: 'ls' } }] } },
+    ]);
+
+    const messages = await readSessionHistory('s-dedup-distinct', '/test');
+    expect(messages).toHaveLength(1);
+    expect(messages[0].text).toBe('First part\nSecond part');
+    expect(messages[0].tools).toHaveLength(1);
+  });
+
   it('extracts tool_use blocks', async () => {
     await writeJsonl('s3', '/test', [
       { type: 'assistant', timestamp: '2025-01-01T00:00:00Z', message: { id: 'a1', role: 'assistant', content: [
