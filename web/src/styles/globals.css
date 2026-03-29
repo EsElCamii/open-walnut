@@ -12157,14 +12157,19 @@ img[data-lightbox-src],
   gap: 6px;
 }
 
-.session-plan-popover .execute-plan-btn {
-  padding: 6px 10px;
-  font-size: 12px;
-}
-
+.session-plan-popover .execute-plan-btn,
 .session-plan-popover .execute-plan-btn-secondary {
   padding: 6px 10px;
   font-size: 12px;
+  white-space: normal;
+  flex-wrap: wrap;
+}
+
+.session-plan-popover .execute-plan-btn-desc {
+  font-size: 10px;
+  margin-left: 0;
+  width: 100%;
+  opacity: 0.7;
 }
 
 .session-plan-popover .execute-plan-btn-desc {
