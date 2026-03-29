@@ -91,9 +91,7 @@ export function SkillsPage() {
       </div>
 
       {showForm && (
-        <div style={{ marginBottom: 16 }}>
-          <SkillForm onSave={handleCreate} onCancel={() => setShowForm(false)} />
-        </div>
+        <SkillForm onSave={handleCreate} onCancel={() => setShowForm(false)} />
       )}
 
       <div className="skill-search-row">
@@ -122,7 +120,7 @@ export function SkillsPage() {
           {(['all', 'enabled', 'disabled'] as const).map((tab) => (
             <button
               key={tab}
-              className={`skill-filter-tab${statusFilter === tab ? ' active' : ''}${tab === 'disabled' ? ' skill-filter-tab-status' : ''}`}
+              className={`skill-filter-tab${statusFilter === tab ? ' active' : ''}`}
               onClick={() => setStatusFilter(tab)}
             >
               {tab.charAt(0).toUpperCase() + tab.slice(1)}{tab !== 'all' ? ` (${counts[tab]})` : ''}

@@ -113,6 +113,7 @@ export const MEMORY_FILE = path.join(WALNUT_HOME, 'MEMORY.md');
 export const PROJECTS_MEMORY_DIR = path.join(MEMORY_DIR, 'projects');
 export const CHAT_HISTORY_FILE = path.join(WALNUT_HOME, 'chat-history.json');
 export const GLOBAL_SKILLS_DIR = path.join(WALNUT_HOME, 'skills');
+export const SKILL_SETTINGS_FILE = path.join(WALNUT_HOME, 'skill-settings.json');
 export const CLAUDE_SKILLS_DIR = path.join(CLAUDE_HOME, 'skills');
 export const CRON_FILE = path.join(WALNUT_HOME, 'cron-jobs.json');
 export const USAGE_DB_FILE = path.join(WALNUT_HOME, 'usage.sqlite');

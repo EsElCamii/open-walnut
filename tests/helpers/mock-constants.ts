@@ -39,7 +39,9 @@ export function createMockConstants(prefix = 'walnut-test') {
     CLAUDE_HOME: path.join(tmpBase, '.claude'),
     HOOK_LOG_FILE: path.join(tmpBase, 'hook-errors.log'),
     GLOBAL_SKILLS_DIR: path.join(tmpBase, 'skills'),
+    BUILTIN_SKILLS_DIR: path.join(tmpBase, 'data', 'skills'),
     CLAUDE_SKILLS_DIR: path.join(tmpBase, '.claude', 'skills'),
+    SKILL_SETTINGS_FILE: path.join(tmpBase, 'skill-settings.json'),
     CHAT_HISTORY_FILE: path.join(tmpBase, 'chat-history.json'),
     CRON_FILE: path.join(tmpBase, 'cron-jobs.json'),
     PLUGIN_A_SYNC_FILE: path.join(tmpBase, 'sync', 'plugin-a-sync.json'),
@@ -56,6 +58,8 @@ export function createMockConstants(prefix = 'walnut-test') {
     NOTES_DIR: path.join(tmpBase, 'notes'),
     REPOSITORIES_DIR: path.join(tmpBase, 'repositories'),
     TIMELINE_DIR: path.join(tmpBase, 'timeline'),
+    COMMANDS_DIR: path.join(tmpBase, 'commands'),
+    BUILTIN_COMMANDS_DIR: path.join(tmpBase, 'data', 'slash-commands'),
     DAEMON_BINARIES_DIR: REAL_DAEMON_BINARIES_DIR,
   };
 }

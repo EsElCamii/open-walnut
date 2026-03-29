@@ -154,7 +154,11 @@ export function createSkillsRouter(): Router {
       res.json({ content });
     } catch (err) {
       if (err instanceof Error) {
-        if (err.message.includes('not found') || err.message === 'Invalid filename') {
+        if (err.message === 'Invalid filename') {
+          res.status(400).json({ error: err.message });
+          return;
+        }
+        if (err.message.includes('not found')) {
           res.status(404).json({ error: err.message });
           return;
         }

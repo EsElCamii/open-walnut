@@ -7,13 +7,12 @@
  *   ~/.open-walnut/skills/       — walnut global
  *   ~/.claude/skills/      — claude skills (shared across tools)
  */
-import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import yaml from 'js-yaml';
 import { log } from '../logging/index.js';
-import { GLOBAL_SKILLS_DIR, CLAUDE_SKILLS_DIR, BUILTIN_SKILLS_DIR } from '../constants.js';
+import { GLOBAL_SKILLS_DIR, CLAUDE_SKILLS_DIR, BUILTIN_SKILLS_DIR, SKILL_SETTINGS_FILE } from '../constants.js';
 
 export interface SkillMeta {
   name: string;
@@ -182,7 +181,7 @@ export function clearSkillsCache(): void {
 /** Read the set of disabled skill dirNames from skill-settings.json. */
 async function getDisabledSkillSet(): Promise<Set<string>> {
   try {
-    const raw = await fsp.readFile(path.join(WALNUT_HOME, 'skill-settings.json'), 'utf-8');
+    const raw = await fsp.readFile(SKILL_SETTINGS_FILE, 'utf-8');
     const parsed = JSON.parse(raw);
     if (Array.isArray(parsed.disabled)) return new Set(parsed.disabled);
   } catch {

@@ -8,6 +8,7 @@ import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { createPortal } from 'react-dom';
 import { fetchFileContent, type FileContentResponse } from '@/api/files';
 import { renderMarkdownWithRefs } from '@/utils/markdown';
+import { formatSize } from '@/utils/format';
 
 interface FileViewerProps {
   path: string;
@@ -28,12 +29,6 @@ function extToLang(ext: string): string {
     kt: 'kotlin', c: 'c', cpp: 'cpp', h: 'c', hpp: 'cpp',
   };
   return map[ext] || '';
-}
-
-function formatSize(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
 export function FileViewer({ path: filePath, line, host, onClose }: FileViewerProps) {

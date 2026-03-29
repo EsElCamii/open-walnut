@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import type { SkillInfo, RefFile } from '@/api/skills';
 import { fetchReferences } from '@/api/skills';
+import { formatSize } from '@/utils/format';
 
 interface SkillDetailProps {
   skill: SkillInfo;
@@ -19,13 +20,17 @@ export function SkillDetail({ skill, onSave, onDelete, onToggle }: SkillDetailPr
   const [refsLoaded, setRefsLoaded] = useState(false);
   const isReadonly = skill.source === 'workspace';
 
+  // Only reset editor when switching to a different skill.
+  // Do NOT depend on skill.content — refetches after toggle/update would
+  // overwrite unsaved user edits.
   useEffect(() => {
     setContent(skill.content);
     setDirty(false);
     setConfirmDelete(false);
     setRefsOpen(false);
     setRefsLoaded(false);
-  }, [skill.dirName, skill.content]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [skill.dirName]);
 
   const handleLoadRefs = useCallback(async () => {
     if (refsLoaded) {
@@ -67,12 +72,6 @@ export function SkillDetail({ skill, onSave, onDelete, onToggle }: SkillDetailPr
     } catch (err) {
       alert(err instanceof Error ? err.message : 'Failed to delete');
     }
-  };
-
-  const formatSize = (bytes: number) => {
-    if (bytes < 1024) return `${bytes} B`;
-    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
   };
 
   return (

@@ -14773,6 +14773,7 @@ img[data-lightbox-src],
 
 .skill-form {
   padding: 20px;
+  margin-bottom: 16px;
 }
 
 .skill-form-title {
@@ -15032,11 +15033,11 @@ img[data-lightbox-src],
 
 /* ─── Search Results ─── */
 
-.notes-search-result {
+.notes-tree-item.notes-search-result {
   flex-direction: column;
-  align-items: flex-start !important;
-  gap: 2px !important;
-  padding: 8px 12px !important;
+  align-items: flex-start;
+  gap: 2px;
+  padding: 8px 12px;
 }
 
 .notes-search-result-content {

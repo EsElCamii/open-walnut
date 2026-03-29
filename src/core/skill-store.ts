@@ -7,8 +7,7 @@
 import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
-import { log } from '../logging/index.js';
-import { GLOBAL_SKILLS_DIR, CLAUDE_SKILLS_DIR, BUILTIN_SKILLS_DIR, WALNUT_HOME } from '../constants.js';
+import { GLOBAL_SKILLS_DIR, CLAUDE_SKILLS_DIR, BUILTIN_SKILLS_DIR, SKILL_SETTINGS_FILE } from '../constants.js';
 import {
   discoverSkills,
   getSearchDirs,
@@ -33,8 +32,6 @@ export interface SkillInfo {
 interface SkillSettings {
   disabled: string[];
 }
-
-const SKILL_SETTINGS_FILE = path.join(WALNUT_HOME, 'skill-settings.json');
 
 // ─── settings persistence ──────────────────────────────────────────
 
@@ -198,6 +195,13 @@ export async function deleteSkill(dirName: string): Promise<void> {
 }
 
 export async function setSkillEnabled(dirName: string, enabled: boolean): Promise<SkillInfo> {
+  // Validate skill exists BEFORE modifying settings
+  const dirs = getSearchDirs();
+  const discovered = await discoverSkills(dirs);
+  if (!discovered.has(dirName)) {
+    throw new Error(`Skill not found: ${dirName}`);
+  }
+
   const settings = await readSettings();
   const disabledSet = new Set(settings.disabled);
 
@@ -261,4 +265,3 @@ export async function getReference(dirName: string, filename: string): Promise<s
   return fsp.readFile(filePath, 'utf-8');
 }
 
-export { readSettings as getSkillSettings };

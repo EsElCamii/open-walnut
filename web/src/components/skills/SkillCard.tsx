@@ -1,15 +1,11 @@
 import type { SkillInfo } from '@/api/skills';
+import { formatSize } from '@/utils/format';
 
 interface SkillCardProps {
   skill: SkillInfo;
   selected: boolean;
   onSelect: (skill: SkillInfo) => void;
   onToggle: (dirName: string, enabled: boolean) => void;
-}
-
-function fmtSize(chars: number): string {
-  if (chars < 1024) return `${chars} B`;
-  return `${(chars / 1024).toFixed(1)} KB`;
 }
 
 export function SkillCard({ skill, selected, onSelect, onToggle }: SkillCardProps) {
@@ -32,10 +28,10 @@ export function SkillCard({ skill, selected, onSelect, onToggle }: SkillCardProp
           )}
           <div className="skill-card-sizes">
             <span className="skill-size-pill" title="Description injected into every system prompt (always loaded)">
-              prompt <strong>{fmtSize(skill.description.length)}</strong>
+              prompt <strong>{formatSize(skill.description.length)}</strong>
             </span>
             <span className="skill-size-pill" title="Full SKILL.md loaded on-demand when skill is activated">
-              doc <strong>{fmtSize(skill.content.length)}</strong>
+              doc <strong>{formatSize(skill.content.length)}</strong>
             </span>
           </div>
         </div>
