@@ -685,13 +685,19 @@ export const SessionPanel = memo(function SessionPanel({ sessionId, onClose, onT
             />
           </div>
         )}
-        {ps === 'error' && session?.errorMessage && (
-          <div className="session-error-banner">
-            <span className="session-error-banner-icon">&#x26A0;&#xFE0F;</span>
-            <span className="session-error-banner-text">{session.errorMessage}</span>
-            <SessionRetryButton sessionId={sessionId} onRetried={handleRetried} onResuming={handleResuming} />
-          </div>
-        )}
+        {ps === 'error' && session?.errorMessage && (() => {
+          const isReconnecting = session.errorMessage.includes('Connection lost')
+            && session.activity?.includes('Reconnecting');
+          return (
+            <div className={`session-error-banner${isReconnecting ? ' session-error-banner--reconnecting' : ''}`}>
+              <span className="session-error-banner-icon">{isReconnecting ? '\u21BB' : '\u26A0\uFE0F'}</span>
+              <span className="session-error-banner-text" style={isReconnecting ? { color: 'var(--warning, #f59e0b)' } : undefined}>
+                {isReconnecting ? 'Reconnecting to remote host...' : session.errorMessage}
+              </span>
+              <SessionRetryButton sessionId={sessionId} onRetried={handleRetried} onResuming={handleResuming} />
+            </div>
+          );
+        })()}
         <div className="session-panel-body" ref={bodyRef}>
           <SessionChatHistory
             key={sessionId}

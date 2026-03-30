@@ -220,6 +220,10 @@ export class DaemonConnection {
         localPort: this.localPort,
         remotePort: daemonPort,
       })
+
+      // Initial connection: recover any sessions that were left in error state
+      // from a previous server run (e.g. server restart while sessions were error).
+      this.recoverDisconnectedSessions().catch(() => {})
     } catch (err) {
       this._connecting = false
       throw err
@@ -908,9 +912,19 @@ export class DaemonConnection {
               sessionId: s.claudeSessionId, host: this.hostKey,
             })
           }
-        } catch { /* daemon doesn't know this session — keep error */ }
+        } catch (err) {
+          log.session.debug('DaemonConnection: failed to probe session during recovery', {
+            sessionId: s.claudeSessionId, host: this.hostKey,
+            error: err instanceof Error ? err.message : String(err),
+          })
+        }
       }
-    } catch { /* session tracker not available */ }
+    } catch (err) {
+      log.session.warn('DaemonConnection: recoverDisconnectedSessions failed', {
+        host: this.hostKey,
+        error: err instanceof Error ? err.message : String(err),
+      })
+    }
   }
 
   private startPing(): void {
@@ -1023,4 +1037,23 @@ export function getDaemonPoolStatus(): DaemonStatus[] {
     result.push({ host, connected: conn.connected })
   }
   return result
+}
+
+/**
+ * Probe a remote daemon to check if a session's process is still alive.
+ * Returns { alive: true/false } if daemon is reachable, null if not connected.
+ * Used by session-health-monitor to auto-recover connection-lost sessions.
+ */
+export async function probeDaemonSession(
+  hostKey: string,
+  sessionId: string,
+): Promise<{ alive: boolean } | null> {
+  const conn = connectionPool.get(hostKey)
+  if (!conn?.connected) return null
+  try {
+    const result = await conn.send('status', { sid: sessionId })
+    return { alive: !!(result.ok && result.alive) }
+  } catch {
+    return null
+  }
 }

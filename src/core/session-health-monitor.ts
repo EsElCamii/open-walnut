@@ -43,6 +43,9 @@ export class SessionHealthMonitor {
     // Kill orphaned processes from terminal/stopped sessions (leaked processes)
     await this.killOrphanedProcesses()
 
+    // Auto-recover remote sessions stuck in 'error' due to connection loss
+    await this.recoverConnectionLostSessions(updateSessionRecord)
+
     let sessions
     try {
       sessions = await listNonTerminalSessions()
@@ -463,6 +466,111 @@ export class SessionHealthMonitor {
       }
     } catch (err) {
       log.session.debug('health monitor: orphan process cleanup failed, will retry', {
+        error: err instanceof Error ? err.message : String(err),
+      })
+    }
+  }
+
+  /**
+   * Auto-recover remote sessions stuck in 'error' with "Connection lost" message.
+   *
+   * This is the persistent recovery loop that runs every 30s. It complements
+   * DaemonConnection.recoverDisconnectedSessions() (which is one-shot on reconnect)
+   * by continuously retrying recovery for sessions that were missed due to
+   * timing races (e.g. daemon reconnected before health monitor marked error).
+   *
+   * For each matching session:
+   *   - Daemon connected + process alive → restore to 'running'
+   *   - Daemon connected + process dead → set 'stopped' (resumable)
+   *   - Daemon not connected → update activity to "Reconnecting..." (UI shows yellow banner)
+   */
+  private async recoverConnectionLostSessions(
+    updateSessionRecord: (id: string, update: Record<string, unknown>) => Promise<unknown>,
+  ): Promise<void> {
+    try {
+      const { listSessions } = await import('./session-tracker.js')
+      const { isDaemonConnected, probeDaemonSession } = await import('../providers/daemon-connection.js')
+      const sessions = await listSessions()
+
+      for (const s of sessions) {
+        // Only target remote sessions in error state with "Connection lost" message
+        if (!s.host) continue
+        if (s.process_status !== 'error') continue
+        if (!s.errorMessage?.includes('Connection lost')) continue
+        if (s.archived) continue
+
+        try {
+          if (isDaemonConnected(s.host)) {
+            // Daemon is connected — probe the remote process
+            const probe = await probeDaemonSession(s.host, s.claudeSessionId)
+
+            if (probe === null) {
+              // Probe failed (daemon disconnected mid-probe) — retry next cycle
+              continue
+            }
+
+            const now = new Date().toISOString()
+            if (probe.alive) {
+              // Process still running — restore session
+              await updateSessionRecord(s.claudeSessionId, {
+                process_status: 'running',
+                errorMessage: undefined,
+                activity: undefined,
+                last_status_change: now,
+                status_reason: 'auto_recovered',
+                status_changed_by: 'health-monitor',
+              } as any)
+              bus.emit(EventNames.SESSION_STATUS_CHANGED, {
+                sessionId: s.claudeSessionId,
+                taskId: s.taskId,
+                process_status: 'running',
+              }, ['*'], { source: 'health-monitor', urgency: 'urgent' })
+              log.session.info('health monitor: auto-recovered connection-lost session', {
+                sessionId: s.claudeSessionId, host: s.host, alive: true,
+              })
+            } else {
+              // Process dead — mark stopped (user's next message will --resume)
+              await updateSessionRecord(s.claudeSessionId, {
+                process_status: 'stopped',
+                errorMessage: undefined,
+                activity: undefined,
+                last_status_change: now,
+                status_reason: 'auto_recovered_dead',
+                status_changed_by: 'health-monitor',
+              } as any)
+              bus.emit(EventNames.SESSION_STATUS_CHANGED, {
+                sessionId: s.claudeSessionId,
+                taskId: s.taskId,
+                process_status: 'stopped',
+              }, ['*'], { source: 'health-monitor', urgency: 'urgent' })
+              log.session.info('health monitor: auto-recovered connection-lost session (process dead)', {
+                sessionId: s.claudeSessionId, host: s.host, alive: false,
+              })
+            }
+          } else {
+            // Daemon not connected — update activity so UI shows "Reconnecting..." banner
+            // Only update if not already showing reconnecting message (avoid churn)
+            if (s.activity !== 'Reconnecting to remote host...') {
+              await updateSessionRecord(s.claudeSessionId, {
+                activity: 'Reconnecting to remote host...',
+              })
+              bus.emit(EventNames.SESSION_STATUS_CHANGED, {
+                sessionId: s.claudeSessionId,
+                taskId: s.taskId,
+                process_status: 'error',
+                activity: 'Reconnecting to remote host...',
+              }, ['*'], { source: 'health-monitor' })
+            }
+          }
+        } catch (err) {
+          log.session.debug('health monitor: connection-lost recovery failed for session', {
+            sessionId: s.claudeSessionId, host: s.host,
+            error: err instanceof Error ? err.message : String(err),
+          })
+        }
+      }
+    } catch (err) {
+      log.session.debug('health monitor: recoverConnectionLostSessions failed', {
         error: err instanceof Error ? err.message : String(err),
       })
     }
