@@ -570,7 +570,7 @@ export class SessionHealthMonitor {
         }
       }
     } catch (err) {
-      log.session.debug('health monitor: recoverConnectionLostSessions failed', {
+      log.session.warn('health monitor: recoverConnectionLostSessions failed', {
         error: err instanceof Error ? err.message : String(err),
       })
     }

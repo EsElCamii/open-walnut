@@ -126,22 +126,23 @@ interface ChatPayload {
 }
 
 // ── Plan Mode prompt injection ──
+// Pure prompt control for plan mode — no tool filtering, just instruction injection.
 
 const PLAN_MODE_FULL_INSTRUCTION = `[PLAN MODE]
-You are currently in PLAN MODE. This is a discussion-only phase.
+Plan mode is active. The user indicated that they do not want you to execute yet — you MUST NOT create or update tasks, start or send to sessions, write or edit files, run shell commands, or otherwise make any changes to the system. This supersedes any other instructions you have received.
 
-Rules:
-- COMMUNICATE, don't execute. Discuss ideas, ask clarifying questions, explore options.
-- You may READ and SEARCH freely — query tasks, read files, search memory, browse the web.
-- Do NOT create/update/delete tasks, start sessions, write files, or execute commands.
-- Do NOT take any action that changes state. If unsure, ask first.
-- Focus on understanding the user's intent before proposing solutions.
-- When proposing a plan, be specific but don't execute it yet.
+You may freely use read-only tools: query tasks, read files, search memory, browse the web, analyze images.
 
-The user will switch to Execution mode when they're ready to proceed.
+Your role in plan mode:
+- COMMUNICATE — discuss ideas, ask clarifying questions, explore options with the user.
+- Understand the user's intent fully before proposing solutions.
+- When proposing a plan, be specific about what you would do, but do NOT execute it.
+- If you are unsure about something, ask the user rather than making assumptions.
+
+The user will switch to Execution mode when they are ready for you to act.
 [/PLAN MODE]`
 
-const PLAN_MODE_REMINDER = '[Reminder: You are in PLAN MODE — discuss and explore only, do not execute.]'
+const PLAN_MODE_REMINDER = '[Reminder: Plan mode is still active — discuss and explore only, do not execute or make changes.]'
 
 /**
  * Build a human-readable task context prefix for the agent.

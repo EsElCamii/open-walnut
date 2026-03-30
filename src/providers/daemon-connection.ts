@@ -1052,8 +1052,13 @@ export async function probeDaemonSession(
   if (!conn?.connected) return null
   try {
     const result = await conn.send('status', { sid: sessionId })
+    // result.ok = daemon recognized the session; result.alive = OS process is still running. Both required.
     return { alive: !!(result.ok && result.alive) }
-  } catch {
+  } catch (err) {
+    log.session.debug('probeDaemonSession: status probe failed', {
+      hostKey, sessionId,
+      error: err instanceof Error ? err.message : String(err),
+    })
     return null
   }
 }

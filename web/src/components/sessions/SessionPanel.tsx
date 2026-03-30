@@ -691,7 +691,7 @@ export const SessionPanel = memo(function SessionPanel({ sessionId, onClose, onT
           return (
             <div className={`session-error-banner${isReconnecting ? ' session-error-banner--reconnecting' : ''}`}>
               <span className="session-error-banner-icon">{isReconnecting ? '\u21BB' : '\u26A0\uFE0F'}</span>
-              <span className="session-error-banner-text" style={isReconnecting ? { color: 'var(--warning, #f59e0b)' } : undefined}>
+              <span className="session-error-banner-text">
                 {isReconnecting ? 'Reconnecting to remote host...' : session.errorMessage}
               </span>
               <SessionRetryButton sessionId={sessionId} onRetried={handleRetried} onResuming={handleResuming} />

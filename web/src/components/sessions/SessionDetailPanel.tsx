@@ -618,7 +618,7 @@ export function SessionDetailPanel({ session, taskTitle, summary, phase: propPha
           return (
             <div className={`session-error-banner${isReconnecting ? ' session-error-banner--reconnecting' : ''}`}>
               <span className="session-error-banner-icon">{isReconnecting ? '\u21BB' : ICON_WARNING}</span>
-              <span className="session-error-banner-text" style={isReconnecting ? { color: 'var(--warning, #f59e0b)' } : undefined}>
+              <span className="session-error-banner-text">
                 {isReconnecting ? 'Reconnecting to remote host...' : session.errorMessage}
               </span>
               <SessionRetryButton sessionId={session.claudeSessionId} onRetried={handleRetried} onResuming={handleResuming} />

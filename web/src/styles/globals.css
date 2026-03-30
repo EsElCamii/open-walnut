@@ -2740,7 +2740,6 @@ input:focus, textarea:focus, select:focus {
 .session-error-banner--reconnecting .session-error-banner-icon {
   animation: spin 1.5s linear infinite;
 }
-@keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
 .session-error-banner-icon { font-size: 14px; flex-shrink: 0; line-height: 1.3; }
 .session-error-banner-text {
   color: var(--danger, #ff3b30);
@@ -2749,6 +2748,9 @@ input:focus, textarea:focus, select:focus {
   word-break: break-word;
   max-height: 120px;
   overflow-y: auto;
+}
+.session-error-banner--reconnecting .session-error-banner-text {
+  color: var(--warning, #f59e0b);
 }
 
 /* ── Team Tab Bar (top-level: Lead | Team1 | Team2) ── */

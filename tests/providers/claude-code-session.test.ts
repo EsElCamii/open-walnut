@@ -1181,3 +1181,88 @@ describe('ClaudeCodeSession SSH host', () => {
     await waitForResult(collected);
   });
 });
+
+// ═══════════════════════════════════════════════════════════════════
+//  Category C — Streaming event dedup regression
+//
+//  Uses mock-claude-replay.mjs to simulate daemon reconnect replaying
+//  JSONL N times. Verifies handleStreamLine deduplicates repeated events.
+// ═══════════════════════════════════════════════════════════════════
+
+const MOCK_REPLAY_CLI = path.resolve(import.meta.dirname, 'mock-claude-replay.mjs');
+
+describe('Category C: Streaming event dedup regression', () => {
+  afterEach(() => {
+    delete process.env.MOCK_REPLAY_COUNT;
+  });
+
+  // C1–C3: parameterized text replay (2x, 4x, 8x)
+  for (const replayCount of [2, 4, 8]) {
+    it(`C1-C3: ${replayCount}x text replay → exactly 1 text delta`, async () => {
+      process.env.MOCK_REPLAY_COUNT = String(replayCount);
+      const collected = collectEvents();
+      const session = new ClaudeCodeSession(`task-replay-${replayCount}x`, 'proj', MOCK_REPLAY_CLI);
+      session.send('Hello');
+
+      await waitForResult(collected);
+
+      // Despite N replays, only 1 unique text block should be emitted
+      expect(collected.textDeltas).toHaveLength(1);
+      expect(collected.textDeltas[0].data.delta).toBe('Processed: Hello');
+    });
+  }
+
+  it('C4: 4x tool_use replay → exactly 1 tool use event', async () => {
+    process.env.MOCK_REPLAY_COUNT = '4';
+    const collected = collectEvents();
+    const session = new ClaudeCodeSession('task-replay-tool', 'proj', MOCK_REPLAY_CLI);
+    session.send('tool-test');
+
+    await waitForResult(collected);
+
+    expect(collected.toolUses).toHaveLength(1);
+    expect(collected.toolUses[0].data.toolUseId).toBe('toolu_mock_001');
+  });
+
+  it('C5: 4x mixed content → textDeltas=2 (pre-tool + post-tool), toolUses=1', async () => {
+    process.env.MOCK_REPLAY_COUNT = '4';
+    const collected = collectEvents();
+    const session = new ClaudeCodeSession('task-replay-mixed', 'proj', MOCK_REPLAY_CLI);
+    session.send('tool-test');
+
+    await waitForResult(collected);
+
+    // Pre-tool text ("Let me read that file.") + post-tool text ("Processed: tool-test")
+    expect(collected.textDeltas).toHaveLength(2);
+    expect(collected.toolUses).toHaveLength(1);
+  });
+
+  it('C6: different texts in same message are NOT deduped', async () => {
+    process.env.MOCK_REPLAY_COUNT = '2';
+    const collected = collectEvents();
+    const session = new ClaudeCodeSession('task-replay-twotexts', 'proj', MOCK_REPLAY_CLI);
+    session.send('two-texts');
+
+    await waitForResult(collected);
+
+    // Two genuinely different text blocks in the same message → both emitted
+    expect(collected.textDeltas).toHaveLength(2);
+    expect(collected.textDeltas[0].data.delta).toBe('First distinct text.');
+    expect(collected.textDeltas[1].data.delta).toBe('Second distinct text.');
+  });
+
+  it('C7: fullText does not contain repeated content after 4x replay', async () => {
+    process.env.MOCK_REPLAY_COUNT = '4';
+    const collected = collectEvents();
+    const session = new ClaudeCodeSession('task-replay-fulltext', 'proj', MOCK_REPLAY_CLI);
+    session.send('Hello');
+
+    await waitForResult(collected);
+
+    // fullText should contain the response text exactly once
+    const expectedText = 'Processed: Hello';
+    expect(session.fullText).toBe(expectedText);
+    // Double-check: no duplication
+    expect(session.fullText).not.toBe(expectedText + expectedText);
+  });
+});

@@ -254,7 +254,8 @@ export function GenericToolCall({ tool, status = 'done', result: resultProp, ses
   // Merge result from explicit prop (streaming path) and tool.result (persisted history path)
   const result = resultProp ?? (tool as { result?: string }).result;
   const safeInput = (tool.input && typeof tool.input === 'object') ? tool.input : {};
-  const description = typeof safeInput.description === 'string' ? safeInput.description : null;
+  const rawDesc = typeof safeInput.description === 'string' ? safeInput.description.trim() : '';
+  const description = rawDesc ? (rawDesc.length > 120 ? rawDesc.slice(0, 120) + '...' : rawDesc) : null;
   const inputSummary = Object.entries(safeInput)
     .filter(([k]) => k !== 'description')
     .map(([k, v]) => {
