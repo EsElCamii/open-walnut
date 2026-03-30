@@ -686,6 +686,8 @@ export const SessionPanel = memo(function SessionPanel({ sessionId, onClose, onT
           </div>
         )}
         {ps === 'error' && session?.errorMessage && (() => {
+          // Coupling: 'Connection lost' is set by session-health-monitor when daemon unreachable.
+          // 'Reconnecting' activity is set by the same monitor's recoverConnectionLostSessions().
           const isReconnecting = session.errorMessage.includes('Connection lost')
             && session.activity?.includes('Reconnecting');
           return (

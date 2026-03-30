@@ -873,6 +873,7 @@ export class DaemonConnection {
         if (s.host !== this.hostKey) continue
         if (s.process_status !== 'error') continue
         if (!s.errorMessage?.includes('Connection lost')) continue
+        if (s.archived) continue
 
         // Ask daemon if this session's process is still alive
         try {
@@ -881,6 +882,7 @@ export class DaemonConnection {
             await updateSessionRecord(s.claudeSessionId, {
               process_status: 'running',
               errorMessage: undefined,
+              activity: undefined,
               last_status_change: new Date().toISOString(),
               status_reason: 'daemon_reconnected',
               status_changed_by: 'daemon',
@@ -899,6 +901,7 @@ export class DaemonConnection {
             await updateSessionRecord(s.claudeSessionId, {
               process_status: 'stopped',
               errorMessage: undefined,
+              activity: undefined,
               last_status_change: new Date().toISOString(),
               status_reason: 'daemon_reported_exit',
               status_changed_by: 'daemon',
