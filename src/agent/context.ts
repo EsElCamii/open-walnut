@@ -10,6 +10,7 @@ import { getAllProjectSummaries } from '../core/project-memory.js';
 import { getCompactionSummary } from '../core/chat-history.js';
 import { buildAgentsSection } from './subagent-context.js';
 import { listRepoSummaries } from './tools/files/repos-handler.js';
+import { getAllRepoMemorySummaries } from '../core/repo-memory.js';
 import { TASKS_FILE } from '../constants.js';
 import type { Task } from '../core/types.js';
 
@@ -79,8 +80,14 @@ export function buildMemoryContext(budget: number = 20000): string {
     ? repoSummaries.map(r => `- **${r.name}**: ${r.description}${r.hosts.length > 0 ? ` [${r.hosts.join(', ')}]` : ''}`).join('\n')
     : '';
 
+  // Repo environment memories
+  const repoMemSummaries = getAllRepoMemorySummaries();
+  const repoMemLine = repoMemSummaries.length > 0
+    ? `\nEnvironment memories (${repoMemSummaries.length}): Use \`files_read source='memory/repo/{slug}'\` to read, \`files_write source='memory/repo/{slug}' mode='append'\` to add learnings.`
+    : '';
+
   const repoSection = repoLines
-    ? `\n\n## Your repositories\n${repoLines}\nUse \`files_read source='repos/{name}'\` for full details, \`files_list prefix='repos'\` to list all.`
+    ? `\n\n## Your repositories\n${repoLines}\nUse \`files_read source='repos/{name}'\` for full details, \`files_list prefix='repos'\` to list all.${repoMemLine}`
     : '';
 
   return `## Task Categories & Projects

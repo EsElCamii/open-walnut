@@ -81,6 +81,9 @@ Special sources (use these URIs instead of raw file paths):
                            (e.g. memory/project/work/api, memory/project/passion/walnut).
   memory/daily           — Today's activity log (timestamped entries from all sessions).
   memory/daily/YYYY-MM-DD — Specific day's log (e.g. memory/daily/2026-03-25).
+  memory/repo            — List all repository environment memories.
+  memory/repo/{slug}     — Environment learnings for a specific repository (build quirks,
+                           conventions, structure, known issues). Auto-injected into sessions.
   repos/                 — List all registered repositories (name, description, hosts).
   repos/{name}           — Read repository details (YAML: hosts, tech stack, architecture, commands).
   /absolute/path         — Any file on disk. Images (PNG/JPEG/GIF/WebP) return inline.
@@ -159,7 +162,7 @@ content_hash (from files_read) required for overwrite on memory/notes sources �
 For file sources: content_hash is optional but recommended for safety.
 
 Sources: notes/global, notes/{name}, memory/global, memory/project/{path},
-memory/daily[/YYYY-MM-DD], repos/{name}, /absolute/path — see files_read for full descriptions.`,
+memory/daily[/YYYY-MM-DD], memory/repo/{slug}, repos/{name}, /absolute/path — see files_read for full descriptions.`,
   input_schema: {
     type: 'object',
     properties: {
@@ -213,7 +216,7 @@ content_hash (from files_read) required for memory/notes sources — prevents st
 For file sources: content_hash is optional but recommended.
 
 Sources: notes/global, notes/{name}, memory/global, memory/project/{path},
-memory/daily[/YYYY-MM-DD], repos/{name}, /absolute/path — see files_read for full descriptions.`,
+memory/daily[/YYYY-MM-DD], memory/repo/{slug}, repos/{name}, /absolute/path — see files_read for full descriptions.`,
   input_schema: {
     type: 'object',
     properties: {
@@ -270,6 +273,7 @@ export const filesListTool: ToolDefinition = {
   "notes"          → all note documents (global + named notes)
   "memory/project" → all project memories with names & descriptions
   "memory/daily"   → all daily log dates (most recent first)
+  "memory/repo"    → all repository environment memories
   "repos"          → all registered repositories (name, description, hosts)
   "/path/to/dir"   → directory listing of files on disk`,
   input_schema: {

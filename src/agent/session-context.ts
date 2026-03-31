@@ -24,6 +24,7 @@ const CONVERSATION_LOG_BUDGET = 300
 const SESSION_BUDGET = 600
 const PROJECT_MEMORY_BUDGET = 1500
 const REPOSITORY_BUDGET = 2000
+const REPO_MEMORY_BUDGET = 1500
 
 const MAX_SESSIONS = 3
 
@@ -230,6 +231,26 @@ export async function buildSessionContext(taskId: string, cwd?: string, host?: s
             REPOSITORY_BUDGET,
           ),
         )
+
+        // Repo environment memory (dynamic learnings accumulated by agents)
+        try {
+          const { getRepoMemory, REPO_MEMORY_MAX_LINES } = await import('../core/repo-memory.js')
+          const repoMem = getRepoMemory(repo.slug)
+          if (repoMem && repoMem.content.trim()) {
+            // Tail-truncate to max lines (keep most recent entries)
+            const lines = repoMem.content.split('\n')
+            const truncatedContent = lines.length > REPO_MEMORY_MAX_LINES
+              ? lines.slice(-REPO_MEMORY_MAX_LINES).join('\n')
+              : repoMem.content
+
+            sections.push(
+              truncateToTokenBudget(
+                `<repository_memory repo="${repo.slug}">\n${truncatedContent}\n</repository_memory>`,
+                REPO_MEMORY_BUDGET,
+              ),
+            )
+          }
+        } catch { /* non-critical */ }
       }
     } catch {
       // non-critical — repository matching is best-effort

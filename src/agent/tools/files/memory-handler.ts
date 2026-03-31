@@ -1,12 +1,13 @@
 /**
- * MemoryHandler — handles memory/global, memory/project/*, memory/daily/* sources.
- * Reuses existing core modules: memory-file, project-memory, daily-log.
+ * MemoryHandler — handles memory/global, memory/project/*, memory/daily/*, memory/repo/* sources.
+ * Reuses existing core modules: memory-file, project-memory, repo-memory, daily-log.
  */
 import fs from 'node:fs';
 import path from 'node:path';
 import { DAILY_DIR } from '../../../constants.js';
 import { readFileWithMeta, writeFileChecked, editFileContent } from '../../../utils/file-ops.js';
 import { appendProjectMemory, ensureProjectDir, getAllProjectSummaries } from '../../../core/project-memory.js';
+import { appendRepoMemory, ensureRepoMemoryDir, getAllRepoMemorySummaries } from '../../../core/repo-memory.js';
 import { appendDailyLog, formatDateKey } from '../../../core/daily-log.js';
 import { ensureMemoryFile } from '../../../core/memory-file.js';
 import type { FileHandler, ResolvedSource, FilesReadResult, FilesWriteResult, FilesEditResult, FilesListItem } from './types.js';
@@ -43,6 +44,9 @@ export const memoryHandler: FileHandler = {
     if (resolved.variant === 'project' && resolved.meta?.projectPath) {
       ensureProjectDir(resolved.meta.projectPath);
     }
+    if (resolved.variant === 'repo' && resolved.meta?.slug) {
+      ensureRepoMemoryDir(resolved.meta.slug);
+    }
     if (resolved.variant === 'global') {
       ensureMemoryFile();
     }
@@ -78,6 +82,16 @@ export const memoryHandler: FileHandler = {
       const summaries = getAllProjectSummaries();
       return summaries.map((s) => ({
         source: `memory/project/${s.path}`,
+        name: s.name,
+        description: s.description,
+      }));
+    }
+
+    // memory/repo → list all repo memories
+    if (resolved.variant === 'repo-list') {
+      const summaries = getAllRepoMemorySummaries();
+      return summaries.map((s) => ({
+        source: `memory/repo/${s.slug}`,
         name: s.name,
         description: s.description,
       }));
@@ -152,6 +166,15 @@ function handleMemoryAppend(resolved: ResolvedSource, content: string): FilesWri
       written_to: writtenTo,
       summary: result.summary,
     };
+  }
+
+  if (resolved.variant === 'repo') {
+    const slug = resolved.meta?.slug;
+    if (!slug) {
+      throw new Error('slug is required for repo memory append.');
+    }
+    appendRepoMemory(slug, content, 'agent');
+    return { status: 'saved', content_hash: '', written_to: ['repo'] };
   }
 
   throw new Error(`Append not supported for memory variant "${resolved.variant}".`);

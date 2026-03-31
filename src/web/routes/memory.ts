@@ -8,7 +8,7 @@ import { Router, type Request, type Response, type NextFunction } from 'express'
 import { listMemories, getMemory } from '../../core/memory.js'
 import { compactDailyLog, formatDateKey, getDailyLog, estimateTokens } from '../../core/daily-log.js'
 import { getMemoryFile } from '../../core/memory-file.js'
-import { MEMORY_FILE, DAILY_DIR, MEMORY_DIR } from '../../constants.js'
+import { MEMORY_FILE, DAILY_DIR, MEMORY_DIR, REPOS_MEMORY_DIR } from '../../constants.js'
 import { log } from '../../logging/index.js'
 
 export const memoryRouter = Router()
@@ -64,7 +64,21 @@ memoryRouter.get('/browse', (_req: Request, res: Response, next: NextFunction) =
     // Sort sessions by updatedAt desc
     sessions.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
 
-    res.json({ tree: { global, daily, projects, sessions, knowledge } })
+    // Repo environment memories
+    const repos: BrowseItem[] = []
+    try {
+      const dirs = fs.readdirSync(REPOS_MEMORY_DIR, { withFileTypes: true })
+      for (const d of dirs) {
+        if (!d.isDirectory()) continue
+        const memFile = path.join(REPOS_MEMORY_DIR, d.name, 'MEMORY.md')
+        try {
+          const stat = fs.statSync(memFile)
+          repos.push({ path: `repos/${d.name}/MEMORY.md`, title: d.name, updatedAt: stat.mtime.toISOString() })
+        } catch { /* no MEMORY.md */ }
+      }
+    } catch { /* REPOS_MEMORY_DIR doesn't exist yet */ }
+
+    res.json({ tree: { global, daily, projects, sessions, knowledge, repos } })
   } catch (err) {
     next(err)
   }

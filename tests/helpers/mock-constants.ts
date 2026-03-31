@@ -57,6 +57,7 @@ export function createMockConstants(prefix = 'walnut-test') {
     GLOBAL_NOTES_FILE: path.join(tmpBase, 'global-notes.md'),
     NOTES_DIR: path.join(tmpBase, 'notes'),
     REPOSITORIES_DIR: path.join(tmpBase, 'repositories'),
+    REPOS_MEMORY_DIR: path.join(tmpBase, 'memory', 'repos'),
     TIMELINE_DIR: path.join(tmpBase, 'timeline'),
     COMMANDS_DIR: path.join(tmpBase, 'commands'),
     BUILTIN_COMMANDS_DIR: path.join(tmpBase, 'data', 'slash-commands'),

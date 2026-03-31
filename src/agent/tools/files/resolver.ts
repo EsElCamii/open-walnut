@@ -11,6 +11,7 @@ import path from 'node:path';
 import {
   MEMORY_FILE,
   PROJECTS_MEMORY_DIR,
+  REPOS_MEMORY_DIR,
   DAILY_DIR,
   GLOBAL_NOTES_FILE,
   WALNUT_HOME,
@@ -96,6 +97,30 @@ export function resolveSource(source: string): ResolvedSource {
     };
   }
 
+  // ── memory/repo → repo environment memory ──
+  if (source === 'memory/repo') {
+    return {
+      type: 'memory',
+      filePath: REPOS_MEMORY_DIR,
+      source,
+      variant: 'repo-list',
+    };
+  }
+
+  if (source.startsWith('memory/repo/')) {
+    const slug = source.slice('memory/repo/'.length);
+    if (!slug || slug.includes('..') || slug.includes('/')) {
+      throw new Error(`Invalid repo slug in source "${source}": must be a simple name.`);
+    }
+    return {
+      type: 'memory',
+      filePath: path.join(REPOS_MEMORY_DIR, slug, 'MEMORY.md'),
+      source,
+      variant: 'repo',
+      meta: { slug },
+    };
+  }
+
   // ── notes/* → NotesHandler ──
   if (source === 'notes/global') {
     return {
@@ -155,6 +180,6 @@ export function resolveSource(source: string): ResolvedSource {
   }
 
   throw new Error(
-    `Invalid source "${source}". Expected: /absolute/path, memory/global, memory/project/{path}, memory/daily[/YYYY-MM-DD], notes/global, notes/{name}, repos/, or repos/{name}.`,
+    `Invalid source "${source}". Expected: /absolute/path, memory/global, memory/project/{path}, memory/daily[/YYYY-MM-DD], memory/repo[/{slug}], notes/global, notes/{name}, repos/, or repos/{name}.`,
   );
 }
