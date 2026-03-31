@@ -23,6 +23,9 @@ import {
   createCategory,
   createProject,
   getStoreCategories,
+  togglePin,
+  setFocusTier,
+  getPinnedTasks,
 } from '../core/task-manager.js';
 import { VALID_PHASES, shouldRollbackToInProgress } from '../core/phase.js';
 import { search } from '../core/search.js';
@@ -2102,6 +2105,56 @@ defaults (same resolution chain as start_session).`,
 
   // ── Inline Subagent ──
   createSubagentTool,
+
+  // ── Pin / Focus Tier ──
+  {
+    name: 'pin_task',
+    description: 'Pin/unpin a task and set its focus tier. Pinned tasks appear in the Focus Bar sidebar. Focus (max 3, current sprint), Next (queued), Satellite (backlog).',
+    input_schema: {
+      type: 'object',
+      properties: {
+        task_id: { type: 'string', description: 'Task ID or prefix.' },
+        action: { type: 'string', enum: ['pin', 'unpin', 'set_tier'], description: 'Action to perform.' },
+        tier: { type: 'string', enum: ['focus', 'next', 'satellite'], description: 'Target tier (required for set_tier, optional for pin — defaults to satellite).' },
+      },
+      required: ['task_id', 'action'],
+    },
+    async execute(params) {
+      const id = params.task_id as string;
+      const action = params.action as string;
+      const tier = (params.tier as string) || 'satellite';
+
+      try {
+        const task = await getTask(id);
+
+        if (action === 'pin') {
+          if (task.pinned) return `Already pinned: ${taskRef(task.id, task.title)}`;
+          const result = await togglePin(task.id);
+          if (!result.pinned) return `Error: togglePin did not pin the task.`;
+          // Set tier after pinning
+          await setFocusTier(task.id, tier as 'focus' | 'next' | 'satellite');
+          return `Pinned ${taskRef(task.id, task.title)} → ${tier} tier.`;
+        }
+
+        if (action === 'unpin') {
+          if (!task.pinned) return `Not pinned: ${taskRef(task.id, task.title)}`;
+          await togglePin(task.id);
+          return `Unpinned ${taskRef(task.id, task.title)}.`;
+        }
+
+        if (action === 'set_tier') {
+          if (!task.pinned) return `Error: task is not pinned. Pin it first with action='pin'.`;
+          if (!['focus', 'next', 'satellite'].includes(tier)) return `Error: invalid tier "${tier}". Use focus, next, or satellite.`;
+          await setFocusTier(task.id, tier as 'focus' | 'next' | 'satellite');
+          return `Moved ${taskRef(task.id, task.title)} to ${tier} tier.`;
+        }
+
+        return `Error: unknown action "${action}". Use pin, unpin, or set_tier.`;
+      } catch (err) {
+        return `Error: ${err instanceof Error ? err.message : String(err)}`;
+      }
+    },
+  },
 
 ];
 
