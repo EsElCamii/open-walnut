@@ -1330,6 +1330,8 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
   const integrations = useIntegrations();
   const [newTitle, setNewTitle] = useState('');
   const [pinnedCollapsed, setPinnedCollapsed] = useState(false);
+  const [focusCollapsed, setFocusCollapsed] = useState(false);
+  const [satelliteCollapsed, setSatelliteCollapsed] = useState(false);
   const [recentCollapsed, setRecentCollapsed] = useState(false);
   const [collapsedCategories, setCollapsedCategories] = useState<Set<string>>(() => readSetFromStorage(LS_COLLAPSED_CATS_KEY));
   const [collapsedProjects, setCollapsedProjects] = useState<Set<string>>(() => readSetFromStorage(LS_COLLAPSED_PROJS_KEY));
@@ -2548,51 +2550,57 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
           </div>
           {!pinnedCollapsed && (
             <DndContext sensors={pinnedSensors} collisionDetection={closestCenter} onDragEnd={handlePinnedDragEnd}>
-              {/* Focus sub-group */}
+              {/* Focus sub-group — collapsible */}
               <div className="todo-pinned-subgroup">
-                <div className="todo-pinned-sublabel">
+                <div className="todo-pinned-sublabel" onClick={() => setFocusCollapsed(c => !c)} role="button" tabIndex={0} onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') setFocusCollapsed(c => !c); }} style={{ cursor: 'pointer' }}>
+                  <span className={`todo-pinned-chevron todo-pinned-sub-chevron${focusCollapsed ? '' : ' todo-pinned-chevron-open'}`}>{'\u25B8'}</span>
                   <span className="todo-pinned-sublabel-icon todo-icon-focus" />
                   <span className="todo-pinned-sublabel-text">Focus</span>
                   <span className="todo-pinned-sublabel-count">{focusTasksLocal.length}</span>
                 </div>
-                <SortableContext items={focusIds_arr} strategy={verticalListSortingStrategy}>
-                  <FocusDropZone id="focus-drop-zone" isEmpty={focusTasksLocal.length === 0} isFull={false}>
-                    {focusTasksLocal.map((task) => (
-                      <SortableFocusCard
-                        key={task.id}
-                        task={task}
-                        isFocused={focusedTaskId === task.id}
-                        onClick={handlePinnedCardClick}
-                        onDemoteTask={onDemoteTask}
-                        onUnpinTask={onUnpinTask}
-                      />
-                    ))}
-                  </FocusDropZone>
-                </SortableContext>
-              </div>
-
-              {/* Satellite sub-group */}
-              {satelliteTasksLocal.length > 0 && (
-                <div className="todo-pinned-subgroup">
-                  <div className="todo-pinned-sublabel">
-                    <span className="todo-pinned-sublabel-icon todo-icon-satellite" />
-                    <span className="todo-pinned-sublabel-text">Satellite</span>
-                    <span className="todo-pinned-sublabel-count">{satelliteTasksLocal.length}</span>
-                  </div>
-                  <SortableContext items={satelliteIds_arr} strategy={verticalListSortingStrategy}>
-                    <div className="todo-pinned-list todo-pinned-list-scroll" style={{ maxHeight: PINNED_VISIBLE_MAX * 30 }}>
-                      {satelliteTasksLocal.map((task) => (
-                        <SortableSatelliteCard
+                {!focusCollapsed && (
+                  <SortableContext items={focusIds_arr} strategy={verticalListSortingStrategy}>
+                    <FocusDropZone id="focus-drop-zone" isEmpty={focusTasksLocal.length === 0} isFull={false}>
+                      {focusTasksLocal.map((task) => (
+                        <SortableFocusCard
                           key={task.id}
                           task={task}
                           isFocused={focusedTaskId === task.id}
                           onClick={handlePinnedCardClick}
-                          onPromoteTask={onPromoteTask}
+                          onDemoteTask={onDemoteTask}
                           onUnpinTask={onUnpinTask}
                         />
                       ))}
-                    </div>
+                    </FocusDropZone>
                   </SortableContext>
+                )}
+              </div>
+
+              {/* Satellite sub-group — collapsible */}
+              {satelliteTasksLocal.length > 0 && (
+                <div className="todo-pinned-subgroup">
+                  <div className="todo-pinned-sublabel" onClick={() => setSatelliteCollapsed(c => !c)} role="button" tabIndex={0} onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') setSatelliteCollapsed(c => !c); }} style={{ cursor: 'pointer' }}>
+                    <span className={`todo-pinned-chevron todo-pinned-sub-chevron${satelliteCollapsed ? '' : ' todo-pinned-chevron-open'}`}>{'\u25B8'}</span>
+                    <span className="todo-pinned-sublabel-icon todo-icon-satellite" />
+                    <span className="todo-pinned-sublabel-text">Satellite</span>
+                    <span className="todo-pinned-sublabel-count">{satelliteTasksLocal.length}</span>
+                  </div>
+                  {!satelliteCollapsed && (
+                    <SortableContext items={satelliteIds_arr} strategy={verticalListSortingStrategy}>
+                      <div className="todo-pinned-list todo-pinned-list-scroll" style={{ maxHeight: PINNED_VISIBLE_MAX * 30 }}>
+                        {satelliteTasksLocal.map((task) => (
+                          <SortableSatelliteCard
+                            key={task.id}
+                            task={task}
+                            isFocused={focusedTaskId === task.id}
+                            onClick={handlePinnedCardClick}
+                            onPromoteTask={onPromoteTask}
+                            onUnpinTask={onUnpinTask}
+                          />
+                        ))}
+                      </div>
+                    </SortableContext>
+                  )}
                 </div>
               )}
             </DndContext>
