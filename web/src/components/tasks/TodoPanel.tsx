@@ -1327,7 +1327,7 @@ interface RecentCardProps {
 function RecentCard({ task, isFocused, onClick, onPinTask }: RecentCardProps) {
   const needsAttention = task.phase === 'AGENT_COMPLETE' || task.phase === 'AWAIT_HUMAN_ACTION';
   const phaseLabel = PHASE_LABEL[task.phase] ?? task.phase;
-  const ago = task.last_session_update ? timeAgo(task.last_session_update) : '';
+  const ago = timeAgo(task.last_session_update ?? task.created_at);
 
   return (
     <div
@@ -1598,13 +1598,20 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
       .filter((t): t is Task => !!t && t.status !== 'done' && t.phase !== 'COMPLETE');
   }, [tasks, pinnedTaskIds]);
 
-  // Recent tasks: tasks with session activity, excluding pinned and completed
+  // Recent tasks: all non-completed tasks excluding pinned, sorted by most recent activity
   const recentTasks = useMemo(() => {
     const pinSet = pinnedTaskIds ?? new Set<string>();
+    // Use the most recent timestamp between session activity and creation time
+    const recentTime = (t: Task) => {
+      const s = t.last_session_update ?? '';
+      const c = t.created_at ?? '';
+      return s > c ? s : c;
+    };
     return tasks
-      .filter(t => t.last_session_update && !pinSet.has(t.id)
+      .filter(t => !pinSet.has(t.id)
                    && t.status !== 'done' && t.phase !== 'COMPLETE')
-      .sort((a, b) => (b.last_session_update ?? '').localeCompare(a.last_session_update ?? ''));
+      .sort((a, b) => recentTime(b).localeCompare(recentTime(a)))
+      .slice(0, 50);
   }, [tasks, pinnedTaskIds]);
 
   const sensors = useSensors(
