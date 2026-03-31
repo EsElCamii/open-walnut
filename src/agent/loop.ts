@@ -426,7 +426,7 @@ export async function runAgentLoop(
     }
 
     // Execute tool calls and build tool_result blocks
-    const toolResults: Array<{ type: 'tool_result'; tool_use_id: string; content: ToolResultContent }> = [];
+    const toolResults: Array<{ type: 'tool_result'; tool_use_id: string; content: ToolResultContent; is_error?: boolean }> = [];
     for (const toolUse of toolUseBlocks) {
       // Abort checkpoint 3: before each tool execution
       if (signal?.aborted) {
@@ -452,10 +452,19 @@ export async function runAgentLoop(
         : toolResult.map(b => b.type === 'text' ? (b as { text: string }).text : '[image]').join('\n');
       callbacks?.onToolResult?.(toolUse.name, displayResult, toolUse.id);
 
+      // Detect tool errors: all tool error paths return strings starting with "Error:"
+      // or "Error executing". Setting is_error tells the model to treat it as a failure
+      // and retry or report, rather than treating it as successful output.
+      const isError = isToolResultError(toolResult);
+      if (isError) {
+        log.agent.warn(`${logTag} tool ${toolUse.name} returned error`, { displayResult });
+      }
+
       toolResults.push({
         type: 'tool_result',
         tool_use_id: toolUse.id,
         content: toolResult,
+        ...(isError ? { is_error: true } : {}),
       });
     }
 
@@ -527,4 +536,18 @@ export async function runAgentLoop(
   }
 
   return { messages, response: finalText, tokenBreakdown: buildTokenBreakdown() };
+}
+
+/**
+ * Detect whether a tool result represents an error.
+ * All tool error paths produce strings starting with "Error:" or "Error executing".
+ * For structured content blocks, check the first text block.
+ */
+export function isToolResultError(result: ToolResultContent): boolean {
+  const text = typeof result === 'string'
+    ? result
+    : result.find(b => b.type === 'text')
+      ? (result.find(b => b.type === 'text') as { text: string }).text
+      : '';
+  return /^Error[:\s]/i.test(text);
 }
