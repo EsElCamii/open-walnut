@@ -215,6 +215,8 @@ Hidden `.metadata` tasks per project with YAML config (e.g., `default_host`, `de
     │   └── YYYY-MM-DD.md             # One file per day, timestamped entries
     ├── projects/                      # Mirrors task hierarchy
     │   └── {category}/{project}/MEMORY.md
+    ├── repos/                         # Per-repository environment knowledge
+    │   └── {slug}/MEMORY.md           # Dynamic learnings (build quirks, conventions)
     ├── sessions/                      # Session summaries (auto-captured)
     │   └── [slug].md
     ├── knowledge/                     # Knowledge articles
