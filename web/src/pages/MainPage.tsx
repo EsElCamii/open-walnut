@@ -901,7 +901,6 @@ export function MainPage({ visible = true, navigateRef }: MainPageProps) {
           onDemoteTask={focusBar.demote}
           pinnedTaskIds={pinnedTaskIdSet}
           focusTaskIds={focusTaskIdSet}
-          focusFull={focusBar.focusFull}
           suppressDetail={suppressDetail}
           operationError={operationError}
           onClearOperationError={clearOperationError}

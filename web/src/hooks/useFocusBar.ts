@@ -3,8 +3,6 @@ import { useEvent } from './useWebSocket';
 import * as focusApi from '@/api/focus';
 import type { Task } from '@open-walnut/core';
 
-const FOCUS_MAX = 3;
-
 export interface UseFocusBarReturn {
   pinnedIds: string[];
   pinnedTasks: Task[];
@@ -19,7 +17,6 @@ export interface UseFocusBarReturn {
   demote: (taskId: string) => Promise<void>;
   isPinned: (taskId: string) => boolean;
   isFocus: (taskId: string) => boolean;
-  focusFull: boolean;
   visible: boolean;
   setVisible: (v: boolean) => void;
 }
@@ -132,7 +129,6 @@ export function useFocusBar(tasks: Task[]): UseFocusBarReturn {
   }, [fetchPinned]);
 
   const promote = useCallback(async (taskId: string) => {
-    if (focusIds.length >= FOCUS_MAX) return;
     lastWriteRef.current = Date.now();
     // Optimistic: move from satellite to focus
     setFocusIds((prev) => prev.includes(taskId) ? prev : [...prev, taskId]);
@@ -146,7 +142,7 @@ export function useFocusBar(tasks: Task[]): UseFocusBarReturn {
       setFocusIds((prev) => prev.filter((id) => id !== taskId));
       setSatelliteIds((prev) => prev.includes(taskId) ? prev : [...prev, taskId]);
     }
-  }, [focusIds]);
+  }, []);
 
   const demote = useCallback(async (taskId: string) => {
     lastWriteRef.current = Date.now();
@@ -174,8 +170,6 @@ export function useFocusBar(tasks: Task[]): UseFocusBarReturn {
     [focusIds],
   );
 
-  const focusFull = focusIds.length >= FOCUS_MAX;
-
   // Resolve IDs to Task objects
   const pinnedTasks = useMemo(() => {
     const taskMap = new Map(tasks.map((t) => [t.id, t]));
@@ -202,7 +196,7 @@ export function useFocusBar(tasks: Task[]): UseFocusBarReturn {
     pinnedIds, pinnedTasks,
     focusIds, satelliteIds, focusTasks, satelliteTasks,
     pin, unpin, reorder, promote, demote,
-    isPinned, isFocus, focusFull,
+    isPinned, isFocus,
     visible, setVisible,
   };
 }

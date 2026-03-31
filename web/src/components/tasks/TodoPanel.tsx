@@ -88,7 +88,6 @@ interface TodoPanelProps {
   onDemoteTask?: (taskId: string) => void;
   pinnedTaskIds?: Set<string>;
   focusTaskIds?: Set<string>;
-  focusFull?: boolean;
   /** When true, suppress opening the detail panel for the focused task (e.g. chat task-ref clicks). */
   suppressDetail?: boolean;
   /** Set of session IDs currently displayed in session columns. */
@@ -1304,7 +1303,7 @@ function RecentCard({ task, isFocused, onClick, onPinTask }: RecentCardProps) {
 
 // ── TodoPanel ──
 
-export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onComplete, onSetPhase, onCreate, onUpdate, onStar, onSetPriority, onFocusTask, onClearFocus, focusedTaskId, focusNonce, favorites, ordering, onReorder, onMoveTask, onReparentTask, onOpenSession, onOpenTriageForTask, onPinTask, onUnpinTask, onReorderPinned, onPromoteTask, onDemoteTask, pinnedTaskIds, focusTaskIds, focusFull, suppressDetail, openSessionIds, operationError, onClearOperationError, onOperationError, externalCategory, onCategoryChange }: TodoPanelProps) {
+export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onComplete, onSetPhase, onCreate, onUpdate, onStar, onSetPriority, onFocusTask, onClearFocus, focusedTaskId, focusNonce, favorites, ordering, onReorder, onMoveTask, onReparentTask, onOpenSession, onOpenTriageForTask, onPinTask, onUnpinTask, onReorderPinned, onPromoteTask, onDemoteTask, pinnedTaskIds, focusTaskIds, suppressDetail, openSessionIds, operationError, onClearOperationError, onOperationError, externalCategory, onCategoryChange }: TodoPanelProps) {
   // Hide .metadata* tasks (project/category configuration tasks, not user-visible)
   const tasks = useMemo(() => rawTasks.filter((t) => !t.title.startsWith('.metadata')), [rawTasks]);
   const navigate = useNavigate();
@@ -1604,7 +1603,7 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
     const isOverSatellite = overId === 'satellite-drop-zone' || (!fSet.has(overId) && pinnedTaskIds_arr.includes(overId));
 
     // Cross-container: Satellite → Focus (promote)
-    if (!isActiveInFocus && isOverFocus && !focusFull) {
+    if (!isActiveInFocus && isOverFocus) {
       onPromoteTask?.(activeId);
       return;
     }
@@ -1622,7 +1621,7 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
     newOrder.splice(oldIndex, 1);
     newOrder.splice(newIndex, 0, activeId);
     onReorderPinned?.(newOrder);
-  }, [pinnedTaskIds_arr, focusTaskIds, focusFull, onReorderPinned, onPromoteTask, onDemoteTask]);
+  }, [pinnedTaskIds_arr, focusTaskIds, onReorderPinned, onPromoteTask, onDemoteTask]);
 
   // Recently completed: tracks tasks completed in the last few seconds.
   // Used for BOTH visual styling (isRecentlyDone green tint) AND filtering —
@@ -2544,7 +2543,6 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
         <div className="todo-pinned-section">
           <div className="todo-pinned-header" onClick={() => setPinnedCollapsed(c => !c)} role="button" tabIndex={0} onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') setPinnedCollapsed(c => !c); }} style={{ cursor: 'pointer' }}>
             <span className={`todo-pinned-chevron${pinnedCollapsed ? '' : ' todo-pinned-chevron-open'}`}>{'\u25B8'}</span>
-            <span className="todo-pinned-icon">{'\uD83D\uDCCC'}</span>
             <span className="todo-pinned-label">Pinned</span>
             <span className="todo-pinned-count">{pinnedTasks.length}</span>
           </div>
@@ -2553,12 +2551,12 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
               {/* Focus sub-group */}
               <div className="todo-pinned-subgroup">
                 <div className="todo-pinned-sublabel">
-                  <span className="todo-pinned-sublabel-icon">{'\u2B50'}</span>
+                  <span className="todo-pinned-sublabel-icon todo-icon-focus" />
                   <span className="todo-pinned-sublabel-text">Focus</span>
-                  <span className="todo-pinned-sublabel-count">{focusTasksLocal.length}/3</span>
+                  <span className="todo-pinned-sublabel-count">{focusTasksLocal.length}</span>
                 </div>
                 <SortableContext items={focusIds_arr} strategy={verticalListSortingStrategy}>
-                  <FocusDropZone id="focus-drop-zone" isEmpty={focusTasksLocal.length === 0} isFull={!!focusFull}>
+                  <FocusDropZone id="focus-drop-zone" isEmpty={focusTasksLocal.length === 0} isFull={false}>
                     {focusTasksLocal.map((task) => (
                       <SortableFocusCard
                         key={task.id}
@@ -2577,7 +2575,8 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
               {satelliteTasksLocal.length > 0 && (
                 <div className="todo-pinned-subgroup">
                   <div className="todo-pinned-sublabel">
-                    <span className="todo-pinned-sublabel-text">Other pinned</span>
+                    <span className="todo-pinned-sublabel-icon todo-icon-satellite" />
+                    <span className="todo-pinned-sublabel-text">Satellite</span>
                     <span className="todo-pinned-sublabel-count">{satelliteTasksLocal.length}</span>
                   </div>
                   <SortableContext items={satelliteIds_arr} strategy={verticalListSortingStrategy}>
@@ -2590,7 +2589,6 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
                           onClick={handlePinnedCardClick}
                           onPromoteTask={onPromoteTask}
                           onUnpinTask={onUnpinTask}
-                          focusFull={focusFull}
                         />
                       ))}
                     </div>
@@ -2607,7 +2605,6 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
         <div className="todo-pinned-section">
           <div className="todo-pinned-header" onClick={() => setRecentCollapsed(c => !c)} role="button" tabIndex={0} onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') setRecentCollapsed(c => !c); }} style={{ cursor: 'pointer' }}>
             <span className={`todo-pinned-chevron${recentCollapsed ? '' : ' todo-pinned-chevron-open'}`}>{'\u25B8'}</span>
-            <span className="todo-pinned-icon">{'\uD83D\uDD50'}</span>
             <span className="todo-pinned-label">Recent</span>
             <span className="todo-pinned-count">{recentTasks.length}</span>
           </div>

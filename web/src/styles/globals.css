@@ -6940,6 +6940,24 @@ img[data-lightbox-src],
   opacity: 0.7;
 }
 
+/* Pure CSS icons for Focus and Satellite sub-labels */
+.todo-icon-focus {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--accent, #007aff);
+  flex-shrink: 0;
+}
+
+.todo-icon-satellite {
+  width: 7px;
+  height: 7px;
+  border: 1.5px solid var(--fg-muted);
+  border-radius: 50%;
+  flex-shrink: 0;
+  opacity: 0.5;
+}
+
 /* ── Focus card styles ── */
 
 .todo-focus-card {
@@ -6994,11 +7012,6 @@ img[data-lightbox-src],
   border-color: var(--accent, #007aff);
 }
 
-.todo-focus-drop-full {
-  border: 2px dashed var(--error) !important;
-  background: rgba(255, 59, 48, 0.04);
-}
-
 .todo-focus-placeholder {
   font-size: 11px;
   color: var(--fg-muted);
@@ -7029,15 +7042,6 @@ img[data-lightbox-src],
 .todo-tier-btn:hover {
   opacity: 1 !important;
   color: var(--accent, #007aff);
-}
-
-.todo-tier-btn-disabled {
-  cursor: not-allowed;
-}
-
-.todo-tier-btn-disabled:hover {
-  color: var(--fg-muted) !important;
-  opacity: 0.3 !important;
 }
 
 /* ── Recent tasks (time-ago + pin button) ── */

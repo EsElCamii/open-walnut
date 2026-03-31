@@ -95,10 +95,6 @@ focusRouter.put('/tasks/:id/tier', async (req: Request, res: Response, next: Nex
     const result = await setFocusTier(taskId, focus)
     res.json(result)
   } catch (err) {
-    if (err instanceof Error && (err as Error & { status?: number }).status === 409) {
-      res.status(409).json({ error: err.message })
-      return
-    }
     if (err instanceof Error && (err.message.startsWith('Task not found') || err.message.startsWith('Task is not pinned'))) {
       res.status(400).json({ error: err.message })
       return

@@ -2552,12 +2552,11 @@ export async function getPinnedTasks(): Promise<Task[]> {
 }
 
 // Focus tier = top-priority pinned tasks shown in FocusDock.
-// Capped at 3 to match the dock's 3-card layout and avoid diluting focus.
-const FOCUS_MAX = 3;
+// No cap — users decide how many tasks to focus on.
 
 /**
  * Set the focus tier for a pinned task.
- * focus=true → promote to Focus (max 3), focus=false → demote to Satellite.
+ * focus=true → promote to Focus, focus=false → demote to Satellite.
  */
 export async function setFocusTier(taskId: string, focus: boolean): Promise<{ focus_tasks: string[]; satellite_tasks: string[] }> {
   return withWriteLock(async () => {
@@ -2567,12 +2566,6 @@ export async function setFocusTier(taskId: string, focus: boolean): Promise<{ fo
     if (!task.pinned) throw new Error(`Task is not pinned: ${task.title}`);
 
     if (focus) {
-      const currentFocusCount = store.tasks.filter(
-        (t) => t.pinned && t.focus && t.id !== taskId && t.phase !== 'COMPLETE' && t.status !== 'done',
-      ).length;
-      if (currentFocusCount >= FOCUS_MAX) {
-        throw Object.assign(new Error(`Focus full (max ${FOCUS_MAX})`), { status: 409 });
-      }
       task.focus = true;
     } else {
       delete task.focus;

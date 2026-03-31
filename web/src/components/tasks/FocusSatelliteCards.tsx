@@ -92,10 +92,9 @@ interface SortableSatelliteCardProps {
   onClick?: (task: Task) => void;
   onPromoteTask?: (taskId: string) => void;
   onUnpinTask?: (taskId: string) => void;
-  focusFull?: boolean;
 }
 
-export function SortableSatelliteCard({ task, isFocused, onClick, onPromoteTask, onUnpinTask, focusFull }: SortableSatelliteCardProps) {
+export function SortableSatelliteCard({ task, isFocused, onClick, onPromoteTask, onUnpinTask }: SortableSatelliteCardProps) {
   const {
     attributes,
     listeners,
@@ -130,11 +129,10 @@ export function SortableSatelliteCard({ task, isFocused, onClick, onPromoteTask,
       <span className="todo-pinned-title" title={task.title}>{task.title}</span>
       <span className={`todo-pinned-phase${needsAttention ? ' todo-pinned-phase-attention' : ''}`} title={phaseLabel} />
       <button
-        className={`todo-tier-btn${focusFull ? ' todo-tier-btn-disabled' : ''}`}
-        onClick={(e) => { e.stopPropagation(); if (!focusFull) onPromoteTask?.(task.id); }}
-        title={focusFull ? 'Focus full (max 3)' : 'Move to Focus'}
+        className="todo-tier-btn"
+        onClick={(e) => { e.stopPropagation(); onPromoteTask?.(task.id); }}
+        title="Move to Focus"
         aria-label="Promote to Focus"
-        disabled={focusFull}
       >
         &#x2191;
       </button>
