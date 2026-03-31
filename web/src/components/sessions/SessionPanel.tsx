@@ -136,10 +136,12 @@ export const SessionPanel = memo(function SessionPanel({ sessionId, onClose, onT
   // Fetch messages for the UserMessagesSummary
   const { messages: historyMessages, loading: historyLoading } = useSessionHistory(sessionId);
 
-  // Plan content for PlanPreviewSection
+  // Plan content for plan chip and execute buttons
   const hasPlan = !!session?.planCompleted;
   const isFromPlan = !!session?.fromPlanSessionId;
-  const shouldFetchPlan = hasPlan || isFromPlan;
+  // mode === 'plan' covers sessions still actively planning — planCompleted is only set after the plan tool call finishes,
+  // so without this the Plan chip would be hidden during active planning.
+  const shouldFetchPlan = hasPlan || isFromPlan || session?.mode === 'plan';
   const { plan, loading: planLoading, refresh: planRefresh } = useSessionPlan(sessionId || undefined, shouldFetchPlan);
 
   // Real-time model + context window usage
@@ -348,9 +350,12 @@ export const SessionPanel = memo(function SessionPanel({ sessionId, onClose, onT
     exitFullscreen();
   }, [sessionId, exitFullscreen]);
 
+  // planCompleted covers plan sessions; (plan && !planLoading) covers execution sessions where
+  // fromPlanSessionId is set but planCompleted is never true on exec records (plan content fetched from source session).
   const showExecuteButtons =
-    session?.planCompleted === true
+    (session?.planCompleted === true || (plan && !planLoading))
     && session?.process_status !== 'error'
+    && session?.process_status !== 'running'
     && !executeStarted;
 
   const handleExecuteContinue = useCallback(async () => {

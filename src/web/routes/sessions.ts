@@ -834,8 +834,9 @@ sessionsRouter.post('/:sessionId/execute-continue', async (req: Request, res: Re
       res.status(404).json({ error: 'Session not found' })
       return
     }
-    if (!session.planCompleted) {
-      res.status(400).json({ error: 'Not a completed plan session' })
+    // Allows plan sessions (planCompleted=true) and execution sessions (fromPlanSessionId set, planCompleted never true on exec records)
+    if (!session.planCompleted && !session.fromPlanSessionId) {
+      res.status(400).json({ error: 'Not a plan or execution session' })
       return
     }
     // Update mode to bypass for execution
@@ -874,8 +875,22 @@ sessionsRouter.post('/:sessionId/execute', async (req: Request, res: Response, n
       host?: string
     }
 
+    // Look up session record first to resolve fromPlanSessionId chain
+    const sourceRecord = await getSessionByClaudeId(planSessionId)
+    if (!sourceRecord) {
+      res.status(404).json({ error: 'Session not found' })
+      return
+    }
+
+    // Follow one hop to the source plan session for execution sessions. Exec sessions always point
+    // directly to a plan session (never to another exec), so one hop is sufficient.
+    let actualPlanSessionId = planSessionId
+    if (sourceRecord.fromPlanSessionId && !sourceRecord.planCompleted) {
+      actualPlanSessionId = sourceRecord.fromPlanSessionId
+    }
+
     // Read plan file via shared resolver (same logic as agent tool's from_plan path)
-    const planResult = await readPlanFromSession(planSessionId)
+    const planResult = await readPlanFromSession(actualPlanSessionId)
     if ('error' in planResult) {
       // Distinguish "session not found" (404) from "session exists but not a plan" (400)
       const status = planResult.error.includes('not found') ? 404 : 400
@@ -883,9 +898,8 @@ sessionsRouter.post('/:sessionId/execute', async (req: Request, res: Response, n
       return
     }
 
-    const record = await getSessionByClaudeId(planSessionId)
-    const taskId = task_id ?? record?.taskId
-    const cwd = working_directory ?? record?.cwd
+    const taskId = task_id ?? sourceRecord?.taskId
+    const cwd = working_directory ?? sourceRecord?.cwd
     if (!cwd) {
       res.status(400).json({ error: 'working_directory is required (plan session has no stored cwd).' })
       return
@@ -902,15 +916,18 @@ sessionsRouter.post('/:sessionId/execute', async (req: Request, res: Response, n
     const planMessage = buildPlanExecutionMessage(planResult.planFile, planResult.content, instructions)
 
     // Use host from request body, or inherit from the plan session
-    const execHost = host ?? record?.host
+    const execHost = host ?? sourceRecord?.host
 
-    // Archive the plan session (hidden from UI) and preserve planContent
-    await updateSessionRecord(planSessionId, {
-      archived: true,
-      archive_reason: 'plan_executed',
-      planContent: planResult.content,
-    })
-    log.web.info('execute: archived plan session', { planSessionId })
+    // Archive the current session (hidden from UI). Guard prevents double-archive on retry/double-click.
+    // planContent is only snapshotted on plan sessions (planCompleted=true); exec sessions skip it (already stored on the plan record).
+    if (!sourceRecord.archived) {
+      await updateSessionRecord(planSessionId, {
+        archived: true,
+        archive_reason: sourceRecord.planCompleted ? 'plan_executed' : 'plan_re_executed',
+        ...(sourceRecord.planCompleted ? { planContent: planResult.content } : {}),
+      })
+      log.web.info('execute: archived session', { planSessionId, reason: sourceRecord.planCompleted ? 'plan_executed' : 'plan_re_executed' })
+    }
 
     // Clear task session slot so UI no longer shows archived plan as active
     if (taskId) {

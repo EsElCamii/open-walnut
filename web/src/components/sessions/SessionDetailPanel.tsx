@@ -166,7 +166,9 @@ export function SessionDetailPanel({ session, taskTitle, summary, phase: propPha
   // Lift plan hook here so we can provide plan content via context to all PlanCards
   const hasPlan = !!session?.planCompleted;
   const isFromPlan = !!session?.fromPlanSessionId;
-  const shouldFetchPlan = hasPlan || isFromPlan;
+  // mode === 'plan' covers sessions still actively planning — planCompleted is only set after the plan tool call finishes,
+  // so without this the Plan chip would be hidden during active planning.
+  const shouldFetchPlan = hasPlan || isFromPlan || session?.mode === 'plan';
   const { plan, loading: planLoading, refresh: planRefresh } = useSessionPlan(sessionId_ || undefined, shouldFetchPlan);
 
   // Real-time model + context window usage
@@ -259,9 +261,12 @@ export function SessionDetailPanel({ session, taskTitle, summary, phase: propPha
   const ps = session.process_status ?? 'stopped';
   const taskPhase: TaskPhase = propPhase ?? 'TODO';
   const isEmbedded = session.provider === 'embedded';
+  // planCompleted covers plan sessions; (plan && !planLoading) covers execution sessions where
+  // fromPlanSessionId is set but planCompleted is never true on exec records (plan content fetched from source session).
   const showExecuteButtons =
-    session.planCompleted === true
+    (session.planCompleted === true || (plan && !planLoading))
     && ps !== 'error'
+    && ps !== 'running'
     && !executeStarted;
 
   /** "Execute" — resumes the same session with bypass permissions. */
