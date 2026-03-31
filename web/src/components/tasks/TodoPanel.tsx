@@ -1625,6 +1625,24 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
     onReorderPinned?.(newOrder);
   }, [pinnedTaskIds_arr, focusTaskIds, onReorderPinned, onPromoteTask, onDemoteTask]);
 
+  // Track actively-dragged pinned task for DragOverlay (cross-container visual feedback)
+  const [activeDragPinnedId, setActiveDragPinnedId] = useState<string | null>(null);
+  const activeDragPinnedTask = useMemo(
+    () => activeDragPinnedId ? pinnedTasks.find((t) => t.id === activeDragPinnedId) ?? null : null,
+    [activeDragPinnedId, pinnedTasks],
+  );
+  const handlePinnedDragStart = useCallback((event: DragStartEvent) => {
+    setActiveDragPinnedId(event.active.id as string);
+  }, []);
+  const handlePinnedDragCancel = useCallback(() => {
+    setActiveDragPinnedId(null);
+  }, []);
+  // Wrap original dragEnd to also clear overlay
+  const handlePinnedDragEndWithOverlay = useCallback((event: DragEndEvent) => {
+    setActiveDragPinnedId(null);
+    handlePinnedDragEnd(event);
+  }, [handlePinnedDragEnd]);
+
   // Recently completed: tracks tasks completed in the last few seconds.
   // Used for BOTH visual styling (isRecentlyDone green tint) AND filtering —
   // recently completed tasks stay visible briefly before being hidden, giving
@@ -2549,7 +2567,7 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
             <span className="todo-pinned-count">{pinnedTasks.length}</span>
           </div>
           {!pinnedCollapsed && (
-            <DndContext sensors={pinnedSensors} collisionDetection={closestCenter} onDragEnd={handlePinnedDragEnd}>
+            <DndContext sensors={pinnedSensors} collisionDetection={closestCenter} onDragStart={handlePinnedDragStart} onDragEnd={handlePinnedDragEndWithOverlay} onDragCancel={handlePinnedDragCancel}>
               {/* Focus sub-group — collapsible */}
               <div className="todo-pinned-subgroup">
                 <div className="todo-pinned-sublabel" onClick={() => setFocusCollapsed(c => !c)} role="button" tabIndex={0} onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') setFocusCollapsed(c => !c); }} style={{ cursor: 'pointer' }}>
@@ -2603,6 +2621,15 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
                   )}
                 </div>
               )}
+
+              {/* Floating preview card during cross-container drag */}
+              <DragOverlay dropAnimation={null}>
+                {activeDragPinnedTask && (
+                  <div className="todo-pinned-card todo-pinned-card-dragging">
+                    <span className="todo-pinned-title" title={activeDragPinnedTask.title}>{activeDragPinnedTask.title}</span>
+                  </div>
+                )}
+              </DragOverlay>
             </DndContext>
           )}
         </div>

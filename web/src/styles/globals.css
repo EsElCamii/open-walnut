@@ -6901,6 +6901,19 @@ img[data-lightbox-src],
   cursor: grabbing;
 }
 
+/* Floating card during cross-container drag */
+.todo-pinned-card-dragging {
+  background: var(--bg);
+  box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+  border: 1px solid var(--accent, #007aff);
+  border-radius: 6px;
+  padding: 4px 10px;
+  min-height: 28px;
+  font-size: 12px;
+  opacity: 0.92;
+  cursor: grabbing;
+}
+
 /* ── Focus / Satellite sub-group styles (inside unified PINNED section) ── */
 
 .todo-pinned-subgroup {
