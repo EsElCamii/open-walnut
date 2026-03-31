@@ -19,7 +19,7 @@ interface Subtask {
   updated_at: string;
 }
 import { generateId, parseGroupFromCategory } from '../utils/format.js';
-import { buildListName } from '../core/task-manager.js';
+import { buildListName, getStoreCategories } from '../core/task-manager.js';
 import type { Config } from '../core/types.js';
 
 // ── Plugin-system helpers ──
@@ -710,6 +710,25 @@ export function mapToLocal(
 // -- Push/pull operations --
 
 export async function pushTask(task: Task): Promise<string> {
+  // Guard: never push tasks whose category is registered to a different source.
+  // This prevents ms-todo from creating lists for categories owned by other plugins
+  // (e.g. plugin-reserved category lists appearing in MS Todo from non-ms-todo sources).
+  try {
+    const storeCategories = await getStoreCategories();
+    const catKey = Object.keys(storeCategories).find(
+      k => k.toLowerCase() === task.category.toLowerCase(),
+    );
+    if (catKey && storeCategories[catKey].source !== 'ms-todo') {
+      throw new Error(
+        `pushTask: refusing to push task "${task.title}" to MS Todo — ` +
+        `category "${task.category}" is registered as ${storeCategories[catKey].source}`,
+      );
+    }
+  } catch (err) {
+    // Re-throw category source conflicts; swallow store-read failures (e.g. in tests)
+    if (err instanceof Error && err.message.startsWith('pushTask: refusing')) throw err;
+  }
+
   const token = await getAccessToken();
   const listId = await resolveListIdForTask(task);
   const msBody = mapToRemote(task);
@@ -1054,26 +1073,34 @@ export async function reconcilePulledTasks(
     } else {
       const partial = mapToLocal(msTask, list.displayName);
 
-      await addLocalTask({
-        title: partial.title ?? msTask.title,
-        status: partial.status ?? 'todo',
-        phase: partial.phase ?? 'TODO',
-        priority: partial.priority ?? 'none',
-        category: partial.category ?? listCategory,
-        project: partial.project ?? listProject,
-        source: 'ms-todo',
-        session_ids: [],
-        ext: { 'ms-todo': { id: msTask.id, list_id: list.id } },
-        created_at: msTask.createdDateTime,
-        updated_at: msTask.lastModifiedDateTime,
-        due_date: partial.due_date,
-        ...(partial.parent_task_id ? { parent_task_id: partial.parent_task_id } : {}),
-        description: partial.description ?? '',
-        summary: partial.summary ?? '',
-        note: partial.note ?? '',
-        ...(partial.conversation_log ? { conversation_log: partial.conversation_log } : {}),
-      } as Omit<Task, 'id'>);
-      count++;
+      try {
+        await addLocalTask({
+          title: partial.title ?? msTask.title,
+          status: partial.status ?? 'todo',
+          phase: partial.phase ?? 'TODO',
+          priority: partial.priority ?? 'none',
+          category: partial.category ?? listCategory,
+          project: partial.project ?? listProject,
+          source: 'ms-todo',
+          session_ids: [],
+          ext: { 'ms-todo': { id: msTask.id, list_id: list.id } },
+          created_at: msTask.createdDateTime,
+          updated_at: msTask.lastModifiedDateTime,
+          due_date: partial.due_date,
+          ...(partial.parent_task_id ? { parent_task_id: partial.parent_task_id } : {}),
+          description: partial.description ?? '',
+          summary: partial.summary ?? '',
+          note: partial.note ?? '',
+          ...(partial.conversation_log ? { conversation_log: partial.conversation_log } : {}),
+        } as Omit<Task, 'id'>);
+        count++;
+      } catch (err) {
+        // Skip tasks that conflict with category source (e.g. ms-todo task in a plugin-reserved category)
+        log.web.debug('reconcilePulledTasks: skipped creating task', {
+          title: msTask.title, listName: list.displayName,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
     }
   }
   return count;

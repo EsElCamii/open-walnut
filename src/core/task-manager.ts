@@ -1805,17 +1805,24 @@ export function validateCategorySource(
     }
   }
 
-  // Check existing tasks in the category
-  const existing = tasks.find(
-    (t) => t.category.toLowerCase() === catLower && t.source !== intendedSource,
+  // Check existing tasks in the category — but only when store.categories doesn't already
+  // confirm this category belongs to intendedSource. store.categories is the source of truth;
+  // a few drifted tasks from sync pull (which bypasses validation) shouldn't block creation.
+  const storeCatConfirmed = storeCategories && Object.keys(storeCategories).some(
+    k => k.toLowerCase() === catLower && storeCategories[k].source === intendedSource,
   );
-  if (existing) {
-    return {
-      ok: false,
-      error: `Category "${category}" already contains ${existing.source} tasks. Cannot add a ${intendedSource} task to it. Use a different category name, or move existing tasks out first.`,
-      existingSource: existing.source,
-      reason: 'existing_tasks',
-    };
+  if (!storeCatConfirmed) {
+    const existing = tasks.find(
+      (t) => t.category.toLowerCase() === catLower && t.source !== intendedSource,
+    );
+    if (existing) {
+      return {
+        ok: false,
+        error: `Category "${category}" already contains ${existing.source} tasks. Cannot add a ${intendedSource} task to it. Use a different category name, or move existing tasks out first.`,
+        existingSource: existing.source,
+        reason: 'existing_tasks',
+      };
+    }
   }
 
   return { ok: true };
@@ -2761,6 +2768,21 @@ export async function addTaskFull(taskData: Omit<Task, 'id'>): Promise<Task> {
       dup.updated_at = taskData.updated_at ?? new Date().toISOString();
       await writeStore(store);
       return dup;
+    }
+  }
+
+  // Guard: reject new tasks whose source conflicts with store.categories registration.
+  // This prevents sync pull from different plugins creating tasks in categories
+  // owned by another source (e.g. ms-todo tasks landing in a plugin-reserved category).
+  if (store.categories && taskData.category) {
+    const catKey = Object.keys(store.categories).find(
+      k => k.toLowerCase() === taskData.category.toLowerCase(),
+    );
+    if (catKey && store.categories[catKey].source !== taskData.source) {
+      throw new Error(
+        `addTaskFull: category "${taskData.category}" is registered as ${store.categories[catKey].source}, ` +
+        `refusing to create ${taskData.source} task "${taskData.title}" in it`,
+      );
     }
   }
 

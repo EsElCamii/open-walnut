@@ -1129,4 +1129,36 @@ describe('updateTask — cross-source migration', () => {
     expect(r4.ok).toBe(false);
     if (!r4.ok) expect(r4.reason).toBe('existing_tasks');
   });
+
+  it('store.categories confirmation overrides drifted existing tasks', () => {
+    // Scenario: store.categories says "Work - PluginX" is plugin-x, but a few ms-todo
+    // tasks leaked in via sync pull (which bypasses validation). Creating a plugin-x
+    // task should succeed because store.categories is the source of truth.
+    const driftedTasks = [
+      {
+        id: 'drift-1', title: 'Drifted', status: 'todo' as const, phase: 'TODO' as const,
+        priority: 'none' as const, category: 'Work - PluginX', project: 'Work - PluginX',
+        source: 'ms-todo', session_ids: [], description: '', summary: '',
+        note: '', created_at: '', updated_at: '',
+      },
+    ];
+    const storeCategories = { 'Work - PluginX': { source: 'plugin-x' as const } };
+    const result = validateCategorySource(
+      driftedTasks, 'Work - PluginX', 'plugin-x', {}, storeCategories,
+    );
+    expect(result.ok).toBe(true);
+  });
+
+  it('existing_tasks still blocks when store.categories has no entry', () => {
+    const tasks = [{
+      id: 'x', title: 'X', status: 'todo' as const, phase: 'TODO' as const,
+      priority: 'none' as const, category: 'Orphan', project: 'Orphan',
+      source: 'ms-todo', session_ids: [], description: '', summary: '',
+      note: '', created_at: '', updated_at: '',
+    }];
+    // No storeCategories entry for "Orphan" → existing_tasks check still applies
+    const result = validateCategorySource(tasks, 'Orphan', 'local', {});
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.reason).toBe('existing_tasks');
+  });
 });
