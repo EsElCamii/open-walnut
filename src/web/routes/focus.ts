@@ -1,10 +1,8 @@
 /**
  * Focus Bar routes — manage pinned tasks via task-level fields.
  *
- * Pin state lives on each Task object (pinned + pin_order fields).
- * Legacy config.yaml pin lists (if any) are ignored — do not add migration code.
- * Users can pin any number of tasks. The Focus Dock UI shows only the first 3;
- * the Todo Sidebar pinned section shows all.
+ * Pin state lives on each Task object (pinned + pin_order + focus_tier fields).
+ * Three tiers: focus (current sprint), next (queued sprint), satellite (backlog).
  */
 
 import { Router, type Request, type Response, type NextFunction } from 'express'
@@ -13,16 +11,15 @@ import { bus, EventNames } from '../../core/event-bus.js'
 
 export const focusRouter = Router()
 
-// GET /api/focus/tasks — list pinned task IDs with focus/satellite split
+// GET /api/focus/tasks — list pinned task IDs with 3-tier split
 focusRouter.get('/tasks', async (_req: Request, res: Response, next: NextFunction) => {
   try {
     const pinned = await getPinnedTasks()
-    const focusTasks = pinned.filter((t) => t.focus).map((t) => t.id)
-    const satelliteTasks = pinned.filter((t) => !t.focus).map((t) => t.id)
     res.json({
       pinned_tasks: pinned.map((t) => t.id),
-      focus_tasks: focusTasks,
-      satellite_tasks: satelliteTasks,
+      focus_tasks: pinned.filter((t) => t.focus_tier === 'focus').map((t) => t.id),
+      next_tasks: pinned.filter((t) => t.focus_tier === 'next').map((t) => t.id),
+      satellite_tasks: pinned.filter((t) => !t.focus_tier).map((t) => t.id),
     })
   } catch (err) {
     next(err)
@@ -83,16 +80,18 @@ focusRouter.put('/reorder', async (req: Request, res: Response, next: NextFuncti
   }
 })
 
-// PUT /api/focus/tasks/:id/tier — promote/demote a pinned task between Focus and Satellite
+const VALID_TIERS = ['focus', 'next', 'satellite'] as const
+
+// PUT /api/focus/tasks/:id/tier — set tier (focus / next / satellite)
 focusRouter.put('/tasks/:id/tier', async (req: Request, res: Response, next: NextFunction) => {
   try {
     const taskId = req.params.id as string
-    const { focus } = req.body as { focus: boolean }
-    if (typeof focus !== 'boolean') {
-      res.status(400).json({ error: 'focus must be a boolean' })
+    const { tier } = req.body as { tier: string }
+    if (!VALID_TIERS.includes(tier as typeof VALID_TIERS[number])) {
+      res.status(400).json({ error: `tier must be one of: ${VALID_TIERS.join(', ')}` })
       return
     }
-    const result = await setFocusTier(taskId, focus)
+    const result = await setFocusTier(taskId, tier as typeof VALID_TIERS[number])
     res.json(result)
   } catch (err) {
     if (err instanceof Error && (err.message.startsWith('Task not found') || err.message.startsWith('Task is not pinned'))) {

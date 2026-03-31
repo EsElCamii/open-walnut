@@ -1098,7 +1098,7 @@ export async function completeTask(idPrefix: string): Promise<{ task: Task }> {
   if (task.pinned) {
     task.pinned = false;
     delete task.pin_order;
-    delete task.focus;
+    delete task.focus_tier;
     // Compact remaining pin orders
     const pinned = store.tasks.filter((t) => t.pinned).sort((a, b) => (a.pin_order ?? 0) - (b.pin_order ?? 0));
     pinned.forEach((t, i) => { t.pin_order = i; });
@@ -1146,7 +1146,7 @@ export async function toggleComplete(idPrefix: string): Promise<{ task: Task }> 
     if (task.pinned) {
       task.pinned = false;
       delete task.pin_order;
-      delete task.focus;
+      delete task.focus_tier;
       const pinned = store.tasks.filter((t) => t.pinned).sort((a, b) => (a.pin_order ?? 0) - (b.pin_order ?? 0));
       pinned.forEach((t, i) => { t.pin_order = i; });
     }
@@ -2499,7 +2499,7 @@ export async function togglePin(taskId: string): Promise<{ pinned: boolean; pinn
       // Unpin
       task.pinned = false;
       delete task.pin_order;
-      delete task.focus;
+      delete task.focus_tier;
       task.updated_at = now;
       // Compact remaining pin orders
       const pinned = store.tasks.filter((t) => t.pinned).sort((a, b) => (a.pin_order ?? 0) - (b.pin_order ?? 0));
@@ -2551,24 +2551,43 @@ export async function getPinnedTasks(): Promise<Task[]> {
     .sort((a, b) => (a.pin_order ?? 0) - (b.pin_order ?? 0));
 }
 
-// Focus tier = top-priority pinned tasks shown in FocusDock.
-// No cap — users decide how many tasks to focus on.
+// Focus tiers: focus (current sprint) → next (queued sprint) → satellite (backlog).
+// No cap — users decide how many tasks per tier.
+type FocusTier = 'focus' | 'next' | 'satellite';
+
+export interface TierResult {
+  focus_tasks: string[];
+  next_tasks: string[];
+  satellite_tasks: string[];
+}
+
+/** Helper: split pinned tasks into tier arrays. */
+function splitTiers(store: TaskStore): TierResult {
+  const pinned = store.tasks
+    .filter((t) => t.pinned && t.phase !== 'COMPLETE' && t.status !== 'done')
+    .sort((a, b) => (a.pin_order ?? 0) - (b.pin_order ?? 0));
+  return {
+    focus_tasks: pinned.filter((t) => t.focus_tier === 'focus').map((t) => t.id),
+    next_tasks: pinned.filter((t) => t.focus_tier === 'next').map((t) => t.id),
+    satellite_tasks: pinned.filter((t) => !t.focus_tier).map((t) => t.id),
+  };
+}
 
 /**
  * Set the focus tier for a pinned task.
- * focus=true → promote to Focus, focus=false → demote to Satellite.
+ * 'focus' = current sprint, 'next' = queued sprint, 'satellite' = backlog.
  */
-export async function setFocusTier(taskId: string, focus: boolean): Promise<{ focus_tasks: string[]; satellite_tasks: string[] }> {
+export async function setFocusTier(taskId: string, tier: FocusTier): Promise<TierResult> {
   return withWriteLock(async () => {
     const store = await readStore();
     const task = store.tasks.find((t) => t.id === taskId);
     if (!task) throw new Error(`Task not found: ${taskId}`);
     if (!task.pinned) throw new Error(`Task is not pinned: ${task.title}`);
 
-    if (focus) {
-      task.focus = true;
+    if (tier === 'focus' || tier === 'next') {
+      task.focus_tier = tier;
     } else {
-      delete task.focus;
+      delete task.focus_tier;
     }
     task.updated_at = new Date().toISOString();
 
@@ -2576,14 +2595,7 @@ export async function setFocusTier(taskId: string, focus: boolean): Promise<{ fo
     bus.emit(EventNames.TASK_UPDATED, { task }, ['web-ui'], { source: 'internal' });
     bus.emit(EventNames.CONFIG_CHANGED, { key: 'focus_bar' }, ['web-ui']);
 
-    const pinned = store.tasks
-      .filter((t) => t.pinned && t.phase !== 'COMPLETE' && t.status !== 'done')
-      .sort((a, b) => (a.pin_order ?? 0) - (b.pin_order ?? 0));
-
-    return {
-      focus_tasks: pinned.filter((t) => t.focus).map((t) => t.id),
-      satellite_tasks: pinned.filter((t) => !t.focus).map((t) => t.id),
-    };
+    return splitTiers(store);
   });
 }
 

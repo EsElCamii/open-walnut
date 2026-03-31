@@ -6957,12 +6957,20 @@ img[data-lightbox-src],
   opacity: 0.7;
 }
 
-/* Pure CSS icons for Focus and Satellite sub-labels */
+/* Pure CSS icons for tier sub-labels */
 .todo-icon-focus {
   width: 8px;
   height: 8px;
   border-radius: 50%;
   background: var(--accent, #007aff);
+  flex-shrink: 0;
+}
+
+.todo-icon-next {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #f5a623;
   flex-shrink: 0;
 }
 
@@ -6997,6 +7005,37 @@ img[data-lightbox-src],
 
 .todo-focus-card.todo-pinned-card-active {
   background: color-mix(in srgb, var(--accent, #007aff) 14%, transparent);
+}
+
+/* Next tier card — amber accent */
+.todo-next-card {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 6px;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: background 0.12s;
+  min-height: 28px;
+  border-left: 3px solid #f5a623;
+  background: color-mix(in srgb, #f5a623 4%, transparent);
+}
+
+.todo-next-card:hover {
+  background: color-mix(in srgb, #f5a623 10%, transparent);
+}
+
+.todo-next-card.todo-pinned-card-active {
+  background: color-mix(in srgb, #f5a623 14%, transparent);
+}
+
+.todo-next-card.todo-pinned-card-attention {
+  border-left-color: var(--error);
+  background: rgba(255, 59, 48, 0.08);
+}
+
+.todo-next-card.todo-pinned-card-attention:hover {
+  background: rgba(255, 59, 48, 0.14);
 }
 
 .todo-focus-card.todo-pinned-card-attention {

@@ -1,42 +1,39 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { useEvent } from './useWebSocket';
 import * as focusApi from '@/api/focus';
+import type { FocusTier } from '@/api/focus';
 import type { Task } from '@open-walnut/core';
 
 export interface UseFocusBarReturn {
   pinnedIds: string[];
   pinnedTasks: Task[];
   focusIds: string[];
+  nextIds: string[];
   satelliteIds: string[];
   focusTasks: Task[];
+  nextTasks: Task[];
   satelliteTasks: Task[];
   pin: (taskId: string) => Promise<void>;
   unpin: (taskId: string) => Promise<void>;
   reorder: (newIds: string[]) => Promise<void>;
-  promote: (taskId: string) => Promise<void>;
-  demote: (taskId: string) => Promise<void>;
+  setTier: (taskId: string, tier: FocusTier) => Promise<void>;
   isPinned: (taskId: string) => boolean;
-  isFocus: (taskId: string) => boolean;
+  tierOf: (taskId: string) => FocusTier;
   visible: boolean;
   setVisible: (v: boolean) => void;
 }
 
-// How long to ignore config:changed events after we caused them (ms)
 const SELF_CHANGE_COOLDOWN = 3000;
-
 const VISIBLE_KEY = 'open-walnut-focus-dock-visible';
 
 function readVisible(): boolean {
-  try {
-    return localStorage.getItem(VISIBLE_KEY) === 'true';
-  } catch {
-    return false;
-  }
+  try { return localStorage.getItem(VISIBLE_KEY) === 'true'; } catch { return false; }
 }
 
 export function useFocusBar(tasks: Task[]): UseFocusBarReturn {
   const [pinnedIds, setPinnedIds] = useState<string[]>([]);
   const [focusIds, setFocusIds] = useState<string[]>([]);
+  const [nextIds, setNextIds] = useState<string[]>([]);
   const [satelliteIds, setSatelliteIds] = useState<string[]>([]);
   const [visible, setVisibleState] = useState(readVisible);
 
@@ -45,22 +42,21 @@ export function useFocusBar(tasks: Task[]): UseFocusBarReturn {
     try { localStorage.setItem(VISIBLE_KEY, String(v)); } catch { /* ignore */ }
   }, []);
 
-  // Track when WE last wrote to the focus_bar config
   const lastWriteRef = useRef(0);
 
-  const fetchPinned = useCallback(() => {
-    focusApi.fetchPinnedTasks()
-      .then((data) => {
-        setPinnedIds(data.pinned_tasks);
-        setFocusIds(data.focus_tasks ?? []);
-        setSatelliteIds(data.satellite_tasks ?? []);
-      })
-      .catch(() => {});
+  const applyData = useCallback((data: focusApi.FocusBarData) => {
+    setPinnedIds(data.pinned_tasks);
+    setFocusIds(data.focus_tasks ?? []);
+    setNextIds(data.next_tasks ?? []);
+    setSatelliteIds(data.satellite_tasks ?? []);
   }, []);
+
+  const fetchPinned = useCallback(() => {
+    focusApi.fetchPinnedTasks().then(applyData).catch(() => {});
+  }, [applyData]);
 
   useEffect(() => { fetchPinned(); }, [fetchPinned]);
 
-  // Re-sync only when focus_bar config changes from EXTERNAL sources
   useEvent('config:changed', (data: unknown) => {
     const { key } = (data ?? {}) as { key?: string };
     if (key !== 'focus_bar') return;
@@ -69,13 +65,18 @@ export function useFocusBar(tasks: Task[]): UseFocusBarReturn {
   });
 
   // Auto-unpin completed tasks
+  const removeFromAll = useCallback((taskId: string) => {
+    setPinnedIds((prev) => prev.filter((id) => id !== taskId));
+    setFocusIds((prev) => prev.filter((id) => id !== taskId));
+    setNextIds((prev) => prev.filter((id) => id !== taskId));
+    setSatelliteIds((prev) => prev.filter((id) => id !== taskId));
+  }, []);
+
   useEvent('task:completed', (data: unknown) => {
     const { task } = data as { task: { id: string } };
     if (task?.id && pinnedIds.includes(task.id)) {
       lastWriteRef.current = Date.now();
-      setPinnedIds((prev) => prev.filter((pid) => pid !== task.id));
-      setFocusIds((prev) => prev.filter((pid) => pid !== task.id));
-      setSatelliteIds((prev) => prev.filter((pid) => pid !== task.id));
+      removeFromAll(task.id);
       focusApi.unpinTask(task.id).catch(() => {});
     }
   });
@@ -83,9 +84,7 @@ export function useFocusBar(tasks: Task[]): UseFocusBarReturn {
     const { task } = data as { task: { id: string; phase?: string; status?: string } };
     if ((task.phase === 'COMPLETE' || task.status === 'done') && pinnedIds.includes(task.id)) {
       lastWriteRef.current = Date.now();
-      setPinnedIds((prev) => prev.filter((pid) => pid !== task.id));
-      setFocusIds((prev) => prev.filter((pid) => pid !== task.id));
-      setSatelliteIds((prev) => prev.filter((pid) => pid !== task.id));
+      removeFromAll(task.id);
       focusApi.unpinTask(task.id).catch(() => {});
     }
   });
@@ -107,16 +106,13 @@ export function useFocusBar(tasks: Task[]): UseFocusBarReturn {
 
   const unpin = useCallback(async (taskId: string) => {
     lastWriteRef.current = Date.now();
-    setPinnedIds((prev) => prev.filter((id) => id !== taskId));
-    setFocusIds((prev) => prev.filter((id) => id !== taskId));
-    setSatelliteIds((prev) => prev.filter((id) => id !== taskId));
+    removeFromAll(taskId);
     try {
       await focusApi.unpinTask(taskId);
     } catch {
-      // Rollback — re-fetch from server
       fetchPinned();
     }
-  }, [fetchPinned]);
+  }, [removeFromAll, fetchPinned]);
 
   const reorder = useCallback(async (newIds: string[]) => {
     lastWriteRef.current = Date.now();
@@ -128,75 +124,47 @@ export function useFocusBar(tasks: Task[]): UseFocusBarReturn {
     }
   }, [fetchPinned]);
 
-  const promote = useCallback(async (taskId: string) => {
+  const setTier = useCallback(async (taskId: string, tier: FocusTier) => {
     lastWriteRef.current = Date.now();
-    // Optimistic: move from satellite to focus
-    setFocusIds((prev) => prev.includes(taskId) ? prev : [...prev, taskId]);
-    setSatelliteIds((prev) => prev.filter((id) => id !== taskId));
+    // Optimistic: remove from old tier, add to new
+    setFocusIds((prev) => tier === 'focus' ? (prev.includes(taskId) ? prev : [...prev, taskId]) : prev.filter((id) => id !== taskId));
+    setNextIds((prev) => tier === 'next' ? (prev.includes(taskId) ? prev : [...prev, taskId]) : prev.filter((id) => id !== taskId));
+    setSatelliteIds((prev) => tier === 'satellite' ? (prev.includes(taskId) ? prev : [...prev, taskId]) : prev.filter((id) => id !== taskId));
     try {
-      const result = await focusApi.setTaskTier(taskId, true);
-      setFocusIds(result.focus_tasks);
-      setSatelliteIds(result.satellite_tasks);
+      const result = await focusApi.setTaskTier(taskId, tier);
+      applyData(result);
     } catch {
-      // Rollback
-      setFocusIds((prev) => prev.filter((id) => id !== taskId));
-      setSatelliteIds((prev) => prev.includes(taskId) ? prev : [...prev, taskId]);
+      fetchPinned();
     }
-  }, []);
+  }, [applyData, fetchPinned]);
 
-  const demote = useCallback(async (taskId: string) => {
-    lastWriteRef.current = Date.now();
-    // Optimistic: move from focus to satellite
-    setFocusIds((prev) => prev.filter((id) => id !== taskId));
-    setSatelliteIds((prev) => prev.includes(taskId) ? prev : [...prev, taskId]);
-    try {
-      const result = await focusApi.setTaskTier(taskId, false);
-      setFocusIds(result.focus_tasks);
-      setSatelliteIds(result.satellite_tasks);
-    } catch {
-      // Rollback
-      setFocusIds((prev) => prev.includes(taskId) ? prev : [...prev, taskId]);
-      setSatelliteIds((prev) => prev.filter((id) => id !== taskId));
-    }
-  }, []);
+  const isPinned = useCallback((taskId: string) => pinnedIds.includes(taskId), [pinnedIds]);
 
-  const isPinned = useCallback(
-    (taskId: string) => pinnedIds.includes(taskId),
-    [pinnedIds],
-  );
-
-  const isFocus = useCallback(
-    (taskId: string) => focusIds.includes(taskId),
-    [focusIds],
-  );
+  const tierOf = useCallback((taskId: string): FocusTier => {
+    if (focusIds.includes(taskId)) return 'focus';
+    if (nextIds.includes(taskId)) return 'next';
+    return 'satellite';
+  }, [focusIds, nextIds]);
 
   // Resolve IDs to Task objects
-  const pinnedTasks = useMemo(() => {
-    const taskMap = new Map(tasks.map((t) => [t.id, t]));
-    return pinnedIds
+  const resolve = useCallback((ids: string[], allTasks: Task[]) => {
+    const taskMap = new Map(allTasks.map((t) => [t.id, t]));
+    return ids
       .map((id) => taskMap.get(id))
       .filter((t): t is Task => !!t && t.phase !== 'COMPLETE' && t.status !== 'done');
-  }, [pinnedIds, tasks]);
+  }, []);
 
-  const focusTasks = useMemo(() => {
-    const taskMap = new Map(tasks.map((t) => [t.id, t]));
-    return focusIds
-      .map((id) => taskMap.get(id))
-      .filter((t): t is Task => !!t && t.phase !== 'COMPLETE' && t.status !== 'done');
-  }, [focusIds, tasks]);
-
-  const satelliteTasks = useMemo(() => {
-    const taskMap = new Map(tasks.map((t) => [t.id, t]));
-    return satelliteIds
-      .map((id) => taskMap.get(id))
-      .filter((t): t is Task => !!t && t.phase !== 'COMPLETE' && t.status !== 'done');
-  }, [satelliteIds, tasks]);
+  const pinnedTasks = useMemo(() => resolve(pinnedIds, tasks), [resolve, pinnedIds, tasks]);
+  const focusTasks = useMemo(() => resolve(focusIds, tasks), [resolve, focusIds, tasks]);
+  const nextTasks = useMemo(() => resolve(nextIds, tasks), [resolve, nextIds, tasks]);
+  const satelliteTasks = useMemo(() => resolve(satelliteIds, tasks), [resolve, satelliteIds, tasks]);
 
   return {
     pinnedIds, pinnedTasks,
-    focusIds, satelliteIds, focusTasks, satelliteTasks,
-    pin, unpin, reorder, promote, demote,
-    isPinned, isFocus,
+    focusIds, nextIds, satelliteIds,
+    focusTasks, nextTasks, satelliteTasks,
+    pin, unpin, reorder, setTier,
+    isPinned, tierOf,
     visible, setVisible,
   };
 }

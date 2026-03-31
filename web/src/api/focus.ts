@@ -1,8 +1,11 @@
 import { apiGet, apiPost, apiPut, apiDelete } from './client';
 
+export type FocusTier = 'focus' | 'next' | 'satellite';
+
 export interface FocusBarData {
   pinned_tasks: string[];
   focus_tasks: string[];
+  next_tasks: string[];
   satellite_tasks: string[];
 }
 
@@ -22,9 +25,9 @@ export async function reorderPinnedTasks(taskIds: string[]): Promise<FocusBarDat
   return apiPut<FocusBarData>('/api/focus/reorder', { task_ids: taskIds });
 }
 
-export async function setTaskTier(taskId: string, focus: boolean): Promise<{ focus_tasks: string[]; satellite_tasks: string[] }> {
-  return apiPut<{ focus_tasks: string[]; satellite_tasks: string[] }>(
+export async function setTaskTier(taskId: string, tier: FocusTier): Promise<FocusBarData> {
+  return apiPut<FocusBarData>(
     `/api/focus/tasks/${encodeURIComponent(taskId)}/tier`,
-    { focus },
+    { tier },
   );
 }

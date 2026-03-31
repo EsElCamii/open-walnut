@@ -53,7 +53,8 @@ import { ProjectDetailPane } from './ProjectDetailPane';
 import { CategoryDetailPane } from './CategoryDetailPane';
 import { GlobalNotesSection } from '../notes/GlobalNotesSection';
 import { useGlobalNotes } from '@/hooks/useGlobalNotes';
-import { SortableFocusCard, SortableSatelliteCard, FocusDropZone } from './FocusSatelliteCards';
+import { SortableTierCard, TierDropZone } from './FocusSatelliteCards';
+import type { FocusTier } from '@/api/focus';
 
 type DetailTarget =
   | { type: 'project'; category: string; project: string }
@@ -84,10 +85,10 @@ interface TodoPanelProps {
   onPinTask?: (taskId: string) => void;
   onUnpinTask?: (taskId: string) => void;
   onReorderPinned?: (newIds: string[]) => void;
-  onPromoteTask?: (taskId: string) => void;
-  onDemoteTask?: (taskId: string) => void;
+  onSetTier?: (taskId: string, tier: FocusTier) => void;
   pinnedTaskIds?: Set<string>;
   focusTaskIds?: Set<string>;
+  nextTaskIds?: Set<string>;
   /** When true, suppress opening the detail panel for the focused task (e.g. chat task-ref clicks). */
   suppressDetail?: boolean;
   /** Set of session IDs currently displayed in session columns. */
@@ -1303,7 +1304,7 @@ function RecentCard({ task, isFocused, onClick, onPinTask }: RecentCardProps) {
 
 // ── TodoPanel ──
 
-export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onComplete, onSetPhase, onCreate, onUpdate, onStar, onSetPriority, onFocusTask, onClearFocus, focusedTaskId, focusNonce, favorites, ordering, onReorder, onMoveTask, onReparentTask, onOpenSession, onOpenTriageForTask, onPinTask, onUnpinTask, onReorderPinned, onPromoteTask, onDemoteTask, pinnedTaskIds, focusTaskIds, suppressDetail, openSessionIds, operationError, onClearOperationError, onOperationError, externalCategory, onCategoryChange }: TodoPanelProps) {
+export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onComplete, onSetPhase, onCreate, onUpdate, onStar, onSetPriority, onFocusTask, onClearFocus, focusedTaskId, focusNonce, favorites, ordering, onReorder, onMoveTask, onReparentTask, onOpenSession, onOpenTriageForTask, onPinTask, onUnpinTask, onReorderPinned, onSetTier, pinnedTaskIds, focusTaskIds, nextTaskIds, suppressDetail, openSessionIds, operationError, onClearOperationError, onOperationError, externalCategory, onCategoryChange }: TodoPanelProps) {
   // Hide .metadata* tasks (project/category configuration tasks, not user-visible)
   const tasks = useMemo(() => rawTasks.filter((t) => !t.title.startsWith('.metadata')), [rawTasks]);
   const navigate = useNavigate();
@@ -1331,6 +1332,7 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
   const [newTitle, setNewTitle] = useState('');
   const [pinnedCollapsed, setPinnedCollapsed] = useState(false);
   const [focusCollapsed, setFocusCollapsed] = useState(false);
+  const [nextCollapsed, setNextCollapsed] = useState(false);
   const [satelliteCollapsed, setSatelliteCollapsed] = useState(false);
   const [recentCollapsed, setRecentCollapsed] = useState(false);
   const [collapsedCategories, setCollapsedCategories] = useState<Set<string>>(() => readSetFromStorage(LS_COLLAPSED_CATS_KEY));
@@ -1549,16 +1551,22 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
       .filter((t): t is Task => !!t && t.status !== 'done' && t.phase !== 'COMPLETE');
   }, [tasks, pinnedTaskIds]);
 
-  // Split pinned into Focus and Satellite based on focusTaskIds
+  // Split pinned into Focus / Next / Satellite
   const focusTasksLocal = useMemo(() => {
     if (!focusTaskIds || focusTaskIds.size === 0) return [];
     return pinnedTasks.filter((t) => focusTaskIds.has(t.id));
   }, [pinnedTasks, focusTaskIds]);
 
+  const nextTasksLocal = useMemo(() => {
+    if (!nextTaskIds || nextTaskIds.size === 0) return [];
+    return pinnedTasks.filter((t) => nextTaskIds.has(t.id));
+  }, [pinnedTasks, nextTaskIds]);
+
   const satelliteTasksLocal = useMemo(() => {
     const fSet = focusTaskIds ?? new Set<string>();
-    return pinnedTasks.filter((t) => !fSet.has(t.id));
-  }, [pinnedTasks, focusTaskIds]);
+    const nSet = nextTaskIds ?? new Set<string>();
+    return pinnedTasks.filter((t) => !fSet.has(t.id) && !nSet.has(t.id));
+  }, [pinnedTasks, focusTaskIds, nextTaskIds]);
 
   // Recent tasks: all non-completed tasks excluding pinned, sorted by most recent activity
   const recentTasks = useMemo(() => {
@@ -1589,9 +1597,19 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
 
   const pinnedTaskIds_arr = useMemo(() => pinnedTasks.map((t) => t.id), [pinnedTasks]);
   const focusIds_arr = useMemo(() => focusTasksLocal.map((t) => t.id), [focusTasksLocal]);
+  const nextIds_arr = useMemo(() => nextTasksLocal.map((t) => t.id), [nextTasksLocal]);
   const satelliteIds_arr = useMemo(() => satelliteTasksLocal.map((t) => t.id), [satelliteTasksLocal]);
 
-  // Unified DnD handler — supports cross-container (Focus ↔ Satellite) + same-container reorder
+  // Determine which tier an ID belongs to
+  const tierOfId = useCallback((id: string): FocusTier => {
+    const fSet = focusTaskIds ?? new Set<string>();
+    const nSet = nextTaskIds ?? new Set<string>();
+    if (fSet.has(id)) return 'focus';
+    if (nSet.has(id)) return 'next';
+    return 'satellite';
+  }, [focusTaskIds, nextTaskIds]);
+
+  // Cross-container DnD: detect tier of drop target, call setTier if different
   const handlePinnedDragEnd = useCallback((event: DragEndEvent) => {
     const { active, over } = event;
     if (!over) return;
@@ -1599,23 +1617,18 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
     const overId = over.id as string;
     if (activeId === overId) return;
 
-    const fSet = focusTaskIds ?? new Set<string>();
-    const isActiveInFocus = fSet.has(activeId);
-    const isOverFocus = overId === 'focus-drop-zone' || fSet.has(overId);
-    const isOverSatellite = overId === 'satellite-drop-zone' || (!fSet.has(overId) && pinnedTaskIds_arr.includes(overId));
+    // Check if dropped on a drop zone or a card in a different tier
+    const dropZoneTier: Record<string, FocusTier> = { 'focus-drop-zone': 'focus', 'next-drop-zone': 'next', 'satellite-drop-zone': 'satellite' };
+    const targetTier = dropZoneTier[overId] ?? (pinnedTaskIds_arr.includes(overId) ? tierOfId(overId) : null);
+    if (!targetTier) return;
 
-    // Cross-container: Satellite → Focus (promote)
-    if (!isActiveInFocus && isOverFocus) {
-      onPromoteTask?.(activeId);
-      return;
-    }
-    // Cross-container: Focus → Satellite (demote)
-    if (isActiveInFocus && isOverSatellite) {
-      onDemoteTask?.(activeId);
+    const activeTier = tierOfId(activeId);
+    if (activeTier !== targetTier) {
+      onSetTier?.(activeId, targetTier);
       return;
     }
 
-    // Same-container reorder within full pinned list
+    // Same-container reorder
     const oldIndex = pinnedTaskIds_arr.indexOf(activeId);
     const newIndex = pinnedTaskIds_arr.indexOf(overId);
     if (oldIndex === -1 || newIndex === -1) return;
@@ -1623,7 +1636,7 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
     newOrder.splice(oldIndex, 1);
     newOrder.splice(newIndex, 0, activeId);
     onReorderPinned?.(newOrder);
-  }, [pinnedTaskIds_arr, focusTaskIds, onReorderPinned, onPromoteTask, onDemoteTask]);
+  }, [pinnedTaskIds_arr, tierOfId, onReorderPinned, onSetTier]);
 
   // Track actively-dragged pinned task for DragOverlay (cross-container visual feedback)
   const [activeDragPinnedId, setActiveDragPinnedId] = useState<string | null>(null);
@@ -2568,9 +2581,9 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
           </div>
           {!pinnedCollapsed && (
             <DndContext sensors={pinnedSensors} collisionDetection={closestCenter} onDragStart={handlePinnedDragStart} onDragEnd={handlePinnedDragEndWithOverlay} onDragCancel={handlePinnedDragCancel}>
-              {/* Focus sub-group — collapsible */}
+              {/* Focus sub-group */}
               <div className="todo-pinned-subgroup">
-                <div className="todo-pinned-sublabel" onClick={() => setFocusCollapsed(c => !c)} role="button" tabIndex={0} onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') setFocusCollapsed(c => !c); }} style={{ cursor: 'pointer' }}>
+                <div className="todo-pinned-sublabel" onClick={() => setFocusCollapsed(c => !c)} role="button" tabIndex={0} onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') setFocusCollapsed(c => !c); }} style={{ cursor: 'pointer' }} title="Current sprint — finish these first">
                   <span className={`todo-pinned-chevron todo-pinned-sub-chevron${focusCollapsed ? '' : ' todo-pinned-chevron-open'}`}>{'\u25B8'}</span>
                   <span className="todo-pinned-sublabel-icon todo-icon-focus" />
                   <span className="todo-pinned-sublabel-text">Focus</span>
@@ -2578,26 +2591,38 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
                 </div>
                 {!focusCollapsed && (
                   <SortableContext items={focusIds_arr} strategy={verticalListSortingStrategy}>
-                    <FocusDropZone id="focus-drop-zone" isEmpty={focusTasksLocal.length === 0} isFull={false}>
+                    <TierDropZone id="focus-drop-zone" isEmpty={focusTasksLocal.length === 0}>
                       {focusTasksLocal.map((task) => (
-                        <SortableFocusCard
-                          key={task.id}
-                          task={task}
-                          isFocused={focusedTaskId === task.id}
-                          onClick={handlePinnedCardClick}
-                          onDemoteTask={onDemoteTask}
-                          onUnpinTask={onUnpinTask}
-                        />
+                        <SortableTierCard key={task.id} task={task} tier="focus" isFocused={focusedTaskId === task.id} onClick={handlePinnedCardClick} onSetTier={onSetTier} onUnpinTask={onUnpinTask} />
                       ))}
-                    </FocusDropZone>
+                    </TierDropZone>
                   </SortableContext>
                 )}
               </div>
 
-              {/* Satellite sub-group — collapsible */}
+              {/* Next sub-group */}
+              <div className="todo-pinned-subgroup">
+                <div className="todo-pinned-sublabel" onClick={() => setNextCollapsed(c => !c)} role="button" tabIndex={0} onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') setNextCollapsed(c => !c); }} style={{ cursor: 'pointer' }} title="Next sprint — queued after Focus is done">
+                  <span className={`todo-pinned-chevron todo-pinned-sub-chevron${nextCollapsed ? '' : ' todo-pinned-chevron-open'}`}>{'\u25B8'}</span>
+                  <span className="todo-pinned-sublabel-icon todo-icon-next" />
+                  <span className="todo-pinned-sublabel-text">Next</span>
+                  <span className="todo-pinned-sublabel-count">{nextTasksLocal.length}</span>
+                </div>
+                {!nextCollapsed && (
+                  <SortableContext items={nextIds_arr} strategy={verticalListSortingStrategy}>
+                    <TierDropZone id="next-drop-zone" isEmpty={nextTasksLocal.length === 0}>
+                      {nextTasksLocal.map((task) => (
+                        <SortableTierCard key={task.id} task={task} tier="next" isFocused={focusedTaskId === task.id} onClick={handlePinnedCardClick} onSetTier={onSetTier} onUnpinTask={onUnpinTask} />
+                      ))}
+                    </TierDropZone>
+                  </SortableContext>
+                )}
+              </div>
+
+              {/* Satellite sub-group */}
               {satelliteTasksLocal.length > 0 && (
                 <div className="todo-pinned-subgroup">
-                  <div className="todo-pinned-sublabel" onClick={() => setSatelliteCollapsed(c => !c)} role="button" tabIndex={0} onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') setSatelliteCollapsed(c => !c); }} style={{ cursor: 'pointer' }}>
+                  <div className="todo-pinned-sublabel" onClick={() => setSatelliteCollapsed(c => !c)} role="button" tabIndex={0} onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') setSatelliteCollapsed(c => !c); }} style={{ cursor: 'pointer' }} title="Backlog — other pinned tasks">
                     <span className={`todo-pinned-chevron todo-pinned-sub-chevron${satelliteCollapsed ? '' : ' todo-pinned-chevron-open'}`}>{'\u25B8'}</span>
                     <span className="todo-pinned-sublabel-icon todo-icon-satellite" />
                     <span className="todo-pinned-sublabel-text">Satellite</span>
@@ -2607,14 +2632,7 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
                     <SortableContext items={satelliteIds_arr} strategy={verticalListSortingStrategy}>
                       <div className="todo-pinned-list todo-pinned-list-scroll" style={{ maxHeight: PINNED_VISIBLE_MAX * 30 }}>
                         {satelliteTasksLocal.map((task) => (
-                          <SortableSatelliteCard
-                            key={task.id}
-                            task={task}
-                            isFocused={focusedTaskId === task.id}
-                            onClick={handlePinnedCardClick}
-                            onPromoteTask={onPromoteTask}
-                            onUnpinTask={onUnpinTask}
-                          />
+                          <SortableTierCard key={task.id} task={task} tier="satellite" isFocused={focusedTaskId === task.id} onClick={handlePinnedCardClick} onSetTier={onSetTier} onUnpinTask={onUnpinTask} />
                         ))}
                       </div>
                     </SortableContext>
