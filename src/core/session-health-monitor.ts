@@ -300,12 +300,16 @@ export class SessionHealthMonitor {
       } else {
         const pid = session.pid
         if (pid == null) continue  // No PID — can't signal; skip to next session
-        try { process.kill(pid, 'SIGINT') } catch { /* already dead */ }
-        // Deferred SIGTERM fallback — fire-and-forget, doesn't block health check loop
+        // Kill entire process group (-pid) to also clean up MCP child processes
+        try { process.kill(-pid, 'SIGINT') } catch { /* already dead */ }
+        // Deferred SIGTERM/SIGKILL fallback — fire-and-forget, doesn't block health check loop
         setTimeout(() => {
           isProcessAliveAsync(pid, 'claude').then((alive) => {
             if (alive) {
-              try { process.kill(pid, 'SIGTERM') } catch { /* already dead */ }
+              try { process.kill(-pid, 'SIGTERM') } catch { /* already dead */ }
+              setTimeout(() => {
+                try { process.kill(-pid, 'SIGKILL') } catch {}
+              }, 2_000)
             }
           }).catch(() => {})
         }, 5_000)
@@ -454,7 +458,8 @@ export class SessionHealthMonitor {
           process_status: s.process_status,
         })
 
-        try { process.kill(s.pid, 'SIGTERM') } catch { /* already dead */ }
+        // Kill entire process group (-pid) to also clean up MCP child processes
+        try { process.kill(-s.pid, 'SIGTERM') } catch { /* already dead */ }
 
         // Remote process cleanup is handled by daemon transport when the local tunnel dies.
 

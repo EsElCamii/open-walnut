@@ -9,7 +9,8 @@
  *   3. Connects via WebSocket through an SSH tunnel
  *
  * The daemon runs independently on the remote machine — SSH dropping
- * doesn't kill it. It auto-exits after 30min of no WebSocket connections.
+ * doesn't kill it. It NEVER auto-exits. Individual sessions are killed
+ * after 2 hours of inactivity with no connected watchers.
  *
  * WHY EMBEDDED:
  * - No npm install needed on remote (uses Node.js built-in WebSocket from Node 21+,
@@ -34,7 +35,7 @@
  * - Streams JSONL output via WebSocket
  * - Handles subagent polling
  * - Provides file system operations
- * - Auto-exits after 30min of inactivity
+ * - Never auto-exits; kills idle sessions after 2hr with no watchers
  */
 export function getDaemonSource(): string {
   return DAEMON_SOURCE
@@ -74,7 +75,6 @@ const STREAMS_DIR = '/tmp/open-walnut-streams';
 const PORT_FILE = path.join(DAEMON_DIR, 'daemon.port');
 const PID_FILE = path.join(DAEMON_DIR, 'daemon.pid');
 const LOG_FILE = path.join(DAEMON_DIR, 'daemon.log');
-const IDLE_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes
 const AGENT_POLL_INTERVAL_MS = 2000;
 const AGENT_REDISCOVER_INTERVAL_MS = 10000;
 const PING_INTERVAL_MS = 15000;
@@ -95,20 +95,40 @@ function logMsg(level, msg, data) {
 // Each session has: { proc, pipe, jsonlPath, watchers, offset, onExit }
 const sessions = new Map();
 
+// ── Process group helpers ──
+// Claude is spawned with detached:true, so pid === PGID.
+// kill(-pid) sends signal to the entire process group (Claude + MCP servers).
+
+function killProcessGroup(pid, signal) {
+  try { process.kill(-pid, signal); return true; } catch { return false; }
+}
+
+function isProcessGroupAlive(pid) {
+  try { process.kill(-pid, 0); return true; } catch { return false; }
+}
+
+function killSessionProcessGroup(pid, sid) {
+  if (!isProcessGroupAlive(pid)) return;
+  logMsg('info', 'kill sequence: SIGINT', { sid, pid });
+  killProcessGroup(pid, 'SIGINT');
+  setTimeout(() => {
+    if (!isProcessGroupAlive(pid)) return;
+    logMsg('info', 'kill sequence: SIGTERM', { sid, pid });
+    killProcessGroup(pid, 'SIGTERM');
+    setTimeout(() => {
+      if (!isProcessGroupAlive(pid)) return;
+      logMsg('warn', 'kill sequence: SIGKILL', { sid, pid });
+      killProcessGroup(pid, 'SIGKILL');
+    }, 2000);
+  }, 5000);
+}
+
 // ── WebSocket connections ──
 const wsClients = new Set();
-let idleTimer = null;
 
-function resetIdleTimer() {
-  if (idleTimer) clearTimeout(idleTimer);
-  idleTimer = setTimeout(() => {
-    if (wsClients.size === 0) {
-      logMsg('info', 'idle timeout — exiting', { timeoutMs: IDLE_TIMEOUT_MS });
-      cleanup();
-      process.exit(0);
-    }
-  }, IDLE_TIMEOUT_MS);
-}
+// Daemon NEVER auto-exits. It's a permanent process manager on the remote host.
+// Mac disconnecting should NOT cause daemon to exit — sessions keep running.
+// Session lifecycle is managed by the session idle scanner (scanIdleSessions).
 
 // ── Agent subscriptions ──
 // Map<subKey, { timer, rediscoverTimer, files: Map<filePath, offset> }>
@@ -387,6 +407,11 @@ function cmdStart(ws, id, cmd) {
   proc.on('exit', (code) => {
     sessionData.exitCode = code;
     logMsg('info', 'session process exited', { sid, pid, code });
+
+    // Clean up MCP child processes that may survive Claude's exit
+    killProcessGroup(pid, 'SIGTERM');
+    setTimeout(() => killProcessGroup(pid, 'SIGKILL'), 2000);
+
     // Broadcast exit to all connected clients watching this session
     for (const client of sessionData.watchers.keys()) {
       sendEvent(client, 'exit', { sid, code: code ?? 1 });
@@ -544,19 +569,27 @@ function cmdStop(ws, id, cmd) {
   const session = sessions.get(sid);
   if (!session || !session.pid) return sendOk(ws, id, { stopped: true });
 
+  const pid = session.pid;
+  logMsg('info', 'stopping session (process group kill)', { sid, pid });
+
+  // 3-phase process group kill: SIGINT → SIGTERM → SIGKILL
   try {
-    process.kill(session.pid, 'SIGINT');
-    // Wait up to 5s for exit
+    killProcessGroup(pid, 'SIGINT');
     let checks = 0;
     const checkExit = () => {
-      try { process.kill(session.pid, 0); } catch {
+      if (!isProcessGroupAlive(pid)) {
         sendOk(ws, id, { stopped: true });
         return;
       }
       checks++;
-      if (checks >= 25) { // 5s
-        try { process.kill(session.pid, 'SIGTERM'); } catch {}
-        sendOk(ws, id, { stopped: true, forced: true });
+      if (checks >= 25) { // 5s elapsed
+        killProcessGroup(pid, 'SIGTERM');
+        setTimeout(() => {
+          if (isProcessGroupAlive(pid)) {
+            killProcessGroup(pid, 'SIGKILL');
+          }
+          sendOk(ws, id, { stopped: true, forced: true });
+        }, 2000);
         return;
       }
       setTimeout(checkExit, 200);
@@ -941,14 +974,113 @@ function sendEvent(ws, ev, data) {
   try { ws.send(JSON.stringify({ ev, ...data })); } catch {}
 }
 
+// ── Session idle scanner ──
+// 5min: long enough for model response delays (up to 120s) and MCP tool execution,
+// short enough to detect stuck sessions promptly.
+const SESSION_IDLE_WARNING_MS = 5 * 60 * 1000;     // 5 minutes
+// 2hr: conservative — gives plenty of time for legitimate background work (builds,
+// long MCP ops, await_human_action), but eventually reclaims resources.
+const SESSION_IDLE_KILL_MS = 2 * 60 * 60 * 1000;   // 2 hours
+const SESSION_SCAN_INTERVAL_MS = 60000;             // every 60s
+
+function scanIdleSessions() {
+  const now = Date.now();
+  for (const [sid, session] of sessions) {
+    const pid = session.pid;
+    if (!pid) continue;
+
+    // 1. Process already dead? Clean up process group
+    if (session.exitCode !== null) {
+      if (isProcessGroupAlive(pid)) {
+        logMsg('info', 'idle scan: cleaning dead session process group', { sid, pid });
+        killProcessGroup(pid, 'SIGKILL');
+      }
+      continue;
+    }
+
+    // Check if process is actually alive
+    let alive = false;
+    try { process.kill(pid, 0); alive = true; } catch {}
+    if (!alive) {
+      logMsg('info', 'idle scan: process dead (missed exit)', { sid, pid });
+      session.exitCode = -1;
+      killProcessGroup(pid, 'SIGKILL');
+      for (const client of session.watchers.keys()) {
+        sendEvent(client, 'exit', { sid, code: -1 });
+      }
+      continue;
+    }
+
+    // 2. Has client watching? Skip
+    if (session.watchers.size > 0) continue;
+
+    // 3. Check JSONL file mtime
+    let mtimeMs = 0;
+    try { mtimeMs = fs.statSync(session.jsonlPath).mtimeMs; } catch { continue; }
+
+    const idleMs = now - mtimeMs;
+    if (idleMs < SESSION_IDLE_WARNING_MS) {
+      continue;
+    } else if (idleMs < SESSION_IDLE_KILL_MS) {
+      const idleMinutes = Math.round(idleMs / 60000);
+      logMsg('warn', 'idle scan: session idle with no watchers', { sid, pid, idleMinutes, threshold: '2hr' });
+    } else {
+      const idleMinutes = Math.round(idleMs / 60000);
+      logMsg('warn', 'idle scan: killing idle session (no watchers, no output)', { sid, pid, idleMinutes });
+      killSessionProcessGroup(pid, sid);
+    }
+  }
+}
+
+function cleanupOrphanedProcessGroups() {
+  try {
+    const files = fs.readdirSync(STREAMS_DIR);
+    for (const f of files) {
+      if (!f.endsWith('.pgid')) continue;
+      const sid = f.replace('.pgid', '');
+      try {
+        const pid = parseInt(fs.readFileSync(path.join(STREAMS_DIR, f), 'utf-8').trim(), 10);
+        if (isNaN(pid) || pid <= 0) continue;
+        if (isProcessGroupAlive(pid)) {
+          logMsg('warn', 'startup cleanup: killing orphaned process group', { sid, pid });
+          killSessionProcessGroup(pid, sid);
+        }
+      } catch {}
+    }
+  } catch {}
+}
+
 // ── Cleanup ──
 function cleanup() {
-  // Stop all watchers
-  for (const [, session] of sessions) {
+  // Kill all tracked session process groups
+  for (const [sid, session] of sessions) {
+    if (session.pid && session.exitCode === null) {
+      logMsg('info', 'cleanup: killing session process group', { sid, pid: session.pid });
+      killProcessGroup(session.pid, 'SIGTERM');
+    }
     for (const [, watcher] of session.watchers) {
       watcher.close();
     }
   }
+  // Also kill any process groups from .pgid files not in our sessions map
+  try {
+    const files = fs.readdirSync(STREAMS_DIR);
+    for (const f of files) {
+      if (!f.endsWith('.pgid')) continue;
+      try {
+        const pid = parseInt(fs.readFileSync(path.join(STREAMS_DIR, f), 'utf-8').trim(), 10);
+        if (!isNaN(pid) && pid > 0) killProcessGroup(pid, 'SIGTERM');
+      } catch {}
+    }
+  } catch {}
+  // Best-effort SIGKILL after 2s — this timer won't fire when cleanup() is called
+  // from signal handlers (process.exit() cancels pending timers). That's OK:
+  // cleanupOrphanedProcessGroups() catches survivors on next daemon startup.
+  setTimeout(() => {
+    for (const [, session] of sessions) {
+      if (session.pid) killProcessGroup(session.pid, 'SIGKILL');
+    }
+  }, 2000);
   // Stop all agent subs
   for (const [, sub] of agentSubs) {
     clearInterval(sub.timer);
@@ -1000,6 +1132,9 @@ if (action === '--start') {
   fs.mkdirSync(DAEMON_DIR, { recursive: true });
   fs.mkdirSync(STREAMS_DIR, { recursive: true });
 
+  // Clean up orphaned process groups from a previous daemon crash
+  cleanupOrphanedProcessGroups();
+
   const httpServer = http.createServer((req, res) => {
     res.writeHead(200);
     res.end('walnut-daemon ok');
@@ -1009,7 +1144,6 @@ if (action === '--start') {
 
   wss.on('connection', (ws) => {
     wsClients.add(ws);
-    resetIdleTimer();
     logMsg('info', 'client connected', { clients: wsClients.size });
 
     // Ping/pong keepalive
@@ -1018,7 +1152,6 @@ if (action === '--start') {
     }, PING_INTERVAL_MS);
 
     ws.on('message', (msg) => {
-      resetIdleTimer();
       handleCommand(ws, typeof msg === 'string' ? msg : msg.toString());
     });
 
@@ -1040,7 +1173,6 @@ if (action === '--start') {
         }
       }
 
-      resetIdleTimer();
       logMsg('info', 'client disconnected', { clients: wsClients.size });
     });
 
@@ -1056,7 +1188,9 @@ if (action === '--start') {
     fs.writeFileSync(PID_FILE, String(process.pid));
     console.log(port); // Print port for parent to capture
     logMsg('info', 'daemon started', { port, pid: process.pid });
-    resetIdleTimer();
+
+    // Start session idle scanner (every 60s)
+    setInterval(scanIdleSessions, SESSION_SCAN_INTERVAL_MS);
   });
 
   // Handle signals
