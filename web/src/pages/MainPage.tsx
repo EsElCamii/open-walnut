@@ -164,6 +164,7 @@ export function MainPage({ visible = true, navigateRef }: MainPageProps) {
   const favorites = useFavorites();
   const focusBar = useFocusBarContext();
   const pinnedTaskIdSet = useMemo(() => new Set(focusBar.pinnedIds), [focusBar.pinnedIds]);
+  const focusTaskIdSet = useMemo(() => new Set(focusBar.focusIds), [focusBar.focusIds]);
   const ordering = useOrdering();
   const [focusedTask, setFocusedTask] = useState<Task | null>(null);
   // Nonce that increments on every focus action — forces re-scroll even for same task
@@ -896,7 +897,11 @@ export function MainPage({ visible = true, navigateRef }: MainPageProps) {
           onPinTask={focusBar.pin}
           onUnpinTask={focusBar.unpin}
           onReorderPinned={focusBar.reorder}
+          onPromoteTask={focusBar.promote}
+          onDemoteTask={focusBar.demote}
           pinnedTaskIds={pinnedTaskIdSet}
+          focusTaskIds={focusTaskIdSet}
+          focusFull={focusBar.focusFull}
           suppressDetail={suppressDetail}
           operationError={operationError}
           onClearOperationError={clearOperationError}

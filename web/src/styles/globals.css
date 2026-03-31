@@ -6901,6 +6901,145 @@ img[data-lightbox-src],
   cursor: grabbing;
 }
 
+/* ── Focus / Satellite sub-group styles (inside unified PINNED section) ── */
+
+.todo-pinned-subgroup {
+  margin-top: 4px;
+}
+
+.todo-pinned-subgroup + .todo-pinned-subgroup {
+  margin-top: 6px;
+  padding-top: 4px;
+  border-top: 1px solid color-mix(in srgb, var(--border) 50%, transparent);
+}
+
+.todo-pinned-sublabel {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0 6px 2px;
+  user-select: none;
+}
+
+.todo-pinned-sublabel-icon {
+  font-size: 9px;
+  line-height: 1;
+}
+
+.todo-pinned-sublabel-text {
+  font-size: 10px;
+  font-weight: 500;
+  color: var(--fg-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.todo-pinned-sublabel-count {
+  font-size: 9px;
+  color: var(--fg-muted);
+  opacity: 0.7;
+}
+
+/* ── Focus card styles ── */
+
+.todo-focus-card {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 6px;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: background 0.12s;
+  min-height: 28px;
+  border-left: 3px solid var(--accent, #007aff);
+  background: color-mix(in srgb, var(--accent, #007aff) 4%, transparent);
+  font-weight: 500;
+}
+
+.todo-focus-card:hover {
+  background: color-mix(in srgb, var(--accent, #007aff) 10%, transparent);
+}
+
+.todo-focus-card.todo-pinned-card-active {
+  background: color-mix(in srgb, var(--accent, #007aff) 14%, transparent);
+}
+
+.todo-focus-card.todo-pinned-card-attention {
+  border-left-color: var(--error);
+  background: rgba(255, 59, 48, 0.08);
+}
+
+.todo-focus-card.todo-pinned-card-attention:hover {
+  background: rgba(255, 59, 48, 0.14);
+}
+
+/* Focus drop zone */
+
+.todo-focus-drop-zone {
+  min-height: 28px;
+  border-radius: 6px;
+  transition: background 0.15s, border-color 0.15s;
+}
+
+.todo-focus-drop-zone-empty {
+  border: 2px dashed var(--border);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 34px;
+}
+
+.todo-focus-drop-zone-over {
+  background: color-mix(in srgb, var(--accent, #007aff) 8%, transparent);
+  border-color: var(--accent, #007aff);
+}
+
+.todo-focus-drop-full {
+  border: 2px dashed var(--error) !important;
+  background: rgba(255, 59, 48, 0.04);
+}
+
+.todo-focus-placeholder {
+  font-size: 11px;
+  color: var(--fg-muted);
+  user-select: none;
+}
+
+/* Promote / Demote tier button */
+
+.todo-tier-btn {
+  background: none;
+  border: none;
+  color: var(--fg-muted);
+  cursor: pointer;
+  font-size: 12px;
+  line-height: 1;
+  padding: 0 2px;
+  opacity: 0;
+  transition: opacity 0.12s, color 0.12s;
+  flex-shrink: 0;
+  font-weight: bold;
+}
+
+.todo-pinned-card:hover .todo-tier-btn,
+.todo-focus-card:hover .todo-tier-btn {
+  opacity: 0.6;
+}
+
+.todo-tier-btn:hover {
+  opacity: 1 !important;
+  color: var(--accent, #007aff);
+}
+
+.todo-tier-btn-disabled {
+  cursor: not-allowed;
+}
+
+.todo-tier-btn-disabled:hover {
+  color: var(--fg-muted) !important;
+  opacity: 0.3 !important;
+}
+
 /* ── Recent tasks (time-ago + pin button) ── */
 
 .todo-recent-ago {

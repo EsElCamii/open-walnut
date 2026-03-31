@@ -8,16 +8,22 @@
  */
 
 import { Router, type Request, type Response, type NextFunction } from 'express'
-import { togglePin, reorderPins, getPinnedTasks } from '../../core/task-manager.js'
+import { togglePin, reorderPins, getPinnedTasks, setFocusTier } from '../../core/task-manager.js'
 import { bus, EventNames } from '../../core/event-bus.js'
 
 export const focusRouter = Router()
 
-// GET /api/focus/tasks — list pinned task IDs (sorted by pin_order)
+// GET /api/focus/tasks — list pinned task IDs with focus/satellite split
 focusRouter.get('/tasks', async (_req: Request, res: Response, next: NextFunction) => {
   try {
     const pinned = await getPinnedTasks()
-    res.json({ pinned_tasks: pinned.map((t) => t.id) })
+    const focusTasks = pinned.filter((t) => t.focus).map((t) => t.id)
+    const satelliteTasks = pinned.filter((t) => !t.focus).map((t) => t.id)
+    res.json({
+      pinned_tasks: pinned.map((t) => t.id),
+      focus_tasks: focusTasks,
+      satellite_tasks: satelliteTasks,
+    })
   } catch (err) {
     next(err)
   }
@@ -73,6 +79,30 @@ focusRouter.put('/reorder', async (req: Request, res: Response, next: NextFuncti
     bus.emit(EventNames.CONFIG_CHANGED, { key: 'focus_bar' }, ['web-ui'])
     res.json({ pinned_tasks: ordered })
   } catch (err) {
+    next(err)
+  }
+})
+
+// PUT /api/focus/tasks/:id/tier — promote/demote a pinned task between Focus and Satellite
+focusRouter.put('/tasks/:id/tier', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const taskId = req.params.id as string
+    const { focus } = req.body as { focus: boolean }
+    if (typeof focus !== 'boolean') {
+      res.status(400).json({ error: 'focus must be a boolean' })
+      return
+    }
+    const result = await setFocusTier(taskId, focus)
+    res.json(result)
+  } catch (err) {
+    if (err instanceof Error && (err as Error & { status?: number }).status === 409) {
+      res.status(409).json({ error: err.message })
+      return
+    }
+    if (err instanceof Error && (err.message.startsWith('Task not found') || err.message.startsWith('Task is not pinned'))) {
+      res.status(400).json({ error: err.message })
+      return
+    }
     next(err)
   }
 })

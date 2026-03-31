@@ -1098,6 +1098,7 @@ export async function completeTask(idPrefix: string): Promise<{ task: Task }> {
   if (task.pinned) {
     task.pinned = false;
     delete task.pin_order;
+    delete task.focus;
     // Compact remaining pin orders
     const pinned = store.tasks.filter((t) => t.pinned).sort((a, b) => (a.pin_order ?? 0) - (b.pin_order ?? 0));
     pinned.forEach((t, i) => { t.pin_order = i; });
@@ -1145,6 +1146,7 @@ export async function toggleComplete(idPrefix: string): Promise<{ task: Task }> 
     if (task.pinned) {
       task.pinned = false;
       delete task.pin_order;
+      delete task.focus;
       const pinned = store.tasks.filter((t) => t.pinned).sort((a, b) => (a.pin_order ?? 0) - (b.pin_order ?? 0));
       pinned.forEach((t, i) => { t.pin_order = i; });
     }
@@ -2497,6 +2499,7 @@ export async function togglePin(taskId: string): Promise<{ pinned: boolean; pinn
       // Unpin
       task.pinned = false;
       delete task.pin_order;
+      delete task.focus;
       task.updated_at = now;
       // Compact remaining pin orders
       const pinned = store.tasks.filter((t) => t.pinned).sort((a, b) => (a.pin_order ?? 0) - (b.pin_order ?? 0));
@@ -2546,6 +2549,49 @@ export async function getPinnedTasks(): Promise<Task[]> {
   return store.tasks
     .filter((t) => t.pinned && t.phase !== 'COMPLETE' && t.status !== 'done')
     .sort((a, b) => (a.pin_order ?? 0) - (b.pin_order ?? 0));
+}
+
+// Focus tier = top-priority pinned tasks shown in FocusDock.
+// Capped at 3 to match the dock's 3-card layout and avoid diluting focus.
+const FOCUS_MAX = 3;
+
+/**
+ * Set the focus tier for a pinned task.
+ * focus=true → promote to Focus (max 3), focus=false → demote to Satellite.
+ */
+export async function setFocusTier(taskId: string, focus: boolean): Promise<{ focus_tasks: string[]; satellite_tasks: string[] }> {
+  return withWriteLock(async () => {
+    const store = await readStore();
+    const task = store.tasks.find((t) => t.id === taskId);
+    if (!task) throw new Error(`Task not found: ${taskId}`);
+    if (!task.pinned) throw new Error(`Task is not pinned: ${task.title}`);
+
+    if (focus) {
+      const currentFocusCount = store.tasks.filter(
+        (t) => t.pinned && t.focus && t.id !== taskId && t.phase !== 'COMPLETE' && t.status !== 'done',
+      ).length;
+      if (currentFocusCount >= FOCUS_MAX) {
+        throw Object.assign(new Error(`Focus full (max ${FOCUS_MAX})`), { status: 409 });
+      }
+      task.focus = true;
+    } else {
+      delete task.focus;
+    }
+    task.updated_at = new Date().toISOString();
+
+    await writeStore(store);
+    bus.emit(EventNames.TASK_UPDATED, { task }, ['web-ui'], { source: 'internal' });
+    bus.emit(EventNames.CONFIG_CHANGED, { key: 'focus_bar' }, ['web-ui']);
+
+    const pinned = store.tasks
+      .filter((t) => t.pinned && t.phase !== 'COMPLETE' && t.status !== 'done')
+      .sort((a, b) => (a.pin_order ?? 0) - (b.pin_order ?? 0));
+
+    return {
+      focus_tasks: pinned.filter((t) => t.focus).map((t) => t.id),
+      satellite_tasks: pinned.filter((t) => !t.focus).map((t) => t.id),
+    };
+  });
 }
 
 // ── Tag helpers ──
