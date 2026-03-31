@@ -73,10 +73,16 @@ export class SessionHealthMonitor {
     // Detect stale AWAIT_HUMAN_ACTION sessions (stuck sub-agents)
     await this.checkStaleAwaitingSessions(sessions, updateSessionRecord, taskMap)
 
-    // Idle timeout — kill sessions with stale outputFile mtime past the configured threshold
-    await this.checkIdleTimeout(sessions, updateSessionRecord, taskMap)
+    // Idle timeout — kill sessions with stale outputFile mtime past the configured threshold.
+    // Returns IDs of sessions it killed — the main loop must skip those to avoid
+    // a race where the stale in-memory process_status ('idle') causes the main loop
+    // to overwrite the correct 'stopped' with 'error' + "Process exited without result".
+    const idleTimedOutIds = await this.checkIdleTimeout(sessions, updateSessionRecord, taskMap)
 
     for (const session of sessions) {
+      // Skip sessions already handled by idle timeout (prevents stale-state race)
+      if (idleTimedOutIds.has(session.claudeSessionId)) continue
+
       const alive = await isSessionProcessAlive(session)
 
       // alive=true: could be 'running' or 'idle' (don't override idle→running)
@@ -229,7 +235,8 @@ export class SessionHealthMonitor {
     sessions: SessionRecord[],
     updateSessionRecord: (id: string, update: Record<string, unknown>) => Promise<unknown>,
     taskMap: Map<string, Task>,
-  ): Promise<void> {
+  ): Promise<Set<string>> {
+    const killedIds = new Set<string>()
     // Read config to get idle_timeout_minutes
     let idleTimeoutMs = DEFAULT_IDLE_TIMEOUT_MS
     try {
@@ -246,7 +253,7 @@ export class SessionHealthMonitor {
     }
 
     // 0 = disabled
-    if (idleTimeoutMs <= 0) return
+    if (idleTimeoutMs <= 0) return killedIds
 
     const now = Date.now()
 
@@ -315,6 +322,8 @@ export class SessionHealthMonitor {
         }, 5_000)
       }
 
+      killedIds.add(session.claudeSessionId)
+
       const updateNow = new Date().toISOString()
       await updateSessionRecord(session.claudeSessionId, {
         process_status: 'stopped',
@@ -331,6 +340,8 @@ export class SessionHealthMonitor {
         process_status: 'stopped',
       }, ['*'], { source: 'health-monitor' })
     }
+
+    return killedIds
   }
 
   /**
