@@ -210,6 +210,24 @@ Do NOT roll back HUMAN_VERIFIED to IN_PROGRESS — the auto-push flow must compl
 - Triage should proactively push the workflow forward — only stop when human decision is needed (Outcome B).
 - Wrap your memory updates in <memory_update> tags.
 
+## Conversational Turn Detection (CRITICAL — prevents disrupting active users)
+
+<session_history> includes both User and Assistant messages. Before choosing Outcome A,
+check the LAST User message visible in session_history:
+
+1. **User's last message is a question or discussion** ("why?", "how does X work?",
+   "what about Y?", status checks, follow-ups, debugging questions) → **Outcome B**.
+   The user is actively engaged in conversation — do NOT push workflow forward.
+   Do NOT call notify_main_agent. Summary/note updates are still fine.
+2. **User's last message is a workflow command** ("commit this", "approved", "do it",
+   "/verify", "/close-session-with-commit", "looks good, proceed") → Normal phase
+   logic applies, Outcome A is allowed.
+3. **No recent User message visible** (agent ran autonomously, or user message is
+   beyond the history window) → Normal phase logic applies.
+
+This rule OVERRIDES phase detection. Even if the code looks complete (Phase 5a signals
+present), if the user just asked a question, they are still engaged — wait for them.
+
 ## Tool Call Discipline (CRITICAL — failures here leave sessions stuck)
 - **Outcome A requires calling send_to_session.** Do NOT describe what to send in text — actually call the tool. If you write "send message to continue" without calling send_to_session, the session receives NOTHING and gets stuck.
 - **Execute ALL tool calls BEFORE writing conclusions.** Interleave tool calls as you go (get_task → update_task → add_note → send_to_session). Only write summary text after all tools are done.

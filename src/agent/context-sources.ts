@@ -111,17 +111,24 @@ async function loadSessionHistory(sessionId: string, budget: number, cwd?: strin
   const messages = await readSessionHistory(sessionId, cwd, host);
   if (messages.length === 0) return '(no session history)';
 
-  // Assistant-only + [index] prefix + per-message truncation + tail truncation
-  const MAX_PER_MSG = 500;
+  // User + Assistant messages with [index] prefix + per-message truncation + tail truncation
+  const MAX_ASSISTANT_MSG = 500;
+  const MAX_USER_MSG = 300; // User messages are shorter; crucial for detecting active conversation
   const lines: string[] = [];
   for (let i = 0; i < messages.length; i++) {
     const m = messages[i];
-    if (m.role !== 'assistant') continue;
-    const toolInfo = m.tools?.length ? ` [${m.tools.map((t) => t.name).join(', ')}]` : '';
-    const text = m.text.length > MAX_PER_MSG
-      ? m.text.slice(0, MAX_PER_MSG) + `... [${m.text.length} chars]`
-      : m.text;
-    lines.push(`[${i}] Assistant${toolInfo}: ${text}`);
+    if (m.role === 'assistant') {
+      const toolInfo = m.tools?.length ? ` [${m.tools.map((t) => t.name).join(', ')}]` : '';
+      const text = m.text.length > MAX_ASSISTANT_MSG
+        ? m.text.slice(0, MAX_ASSISTANT_MSG) + `... [${m.text.length} chars]`
+        : m.text;
+      lines.push(`[${i}] Assistant${toolInfo}: ${text}`);
+    } else if (m.role === 'user') {
+      const text = m.text.length > MAX_USER_MSG
+        ? m.text.slice(0, MAX_USER_MSG) + `... [${m.text.length} chars]`
+        : m.text;
+      lines.push(`[${i}] User: ${text}`);
+    }
   }
 
   return truncateToTokenBudgetTail(lines.join('\n'), budget);

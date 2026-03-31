@@ -253,6 +253,65 @@ describe('loadContextSources', () => {
     expect(result).toContain('no session ID provided');
   });
 
+  it('session_history includes both user and assistant messages', async () => {
+    const task = makeTask();
+    await writeTaskStore([task]);
+    await writeProjectMemory('work/homelab', '---\nname: HomeLab\ndescription: test\n---\n');
+
+    // Mock readSessionHistory to return a mix of user and assistant messages
+    const { readSessionHistory } = await import('../../src/core/session-history.js');
+    const mockMessages = [
+      { role: 'user' as const, text: 'implement the Haiku model switch', timestamp: '2026-03-31T09:30:00Z' },
+      { role: 'assistant' as const, text: 'I\'ll implement the Haiku model switch. Let me edit the CDK code...', timestamp: '2026-03-31T09:31:00Z', tools: [{ name: 'Edit', input: { file: 'cdk.ts' } }] },
+      { role: 'user' as const, text: 'why is ingestion still slow? previous rate was 60 docs per hour', timestamp: '2026-03-31T09:41:00Z' },
+      { role: 'assistant' as const, text: 'Good question. Let me break down what actually happened with the indexing rates...', timestamp: '2026-03-31T09:42:00Z' },
+    ];
+    vi.spyOn(await import('../../src/core/session-history.js'), 'readSessionHistory')
+      .mockResolvedValue(mockMessages);
+
+    const agent = makeAgentDef({
+      context_sources: [
+        { id: 'session_history', enabled: true },
+      ],
+    });
+
+    const result = await loadContextSources(agent, { taskId: task.id, sessionId: 'test-session-123' });
+
+    // User messages must be visible (this is the bug fix — previously filtered out)
+    expect(result).toContain('[0] User: implement the Haiku model switch');
+    expect(result).toContain('[2] User: why is ingestion still slow?');
+
+    // Assistant messages still present with tool info
+    expect(result).toContain('[1] Assistant [Edit]:');
+    expect(result).toContain('[3] Assistant:');
+  });
+
+  it('session_history truncates user messages at 300 chars', async () => {
+    const task = makeTask();
+    await writeTaskStore([task]);
+    await writeProjectMemory('work/homelab', '---\nname: HomeLab\ndescription: test\n---\n');
+
+    const longUserMessage = 'A'.repeat(500);
+    vi.spyOn(await import('../../src/core/session-history.js'), 'readSessionHistory')
+      .mockResolvedValue([
+        { role: 'user' as const, text: longUserMessage, timestamp: '2026-03-31T09:30:00Z' },
+        { role: 'assistant' as const, text: 'OK', timestamp: '2026-03-31T09:31:00Z' },
+      ]);
+
+    const agent = makeAgentDef({
+      context_sources: [
+        { id: 'session_history', enabled: true },
+      ],
+    });
+
+    const result = await loadContextSources(agent, { taskId: task.id, sessionId: 'test-session-123' });
+
+    // User message should be truncated at 300 chars (not 500 like assistant)
+    expect(result).toContain('[0] User: ' + 'A'.repeat(300) + '... [500 chars]');
+    // Assistant message should NOT be truncated (only 2 chars)
+    expect(result).toContain('[1] Assistant: OK');
+  });
+
   it('loads daily_log when enabled', async () => {
     const task = makeTask();
     await writeTaskStore([task]);
