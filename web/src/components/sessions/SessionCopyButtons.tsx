@@ -12,7 +12,7 @@ interface SessionCopyButtonsProps {
   onForkFailed?: () => void;
 }
 
-function CopyChip({ label, value }: { label: string; value: string }) {
+function CopyChip({ label, value, tooltipValue }: { label: string; value: string; tooltipValue?: string }) {
   const [copied, setCopied] = useState(false);
   const timerRef = useRef<ReturnType<typeof setTimeout>>(undefined);
   useEffect(() => () => { clearTimeout(timerRef.current); }, []);
@@ -30,7 +30,7 @@ function CopyChip({ label, value }: { label: string; value: string }) {
     <button
       className="session-copy-chip"
       onClick={copy}
-      title={`Copy: ${value}`}
+      title={`Copy: ${tooltipValue ?? value}`}
     >
       {copied ? 'Copied!' : label}
     </button>
@@ -127,7 +127,7 @@ export function SessionCopyButtons({ sessionId, cwd, project, taskId, taskTitle,
 
   return (
     <span className="session-copy-buttons">
-      {cwd && <CopyChip label={project || 'CWD'} value={cwd} />}
+      {cwd && <CopyChip label={project || 'CWD'} value={cwd} tooltipValue={cwd.split('/').filter(Boolean).pop() || cwd} />}
       <CopyChip label="ID" value={sessionId} />
       <CopyChip label="Resume" value={`${cdPrefix}claude -r ${sessionId}`} />
       {taskId && (
