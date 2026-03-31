@@ -173,3 +173,66 @@ describe('GET /api/sessions/:sessionId/history', () => {
     expect(res.body.messages).toEqual([]);
   });
 });
+
+describe('POST /api/sessions/:sessionId/execute', () => {
+  it('does not throw "record is not defined" for plan sessions', async () => {
+    // Create a plan session with planCompleted + planFile
+    const planFilePath = `${WALNUT_HOME}/test-plan.md`;
+    await fs.mkdir(WALNUT_HOME, { recursive: true });
+    await fs.writeFile(planFilePath, '# Test Plan\n1. Step one\n2. Step two\n');
+
+    await createSessionRecord('plan-sess-1', 'task-1', 'my-project', '/tmp', {
+      mode: 'plan',
+      planFile: planFilePath,
+      planCompleted: true,
+    });
+
+    const { updateSessionRecord } = await import('../../../src/core/session-tracker.js');
+    await updateSessionRecord('plan-sess-1', { process_status: 'stopped' });
+
+    const app = createApp();
+    const res = await request(app)
+      .post('/api/sessions/plan-sess-1/execute')
+      .send({})
+      .timeout(35_000); // endpoint waits up to 30s for session runner
+
+    // The endpoint reaches SESSION_START emit (past the buggy line) then waits
+    // for a session runner that doesn't exist in test env → 200 with no sessionId.
+    // The key assertion: no "record is not defined" ReferenceError.
+    expect(res.body.error ?? '').not.toContain('record is not defined');
+    expect(res.body.status).toBe('started');
+    expect(res.body.planSessionId).toBe('plan-sess-1');
+  }, 40_000);
+
+  it('does not throw "record is not defined" for execution sessions re-executing', async () => {
+    // Create the original plan session
+    const planFilePath = `${WALNUT_HOME}/test-plan-2.md`;
+    await fs.mkdir(WALNUT_HOME, { recursive: true });
+    await fs.writeFile(planFilePath, '# Plan\nDo stuff\n');
+
+    await createSessionRecord('orig-plan', 'task-1', 'my-project', '/tmp', {
+      mode: 'plan',
+      planFile: planFilePath,
+      planCompleted: true,
+    });
+
+    // Create an execution session that points back to the plan session
+    await createSessionRecord('exec-sess-1', 'task-1', 'my-project', '/tmp', {
+      mode: 'bypass',
+      fromPlanSessionId: 'orig-plan',
+    });
+
+    const { updateSessionRecord } = await import('../../../src/core/session-tracker.js');
+    await updateSessionRecord('exec-sess-1', { process_status: 'stopped' });
+
+    const app = createApp();
+    const res = await request(app)
+      .post('/api/sessions/exec-sess-1/execute')
+      .send({})
+      .timeout(35_000);
+
+    // Must NOT crash with "record is not defined"
+    expect(res.body.error ?? '').not.toContain('record is not defined');
+    expect(res.body.status).toBe('started');
+  }, 40_000);
+});

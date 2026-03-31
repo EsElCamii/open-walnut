@@ -1001,7 +1001,7 @@ sessionsRouter.post('/:sessionId/execute', async (req: Request, res: Response, n
       taskId: taskId ?? '',
       message: planMessage,
       cwd,
-      project: record?.project ?? '',
+      project: sourceRecord?.project ?? '',
       mode: execMode,
       title: `Execute plan from ${planSessionId.slice(0, 16)}...`,
       ...(execHost ? { host: execHost } : {}),
