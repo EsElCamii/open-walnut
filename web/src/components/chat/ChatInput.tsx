@@ -102,6 +102,21 @@ export function ChatInput({ onSend, onCommand, onStop, onInterruptSend, onClearQ
 
   const queueFull = isStreaming && (queueCount ?? 0) >= MAX_QUEUE_SIZE;
 
+  // Queue dismiss state: user can close the indicator, re-appears when new messages are queued
+  const [queueDismissed, setQueueDismissed] = useState(false);
+  const prevQueueCount = useRef(0);
+  useEffect(() => {
+    const current = queueCount ?? 0;
+    const prev = prevQueueCount.current;
+    prevQueueCount.current = current;
+    // Only re-surface when queue goes from empty→non-empty, not on every increment — otherwise dismiss-while-streaming is impossible
+    if (prev === 0 && current > 0) {
+      setQueueDismissed(false);
+    }
+  }, [queueCount]);
+
+  const showQueue = isStreaming && (queueCount ?? 0) > 0 && !queueDismissed;
+
   const isSessionMode = !!(sessionCommands && searchSessionCommands);
 
   // Slash command state
@@ -388,7 +403,6 @@ export function ChatInput({ onSend, onCommand, onStop, onInterruptSend, onClearQ
   return (
     <div
       className={`chat-input-container${dragOver ? ' drag-over' : ''}`}
-      style={{ position: 'relative' }}
       onDragOver={handleDragOver}
       onDragLeave={handleDragLeave}
       onDrop={handleDrop}
@@ -401,75 +415,85 @@ export function ChatInput({ onSend, onCommand, onStop, onInterruptSend, onClearQ
           showSource={isSessionMode}
         />
       )}
-      {/* Queue indicator bar */}
-      {isStreaming && (queueCount ?? 0) > 0 && (
+      {/* Queue indicator bar — dismissable, reappears when new messages queued */}
+      {showQueue && (
         <div className="chat-queue-indicator">
           <span>{queueCount} message{(queueCount ?? 0) > 1 ? 's' : ''} queued</span>
           {onClearQueue && (
             <button className="chat-queue-clear" onClick={onClearQueue} type="button">Clear all</button>
           )}
+          <button
+            className="chat-queue-dismiss"
+            onClick={(e) => { e.stopPropagation(); setQueueDismissed(true); }}
+            type="button"
+            aria-label="Dismiss queue indicator"
+          >
+            &times;
+          </button>
         </div>
       )}
-      {/* Unified input box: pill + images + textarea share one border */}
-      <div className="chat-input-box">
-        {/* Inline task context pill */}
-        {focusedTask && onClearFocus && (
-          <div className={`chat-input-task-pill${(focusedTask.phase === 'AGENT_COMPLETE' || focusedTask.phase === 'AWAIT_HUMAN_ACTION') ? ' pill-attention' : ''}`}>
-            <button
-              className="pill-close"
-              onClick={onClearFocus}
-              title="Clear task focus"
-              type="button"
-              aria-label="Clear task focus"
-            >
-              &times;
-            </button>
-            <StatusBadge status={focusedTask.status} phase={focusedTask.phase} />
-            <span className="pill-title">{focusedTask.title}</span>
-          </div>
-        )}
-        {/* Image preview area */}
-        {images.length > 0 && (
-          <div className="chat-image-previews">
-            {images.map((img, i) => (
-              <div key={i} className="chat-image-preview">
-                <img
-                  src={`data:${img.mediaType};base64,${img.data}`}
-                  alt={img.name}
-                />
-                <button
-                  className="chat-image-remove"
-                  onClick={() => removeImage(i)}
-                  type="button"
-                  aria-label="Remove image"
-                >
-                  &times;
-                </button>
-              </div>
-            ))}
-          </div>
-        )}
-        <textarea
-          ref={textareaRef}
-          className="chat-input-textarea"
-          value={value}
-          onChange={(e) => handleChange(e.target.value)}
-          onKeyDown={handleKeyDown}
-          onPaste={handlePaste}
-          placeholder={placeholder ?? (focusedTaskTitle ? `Ask about '${focusedTaskTitle}'...` : 'Type a message... (/ for commands)')}
-          disabled={disabled}
-          rows={1}
+      {/* Input row: attach button sits outside the bordered input-box as a sibling,
+          so it aligns beside (not inside) the shared border */}
+      <div className="chat-input-row">
+        {/* Unified input box: pill + images + textarea share one border */}
+        <div className="chat-input-box">
+          {/* Inline task context pill */}
+          {focusedTask && onClearFocus && (
+            <div className={`chat-input-task-pill${(focusedTask.phase === 'AGENT_COMPLETE' || focusedTask.phase === 'AWAIT_HUMAN_ACTION') ? ' pill-attention' : ''}`}>
+              <button
+                className="pill-close"
+                onClick={onClearFocus}
+                title="Clear task focus"
+                type="button"
+                aria-label="Clear task focus"
+              >
+                &times;
+              </button>
+              <StatusBadge status={focusedTask.status} phase={focusedTask.phase} />
+              <span className="pill-title">{focusedTask.title}</span>
+            </div>
+          )}
+          {/* Image preview area */}
+          {images.length > 0 && (
+            <div className="chat-image-previews">
+              {images.map((img, i) => (
+                <div key={i} className="chat-image-preview">
+                  <img
+                    src={`data:${img.mediaType};base64,${img.data}`}
+                    alt={img.name}
+                  />
+                  <button
+                    className="chat-image-remove"
+                    onClick={() => removeImage(i)}
+                    type="button"
+                    aria-label="Remove image"
+                  >
+                    &times;
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+          <textarea
+            ref={textareaRef}
+            className="chat-input-textarea"
+            value={value}
+            onChange={(e) => handleChange(e.target.value)}
+            onKeyDown={handleKeyDown}
+            onPaste={handlePaste}
+            placeholder={placeholder ?? (focusedTaskTitle ? `Ask about '${focusedTaskTitle}'...` : 'Type a message... (/ for commands)')}
+            disabled={disabled}
+            rows={1}
+          />
+        </div>
+        <input
+          ref={fileInputRef}
+          type="file"
+          accept="image/png,image/jpeg,image/gif,image/webp"
+          multiple
+          style={{ display: 'none' }}
+          onChange={handleFileChange}
         />
-      </div>
-      <input
-        ref={fileInputRef}
-        type="file"
-        accept="image/png,image/jpeg,image/gif,image/webp"
-        multiple
-        style={{ display: 'none' }}
-        onChange={handleFileChange}
-      />
-      <div className="chat-input-buttons">
         <button
           className="btn chat-attach-btn"
           onClick={handleAttachClick}
@@ -482,6 +506,9 @@ export function ChatInput({ onSend, onCommand, onStop, onInterruptSend, onClearQ
             <path d="M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.19-9.19a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48" />
           </svg>
         </button>
+      </div>
+      {/* Action buttons — below the input, right-aligned */}
+      <div className="chat-input-buttons">
         {isStreaming && onStop && (
           <button
             className="btn chat-stop-btn"

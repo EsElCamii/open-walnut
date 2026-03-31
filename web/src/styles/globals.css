@@ -5122,12 +5122,19 @@ input:focus, textarea:focus, select:focus {
 
 .chat-input-container {
   display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
+  flex-direction: column;
+  gap: 6px;
   padding: 12px 0 4px;
   border-top: 1px solid var(--border);
   flex-shrink: 0;
+  position: relative;
   transition: border-color 0.2s;
+}
+
+.chat-input-row {
+  display: flex;
+  gap: 6px;
+  align-items: flex-end;
 }
 
 .chat-input-container.drag-over {
@@ -5256,7 +5263,8 @@ input:focus, textarea:focus, select:focus {
 .chat-input-buttons {
   display: flex;
   gap: 6px;
-  align-self: flex-end;
+  align-items: center;
+  justify-content: flex-end;
 }
 
 /* ── Image attachment styles ── */
@@ -5272,6 +5280,7 @@ input:focus, textarea:focus, select:focus {
   align-items: center;
   justify-content: center;
   transition: color 0.15s, border-color 0.15s;
+  flex-shrink: 0;
 }
 
 .chat-attach-btn:hover:not(:disabled) {
@@ -5501,8 +5510,31 @@ img[data-lightbox-src],
   font-size: 11px;
   color: var(--fg-muted);
   background: var(--bg-secondary);
-  border-bottom: 1px solid var(--border);
-  border-radius: var(--radius-sm) var(--radius-sm) 0 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+
+.chat-queue-dismiss {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  font-size: 14px;
+  line-height: 1;
+  color: var(--fg-muted);
+  background: none;
+  border: none;
+  border-radius: 50%;
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: background 0.15s, color 0.15s;
+}
+
+.chat-queue-dismiss:hover {
+  color: var(--fg);
+  background: var(--border);
 }
 
 .chat-queue-clear {
@@ -6272,7 +6304,7 @@ img[data-lightbox-src],
 }
 
 .session-panel-input .chat-input-container {
-  gap: 6px;
+  gap: 4px;
 }
 
 .session-panel-input .chat-input-textarea {
@@ -12941,11 +12973,6 @@ img[data-lightbox-src],
   padding: 4px 8px;
 }
 
-.dock-task-input .chat-input-send {
-  width: 28px;
-  height: 28px;
-  font-size: 14px;
-}
 
 /* Pin button old overrides removed — unified via .task-action-btn */
 
