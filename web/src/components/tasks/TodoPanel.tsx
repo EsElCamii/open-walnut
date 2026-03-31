@@ -31,6 +31,7 @@ import {
   useDroppable,
   closestCenter,
   type DragStartEvent,
+  type DragOverEvent,
   type DragEndEvent,
   type CollisionDetection,
   type Modifier,
@@ -1596,34 +1597,118 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
   );
 
   const pinnedTaskIds_arr = useMemo(() => pinnedTasks.map((t) => t.id), [pinnedTasks]);
-  const focusIds_arr = useMemo(() => focusTasksLocal.map((t) => t.id), [focusTasksLocal]);
-  const nextIds_arr = useMemo(() => nextTasksLocal.map((t) => t.id), [nextTasksLocal]);
-  const satelliteIds_arr = useMemo(() => satelliteTasksLocal.map((t) => t.id), [satelliteTasksLocal]);
 
-  // Determine which tier an ID belongs to
-  const tierOfId = useCallback((id: string): FocusTier => {
-    const fSet = focusTaskIds ?? new Set<string>();
-    const nSet = nextTaskIds ?? new Set<string>();
-    if (fSet.has(id)) return 'focus';
-    if (nSet.has(id)) return 'next';
+  // ── Live cross-container DnD ──
+  // During drag, we maintain local overrides of tier arrays so items appear in the
+  // target section in real-time. On drop we commit to the server; on cancel we revert.
+
+  const DROP_ZONE_TIERS: Record<string, FocusTier> = { 'focus-drop-zone': 'focus', 'next-drop-zone': 'next', 'satellite-drop-zone': 'satellite' };
+
+  // Local tier arrays that can be overridden during drag
+  const [dragFocusIds, setDragFocusIds] = useState<string[] | null>(null);
+  const [dragNextIds, setDragNextIds] = useState<string[] | null>(null);
+  const [dragSatelliteIds, setDragSatelliteIds] = useState<string[] | null>(null);
+
+  // Active arrays: use drag overrides when dragging, else the source-of-truth
+  const focusIds_arr = dragFocusIds ?? focusTasksLocal.map((t) => t.id);
+  const nextIds_arr = dragNextIds ?? nextTasksLocal.map((t) => t.id);
+  const satelliteIds_arr = dragSatelliteIds ?? satelliteTasksLocal.map((t) => t.id);
+
+  // Resolve tier ID arrays to Task objects (uses drag overrides when active)
+  const pinnedTaskMap = useMemo(() => new Map(pinnedTasks.map((t) => [t.id, t])), [pinnedTasks]);
+  const focusTasksDisplay = useMemo(() => focusIds_arr.map((id) => pinnedTaskMap.get(id)).filter(Boolean) as Task[], [focusIds_arr, pinnedTaskMap]);
+  const nextTasksDisplay = useMemo(() => nextIds_arr.map((id) => pinnedTaskMap.get(id)).filter(Boolean) as Task[], [nextIds_arr, pinnedTaskMap]);
+  const satelliteTasksDisplay = useMemo(() => satelliteIds_arr.map((id) => pinnedTaskMap.get(id)).filter(Boolean) as Task[], [satelliteIds_arr, pinnedTaskMap]);
+
+  // Snapshot of original tier arrays at drag start (for revert on cancel)
+  const dragStartSnapshot = useRef<{ focus: string[]; next: string[]; satellite: string[] } | null>(null);
+  const [activeDragPinnedId, setActiveDragPinnedId] = useState<string | null>(null);
+  const activeDragPinnedTask = useMemo(
+    () => activeDragPinnedId ? pinnedTasks.find((t) => t.id === activeDragPinnedId) ?? null : null,
+    [activeDragPinnedId, pinnedTasks],
+  );
+
+  const tierOfIdInArrays = useCallback((id: string): FocusTier => {
+    if (focusIds_arr.includes(id)) return 'focus';
+    if (nextIds_arr.includes(id)) return 'next';
     return 'satellite';
-  }, [focusTaskIds, nextTaskIds]);
+  }, [focusIds_arr, nextIds_arr]);
 
-  // Cross-container DnD: detect tier of drop target, call setTier if different
-  const handlePinnedDragEnd = useCallback((event: DragEndEvent) => {
+  const handlePinnedDragStart = useCallback((event: DragStartEvent) => {
+    const fArr = focusTasksLocal.map((t) => t.id);
+    const nArr = nextTasksLocal.map((t) => t.id);
+    const sArr = satelliteTasksLocal.map((t) => t.id);
+    dragStartSnapshot.current = { focus: fArr, next: nArr, satellite: sArr };
+    setActiveDragPinnedId(event.active.id as string);
+  }, [focusTasksLocal, nextTasksLocal, satelliteTasksLocal]);
+
+  // Live movement: when hovering over a different tier, move item between arrays
+  const handlePinnedDragOver = useCallback((event: DragOverEvent) => {
     const { active, over } = event;
     if (!over) return;
     const activeId = active.id as string;
     const overId = over.id as string;
-    if (activeId === overId) return;
 
-    // Check if dropped on a drop zone or a card in a different tier
-    const dropZoneTier: Record<string, FocusTier> = { 'focus-drop-zone': 'focus', 'next-drop-zone': 'next', 'satellite-drop-zone': 'satellite' };
-    const targetTier = dropZoneTier[overId] ?? (pinnedTaskIds_arr.includes(overId) ? tierOfId(overId) : null);
+    const snap = dragStartSnapshot.current;
+    if (!snap) return;
+
+    // Determine target tier from drop zone or card
+    const targetTier = DROP_ZONE_TIERS[overId]
+      ?? (snap.focus.includes(overId) || (dragFocusIds ?? snap.focus).includes(overId) ? 'focus' : undefined)
+      ?? (snap.next.includes(overId) || (dragNextIds ?? snap.next).includes(overId) ? 'next' : undefined)
+      ?? (snap.satellite.includes(overId) || (dragSatelliteIds ?? snap.satellite).includes(overId) ? 'satellite' : undefined);
     if (!targetTier) return;
 
-    const activeTier = tierOfId(activeId);
-    if (activeTier !== targetTier) {
+    const currentTier = tierOfIdInArrays(activeId);
+    if (currentTier === targetTier) return;
+
+    // Move activeId from current to target tier arrays
+    const remove = (arr: string[]) => arr.filter((id) => id !== activeId);
+    const addAt = (arr: string[], ovId: string) => {
+      const idx = arr.indexOf(ovId);
+      if (idx === -1) return [...arr, activeId];
+      const copy = [...arr];
+      copy.splice(idx, 0, activeId);
+      return copy;
+    };
+
+    const getArr = (tier: FocusTier) => tier === 'focus' ? (dragFocusIds ?? snap.focus) : tier === 'next' ? (dragNextIds ?? snap.next) : (dragSatelliteIds ?? snap.satellite);
+    const setArr = (tier: FocusTier, val: string[]) => { if (tier === 'focus') setDragFocusIds(val); else if (tier === 'next') setDragNextIds(val); else setDragSatelliteIds(val); };
+
+    setArr(currentTier, remove(getArr(currentTier)));
+    setArr(targetTier, addAt(getArr(targetTier), overId));
+  }, [dragFocusIds, dragNextIds, dragSatelliteIds, tierOfIdInArrays]);
+
+  const clearDragState = useCallback(() => {
+    setActiveDragPinnedId(null);
+    setDragFocusIds(null);
+    setDragNextIds(null);
+    setDragSatelliteIds(null);
+    dragStartSnapshot.current = null;
+  }, []);
+
+  const handlePinnedDragCancel = useCallback(() => {
+    clearDragState();
+  }, [clearDragState]);
+
+  const handlePinnedDragEnd = useCallback((event: DragEndEvent) => {
+    const { active, over } = event;
+    const snap = dragStartSnapshot.current;
+    clearDragState();
+
+    if (!over || !snap) return;
+    const activeId = active.id as string;
+    const overId = over.id as string;
+    if (activeId === overId) return;
+
+    // Determine original and target tiers
+    const origTier: FocusTier = snap.focus.includes(activeId) ? 'focus' : snap.next.includes(activeId) ? 'next' : 'satellite';
+    const targetTier = DROP_ZONE_TIERS[overId]
+      ?? (snap.focus.includes(overId) ? 'focus' : undefined)
+      ?? (snap.next.includes(overId) ? 'next' : undefined)
+      ?? 'satellite';
+
+    if (origTier !== targetTier) {
       onSetTier?.(activeId, targetTier);
       return;
     }
@@ -1636,25 +1721,7 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
     newOrder.splice(oldIndex, 1);
     newOrder.splice(newIndex, 0, activeId);
     onReorderPinned?.(newOrder);
-  }, [pinnedTaskIds_arr, tierOfId, onReorderPinned, onSetTier]);
-
-  // Track actively-dragged pinned task for DragOverlay (cross-container visual feedback)
-  const [activeDragPinnedId, setActiveDragPinnedId] = useState<string | null>(null);
-  const activeDragPinnedTask = useMemo(
-    () => activeDragPinnedId ? pinnedTasks.find((t) => t.id === activeDragPinnedId) ?? null : null,
-    [activeDragPinnedId, pinnedTasks],
-  );
-  const handlePinnedDragStart = useCallback((event: DragStartEvent) => {
-    setActiveDragPinnedId(event.active.id as string);
-  }, []);
-  const handlePinnedDragCancel = useCallback(() => {
-    setActiveDragPinnedId(null);
-  }, []);
-  // Wrap original dragEnd to also clear overlay
-  const handlePinnedDragEndWithOverlay = useCallback((event: DragEndEvent) => {
-    setActiveDragPinnedId(null);
-    handlePinnedDragEnd(event);
-  }, [handlePinnedDragEnd]);
+  }, [pinnedTaskIds_arr, onReorderPinned, onSetTier, clearDragState]);
 
   // Recently completed: tracks tasks completed in the last few seconds.
   // Used for BOTH visual styling (isRecentlyDone green tint) AND filtering —
@@ -2580,19 +2647,19 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
             <span className="todo-pinned-count">{pinnedTasks.length}</span>
           </div>
           {!pinnedCollapsed && (
-            <DndContext sensors={pinnedSensors} collisionDetection={closestCenter} onDragStart={handlePinnedDragStart} onDragEnd={handlePinnedDragEndWithOverlay} onDragCancel={handlePinnedDragCancel}>
+            <DndContext sensors={pinnedSensors} collisionDetection={closestCenter} onDragStart={handlePinnedDragStart} onDragOver={handlePinnedDragOver} onDragEnd={handlePinnedDragEnd} onDragCancel={handlePinnedDragCancel}>
               {/* Focus sub-group */}
               <div className="todo-pinned-subgroup">
                 <div className="todo-pinned-sublabel" onClick={() => setFocusCollapsed(c => !c)} role="button" tabIndex={0} onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') setFocusCollapsed(c => !c); }} style={{ cursor: 'pointer' }} title="Current sprint — finish these first">
                   <span className={`todo-pinned-chevron todo-pinned-sub-chevron${focusCollapsed ? '' : ' todo-pinned-chevron-open'}`}>{'\u25B8'}</span>
                   <span className="todo-pinned-sublabel-icon todo-icon-focus" />
                   <span className="todo-pinned-sublabel-text">Focus</span>
-                  <span className="todo-pinned-sublabel-count">{focusTasksLocal.length}</span>
+                  <span className="todo-pinned-sublabel-count">{focusTasksDisplay.length}</span>
                 </div>
                 {!focusCollapsed && (
                   <SortableContext items={focusIds_arr} strategy={verticalListSortingStrategy}>
-                    <TierDropZone id="focus-drop-zone" isEmpty={focusTasksLocal.length === 0}>
-                      {focusTasksLocal.map((task) => (
+                    <TierDropZone id="focus-drop-zone" isEmpty={focusTasksDisplay.length === 0}>
+                      {focusTasksDisplay.map((task) => (
                         <SortableTierCard key={task.id} task={task} tier="focus" isFocused={focusedTaskId === task.id} onClick={handlePinnedCardClick} onSetTier={onSetTier} onUnpinTask={onUnpinTask} />
                       ))}
                     </TierDropZone>
@@ -2606,12 +2673,12 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
                   <span className={`todo-pinned-chevron todo-pinned-sub-chevron${nextCollapsed ? '' : ' todo-pinned-chevron-open'}`}>{'\u25B8'}</span>
                   <span className="todo-pinned-sublabel-icon todo-icon-next" />
                   <span className="todo-pinned-sublabel-text">Next</span>
-                  <span className="todo-pinned-sublabel-count">{nextTasksLocal.length}</span>
+                  <span className="todo-pinned-sublabel-count">{nextTasksDisplay.length}</span>
                 </div>
                 {!nextCollapsed && (
                   <SortableContext items={nextIds_arr} strategy={verticalListSortingStrategy}>
-                    <TierDropZone id="next-drop-zone" isEmpty={nextTasksLocal.length === 0}>
-                      {nextTasksLocal.map((task) => (
+                    <TierDropZone id="next-drop-zone" isEmpty={nextTasksDisplay.length === 0}>
+                      {nextTasksDisplay.map((task) => (
                         <SortableTierCard key={task.id} task={task} tier="next" isFocused={focusedTaskId === task.id} onClick={handlePinnedCardClick} onSetTier={onSetTier} onUnpinTask={onUnpinTask} />
                       ))}
                     </TierDropZone>
@@ -2620,18 +2687,18 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
               </div>
 
               {/* Satellite sub-group */}
-              {satelliteTasksLocal.length > 0 && (
+              {satelliteTasksDisplay.length > 0 && (
                 <div className="todo-pinned-subgroup">
                   <div className="todo-pinned-sublabel" onClick={() => setSatelliteCollapsed(c => !c)} role="button" tabIndex={0} onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') setSatelliteCollapsed(c => !c); }} style={{ cursor: 'pointer' }} title="Backlog — other pinned tasks">
                     <span className={`todo-pinned-chevron todo-pinned-sub-chevron${satelliteCollapsed ? '' : ' todo-pinned-chevron-open'}`}>{'\u25B8'}</span>
                     <span className="todo-pinned-sublabel-icon todo-icon-satellite" />
                     <span className="todo-pinned-sublabel-text">Satellite</span>
-                    <span className="todo-pinned-sublabel-count">{satelliteTasksLocal.length}</span>
+                    <span className="todo-pinned-sublabel-count">{satelliteTasksDisplay.length}</span>
                   </div>
                   {!satelliteCollapsed && (
                     <SortableContext items={satelliteIds_arr} strategy={verticalListSortingStrategy}>
                       <div className="todo-pinned-list todo-pinned-list-scroll" style={{ maxHeight: PINNED_VISIBLE_MAX * 30 }}>
-                        {satelliteTasksLocal.map((task) => (
+                        {satelliteTasksDisplay.map((task) => (
                           <SortableTierCard key={task.id} task={task} tier="satellite" isFocused={focusedTaskId === task.id} onClick={handlePinnedCardClick} onSetTier={onSetTier} onUnpinTask={onUnpinTask} />
                         ))}
                       </div>
