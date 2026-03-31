@@ -44,11 +44,12 @@ export function useFocusBar(tasks: Task[]): UseFocusBarReturn {
 
   const lastWriteRef = useRef(0);
 
-  const applyData = useCallback((data: focusApi.FocusBarData) => {
-    setPinnedIds(data.pinned_tasks);
-    setFocusIds(data.focus_tasks ?? []);
-    setNextIds(data.next_tasks ?? []);
-    setSatelliteIds(data.satellite_tasks ?? []);
+  // Apply server response — handles both full (GET) and partial (setTier) responses
+  const applyData = useCallback((data: Partial<focusApi.FocusBarData>) => {
+    if (data.pinned_tasks) setPinnedIds(data.pinned_tasks);
+    if (data.focus_tasks) setFocusIds(data.focus_tasks);
+    if (data.next_tasks) setNextIds(data.next_tasks);
+    if (data.satellite_tasks) setSatelliteIds(data.satellite_tasks);
   }, []);
 
   const fetchPinned = useCallback(() => {

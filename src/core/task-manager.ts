@@ -2556,17 +2556,19 @@ export async function getPinnedTasks(): Promise<Task[]> {
 type FocusTier = 'focus' | 'next' | 'satellite';
 
 export interface TierResult {
+  pinned_tasks: string[];
   focus_tasks: string[];
   next_tasks: string[];
   satellite_tasks: string[];
 }
 
-/** Helper: split pinned tasks into tier arrays. */
+/** Helper: split pinned tasks into tier arrays (includes pinned_tasks for full state sync). */
 function splitTiers(store: TaskStore): TierResult {
   const pinned = store.tasks
     .filter((t) => t.pinned && t.phase !== 'COMPLETE' && t.status !== 'done')
     .sort((a, b) => (a.pin_order ?? 0) - (b.pin_order ?? 0));
   return {
+    pinned_tasks: pinned.map((t) => t.id),
     focus_tasks: pinned.filter((t) => t.focus_tier === 'focus').map((t) => t.id),
     next_tasks: pinned.filter((t) => t.focus_tier === 'next').map((t) => t.id),
     satellite_tasks: pinned.filter((t) => !t.focus_tier).map((t) => t.id),
