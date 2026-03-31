@@ -919,10 +919,22 @@ sessionsRouter.post('/:sessionId/execute', async (req: Request, res: Response, n
       actualPlanSessionId = sourceRecord.fromPlanSessionId
     }
 
-    // Read plan file via shared resolver (same logic as agent tool's from_plan path)
-    const planResult = await readPlanFromSession(actualPlanSessionId)
+    // Read plan file via shared resolver (same logic as agent tool's from_plan path).
+    // Fallback: extractPlanContent from JSONL — covers plan sessions where planCompleted flag was never set
+    // (e.g. ExitPlanMode event missed by stream handler) but JSONL contains the plan content.
+    let planResult = await readPlanFromSession(actualPlanSessionId)
     if ('error' in planResult) {
-      // Distinguish "session not found" (404) from "session exists but not a plan" (400)
+      const planRecord = actualPlanSessionId !== planSessionId
+        ? await getSessionByClaudeId(actualPlanSessionId)
+        : sourceRecord
+      if (planRecord) {
+        const extracted = await extractPlanContent(actualPlanSessionId, planRecord.cwd, planRecord.host)
+        if (extracted?.trim()) {
+          planResult = { content: extracted, planFile: planRecord.planFile ?? `(extracted from session ${actualPlanSessionId} JSONL)` }
+        }
+      }
+    }
+    if ('error' in planResult) {
       const status = planResult.error.includes('not found') ? 404 : 400
       res.status(status).json({ error: planResult.error })
       return
