@@ -232,9 +232,13 @@ export class ClaudeCodeSession {
   private pid: number | null = null
   private fullText = ''
   /** Dedup set for streaming text/tool events — prevents replay duplicates.
-   *  Key format: `{message.id}:text:{hash}` or `{message.id}:tool_use:{block.id}`.
-   *  Cleared on session result/error/turn completion. */
+   *  Key format: `{message.id}:tool_use:{block.id}` or length-based text keys.
+   *  Cleared on send()/writeMessage(). */
   private _emittedStreamKeys = new Set<string>()
+  /** Tracks last emitted text per (messageId, textBlockIndex) for progressive delta
+   *  extraction. Claude Code writes multiple JSONL lines per message with accumulated
+   *  text; we must emit only the NEW suffix, not the full snapshot. */
+  private _lastEmittedText = new Map<string, string>()
   private claudeSessionId: string | null = null
   private _cwd: string | null = null
   private _active = false
@@ -484,6 +488,7 @@ export class ClaudeCodeSession {
     this._askUserIntercepted = false
     this.fullText = ''
     this._emittedStreamKeys.clear()
+    this._lastEmittedText.clear()
     this._cwd = cwd ?? null
 
     const isResume = !!resumeSessionId && !forkSession
@@ -806,6 +811,8 @@ export class ClaudeCodeSession {
     this._turnStartOffset = this._transport?.fileSize ?? 0  // Track where this turn's data begins
     this._askUserIntercepted = false
     this._toolInputFilePaths.clear()  // Fresh turn — clear stale cached tool input paths
+    this._emittedStreamKeys.clear()   // Fresh turn — allow new events through dedup
+    this._lastEmittedText.clear()     // Fresh turn — reset progressive delta tracking
     this.emitStatusChanged('IN_PROGRESS')
     // Persist running state to session tracker so API consumers (frontend tree, etc.)
     // see the updated status immediately — not just WebSocket subscribers.
@@ -1348,24 +1355,48 @@ export class ClaudeCodeSession {
         if (!Array.isArray(msg.message?.content)) break
         const msgId = msg.message?.id ?? ''
         const parentToolUseId = msg.parent_tool_use_id ?? undefined
+        let textBlockIdx = 0
         for (const block of msg.message.content) {
           if (block.type === 'text' && block.text) {
-            // Dedup: skip text blocks already emitted for this message
-            // (daemon reconnect with fromOffset:0 replays entire JSONL)
-            const dedupKey = `${msgId}:text:${block.text}`
+            // ── Progressive delta extraction ──
+            // Claude Code writes multiple JSONL lines per message (same message.id),
+            // each containing the ACCUMULATED text so far. We must emit only the NEW
+            // suffix since the last emission, not the full snapshot. Without this,
+            // the frontend/stream-buffer would accumulate "A" + "AB" + "ABC" = "AABABC".
+            const trackingKey = `${msgId}:${textBlockIdx}`
+            textBlockIdx++
+            const previousText = this._lastEmittedText.get(trackingKey) ?? ''
+
+            if (block.text === previousText) {
+              continue // Exact duplicate — skip entirely
+            }
+
+            let deltaText: string
+            if (previousText && block.text.startsWith(previousText)) {
+              // Progressive growth — emit only the new suffix
+              deltaText = block.text.slice(previousText.length)
+            } else {
+              // New text or complete rewrite — emit full text
+              deltaText = block.text
+            }
+
+            this._lastEmittedText.set(trackingKey, block.text)
+
+            // Secondary dedup guard (length-based) for exact replay scenarios
+            const dedupKey = `${msgId}:text:${trackingKey}:${block.text.length}`
             if (this._emittedStreamKeys.has(dedupKey)) continue
             this._emittedStreamKeys.add(dedupKey)
 
             // Rewrite remote image paths to local paths (no-op for local sessions)
-            const text = this.rewriteRemoteImages(block.text)
+            const rewrittenDelta = this.rewriteRemoteImages(deltaText)
             if (this.fullText.length < MAX_FULL_TEXT) {
-              this.fullText += text
+              this.fullText += rewrittenDelta
             }
             log.session.debug('JSONL event: text-delta', { sessionId: this.claudeSessionId, taskId: this.taskId })
             bus.emit(EventNames.SESSION_TEXT_DELTA, {
               sessionId: this.claudeSessionId,
               taskId: this.taskId,
-              delta: text,
+              delta: rewrittenDelta,
             }, ['main-ai'], { source: 'session-runner', urgency: 'urgent' })
           } else if (block.type === 'tool_use') {
             // Dedup: skip tool_use blocks already emitted (daemon replay protection)
