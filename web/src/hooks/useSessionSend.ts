@@ -49,10 +49,41 @@ export function useSessionSend(activeSessionId: string | null): UseSessionSendRe
   const msgsRef = useRef(optimisticMsgs);
   msgsRef.current = optimisticMsgs;
 
-  // Clear optimistic messages on session switch
+  // Clear optimistic messages on session switch + rehydrate from server disk queue.
+  // The queue only contains messages NOT yet delivered to Claude (pending/processing).
+  // Once delivered, removeProcessed() clears them eagerly — so no overlap with JSONL.
   useEffect(() => {
     setOptimisticMsgs([]);
     setSendError(null);
+
+    if (activeSessionId) {
+      wsClient.sendRpc<{ messages: Array<{ id: string; message: string; status: string; enqueuedAt?: string }> }>(
+        'session:get-queue',
+        { sessionId: activeSessionId }
+      ).then((res) => {
+        if (res?.messages?.length) {
+          setOptimisticMsgs(prev => {
+            const existing = new Set(prev.map(m => m.queueId));
+            const newMsgs = res.messages
+              .filter(m => !existing.has(m.id))
+              .map(m => ({
+                role: 'user' as const,
+                text: m.message,
+                timestamp: m.enqueuedAt ?? new Date().toISOString(),
+                queueId: m.id,
+                status: (m.status === 'processing' ? 'delivered' : 'received') as 'received' | 'delivered',
+              }));
+            return [...prev, ...newMsgs];
+          });
+          log.info('send', 'rehydrated from queue', {
+            sessionId: activeSessionId,
+            count: res.messages.length,
+          });
+        }
+      }).catch((e: Error) => {
+        log.warn('send', 'queue rehydrate failed', { error: e.message });
+      });
+    }
   }, [activeSessionId]);
 
   const send = useCallback((sessionId: string, message: string, images?: ImageAttachment[]) => {
