@@ -27,11 +27,19 @@ export interface SessionHistoryResult {
   forkBoundaryIndex?: number;
 }
 
-export async function fetchSessionHistory(sessionId: string, opts?: { source?: 'streams' }): Promise<SessionHistoryResult> {
+export async function fetchSessionHistory(sessionId: string, opts?: { source?: 'streams'; signal?: AbortSignal }): Promise<SessionHistoryResult> {
   const params: Record<string, string> = {};
   if (opts?.source) params.source = opts.source;
-  const res = await apiGet<{ messages: SessionHistoryMessage[]; forkBoundaryIndex?: number }>(`/api/sessions/${sessionId}/history`, params);
+  const res = await apiGet<{ messages: SessionHistoryMessage[]; forkBoundaryIndex?: number }>(
+    `/api/sessions/${sessionId}/history`, params, { signal: opts?.signal },
+  );
   return { messages: res.messages, forkBoundaryIndex: res.forkBoundaryIndex };
+}
+
+export async function fetchSubagentHistory(sessionId: string, agentId: string): Promise<{ messages: SessionHistoryMessage[] }> {
+  return apiGet<{ messages: SessionHistoryMessage[] }>(
+    `/api/sessions/${sessionId}/subagent/${encodeURIComponent(agentId)}/history`,
+  );
 }
 
 export async function updateSession(sessionId: string, updates: { title?: string; human_note?: string; archived?: boolean; archive_reason?: string }): Promise<SessionRecord> {

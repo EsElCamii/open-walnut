@@ -1,4 +1,4 @@
-import { useState, useCallback, useMemo, memo, type MouseEvent } from 'react';
+import { useState, useCallback, useMemo, memo } from 'react';
 import type { SessionHistoryMessage, SessionHistoryTool } from '@/types/session';
 import {
   renderMarkdownWithRefs, extractMarkdownFields, injectJsonIdLinks,
@@ -7,6 +7,9 @@ import {
 import { useEntityClickHandler } from '@/hooks/useEntityClickHandler';
 import { useLivePlanContent } from '@/contexts/PlanContentContext';
 import { PlanPopup } from './PlanPopup';
+import { fetchSubagentHistory } from '@/api/sessions';
+import { getSubagentCache, setSubagentCache } from '@/cache/session-cache';
+import { log } from '@/utils/log';
 
 // ── Edit Diff View ──
 
@@ -140,6 +143,7 @@ const hideOnImgError = (e: React.SyntheticEvent<HTMLImageElement>) => {
 
 interface SessionMessageProps {
   message: SessionHistoryMessage;
+  sessionId?: string;
   sessionCwd?: string;
   onTaskClick?: (taskId: string) => void;
   onSessionClick?: (sessionId: string) => void;
@@ -410,6 +414,7 @@ function getExitPlanContent(tool: { input: Record<string, unknown>; planContent?
 
 interface SessionToolCallProps {
   tool: SessionHistoryTool;
+  sessionId?: string;
   sessionCwd?: string;
   onTaskClick?: (taskId: string) => void;
   onSessionClick?: (sessionId: string) => void;
@@ -419,25 +424,67 @@ interface SessionToolCallProps {
 /** Tool names that should render as collapsible groups with child messages. */
 const GROUPABLE_HISTORY_TOOLS = new Set(['Task', 'Agent']);
 
-/** Collapsible group for a Task/Agent tool call with child messages */
-function TaskGroup({ tool, sessionCwd, onTaskClick, onSessionClick, onFileOpen }: SessionToolCallProps) {
+/** Collapsible group for a Task/Agent tool call with child messages.
+ *  Lazy-loads subagent content on first expand via API when childMessages is undefined. */
+const TASK_GROUP_INITIAL = 10;
+const TASK_GROUP_LOAD_MORE = 20;
+
+function TaskGroup({ tool, sessionId, sessionCwd, onTaskClick, onSessionClick, onFileOpen }: SessionToolCallProps) {
   const [open, setOpen] = useState(false);
+  const [lazyChildren, setLazyChildren] = useState<SessionHistoryMessage[] | null>(null);
+  const [loadingChildren, setLoadingChildren] = useState(false);
+  const [innerOffset, setInnerOffset] = useState(0);
+
   const description = typeof tool.input?.description === 'string'
     ? tool.input.description
     : typeof tool.input?.prompt === 'string'
       ? (tool.input.prompt as string).slice(0, 80) + ((tool.input.prompt as string).length > 80 ? '...' : '')
       : tool.name;
   const subagentType = typeof tool.input?.subagent_type === 'string' ? tool.input.subagent_type : '';
-  const childCount = tool.childMessages?.length ?? 0;
-  const toolCount = tool.childMessages?.reduce((n, m) => n + (m.tools?.length ?? 0), 0) ?? 0;
   const hasResult = !!tool.result;
+
+  // Resolved children: inline (already attached) or lazy-loaded
+  const children = tool.childMessages ?? lazyChildren;
+  const toolCount = children?.reduce((n, m) => n + (m.tools?.length ?? 0), 0) ?? 0;
+
+  const handleToggle = useCallback(async () => {
+    if (!open && !children && !loadingChildren && tool.agentId && sessionId) {
+      // Check frontend cache first
+      const cached = getSubagentCache(sessionId, tool.agentId);
+      if (cached) {
+        setLazyChildren(cached);
+      } else {
+        // Lazy-load from backend
+        setLoadingChildren(true);
+        try {
+          const result = await fetchSubagentHistory(sessionId, tool.agentId);
+          setLazyChildren(result.messages);
+          setSubagentCache(sessionId, tool.agentId, result.messages);
+          log.info('session', `lazy-loaded subagent ${tool.agentId}: ${result.messages.length} msgs`);
+        } catch (err) {
+          log.warn('session', 'failed to lazy-load subagent', { agentId: tool.agentId, error: String(err) });
+        } finally {
+          setLoadingChildren(false);
+        }
+      }
+    }
+    setOpen(p => !p);
+  }, [open, children, loadingChildren, tool.agentId, sessionId]);
+
+  // Tail truncation: show most recent tool calls first (most relevant activity)
+  // Inner truncation: only show last TASK_GROUP_INITIAL + innerOffset children
+  const allChildren = children ?? [];
+  const innerLimit = TASK_GROUP_INITIAL + innerOffset;
+  const innerStart = Math.max(0, allChildren.length - innerLimit);
+  const visibleChildren = allChildren.slice(innerStart);
+  const hiddenCount = innerStart;
 
   return (
     <div className={`task-group ${open ? 'task-group--open' : ''}`}>
-      <button className="task-group-header" onClick={() => setOpen(p => !p)}>
+      <button className="task-group-header" onClick={handleToggle}>
         <span className="task-group-chevron">{open ? '\u25BC' : '\u25B6'}</span>
         <span className="task-group-icon">
-          {hasResult ? '\u2713' : '\u25B6'}
+          {loadingChildren ? '\u23F3' : hasResult ? '\u2713' : '\u25B6'}
         </span>
         <span className="task-group-label">{tool.name}</span>
         {subagentType && <span className="task-group-agent-type">{subagentType}</span>}
@@ -448,10 +495,23 @@ function TaskGroup({ tool, sessionCwd, onTaskClick, onSessionClick, onFileOpen }
       </button>
       {open && (
         <div className="task-group-body">
-          {tool.childMessages && tool.childMessages.length > 0 ? (
-            tool.childMessages.map((child, ci) => (
-              <SessionMessage key={ci} message={child} sessionCwd={sessionCwd} onTaskClick={onTaskClick} onSessionClick={onSessionClick} onFileOpen={onFileOpen} />
-            ))
+          {loadingChildren ? (
+            <div className="task-group-loading">Loading subagent history...</div>
+          ) : allChildren.length > 0 ? (
+            <>
+              {hiddenCount > 0 && (
+                <button
+                  className="session-show-earlier-btn"
+                  onClick={() => setInnerOffset(p => p + TASK_GROUP_LOAD_MORE)}
+                >
+                  Show {Math.min(hiddenCount, TASK_GROUP_LOAD_MORE)} earlier tool calls
+                  <span className="session-show-earlier-count">({hiddenCount} hidden)</span>
+                </button>
+              )}
+              {visibleChildren.map((child, ci) => (
+                <SessionMessage key={innerStart + ci} message={child} sessionId={sessionId} sessionCwd={sessionCwd} onTaskClick={onTaskClick} onSessionClick={onSessionClick} onFileOpen={onFileOpen} />
+              ))}
+            </>
           ) : tool.result ? (
             <div className="task-group-result">
               <div className="task-group-result-label">Result</div>
@@ -468,10 +528,10 @@ function TaskGroup({ tool, sessionCwd, onTaskClick, onSessionClick, onFileOpen }
   );
 }
 
-function SessionToolCall({ tool, sessionCwd, onTaskClick, onSessionClick, onFileOpen }: SessionToolCallProps) {
+function SessionToolCall({ tool, sessionId, sessionCwd, onTaskClick, onSessionClick, onFileOpen }: SessionToolCallProps) {
   // Task/Agent tool with childMessages or agentId → render as collapsible group
   if (GROUPABLE_HISTORY_TOOLS.has(tool.name) && (tool.childMessages || tool.agentId || tool.result)) {
-    return <TaskGroup tool={tool} sessionCwd={sessionCwd} onTaskClick={onTaskClick} onSessionClick={onSessionClick} onFileOpen={onFileOpen} />;
+    return <TaskGroup tool={tool} sessionId={sessionId} sessionCwd={sessionCwd} onTaskClick={onTaskClick} onSessionClick={onSessionClick} onFileOpen={onFileOpen} />;
   }
 
   // ExitPlanMode with plan content → render PlanCard
@@ -506,7 +566,7 @@ function SessionToolCall({ tool, sessionCwd, onTaskClick, onSessionClick, onFile
   return <GenericToolCall tool={tool} sessionCwd={sessionCwd} onTaskClick={onTaskClick} onSessionClick={onSessionClick} onFileOpen={onFileOpen ? (p) => onFileOpen(p) : undefined} />;
 }
 
-export const SessionMessage = memo(function SessionMessage({ message, sessionCwd, onTaskClick, onSessionClick, onFileOpen }: SessionMessageProps) {
+export const SessionMessage = memo(function SessionMessage({ message, sessionId, sessionCwd, onTaskClick, onSessionClick, onFileOpen }: SessionMessageProps) {
   const { role, text, timestamp, tools, thinking, model, usage } = message;
   const time = formatTime(timestamp);
   const isUser = role === 'user';
@@ -530,7 +590,7 @@ export const SessionMessage = memo(function SessionMessage({ message, sessionCwd
       <div className="session-msg-content" onClick={handleContentClick}>
         {thinking && <SessionThinking text={thinking} />}
         {tools && tools.length > 0 && tools.map((t, i) => (
-          <SessionToolCall key={i} tool={t} sessionCwd={sessionCwd} onTaskClick={onTaskClick} onSessionClick={onSessionClick} onFileOpen={onFileOpen} />
+          <SessionToolCall key={i} tool={t} sessionId={sessionId} sessionCwd={sessionCwd} onTaskClick={onTaskClick} onSessionClick={onSessionClick} onFileOpen={onFileOpen} />
         ))}
         {text && (
           <div

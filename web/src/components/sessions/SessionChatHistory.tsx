@@ -1095,7 +1095,7 @@ export const SessionChatHistory = memo(function SessionChatHistory({ sessionId, 
                         <span className="session-fork-divider-label">Forked session starts here</span>
                       </div>
                     )}
-                    <SessionMessage message={m} sessionCwd={sessionCwd} onTaskClick={onTaskClick} onSessionClick={onSessionClick} onFileOpen={onFileOpen} />
+                    <SessionMessage message={m} sessionId={sessionId} sessionCwd={sessionCwd} onTaskClick={onTaskClick} onSessionClick={onSessionClick} onFileOpen={onFileOpen} />
                   </div>
                 );
               })}
@@ -1213,7 +1213,7 @@ export const SessionChatHistory = memo(function SessionChatHistory({ sessionId, 
 
               return (
                 <div key={`u-${m.queueId}`} className={wrapperClass}>
-                  <SessionMessage message={m} sessionCwd={sessionCwd} onTaskClick={onTaskClick} onSessionClick={onSessionClick} onFileOpen={onFileOpen} />
+                  <SessionMessage message={m} sessionId={sessionId} sessionCwd={sessionCwd} onTaskClick={onTaskClick} onSessionClick={onSessionClick} onFileOpen={onFileOpen} />
                   <OptimisticImagePreviews images={m.images} />
                   {m.status === 'received' && (
                     <>

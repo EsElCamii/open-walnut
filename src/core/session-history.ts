@@ -17,6 +17,7 @@ import {
   findLocalJsonlPath,
   readSessionJsonlContent,
   readSubagentContents,
+  readSingleSubagentContent,
 } from './session-file-reader.js';
 import os from 'node:os';
 import path from 'node:path';
@@ -25,6 +26,29 @@ import { REMOTE_IMAGES_DIR } from '../constants.js';
 
 /** Cached homedir — avoids repeated syscall on each history request */
 const LOCAL_HOME = os.homedir();
+
+// ── Server-side parsed history cache (mtime-based, for completed/historical sessions) ──
+
+interface ParsedHistoryCacheEntry {
+  mtimeMs: number;
+  messages: SessionHistoryMessage[];
+}
+
+const MAX_HISTORY_CACHE = 30;
+const parsedHistoryCache = new Map<string, ParsedHistoryCacheEntry>();
+
+function cacheGet(sessionId: string): ParsedHistoryCacheEntry | undefined {
+  return parsedHistoryCache.get(sessionId);
+}
+
+function cacheSet(sessionId: string, entry: ParsedHistoryCacheEntry): void {
+  parsedHistoryCache.delete(sessionId);
+  parsedHistoryCache.set(sessionId, entry);
+  if (parsedHistoryCache.size > MAX_HISTORY_CACHE) {
+    const oldest = parsedHistoryCache.keys().next().value;
+    if (oldest) parsedHistoryCache.delete(oldest);
+  }
+}
 
 // ── Image file detection ──
 
@@ -481,6 +505,29 @@ function parseSessionMessages(content: string): SessionHistoryMessage[] {
 }
 
 /**
+ * Read a single subagent's history by agentId (for lazy-load on demand).
+ * Returns parsed child messages, or empty array if not found.
+ */
+export async function readSingleSubagentHistory(
+  sessionId: string,
+  agentId: string,
+  cwd?: string,
+  host?: string,
+): Promise<SessionHistoryMessage[]> {
+  const content = await readSingleSubagentContent(sessionId, agentId, cwd, host);
+  if (!content) return [];
+  try {
+    return parseSessionMessages(content);
+  } catch (err) {
+    log.session.debug('failed to parse single subagent JSONL', {
+      sessionId, agentId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return [];
+  }
+}
+
+/**
  * Read subagent messages for a session (local or remote).
  * Uses readSubagentContents() from session-file-reader for transparent access.
  *
@@ -530,8 +577,34 @@ function attachSubagentMessages(messages: SessionHistoryMessage[], subagentMap: 
  * Uses readSessionJsonlContent() for transparent local/remote file access.
  * When `host` is provided, falls back to reading from the remote host via SSH.
  */
-export async function readSessionHistory(sessionId: string, cwd?: string, host?: string, outputFile?: string): Promise<SessionHistoryMessage[]> {
+export interface ReadHistoryOptions {
+  /** Skip reading subagent JSONL files (default: false). When true, Task tools retain agentId but childMessages stays undefined — frontend lazy-loads on demand. */
+  skipSubagents?: boolean;
+}
+
+export async function readSessionHistory(sessionId: string, cwd?: string, host?: string, outputFile?: string, options?: ReadHistoryOptions): Promise<SessionHistoryMessage[]> {
   let messages: SessionHistoryMessage[] | null = null;
+
+  // Server-side mtime cache: for local sessions, check if JSONL hasn't changed since last parse.
+  // Primarily benefits completed/historical sessions viewed repeatedly.
+  let localMtimeMs: number | undefined;
+  if (!host) {
+    const localPath = await findLocalJsonlPath(sessionId, cwd);
+    if (localPath) {
+      try {
+        const stat = await fsp.stat(localPath);
+        localMtimeMs = stat.mtimeMs;
+        const cached = cacheGet(sessionId);
+        if (cached && cached.mtimeMs === localMtimeMs) {
+          // Cache hit — return cached messages (skipSubagents is the common path now,
+          // so cached messages don't include childMessages and no mutation concern)
+          return cached.messages;
+        }
+      } catch {
+        // stat failed — proceed with full read
+      }
+    }
+  }
 
   const result = await readSessionJsonlContent(sessionId, cwd, host, outputFile);
   if (result) {
@@ -569,11 +642,15 @@ export async function readSessionHistory(sessionId: string, cwd?: string, host?:
 
   if (!messages) return [];
 
-  // Attach subagent child messages (works for both local and remote sessions)
-  const hasTaskTools = messages.some(m => m.tools?.some(t => t.name === 'Task' && t.agentId));
-  if (hasTaskTools) {
-    const subagentMap = await readSubagentMessages(sessionId, cwd, host);
-    attachSubagentMessages(messages, subagentMap);
+  // Attach subagent child messages (works for both local and remote sessions).
+  // When skipSubagents is true, Task tools retain agentId but childMessages stays
+  // undefined — the frontend lazy-loads subagent content on demand.
+  if (!options?.skipSubagents) {
+    const hasTaskTools = messages.some(m => m.tools?.some(t => t.name === 'Task' && t.agentId));
+    if (hasTaskTools) {
+      const subagentMap = await readSubagentMessages(sessionId, cwd, host);
+      attachSubagentMessages(messages, subagentMap);
+    }
   }
 
   // Refresh plan content from disk (local sessions only).
@@ -611,6 +688,12 @@ export async function readSessionHistory(sessionId: string, cwd?: string, host?:
         });
       }
     }
+  }
+
+  // Only cache when skipSubagents — attachSubagentMessages mutates tool.childMessages
+  // in place, so caching with children attached would share mutable state across consumers.
+  if (localMtimeMs !== undefined && options?.skipSubagents) {
+    cacheSet(sessionId, { mtimeMs: localMtimeMs, messages });
   }
 
   return messages;

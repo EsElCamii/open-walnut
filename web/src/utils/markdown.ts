@@ -233,15 +233,37 @@ export function filePathsToHtml(text: string, sessionCwd?: string): string {
  * converts file paths to clickable links,
  * then runs marked.parse() + DOMPurify.sanitize().
  */
+const mdCache = new Map<string, string>();
+const MD_CACHE_MAX = 200;
+const MD_CACHE_SKIP_LENGTH = 10_000; // skip caching very long texts to avoid memory bloat
+
 export function renderMarkdownWithRefs(text: string, sessionCwd?: string): string {
+  const key = sessionCwd ? `${text}\0${sessionCwd}` : text;
+  const cached = text.length <= MD_CACHE_SKIP_LENGTH ? mdCache.get(key) : undefined;
+  if (cached !== undefined) {
+    mdCache.delete(key);
+    mdCache.set(key, cached);
+    return cached;
+  }
+
+  let html: string;
   try {
     let preprocessed = entityRefsToHtml(text);
     preprocessed = filePathsToHtml(preprocessed, sessionCwd);
     const raw = marked.parse(preprocessed);
-    return typeof raw === 'string' ? DOMPurify.sanitize(raw, { ADD_ATTR: SANITIZE_ATTRS }) : '';
+    html = typeof raw === 'string' ? DOMPurify.sanitize(raw, { ADD_ATTR: SANITIZE_ATTRS }) : '';
   } catch {
-    return DOMPurify.sanitize(text);
+    html = DOMPurify.sanitize(text);
   }
+
+  if (text.length <= MD_CACHE_SKIP_LENGTH) {
+    if (mdCache.size >= MD_CACHE_MAX) {
+      const oldest = mdCache.keys().next().value;
+      if (oldest !== undefined) mdCache.delete(oldest);
+    }
+    mdCache.set(key, html);
+  }
+  return html;
 }
 
 // ── Shared constants for tool call markdown field expansion (Phase 2) ──

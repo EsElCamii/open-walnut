@@ -5,7 +5,7 @@
 import { Router, type Request, type Response, type NextFunction } from 'express'
 import { log } from '../../logging/index.js'
 import { listSessions, getRecentSessions, getSessionSummaries, getSessionsForTask, getSessionByClaudeId, updateSessionRecord, isTriageSession } from '../../core/session-tracker.js'
-import { readSessionHistory, extractPlanContent, rewriteHistoryRemoteImages } from '../../core/session-history.js'
+import { readSessionHistory, readSingleSubagentHistory, extractPlanContent, rewriteHistoryRemoteImages } from '../../core/session-history.js'
 import { listTasks, getTask, addTask, updateTask } from '../../core/task-manager.js'
 import { getConfig } from '../../core/config-manager.js'
 import { bus, EventNames, eventData } from '../../core/event-bus.js'
@@ -693,7 +693,8 @@ sessionsRouter.get('/:sessionId/history', async (req: Request, res: Response, ne
       // Fast path: host=undefined forces local-only reads (canonical JSONL + streams fallback).
       // Skips SSH entirely. For local sessions this returns full data (~1ms).
       // For remote sessions this returns empty (they have no local files).
-      const messages = await readSessionHistory(sessionId, cwd, undefined, record?.outputFile)
+      // skipSubagents: frontend lazy-loads each subagent via /subagent/:agentId/history on demand
+      const messages = await readSessionHistory(sessionId, cwd, undefined, record?.outputFile, { skipSubagents: true })
       logMessageOrdering('P1:streams', sessionId, messages, record?.host)
       const sliced = tail && tail > 0 ? messages.slice(-tail) : messages
       res.json({ messages: sliced, total: messages.length })
@@ -703,7 +704,8 @@ sessionsRouter.get('/:sessionId/history', async (req: Request, res: Response, ne
     // Full path: reads from source of truth (SSH for remote sessions)
     let messages: Awaited<ReturnType<typeof readSessionHistory>>
     try {
-      messages = await readSessionHistory(sessionId, cwd, record?.host, record?.outputFile)
+      // skipSubagents: frontend lazy-loads each subagent via /subagent/:agentId/history on demand
+      messages = await readSessionHistory(sessionId, cwd, record?.host, record?.outputFile, { skipSubagents: true })
     } catch (err) {
       // Surface remote read errors (SSH auth, daemon connection, etc.) to the frontend
       const msg = err instanceof Error ? err.message : String(err)
@@ -739,7 +741,7 @@ sessionsRouter.get('/:sessionId/history', async (req: Request, res: Response, ne
           if (!sourceRecord) break
 
           let sourceMessages = await readSessionHistory(
-            currentForkId, sourceRecord.cwd, sourceRecord.host, sourceRecord.outputFile,
+            currentForkId, sourceRecord.cwd, sourceRecord.host, sourceRecord.outputFile, { skipSubagents: true },
           )
           if (sourceRecord.host) {
             sourceMessages = await rewriteHistoryRemoteImages(sourceMessages, sourceRecord.host, currentForkId, sourceRecord.cwd)
@@ -775,6 +777,34 @@ sessionsRouter.get('/:sessionId/history', async (req: Request, res: Response, ne
       ...(forkedFromSessionId ? { forkedFromSessionId } : {}),
       ...(adjustedForkBoundary != null ? { forkBoundaryIndex: adjustedForkBoundary } : {}),
     })
+  } catch (err) {
+    next(err)
+  }
+})
+
+// GET /api/sessions/:sessionId/subagent/:agentId/history — lazy-load a single subagent's messages
+sessionsRouter.get('/:sessionId/subagent/:agentId/history', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const sessionId = req.params.sessionId as string
+    const agentId = req.params.agentId as string
+
+    // Validate agentId format: hex strings (Task subagents) or name@team (Team agents)
+    if (!/^[a-zA-Z0-9_@.-]+$/.test(agentId)) {
+      res.status(400).json({ error: 'Invalid agentId format' })
+      return
+    }
+
+    const record = await getSessionByClaudeId(sessionId)
+    const cwd = record?.cwd
+
+    let messages = await readSingleSubagentHistory(sessionId, agentId, cwd, record?.host)
+
+    // Rewrite remote image paths for remote sessions
+    if (record?.host && messages.length > 0) {
+      messages = await rewriteHistoryRemoteImages(messages, record.host, sessionId, record.cwd)
+    }
+
+    res.json({ messages })
   } catch (err) {
     next(err)
   }

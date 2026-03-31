@@ -338,10 +338,37 @@ function registerGlobalListeners(): void {
 // Auto-register on import
 registerGlobalListeners();
 
+// ── Subagent content cache (lazy-loaded on TaskGroup expand) ───────────────
+// No invalidation on batch-completed: subagent content is expected to be complete
+// by the time users expand a TaskGroup (active subagents render via StreamingTaskGroup).
+// A page reload clears the cache if fresher data is needed.
+
+const MAX_SUBAGENT_CACHED = 50;
+const subagentCache = new Map<string, SessionHistoryMessage[]>();
+
+function subagentKey(sid: string, agentId: string): string {
+  return `${sid}:${agentId}`;
+}
+
+export function getSubagentCache(sid: string, agentId: string): SessionHistoryMessage[] | undefined {
+  return subagentCache.get(subagentKey(sid, agentId));
+}
+
+export function setSubagentCache(sid: string, agentId: string, msgs: SessionHistoryMessage[]): void {
+  const key = subagentKey(sid, agentId);
+  subagentCache.delete(key); // re-insert for LRU ordering
+  subagentCache.set(key, msgs);
+  if (subagentCache.size > MAX_SUBAGENT_CACHED) {
+    const oldest = subagentCache.keys().next().value;
+    if (oldest) subagentCache.delete(oldest);
+  }
+}
+
 /** Reset all internal state — for tests only. */
 export function __resetForTesting(): void {
   historyCache.clear();
   streamStates.clear();
   trackedSessions.clear();
   inflightBgFetches.clear();
+  subagentCache.clear();
 }

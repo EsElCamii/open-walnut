@@ -235,32 +235,37 @@ export async function readSessionJsonlContent(
   //    Dispatch on host (like readSubagentContents): remote daemon first, else local fs.
   //    Remote sessions have no local canonical file, so we must use daemon first.
   if (host) {
+    const REMOTE_READ_TIMEOUT = 10_000; // 10s max — prevents daemon reconnect from blocking the event loop
     const { DaemonFileReader } = await import('./daemon-file-reader.js');
     const reader = new DaemonFileReader(host);
-    // Try exact encoded path first, then glob fallback, then find fallback.
     const exactPath = cwd ? remoteJsonlPath(sessionId, cwd) : null;
     const globPath = remoteJsonlPath(sessionId); // ~/.claude/projects/*/${sessionId}.jsonl
-    try {
-      if (exactPath) {
-        const content = await reader.readFile(exactPath);
-        if (content) return withFoundCwd(await mergeSyntheticFromLocalStreams(content), 'remote');
-      }
-      // Exact path missed or no cwd — try glob
-      const content = await reader.readFile(globPath);
-      if (content) return withFoundCwd(await mergeSyntheticFromLocalStreams(content), 'remote');
 
-      // Glob also missed — try `find` (more robust than shell glob)
-      const findContent = await reader.findSession(sessionId);
-      if (findContent) return withFoundCwd(await mergeSyntheticFromLocalStreams(findContent), 'remote');
+    try {
+      const result = await Promise.race([
+        (async () => {
+          // Try exact encoded path first, then glob fallback, then find fallback.
+          if (exactPath) {
+            const content = await reader.readFile(exactPath);
+            if (content) return withFoundCwd(await mergeSyntheticFromLocalStreams(content), 'remote');
+          }
+          const content = await reader.readFile(globPath);
+          if (content) return withFoundCwd(await mergeSyntheticFromLocalStreams(content), 'remote');
+          const findContent = await reader.findSession(sessionId);
+          if (findContent) return withFoundCwd(await mergeSyntheticFromLocalStreams(findContent), 'remote');
+          return null;
+        })(),
+        new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error('Remote read timeout (10s)')), REMOTE_READ_TIMEOUT),
+        ),
+      ]);
+      if (result) return result;
     } catch (err) {
       const errMsg = err instanceof Error ? err.message : String(err);
       log.session.warn('remote JSONL read failed', {
         host, sessionId,
         error: errMsg,
       });
-      // Re-throw SSH/connection errors so the UI can display them.
-      // Remote sessions have no local fallback — falling through silently
-      // would just show "No conversation history found" with no explanation.
       throw new Error(`Remote read failed (${host}): ${errMsg}`);
     }
   } else {
@@ -375,6 +380,61 @@ async function readLocalSubagentContents(sessionId: string, cwd?: string): Promi
   }
 
   return result;
+}
+
+/**
+ * Read a single subagent JSONL file by agentId.
+ * Returns the raw content string, or null if not found.
+ */
+export async function readSingleSubagentContent(
+  sessionId: string,
+  agentId: string,
+  cwd?: string,
+  host?: string,
+): Promise<string | null> {
+  const filename = `agent-${agentId}.jsonl`;
+
+  if (host) {
+    const { DaemonFileReader } = await import('./daemon-file-reader.js');
+    const reader = new DaemonFileReader(host);
+    const remotePath = cwd
+      ? `${remoteSubagentDirPath(sessionId, cwd)}/${filename}`
+      : `~/.claude/projects/*/${sessionId}/subagents/${filename}`;
+    try {
+      return await reader.readFile(remotePath);
+    } catch (err) {
+      log.session.debug('remote single subagent read failed', {
+        host, sessionId, agentId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return null;
+    }
+  }
+
+  // Local: check cwd-based path first, then fallback search
+  const projectsDir = path.join(CLAUDE_HOME, 'projects');
+  const candidates: string[] = [];
+  if (cwd) {
+    candidates.push(path.join(subagentDirPath(sessionId, cwd), filename));
+  }
+  try {
+    for (const dir of await fsp.readdir(projectsDir)) {
+      const candidate = path.join(projectsDir, dir, sessionId, 'subagents', filename);
+      if (!candidates.includes(candidate)) candidates.push(candidate);
+    }
+  } catch {
+    // projects dir scan failed — continue with what we have
+  }
+
+  for (const filePath of candidates) {
+    try {
+      const content = await fsp.readFile(filePath, 'utf-8');
+      if (content) return content;
+    } catch {
+      // file doesn't exist at this path — try next
+    }
+  }
+  return null;
 }
 
 async function readRemoteSubagentContents(
