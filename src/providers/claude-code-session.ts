@@ -2271,8 +2271,17 @@ export class SessionRunner {
             const metadata = await getProjectMetadata(task.category, task.project)
             if (metadata?.default_cwd) cwd = metadata.default_cwd as string
           }
-          // Last resort: project memory directory
+          // Last resort: project memory directory (LOCAL sessions only).
+          // For remote sessions, a local path won't exist on the remote host —
+          // fail with a clear error instead of sending a bogus cwd.
           if (!cwd) {
+            if (data.host) {
+              throw new Error(
+                `No working directory found for remote session on "${data.host}". ` +
+                `Set a cwd on the task, or set default_cwd in project "${task.project}" metadata ` +
+                `(e.g. /workplace/... on the remote host).`
+              )
+            }
             const { PROJECTS_MEMORY_DIR } = await import('../constants.js')
             const path = await import('node:path')
             const nodeFs = await import('node:fs')
@@ -2283,6 +2292,8 @@ export class SessionRunner {
         }
       } catch (err) {
         log.session.warn('handleStart: cwd resolution failed', { taskId, error: err instanceof Error ? err.message : String(err) })
+        // For remote sessions, cwd is critical — rethrow so the caller sees the error
+        if (data.host && !cwd) throw err
       }
     }
 
@@ -2494,6 +2505,12 @@ export class SessionRunner {
             if (metadata?.default_cwd) cwd = metadata.default_cwd as string
           }
           if (!cwd) {
+            if (data.host) {
+              throw new Error(
+                `No working directory found for remote session on "${data.host}". ` +
+                `Set a cwd on the task, or set default_cwd in project "${task.project}" metadata.`
+              )
+            }
             const { PROJECTS_MEMORY_DIR } = await import('../constants.js')
             const path = await import('node:path')
             const nodeFs = await import('node:fs')
@@ -2504,6 +2521,7 @@ export class SessionRunner {
         }
       } catch (err) {
         log.session.warn('handleStartSdk: cwd resolution failed', { taskId, error: err instanceof Error ? err.message : String(err) })
+        if (data.host && !cwd) throw err
       }
     }
 

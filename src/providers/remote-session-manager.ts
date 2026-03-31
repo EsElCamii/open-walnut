@@ -145,6 +145,12 @@ export class RemoteSessionManager implements SessionManager {
       throw new Error(`Daemon start failed: ${result.error}`)
     }
 
+    // Detect spawn failures: daemon returns ok but pid is missing when
+    // posix_spawn fails (e.g. cwd doesn't exist on remote host).
+    if (!result.pid) {
+      throw new Error(`Daemon spawn failed: no PID returned. The working directory may not exist on the remote host.`)
+    }
+
     this._pid = (result.pid as number) ?? null
     this._remoteOutputFile = result.outputFile as string ?? null
     this._hasPipe = true

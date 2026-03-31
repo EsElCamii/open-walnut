@@ -273,6 +273,13 @@ function cmdStart(ws: ServerWebSocket<WsData>, id: number, cmd: Record<string, u
     return sendError(ws, id, 'start: missing required fields (sid, args, cwd, message)')
   }
 
+  // Validate cwd exists before spawning — prevents misleading ENOENT on /bin/bash
+  // when the real issue is a non-existent working directory (e.g. local Mac path
+  // sent to a remote Linux host).
+  if (!fs.existsSync(cwd)) {
+    return sendError(ws, id, `start: cwd does not exist on this host: ${cwd}`)
+  }
+
   fs.mkdirSync(STREAMS_DIR, { recursive: true })
 
   const pipePath = path.join(STREAMS_DIR, sid + '.pipe')
@@ -317,10 +324,26 @@ function cmdStart(ws: ServerWebSocket<WsData>, id: number, cmd: Record<string, u
     env: { ...process.env, CLAUDE_CODE_DISABLE_BACKGROUND_TASKS: '1' },
   })
 
-  // Handle spawn errors (e.g., /bin/bash not found) — don't let it crash the daemon
+  // Detect spawn failure immediately — proc.pid is undefined when posix_spawn fails.
+  // This catches cwd-doesn't-exist, shell-not-found, and other synchronous spawn errors
+  // BEFORE we send ok:true back to the client.
+  if (!proc.pid) {
+    logMsg('error', 'spawn failed: no PID (likely bad cwd or missing shell)', { sid, cwd })
+    // Clean up files we just created
+    try { fs.closeSync(pipeFd) } catch {}
+    try { fs.closeSync(outputFd) } catch {}
+    try { fs.closeSync(stderrFd) } catch {}
+    try { fs.unlinkSync(pipePath) } catch {}
+    try { fs.unlinkSync(jsonlPath) } catch {}
+    try { fs.unlinkSync(stderrPath) } catch {}
+    // Drain the async error event to prevent unhandled rejection
+    proc.on('error', () => {})
+    return sendError(ws, id, `spawn failed: process could not start (cwd: ${cwd})`)
+  }
+
+  // Handle late spawn errors (shouldn't happen after pid is set, but defensive)
   proc.on('error', (err) => {
-    logMsg('error', 'spawn failed', { sid, error: err.message })
-    // The exit handler below will fire with exitCode=null, which triggers the error path
+    logMsg('error', 'spawn error (post-start)', { sid, error: err.message })
   })
 
   // Write initial message to FIFO
@@ -336,7 +359,7 @@ function cmdStart(ws: ServerWebSocket<WsData>, id: number, cmd: Record<string, u
   fs.closeSync(stderrFd)
 
   // Save PID
-  const pid = proc.pid!
+  const pid = proc.pid
   proc.unref()
   try { fs.writeFileSync(pgidPath, String(pid)) } catch {}
 
