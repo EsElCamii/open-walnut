@@ -52,6 +52,15 @@ const AGENT_REDISCOVER_INTERVAL_MS = 10000
     `${home}/.pyenv/shims`,           // pyenv (node via pyenv)
     `${home}/.bun/bin`,               // bun
     `${home}/.toolbox/bin`,           // toolbox
+    // Standard system paths as safety net. Primary source is /etc/profile
+    // (sourced in execSync below + buildSpawnPreamble), but if both /etc/profile
+    // and RC sourcing fail, these ensure basic commands (cat, ssh, etc.) work.
+    '/usr/local/bin',
+    '/usr/bin',
+    '/bin',
+    '/usr/local/sbin',
+    '/usr/sbin',
+    '/sbin',
   ]
 
   // Try sourcing shell RC to get full PATH (nvm, fnm, volta, pyenv, etc.)
@@ -317,7 +326,14 @@ function cmdStart(ws: ServerWebSocket<WsData>, id: number, cmd: Record<string, u
   const escapedArgs = args.map((a: string) => shellQuote(a)).join(' ')
   const shellCmd = `${preamble}; exec ${escapedArgs}`
 
-  const proc = spawn('/bin/bash', ['-c', shellCmd], {
+  // Use the user's actual shell to spawn sessions. Hardcoding /bin/bash caused
+  // .zshrc to be sourced from bash (via the preamble's `case "$SHELL"`), which
+  // fails or partially executes — zsh-specific syntax errors are silently
+  // swallowed by `2>/dev/null`, but PATH modifications before the error point
+  // can clobber the inherited PATH, losing /usr/bin and other system dirs.
+  // Using $SHELL ensures RC files are sourced by the correct shell interpreter.
+  const userShell = process.env.SHELL || '/bin/bash'
+  const proc = spawn(userShell, ['-c', shellCmd], {
     detached: true,
     stdio: [pipeFd, outputFd, stderrFd],
     cwd: cwd,

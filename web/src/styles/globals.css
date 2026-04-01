@@ -5122,12 +5122,13 @@ input:focus, textarea:focus, select:focus {
 
 .chat-input-container {
   display: flex;
-  flex-direction: column;
+  flex-wrap: wrap;
   gap: 6px;
   padding: 12px 0 4px;
   border-top: 1px solid var(--border);
   flex-shrink: 0;
   position: relative;
+  align-items: flex-end;
   transition: border-color 0.2s;
 }
 
@@ -5135,6 +5136,8 @@ input:focus, textarea:focus, select:focus {
   display: flex;
   gap: 6px;
   align-items: flex-end;
+  flex: 1;
+  min-width: 0;
 }
 
 .chat-input-container.drag-over {
@@ -5512,6 +5515,7 @@ img[data-lightbox-src],
   background: var(--bg-secondary);
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
+  width: 100%; /* force own row in flex-wrap container */
 }
 
 .chat-queue-dismiss {
@@ -6304,6 +6308,8 @@ img[data-lightbox-src],
 }
 
 .session-panel-input .chat-input-container {
+  flex-direction: column;
+  flex-wrap: nowrap;
   gap: 4px;
 }
 
