@@ -182,11 +182,10 @@ export class RemoteSessionManager implements SessionManager {
   private async retryStartAfterReconnect(
     startPayload: Record<string, unknown>,
   ): Promise<Record<string, unknown>> {
-    // Force reconnect
-    if (this.conn) {
-      this.conn.disconnect()
-      this.conn = null
-    }
+    // Clear local reference — do NOT disconnect() the shared pool connection.
+    // disconnect() sets _destroyed=true which permanently kills auto-reconnect.
+    // The pool's getDaemonConnection() will reconnect if needed.
+    this.conn = null
     await this.ensureConnected()
 
     // Re-subscribe event listener on the fresh connection
@@ -252,10 +251,10 @@ export class RemoteSessionManager implements SessionManager {
           host: this.hostKey, sid: opts.sessionId,
           error: err instanceof Error ? err.message : String(err),
         })
-        if (this.conn) {
-          this.conn.disconnect()
-          this.conn = null
-        }
+        // Clear local reference — do NOT disconnect() the shared pool connection.
+        // disconnect() sets _destroyed=true which permanently kills auto-reconnect.
+        // The pool's getDaemonConnection() will reconnect if needed.
+        this.conn = null
         await this.ensureConnected()
         if (this.unsubscribeEvent) this.unsubscribeEvent()
         this.unsubscribeEvent = this.conn!.onEvent((event) => this.handleDaemonEvent(event))

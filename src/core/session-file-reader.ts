@@ -235,7 +235,10 @@ export async function readSessionJsonlContent(
   //    Dispatch on host (like readSubagentContents): remote daemon first, else local fs.
   //    Remote sessions have no local canonical file, so we must use daemon first.
   if (host) {
-    const REMOTE_READ_TIMEOUT = 10_000; // 10s max — prevents daemon reconnect from blocking the event loop
+    // Timeout: 30s covers cold-start daemon connect (ControlMaster ~15s + tunnel + WS) + file reads.
+    // Individual operations have their own timeouts, but getDaemonConnection() may wait in
+    // connectingPromises with no timeout — this outer race is the safety net for the API request.
+    const REMOTE_READ_TIMEOUT = 30_000;
     const { DaemonFileReader } = await import('./daemon-file-reader.js');
     const reader = new DaemonFileReader(host);
     const exactPath = cwd ? remoteJsonlPath(sessionId, cwd) : null;
@@ -256,7 +259,7 @@ export async function readSessionJsonlContent(
           return null;
         })(),
         new Promise<never>((_, reject) =>
-          setTimeout(() => reject(new Error('Remote read timeout (10s)')), REMOTE_READ_TIMEOUT),
+          setTimeout(() => reject(new Error('Remote read timeout (30s)')), REMOTE_READ_TIMEOUT),
         ),
       ]);
       if (result) return result;

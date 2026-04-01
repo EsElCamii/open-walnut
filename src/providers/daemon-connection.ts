@@ -185,6 +185,10 @@ export class DaemonConnection {
   async connect(): Promise<void> {
     if (this._connected || this._connecting) return
     this._connecting = true
+    // Reset destroyed flag — allows reconnection after a previous disconnect().
+    // Without this, handleConnectionLost() and scheduleReconnect() silently abort
+    // (they gate on _destroyed), so any future connection loss would be permanent.
+    this._destroyed = false
 
     try {
       // Step 0: Establish SSH ControlMaster (one connection for all subsequent commands)
@@ -255,6 +259,12 @@ export class DaemonConnection {
   /**
    * Disconnect from the daemon and clean up SSH tunnel.
    * Does NOT stop the daemon — it continues running independently.
+   *
+   * WARNING: Sets _destroyed=true, which permanently disables auto-reconnect
+   * (handleConnectionLost and scheduleReconnect both gate on this flag).
+   * Only use for intentional teardown (e.g. disconnectAllDaemons on server shutdown).
+   * NEVER call on a shared pool connection from error-recovery paths — use
+   * `this.conn = null` instead to drop the local reference safely.
    */
   disconnect(): void {
     this._destroyed = true
