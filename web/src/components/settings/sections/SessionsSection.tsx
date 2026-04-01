@@ -11,7 +11,7 @@ interface Props {
 }
 
 export function SessionsSection({ config, onSave }: Props) {
-  const [sessionModel, setSessionModel] = useState(config.agent?.session_model ?? 'opus');
+  const [sessionModel, setSessionModel] = useState(config.agent?.session_model ?? 'opus-1m');
   const [idleTimeout, setIdleTimeout] = useState<number | undefined>(config.session?.idle_timeout_minutes ?? 30);
   const [maxIdle, setMaxIdle] = useState<number | undefined>(config.session?.max_idle);
   const [sessionLimits, setSessionLimits] = useState<Record<string, string | number>>(config.session_limits ?? {});
@@ -19,7 +19,7 @@ export function SessionsSection({ config, onSave }: Props) {
   const [sdkPort, setSdkPort] = useState<number | undefined>(config.session_server?.port ?? 7890);
 
   useEffect(() => {
-    setSessionModel(config.agent?.session_model ?? 'opus');
+    setSessionModel(config.agent?.session_model ?? 'opus-1m');
     setIdleTimeout(config.session?.idle_timeout_minutes ?? 30);
     setMaxIdle(config.session?.max_idle);
     setSessionLimits(config.session_limits ?? {});
@@ -60,7 +60,9 @@ export function SessionsSection({ config, onSave }: Props) {
           style={{ maxWidth: 200 }}
         >
           <option value="opus">Opus</option>
+          <option value="opus-1m">Opus 1M</option>
           <option value="sonnet">Sonnet</option>
+          <option value="sonnet-1m">Sonnet 1M</option>
           <option value="haiku">Haiku</option>
         </select>
         <p className="text-sm text-muted" style={{ marginTop: 2 }}>

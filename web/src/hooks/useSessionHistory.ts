@@ -66,6 +66,7 @@ export function useSessionHistory(sessionId: string | null, version = 0): UseSes
     }
 
     let cancelled = false;
+    const controller = new AbortController();
     setError(null);
     setForkBoundaryIndex(undefined);
     const sid = sessionId.substring(0, 8);
@@ -78,7 +79,7 @@ export function useSessionHistory(sessionId: string | null, version = 0): UseSes
       setLoading(true);
       setPhase2Pending(true);
       const endP2 = perf.start(`session:full:${sid}`);
-      fetchSessionHistory(sessionId)
+      fetchSessionHistory(sessionId, { signal: controller.signal })
         .then((result) => {
           if (!cancelled) {
             endP2(`${result.messages.length} msgs`);
@@ -101,7 +102,7 @@ export function useSessionHistory(sessionId: string | null, version = 0): UseSes
         .finally(() => {
           if (!cancelled) { setLoading(false); setPhase2Pending(false); }
         });
-      return () => { cancelled = true; };
+      return () => { cancelled = true; controller.abort(); };
     }
 
     // Initial load (version === 0): check cache first
@@ -114,7 +115,7 @@ export function useSessionHistory(sessionId: string | null, version = 0): UseSes
       setPhase2Pending(true);
 
       const endP2 = perf.start(`session:full:${sid}`);
-      fetchSessionHistory(sessionId)
+      fetchSessionHistory(sessionId, { signal: controller.signal })
         .then((result) => {
           if (cancelled) return;
           endP2(`${result.messages.length} msgs`);
@@ -138,7 +139,7 @@ export function useSessionHistory(sessionId: string | null, version = 0): UseSes
           if (!cancelled) setPhase2Pending(false);
         });
 
-      return () => { cancelled = true; };
+      return () => { cancelled = true; controller.abort(); };
     }
 
     // Cache miss → normal Phase 1 (streams) → Phase 2 (full)
@@ -147,7 +148,7 @@ export function useSessionHistory(sessionId: string | null, version = 0): UseSes
 
     // Phase 1: Fast local read (streams file, ~1ms)
     const endP1 = perf.start(`session:streams:${sid}`);
-    fetchSessionHistory(sessionId, { source: 'streams' })
+    fetchSessionHistory(sessionId, { source: 'streams', signal: controller.signal })
       .then((result) => {
         if (cancelled) return;
         endP1(`${result.messages.length} msgs`);
@@ -165,7 +166,7 @@ export function useSessionHistory(sessionId: string | null, version = 0): UseSes
         if (cancelled) return;
         // Phase 2: Full fetch (source of truth, may SSH for remote sessions)
         const endP2 = perf.start(`session:full:${sid}`);
-        fetchSessionHistory(sessionId)
+        fetchSessionHistory(sessionId, { signal: controller.signal })
           .then((result) => {
             if (!cancelled) {
               endP2(`${result.messages.length} msgs`);
@@ -188,7 +189,7 @@ export function useSessionHistory(sessionId: string | null, version = 0): UseSes
           });
       });
 
-    return () => { cancelled = true; };
+    return () => { cancelled = true; controller.abort(); };
   }, [sessionId, version]);
 
   return { messages, loading, phase2Pending, error, forkBoundaryIndex };

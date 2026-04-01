@@ -261,12 +261,12 @@ export function SessionDetailPanel({ session, taskTitle, summary, phase: propPha
   const ps = session.process_status ?? 'stopped';
   const taskPhase: TaskPhase = propPhase ?? 'TODO';
   const isEmbedded = session.provider === 'embedded';
-  // planCompleted covers plan sessions; (plan && !planLoading) covers execution sessions where
-  // fromPlanSessionId is set but planCompleted is never true on exec records (plan content fetched from source session).
+  // planCompleted=true means the plan is definitively done — show Execute even if session is still running
+  // (SSH FIFO sessions stay alive after plan completion; execution creates a new session anyway).
+  // For exec sessions without planCompleted, require the session to be stopped.
   const showExecuteButtons =
-    (session.planCompleted === true || (plan && !planLoading))
+    (session.planCompleted === true || (plan && !planLoading && ps !== 'running'))
     && ps !== 'error'
-    && ps !== 'running'
     && !executeStarted;
 
   /** "Execute" — resumes the same session with bypass permissions. */

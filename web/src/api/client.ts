@@ -8,10 +8,15 @@ class ApiError extends Error {
   }
 }
 
-async function request<T>(method: string, path: string, body?: unknown): Promise<T> {
+async function request<T>(method: string, path: string, body?: unknown, extra?: { signal?: AbortSignal }): Promise<T> {
+  const timeoutSignal = AbortSignal.timeout(15_000);
+  const signal = extra?.signal
+    ? AbortSignal.any([extra.signal, timeoutSignal])
+    : timeoutSignal;
   const opts: RequestInit = {
     method,
     headers: { 'Content-Type': 'application/json' },
+    signal,
   };
   if (body !== undefined) {
     opts.body = JSON.stringify(body);
@@ -31,9 +36,9 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
   return res.json();
 }
 
-export function apiGet<T>(path: string, params?: Record<string, string>): Promise<T> {
+export function apiGet<T>(path: string, params?: Record<string, string>, opts?: { signal?: AbortSignal }): Promise<T> {
   const url = params ? `${path}?${new URLSearchParams(params)}` : path;
-  return request<T>('GET', url);
+  return request<T>('GET', url, undefined, opts);
 }
 
 export function apiPost<T>(path: string, body?: unknown): Promise<T> {
