@@ -456,6 +456,8 @@ export interface AddTaskInput {
   sprint?: string;
   /** Explicit source override. Only needed for the first task in a new category (e.g. source='local'). */
   source?: TaskSource;
+  /** Skip plugin content-validation & auto-push (fork children are internal). */
+  _skipPluginOps?: boolean;
 }
 
 /**
@@ -911,8 +913,10 @@ export async function addTask(input: AddTaskInput): Promise<{ task: Task; syncRe
     }
 
     // Plugin content validation (before writing to store)
-    runPluginContentValidation(newTask, 'title', newTask.title);
-    if (newTask.description) runPluginContentValidation(newTask, 'description', newTask.description);
+    if (!input._skipPluginOps) {
+      runPluginContentValidation(newTask, 'title', newTask.title);
+      if (newTask.description) runPluginContentValidation(newTask, 'description', newTask.description);
+    }
 
     store.tasks.push(newTask);
 
@@ -928,7 +932,9 @@ export async function addTask(input: AddTaskInput): Promise<{ task: Task; syncRe
   });
 
   // Push to sync target and capture result (outside lock to avoid holding it during network I/O)
-  const syncResult = await autoPushIfConfigured(task);
+  const syncResult = input._skipPluginOps
+    ? { success: true } as SyncResult
+    : await autoPushIfConfigured(task);
 
   // Re-read the task from the store to pick up ext fields set by the push (e.g. plugin ext data).
   // autoPushIfConfigured writes these to the store but the local `task` object is stale.

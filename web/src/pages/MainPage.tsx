@@ -525,7 +525,7 @@ export function MainPage({ visible = true, navigateRef }: MainPageProps) {
   const pendingQuickStartMetaRef = useRef<{ id: string; cwd: string; host?: string; hostLabel?: string; realTaskId?: string; message?: string; category?: string; httpError?: string } | null>(null);
 
   // Fork: pending panel metadata (same pattern as quick-start)
-  const pendingForkMetaRef = useRef<{ id: string; cwd: string; host?: string; realTaskId?: string } | null>(null);
+  const pendingForkMetaRef = useRef<{ id: string; cwd: string; host?: string; realTaskId?: string; httpError?: string } | null>(null);
   const pendingForkTaskRef = useRef<string | null>(null);
 
   // Path selector → select handler
@@ -644,11 +644,13 @@ export function MainPage({ visible = true, navigateRef }: MainPageProps) {
     }
   }, []);
 
-  const handleForkFailed = useCallback(() => {
-    const meta = pendingForkMetaRef.current;
-    pendingForkMetaRef.current = null;
-    if (meta) {
-      setSessionColumns(prev => removeSessionColumn(prev, meta.id));
+  const handleForkFailed = useCallback((errorMessage?: string) => {
+    if (pendingForkMetaRef.current) {
+      pendingForkMetaRef.current = {
+        ...pendingForkMetaRef.current,
+        httpError: errorMessage || 'Fork failed',
+      };
+      setSessionColumns(prev => [...prev]); // force re-render
     }
   }, []);
 

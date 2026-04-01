@@ -1173,6 +1173,7 @@ sessionsRouter.post('/:sessionId/fork', async (req: Request, res: Response, next
         project: parentTask.project,
         parent_task_id: parentTask.id,
         source: parentTask.source,
+        _skipPluginOps: true, // fork is internal — skip plugin validateContent (rejects CJK) and auto-push
       })
       bus.emit(EventNames.TASK_CREATED, { task: newChild }, ['web-ui', 'main-agent'], { source: 'fork' })
       task = newChild

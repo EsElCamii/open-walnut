@@ -9,7 +9,7 @@ interface SessionCopyButtonsProps {
   taskTitle?: string;
   onForkStarted?: (cwd: string, host?: string) => void;
   onForkComplete?: (taskId: string) => void;
-  onForkFailed?: () => void;
+  onForkFailed?: (errorMessage?: string) => void;
 }
 
 function CopyChip({ label, value, tooltipValue }: { label: string; value: string; tooltipValue?: string }) {
@@ -89,9 +89,10 @@ export function SessionCopyButtons({ sessionId, cwd, project, taskId, taskTitle,
         onForkComplete?.(result.taskId);
       }
     } catch (err) {
+      const errMsg = err instanceof Error ? err.message : 'Fork failed';
       setForkResult('error');
-      setForkError(err instanceof Error ? err.message : 'Fork failed');
-      onForkFailed?.();
+      setForkError(errMsg);
+      onForkFailed?.(errMsg);
       clearTimeout(timerRef.current);
       timerRef.current = setTimeout(() => { setForkResult(null); setForkError(null); }, 3000);
     } finally {

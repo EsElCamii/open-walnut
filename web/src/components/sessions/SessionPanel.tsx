@@ -91,8 +91,8 @@ interface SessionPanelProps {
   onForkPending?: (cwd: string, host?: string) => void;
   /** Called when fork API returns — parent stores taskId for WS-based session resolution. */
   onForkResolved?: (taskId: string) => void;
-  /** Called when fork API fails — parent should remove the pending panel. */
-  onForkFailed?: () => void;
+  /** Called when fork API fails — parent should show error on the pending panel. */
+  onForkFailed?: (errorMessage?: string) => void;
 }
 
 export const SessionPanel = memo(function SessionPanel({ sessionId, onClose, onTaskClick, onSessionClick, onSessionReplaced, onForkPending, onForkResolved, onForkFailed }: SessionPanelProps) {
@@ -350,12 +350,12 @@ export const SessionPanel = memo(function SessionPanel({ sessionId, onClose, onT
     exitFullscreen();
   }, [sessionId, exitFullscreen]);
 
-  // planCompleted covers plan sessions; (plan && !planLoading) covers execution sessions where
-  // fromPlanSessionId is set but planCompleted is never true on exec records (plan content fetched from source session).
+  // planCompleted=true means the plan is definitively done — show Execute even if session is still running
+  // (SSH FIFO sessions stay alive after plan completion; execution creates a new session anyway).
+  // For exec sessions without planCompleted, require the session to be stopped.
   const showExecuteButtons =
-    (session?.planCompleted === true || (plan && !planLoading))
+    (session?.planCompleted === true || (plan && !planLoading && session?.process_status !== 'running'))
     && session?.process_status !== 'error'
-    && session?.process_status !== 'running'
     && !executeStarted;
 
   const handleExecuteContinue = useCallback(async () => {
@@ -539,7 +539,7 @@ export const SessionPanel = memo(function SessionPanel({ sessionId, onClose, onT
                 onForkResolved?.(newTaskId);
                 onTaskClick?.(newTaskId);
               }}
-              onForkFailed={onForkFailed}
+              onForkFailed={(errMsg) => onForkFailed?.(errMsg)}
             />
             {session?.host && (
               <span
