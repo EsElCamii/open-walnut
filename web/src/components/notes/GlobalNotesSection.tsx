@@ -31,6 +31,7 @@ export function GlobalNotesSection(props: GlobalNotesSectionProps) {
   const dragging = useRef(false);
   const startY = useRef(0);
   const startH = useRef(0);
+  const handleRef = useRef<HTMLDivElement>(null);
 
   // Keep ref in sync for use in event handlers
   heightRef.current = height;
@@ -42,6 +43,7 @@ export function GlobalNotesSection(props: GlobalNotesSectionProps) {
     startH.current = heightRef.current;
     document.body.style.cursor = 'row-resize';
     document.body.style.userSelect = 'none';
+    handleRef.current?.classList.add('dragging');
   }, []);
 
   useEffect(() => {
@@ -56,6 +58,7 @@ export function GlobalNotesSection(props: GlobalNotesSectionProps) {
       dragging.current = false;
       document.body.style.cursor = '';
       document.body.style.userSelect = '';
+      handleRef.current?.classList.remove('dragging');
       // Persist latest height from ref (not stale closure value)
       try { localStorage.setItem(LS_NOTES_HEIGHT_KEY, String(heightRef.current)); } catch {}
     };
@@ -73,6 +76,7 @@ export function GlobalNotesSection(props: GlobalNotesSectionProps) {
       <div className="global-notes-section">
         {!collapsed && (
           <div
+            ref={handleRef}
             className="global-notes-resize-handle"
             onMouseDown={onMouseDown}
             title="Drag to resize"

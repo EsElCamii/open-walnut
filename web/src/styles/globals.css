@@ -6734,6 +6734,13 @@ img[data-lightbox-src],
 
 /* ── Pinned tasks section (between filters and task list) ── */
 
+/* Scrollable wrapper for pinned + recent so they don't push Notes off-screen */
+.todo-pinned-wrapper {
+  flex-shrink: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
+
 .todo-pinned-section {
   flex-shrink: 0;
   border-bottom: 1px solid var(--border);
@@ -8055,7 +8062,7 @@ img[data-lightbox-src],
 /* ── Draggable resize handle between task list and notes ── */
 
 .global-notes-resize-handle {
-  height: 6px;
+  height: 14px;
   cursor: row-resize;
   display: flex;
   align-items: center;
@@ -8072,11 +8079,11 @@ img[data-lightbox-src],
 
 .global-notes-resize-handle::after {
   content: '';
-  width: 32px;
+  width: 40px;
   height: 3px;
   border-radius: 2px;
   background: var(--border-strong);
-  opacity: 0.5;
+  opacity: 0.6;
 }
 
 .global-notes-resize-handle:hover::after,

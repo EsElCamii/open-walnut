@@ -2741,6 +2741,7 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
       {/* Unified DndContext wrapping both Pinned + Recent — enables drag from Recent to Pin */}
       {(pinnedTasks.length > 0 || recentTasks.length > 0) && (
         <DndContext sensors={pinnedSensors} collisionDetection={closestCenter} onDragStart={handlePinnedDragStart} onDragOver={handlePinnedDragOver} onDragEnd={handlePinnedDragEnd} onDragCancel={handlePinnedDragCancel}>
+          <div className="todo-pinned-wrapper">
           {/* PINNED section — Focus + Next + Satellite sub-groups */}
           {pinnedTasks.length > 0 && (
             <div className="todo-pinned-section">
@@ -2840,6 +2841,7 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
             </div>
           )}
 
+          </div>
           {/* Floating preview card during cross-container drag */}
           <DragOverlay dropAnimation={null}>
             {activeDragPinnedTask && (
