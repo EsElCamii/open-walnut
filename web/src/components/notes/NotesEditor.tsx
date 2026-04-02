@@ -60,8 +60,11 @@ const TightTaskList = TaskList.extend({
       ...this.parent?.(),
       tight: {
         default: true,
-        parseHTML: element =>
-          element.getAttribute('data-tight') === 'true' || !element.querySelector('p'),
+        // Always tight — task lists should never have blank lines between items.
+        // The original check `!element.querySelector('p')` returned false for
+        // "loose" lists (markdown with blank lines between items), setting tight=false
+        // and causing prosemirror-markdown to re-insert blank lines on every save.
+        parseHTML: () => true,
         renderHTML: attributes => ({
           'data-tight': attributes.tight ? 'true' : null,
         }),
