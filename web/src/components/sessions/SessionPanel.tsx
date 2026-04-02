@@ -202,7 +202,11 @@ export const SessionPanel = memo(function SessionPanel({ sessionId, onClose, onT
       .catch(() => {});
   }, []);
 
-  useEvent('config:changed', () => { refreshPinState(session?.taskId); });
+  useEvent('config:changed', (data: unknown) => {
+    const { key } = (data ?? {}) as { key?: string };
+    if (key && key !== 'focus_bar') return;
+    refreshPinState(session?.taskId);
+  });
 
   const handleTogglePin = useCallback(async () => {
     if (!session?.taskId || pinBusy) return;

@@ -32,8 +32,10 @@ export function useSessionPanelMode(containerWidth = 0) {
     }).catch(() => {});
   }, []);
 
-  // Sync when config changes (from other tabs/sources)
-  useEvent('config:changed', useCallback(() => {
+  // Sync when UI config changes (from other tabs/sources)
+  useEvent('config:changed', useCallback((data: unknown) => {
+    const { key } = (data ?? {}) as { key?: string };
+    if (key && key !== 'ui') return;
     if (Date.now() - lastSelfChangeRef.current < SELF_CHANGE_COOLDOWN) return;
     fetchConfig().then(c => {
       const v = c.ui?.session_panels;
