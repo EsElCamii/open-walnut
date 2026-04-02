@@ -6308,9 +6308,6 @@ img[data-lightbox-src],
 }
 
 .session-panel-input .chat-input-container {
-  flex-direction: column;
-  flex-wrap: nowrap;
-  align-items: stretch; /* override flex-end which right-aligns children in column mode */
   gap: 4px;
 }
 

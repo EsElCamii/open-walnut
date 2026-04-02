@@ -52,9 +52,10 @@ const AGENT_REDISCOVER_INTERVAL_MS = 10000
     `${home}/.pyenv/shims`,           // pyenv (node via pyenv)
     `${home}/.bun/bin`,               // bun
     `${home}/.toolbox/bin`,           // toolbox
-    // Standard system paths as safety net. Primary source is /etc/profile
-    // (sourced in execSync below + buildSpawnPreamble), but if both /etc/profile
-    // and RC sourcing fail, these ensure basic commands (cat, ssh, etc.) work.
+    // Standard system paths as safety net. Primary source is the user's RC files
+    // (.zshrc / .bashrc), which typically include system dirs and are sourced in the
+    // extraPaths retrieval above. These fallback paths ensure basic commands work
+    // if RC sourcing fails.
     '/usr/local/bin',
     '/usr/bin',
     '/bin',
@@ -332,6 +333,8 @@ function cmdStart(ws: ServerWebSocket<WsData>, id: number, cmd: Record<string, u
   // swallowed by `2>/dev/null`, but PATH modifications before the error point
   // can clobber the inherited PATH, losing /usr/bin and other system dirs.
   // Using $SHELL ensures RC files are sourced by the correct shell interpreter.
+  // Empirical verification: bash -c 'source .zshrc' on clouddev produces 0 /usr/bin
+  // matches, while zsh -c 'source .zshrc' produces 2 matches, proving the bug.
   const userShell = process.env.SHELL || '/bin/bash'
   const proc = spawn(userShell, ['-c', shellCmd], {
     detached: true,
