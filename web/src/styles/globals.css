@@ -5137,7 +5137,7 @@ input:focus, textarea:focus, select:focus {
   gap: 6px;
   align-items: flex-end;
   flex: 1;
-  min-width: 0;
+  min-width: 200px; /* force buttons to wrap below when container < ~280px */
 }
 
 .chat-input-container.drag-over {
