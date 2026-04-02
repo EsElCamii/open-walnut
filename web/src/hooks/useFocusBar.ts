@@ -30,6 +30,13 @@ function readVisible(): boolean {
   try { return localStorage.getItem(VISIBLE_KEY) === 'true'; } catch { return false; }
 }
 
+/** Shallow-compare two string arrays — avoids unnecessary state updates from server echoes. */
+function arraysEqual(a: string[], b: string[]): boolean {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
+  return true;
+}
+
 export function useFocusBar(tasks: Task[]): UseFocusBarReturn {
   const [pinnedIds, setPinnedIds] = useState<string[]>([]);
   const [focusIds, setFocusIds] = useState<string[]>([]);
@@ -44,12 +51,14 @@ export function useFocusBar(tasks: Task[]): UseFocusBarReturn {
 
   const lastWriteRef = useRef(0);
 
-  // Apply server response — handles both full (GET) and partial (setTier) responses
+  // Apply server response — handles both full (GET) and partial (setTier) responses.
+  // Uses equality check to skip no-op state updates (prevents render cascade when
+  // server echoes the same data that the optimistic update already applied).
   const applyData = useCallback((data: Partial<focusApi.FocusBarData>) => {
-    if (data.pinned_tasks) setPinnedIds(data.pinned_tasks);
-    if (data.focus_tasks) setFocusIds(data.focus_tasks);
-    if (data.next_tasks) setNextIds(data.next_tasks);
-    if (data.satellite_tasks) setSatelliteIds(data.satellite_tasks);
+    if (data.pinned_tasks) setPinnedIds(prev => arraysEqual(prev, data.pinned_tasks!) ? prev : data.pinned_tasks!);
+    if (data.focus_tasks) setFocusIds(prev => arraysEqual(prev, data.focus_tasks!) ? prev : data.focus_tasks!);
+    if (data.next_tasks) setNextIds(prev => arraysEqual(prev, data.next_tasks!) ? prev : data.next_tasks!);
+    if (data.satellite_tasks) setSatelliteIds(prev => arraysEqual(prev, data.satellite_tasks!) ? prev : data.satellite_tasks!);
   }, []);
 
   const fetchPinned = useCallback(() => {
@@ -127,10 +136,13 @@ export function useFocusBar(tasks: Task[]): UseFocusBarReturn {
 
   const setTier = useCallback(async (taskId: string, tier: FocusTier) => {
     lastWriteRef.current = Date.now();
-    // Optimistic: remove from old tier, add to new
-    setFocusIds((prev) => tier === 'focus' ? (prev.includes(taskId) ? prev : [...prev, taskId]) : prev.filter((id) => id !== taskId));
-    setNextIds((prev) => tier === 'next' ? (prev.includes(taskId) ? prev : [...prev, taskId]) : prev.filter((id) => id !== taskId));
-    setSatelliteIds((prev) => tier === 'satellite' ? (prev.includes(taskId) ? prev : [...prev, taskId]) : prev.filter((id) => id !== taskId));
+    // Optimistic: remove from old tier, add to new.
+    // Only create new array when the item is actually added/removed (avoids no-op state updates).
+    const addTo = (prev: string[]) => prev.includes(taskId) ? prev : [...prev, taskId];
+    const removeFrom = (prev: string[]) => prev.includes(taskId) ? prev.filter((id) => id !== taskId) : prev;
+    setFocusIds(tier === 'focus' ? addTo : removeFrom);
+    setNextIds(tier === 'next' ? addTo : removeFrom);
+    setSatelliteIds(tier === 'satellite' ? addTo : removeFrom);
     try {
       const result = await focusApi.setTaskTier(taskId, tier);
       applyData(result);
