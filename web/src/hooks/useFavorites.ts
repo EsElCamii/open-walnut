@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useMemo } from 'react';
 import { useEvent } from './useWebSocket';
 import * as favApi from '@/api/favorites';
 
@@ -27,8 +27,12 @@ export function useFavorites(): UseFavoritesReturn {
 
   useEffect(() => { fetchAll(); }, [fetchAll]);
 
-  // Re-sync when config changes from other sources
-  useEvent('config:changed', () => { fetchAll(); });
+  // Re-sync when favorites config changes from other sources
+  useEvent('config:changed', (data: unknown) => {
+    const { key } = (data ?? {}) as { key?: string };
+    if (key && key !== 'favorites') return;
+    fetchAll();
+  });
 
   const toggleFavoriteCategory = useCallback(async (name: string) => {
     if (favoriteCategories.includes(name)) {
@@ -62,7 +66,8 @@ export function useFavorites(): UseFavoritesReturn {
 
   const hasFavorites = favoriteCategories.length > 0 || favoriteProjects.length > 0;
 
-  return {
+  // Stabilize return value — prevents downstream memo invalidation (e.g. TodoPanel filtered)
+  return useMemo(() => ({
     favoriteCategories,
     favoriteProjects,
     toggleFavoriteCategory,
@@ -70,5 +75,6 @@ export function useFavorites(): UseFavoritesReturn {
     isCategoryFavorite,
     isProjectFavorite,
     hasFavorites,
-  };
+  }), [favoriteCategories, favoriteProjects, toggleFavoriteCategory, toggleFavoriteProject,
+       isCategoryFavorite, isProjectFavorite, hasFavorites]);
 }

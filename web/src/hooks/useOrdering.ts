@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useMemo } from 'react';
 import { useEvent } from './useWebSocket';
 import * as orderingApi from '@/api/ordering';
 
@@ -24,8 +24,12 @@ export function useOrdering(): UseOrderingReturn {
 
   useEffect(() => { fetchAll(); }, [fetchAll]);
 
-  // Re-sync when config changes from other sources
-  useEvent('config:changed', () => { fetchAll(); });
+  // Re-sync when ordering config changes from other sources
+  useEvent('config:changed', (data: unknown) => {
+    const { key } = (data ?? {}) as { key?: string };
+    if (key && key !== 'ordering') return;
+    fetchAll();
+  });
 
   const reorderCategories = useCallback(async (order: string[]) => {
     setCategoryOrder(order);
@@ -37,5 +41,7 @@ export function useOrdering(): UseOrderingReturn {
     await orderingApi.saveProjectOrder(category, order);
   }, []);
 
-  return { categoryOrder, projectOrder, reorderCategories, reorderProjects };
+  return useMemo(() => ({
+    categoryOrder, projectOrder, reorderCategories, reorderProjects,
+  }), [categoryOrder, projectOrder, reorderCategories, reorderProjects]);
 }
