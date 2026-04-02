@@ -77,11 +77,16 @@ export class LocalSessionManager implements SessionManager {
     // Build clean env: remove CLAUDECODE to prevent nested detection
     const { CLAUDECODE: _drop, ...cleanEnv } = process.env
 
+    // Ensure cwd exists — spawn() fails with ENOENT + pid=undefined if it doesn't,
+    // causing a silent 30s timeout instead of an immediate error.
+    const cwd = opts.cwd || process.cwd()
+    fs.mkdirSync(cwd, { recursive: true })
+
     // Spawn the local Claude CLI process
     const proc = spawn(this.cliCommand, opts.args, {
       detached: true,
       stdio: [pipeFd, outputFd, stderrFd],
-      cwd: opts.cwd || process.cwd(),
+      cwd,
       env: { ...cleanEnv, CLAUDE_CODE_DISABLE_BACKGROUND_TASKS: '1' },
     })
 
@@ -96,6 +101,15 @@ export class LocalSessionManager implements SessionManager {
     this._outputFile = this.io.outputFile
     proc.unref()
 
+    // If pid is undefined, spawn failed synchronously (e.g. bad cwd, missing binary).
+    // Throw immediately so transport.start().catch() rejects sessionReady with a
+    // descriptive error instead of silently hanging for the 30s init timeout.
+    if (proc.pid === undefined) {
+      const errMsg = `Failed to spawn "${this.cliCommand}": cwd="${cwd}" may not exist or the CLI binary was not found`
+      log.session.error('LocalSessionManager: spawn failed (no pid)', { cwd, cliCommand: this.cliCommand })
+      throw new Error(errMsg)
+    }
+
     log.session.info('LocalSessionManager: session spawned (detached, FIFO stdin)', {
       pid: proc.pid,
       outputFile: this.io.outputFile,
@@ -104,7 +118,7 @@ export class LocalSessionManager implements SessionManager {
       fork: opts.fork,
     })
 
-    // Handle spawn errors
+    // Handle spawn errors (async failures after pid was assigned)
     proc.on('error', (err) => {
       log.session.error('LocalSessionManager: spawn error', { error: err.message })
     })
