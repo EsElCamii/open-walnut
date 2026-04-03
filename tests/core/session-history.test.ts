@@ -138,7 +138,9 @@ describe('readSessionHistory', () => {
   });
 
   it('deduplicates identical thinking blocks from replayed lines', async () => {
-    const thinkLine = { type: 'assistant', timestamp: '2025-01-01T00:00:00Z', message: { id: 'a1', role: 'assistant', content: [{ type: 'thinking', thinking: 'Deep thought' }] } };
+    // Realistic case: thinking + text (thinking-only messages with no text/tools
+    // are filtered as abandoned API calls)
+    const thinkLine = { type: 'assistant', timestamp: '2025-01-01T00:00:00Z', message: { id: 'a1', role: 'assistant', content: [{ type: 'thinking', thinking: 'Deep thought' }, { type: 'text', text: 'Answer' }] } };
     await writeJsonl('s-dedup-think', '/test', [
       thinkLine, thinkLine, thinkLine,
     ]);
@@ -146,6 +148,27 @@ describe('readSessionHistory', () => {
     const messages = await readSessionHistory('s-dedup-think', '/test');
     expect(messages).toHaveLength(1);
     expect(messages[0].thinking).toBe('Deep thought');
+    expect(messages[0].text).toBe('Answer');
+  });
+
+  it('filters abandoned API calls (thinking-only, no text or tools)', async () => {
+    // When Claude Code retries an API call, the abandoned first call may have
+    // only thinking content with no visible text. These should be filtered out.
+    const abandonedLine = { type: 'assistant', timestamp: '2025-01-01T00:00:00Z', message: { id: 'a1', role: 'assistant', content: [{ type: 'thinking', thinking: 'Deep thought' }] } };
+    await writeJsonl('s-abandoned', '/test', [abandonedLine]);
+
+    const messages = await readSessionHistory('s-abandoned', '/test');
+    expect(messages).toHaveLength(0);
+  });
+
+  it('filters whitespace-only assistant text from abandoned API calls', async () => {
+    // Claude Code sometimes emits "\n\n" as initial text before real content.
+    // If the API call is abandoned, only "\n\n" remains — should be filtered.
+    const emptyTextLine = { type: 'assistant', timestamp: '2025-01-01T00:00:00Z', message: { id: 'a1', role: 'assistant', content: [{ type: 'text', text: '\n\n' }] } };
+    await writeJsonl('s-whitespace', '/test', [emptyTextLine]);
+
+    const messages = await readSessionHistory('s-whitespace', '/test');
+    expect(messages).toHaveLength(0);
   });
 
   it('deduplicates identical tool_use blocks by block id', async () => {

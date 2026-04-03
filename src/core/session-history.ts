@@ -479,11 +479,16 @@ function parseSessionMessages(content: string): SessionHistoryMessage[] {
       }
     }
 
-    const text = textParts.join('\n');
+    const text = textParts.join('\n').trim();
 
     // Skip messages with no visible content (e.g. tool_result-only user entries,
     // empty heartbeat lines). These produce ghost "You" bubbles in the UI.
     if (!text && tools.length === 0 && !thinking) continue;
+
+    // Skip assistant messages with no visible text and no tools.
+    // These are typically abandoned API calls where Claude thought but never
+    // produced a response before the call was retried with a new message ID.
+    if (msg.role === 'assistant' && !text && tools.length === 0) continue;
 
     result.push({
       role: msg.role as 'user' | 'assistant',
@@ -911,7 +916,8 @@ export async function recoverStateFromJsonl(sessionId: string, cwd?: string, hos
       // suffix — later resumes may have lost it due to the processNext default bug.
       // If no [1m] version exists, use the last init event's model as fallback.
       if (type === 'system' && parsed.subtype === 'init' && typeof parsed.model === 'string') {
-        const initModel = parsed.model as string;
+        // De-duplicate [1m][1m] → [1m] from old resume bug
+        const initModel = (parsed.model as string).replace(/(\[1m\])+$/, '[1m]');
         if (initModel.endsWith('[1m]')) {
           state.model = initModel;  // [1m] found — lock it in
         } else if (!state.model?.endsWith('[1m]')) {
