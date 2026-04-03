@@ -67,6 +67,10 @@ export function sanitizeInitModel(raw: string): string | undefined {
   if (cleaned.endsWith(']') && !cleaned.endsWith('[1m]')) return undefined;    // orphan ]
   if (cleaned.includes('[') && !cleaned.includes('[1m]')) return undefined;    // unknown [...] suffix
 
-  return cleaned || undefined;
+  // De-duplicate [1m][1m] → [1m] (caused by old resume bug passing full model string
+  // as --model arg; CLI appended another [1m] marker)
+  const deduped = cleaned.replace(/(\[1m\])+$/, '[1m]');
+
+  return deduped || undefined;
 }
 
