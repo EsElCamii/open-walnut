@@ -20,7 +20,8 @@ export function SessionRow({ session, selected, onClick, phase }: SessionRowProp
   const ago = timeAgo(session.lastActiveAt || session.startedAt);
 
   const statusLabel = PHASE_LABELS[taskPhase] ?? taskPhase;
-  const modeIcon = session.mode === 'plan' ? '\uD83D\uDCCB Plan' : session.mode && session.mode !== 'default' ? '\u26A1 Bypass' : null;
+  const isPlanSession = session.mode === 'plan' || !!session.planCompleted;
+  const modeIcon = isPlanSession ? '\uD83D\uDCCB Plan' : session.mode && session.mode !== 'default' ? '\u26A1 Bypass' : null;
 
   return (
     <div

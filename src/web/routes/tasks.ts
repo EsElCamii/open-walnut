@@ -47,7 +47,7 @@ function toSlotStatus(info: SessionInfo, slot?: 'plan' | 'exec'): { process_stat
     activity: info.activity,
     mode: info.mode,
     provider: info.provider,
-    ...(slot === 'plan' && info.planCompleted ? { planCompleted: true } : {}),
+    ...(info.planCompleted ? { planCompleted: true } : {}),
   }
 }
 
@@ -176,9 +176,9 @@ async function enrichTasksWithSessionStatus(tasks: Task[]): Promise<Task[]> {
         if (sid === enriched.plan_session_id || sid === enriched.exec_session_id) continue
         const info = sessionMap.get(sid)
         if (!info || !isActiveSession(info)) continue
-        if (!enriched.plan_session_status && info.mode === 'plan') {
+        if (!enriched.plan_session_status && (info.mode === 'plan' || info.planCompleted)) {
           enriched.plan_session_status = toSlotStatus(info, 'plan')
-        } else if (!enriched.exec_session_status && info.mode !== 'plan') {
+        } else if (!enriched.exec_session_status && info.mode !== 'plan' && !info.planCompleted) {
           enriched.exec_session_status = toSlotStatus(info, 'exec')
         }
       }
@@ -202,8 +202,10 @@ const VALID_PHASES_ARRAY = [...VALID_PHASES]
 // ?slim=1 — omit note and conversation_log fields (~400KB savings)
 tasksRouter.get('/', async (req: Request, res: Response, next: NextFunction) => {
   try {
+    const t0 = Date.now()
     const { status, category, project, source, tags, sprint, slim } = req.query as Record<string, string | undefined>
     const tasks = (await listTasks({ status, category })).filter((t) => !t.title.startsWith('.metadata'))
+    const tList = Date.now()
     // Client-side project filtering (listTasks only supports status+category)
     let filtered = project
       ? tasks.filter((t) => t.project.toLowerCase() === project.toLowerCase())
@@ -223,7 +225,9 @@ tasksRouter.get('/', async (req: Request, res: Response, next: NextFunction) => 
     if (sprint) {
       filtered = filtered.filter((t) => t.sprint === sprint)
     }
+    const tFilter = Date.now()
     const enriched = await enrichTasksWithSessionStatus(filtered)
+    const tEnrich = Date.now()
     // Add is_blocked flag based on dependency resolution
     const tasksWithBlocked = enriched.map((t) => ({
       ...t,
@@ -240,9 +244,26 @@ tasksRouter.get('/', async (req: Request, res: Response, next: NextFunction) => 
         }
       })
       res.json({ tasks: slimmed })
+      const tDone = Date.now()
+      // Log slow responses (>200ms total)
+      const total = tDone - t0
+      if (total > 200) {
+        log.web.warn('GET /api/tasks slow', {
+          total, listMs: tList - t0, filterMs: tFilter - tList, enrichMs: tEnrich - tFilter,
+          serializeMs: tDone - tEnrich, taskCount: tasks.length, filteredCount: filtered.length, slim: true,
+        })
+      }
       return
     }
     res.json({ tasks: tasksWithBlocked })
+    const tDone = Date.now()
+    const total = tDone - t0
+    if (total > 200) {
+      log.web.warn('GET /api/tasks slow', {
+        total, listMs: tList - t0, filterMs: tFilter - tList, enrichMs: tEnrich - tFilter,
+        serializeMs: tDone - tEnrich, taskCount: tasks.length, filteredCount: filtered.length, slim: false,
+      })
+    }
   } catch (err) {
     next(err)
   }

@@ -548,7 +548,7 @@ export class ClaudeCodeSession {
       }
     }).catch((err) => {
       log.session.error('transport start failed', {
-        taskId: this.taskId, host, isRemote: !!sshTarget,
+        taskId: this.taskId, host: host ?? 'local', cwd, isRemote: !!sshTarget,
         error: err instanceof Error ? err.message : String(err),
       })
       this._rejectSessionReady(err)
@@ -598,8 +598,10 @@ export class ClaudeCodeSession {
     // _initModel is in-memory only (set from init events); old init events aren't
     // re-processed since the JSONL tailer starts from current offset.
     if (record.model) {
-      session._initModel = record.model
-      const shortModel = record.model.replace(/^.*\./, '').replace(/[-_]v\d+.*$/, '') || record.model
+      // De-duplicate [1m][1m] from old resume bug before processing
+      const cleanModel = record.model.replace(/(\[1m\])+$/, '[1m]')
+      session._initModel = cleanModel
+      const shortModel = cleanModel.replace(/^.*\./, '').replace(/[-_]v\d+(\[1m\])?$/, '$1') || cleanModel
       session._model = shortModel
     }
     if (record.cliModel) {
@@ -699,8 +701,10 @@ export class ClaudeCodeSession {
       if (recovered) {
         if (recovered.mode) session._mode = recovered.mode as SessionMode
         if (recovered.model) {
-          session._initModel = recovered.model
-          const shortModel = recovered.model.replace(/^.*\./, '').replace(/[-_]v\d+.*$/, '') || recovered.model
+          // De-duplicate [1m][1m] from old resume bug
+          const cleanModel = recovered.model.replace(/(\[1m\])+$/, '[1m]')
+          session._initModel = cleanModel
+          const shortModel = cleanModel.replace(/^.*\./, '').replace(/[-_]v\d+(\[1m\])?$/, '$1') || cleanModel
           session._model = shortModel
         }
         if (recovered.planFile) session.planFile = recovered.planFile
@@ -1286,12 +1290,15 @@ export class ClaudeCodeSession {
           this.emitStatusChanged('IN_PROGRESS')
         }
 
-        // Parse permissionMode from ANY system event (init or status).
-        // - init: every CLI startup/resume → ground truth verification
-        // - status: EnterPlanMode → real-time mode change detection
+        // Parse permissionMode from system events.
+        // Only apply mode changes from 'status' events (EnterPlanMode mid-session).
+        // Skip 'init' events — the init event just reports the CLI's spawn-time mode,
+        // which can differ from the user's intent (e.g. user toggled mode via UI while
+        // the CLI was spawned with a different mode). The session record is authoritative
+        // for display mode; the init event would overwrite it incorrectly.
         // ExitPlanMode does NOT emit system event → handled by tool_use detection above.
         const permMode = sys.permissionMode
-        if (typeof permMode === 'string') {
+        if (typeof permMode === 'string' && sys.subtype === 'status') {
           const mapped = mapPermissionMode(permMode)
           if (mapped && mapped !== this._mode) {
             const oldMode = this._mode
@@ -1482,6 +1489,27 @@ export class ClaudeCodeSession {
                     .catch(() => {}),
                 )
               }
+
+              // Promote to plan slot: if this session occupies the exec slot (not already
+              // on the plan slot), move it to plan_session_id so the UI recognizes it as
+              // a plan session regardless of original mode (bypass, default, etc.).
+              if (this.claudeSessionId && this.taskId) {
+                import('../core/task-manager.js').then(async ({ getTask, linkSessionSlot, clearSessionSlot }) => {
+                  const sid = this.claudeSessionId!
+                  const tid = this.taskId!
+                  try {
+                    const task = await getTask(tid)
+                    // Only promote if session is on exec slot (or no slot), and plan slot is free
+                    if (task.plan_session_id === sid) return // already on plan slot
+                    if (task.plan_session_id && task.plan_session_id !== sid) return // another session owns plan slot
+                    if (task.exec_session_id === sid) {
+                      await clearSessionSlot(tid, sid, 'exec')
+                    }
+                    await linkSessionSlot(tid, sid, 'plan')
+                  } catch { /* task not found or lock contention — ignore */ }
+                }).catch(() => {})
+              }
+
               // Notify frontend so it can show the Execute button once the session stops
               this.emitStatusChanged('IN_PROGRESS')
             }
@@ -2308,7 +2336,8 @@ export class SessionRunner {
           if (!cwd) {
             if (data.host) {
               throw new Error(
-                `No working directory found for remote session on "${data.host}". ` +
+                `No working directory found for remote session on host "${data.host}" ` +
+                `(task: "${task.id}", category: "${task.category}", project: "${task.project}"). ` +
                 `Set a cwd on the task, or set default_cwd in project "${task.project}" metadata ` +
                 `(e.g. /workplace/... on the remote host).`
               )
@@ -2538,7 +2567,8 @@ export class SessionRunner {
           if (!cwd) {
             if (data.host) {
               throw new Error(
-                `No working directory found for remote session on "${data.host}". ` +
+                `No working directory found for remote session on host "${data.host}" ` +
+                `(task: "${task.id}", category: "${task.category}", project: "${task.project}"). ` +
                 `Set a cwd on the task, or set default_cwd in project "${task.project}" metadata.`
               )
             }

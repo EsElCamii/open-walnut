@@ -17,6 +17,7 @@ import { getFrequentDirs, compileFromSessions } from '../../core/frequent-dirs.j
 import type { SessionRecord, Task } from '../../core/types.js'
 import type { SessionHistoryMessage } from '../../core/session-history.js'
 import { processAndSaveImages, buildSessionImageContext } from './images.js'
+import { sessionRunner } from '../../providers/claude-code-session.js'
 import type { ImagePayload } from './images.js'
 
 /** Diagnose message ordering — logs whether user text messages are interleaved or bunched at end. */
@@ -596,7 +597,7 @@ sessionsRouter.get('/:sessionId', async (req: Request, res: Response, next: Next
 // PATCH /api/sessions/:sessionId
 sessionsRouter.patch('/:sessionId', async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const { title, activity, human_note, archived, archive_reason } = req.body as { title?: string; activity?: string; human_note?: string; archived?: boolean; archive_reason?: string }
+    const { title, activity, human_note, archived, archive_reason, mode } = req.body as { title?: string; activity?: string; human_note?: string; archived?: boolean; archive_reason?: string; mode?: string }
 
     if (title !== undefined && (typeof title !== 'string' || title.length > 500)) {
       res.status(400).json({ error: 'title must be a string (max 500 chars)' })
@@ -610,6 +611,12 @@ sessionsRouter.patch('/:sessionId', async (req: Request, res: Response, next: Ne
 
     if (archived !== undefined && typeof archived !== 'boolean') {
       res.status(400).json({ error: 'archived must be a boolean' })
+      return
+    }
+
+    const VALID_MODES = ['bypass', 'accept', 'default', 'plan'] as const
+    if (mode !== undefined && !VALID_MODES.includes(mode as typeof VALID_MODES[number])) {
+      res.status(400).json({ error: `mode must be one of: ${VALID_MODES.join(', ')}` })
       return
     }
 
@@ -628,10 +635,14 @@ sessionsRouter.patch('/:sessionId', async (req: Request, res: Response, next: Ne
       }
     }
 
+    // Read existing record for mode-change slot promotion logic
+    const existingRecord = mode !== undefined ? await getSessionByClaudeId(sessionId) : undefined
+
     const updates: Partial<SessionRecord> = {}
     if (title !== undefined) updates.title = title
     if (activity !== undefined) updates.activity = activity
     if (human_note !== undefined) updates.human_note = human_note
+    if (mode !== undefined) updates.mode = mode as SessionMode
     if (archived !== undefined) {
       updates.archived = archived
       if (archived && archive_reason) updates.archive_reason = archive_reason
@@ -641,8 +652,16 @@ sessionsRouter.patch('/:sessionId', async (req: Request, res: Response, next: Ne
     const updated = await updateSessionRecord(sessionId, updates)
     log.web.info('session updated via REST', { sessionId, fields: Object.keys(updates) })
 
+    // Sync mode to in-memory session so emitStatusChanged() uses the new value.
+    if (mode !== undefined) {
+      const liveSession = sessionRunner.findByClaudeId(sessionId)
+      if (liveSession) {
+        liveSession._mode = mode as SessionMode
+      }
+    }
+
     // Emit status change so frontend updates in real time
-    if (archived !== undefined) {
+    if (archived !== undefined || mode !== undefined) {
       bus.emit(EventNames.SESSION_STATUS_CHANGED, {
         sessionId,
         taskId: updated.taskId,
@@ -652,6 +671,31 @@ sessionsRouter.patch('/:sessionId', async (req: Request, res: Response, next: Ne
         ...(updated.planCompleted ? { planCompleted: true } : {}),
         ...(archived !== undefined ? { archived } : {}),
       }, ['web-ui'])
+    }
+
+    // Mode change: promote/demote task session slot when switching to/from plan
+    if (mode !== undefined && existingRecord && updated.taskId && existingRecord.mode !== mode) {
+      try {
+        const { getTask, linkSessionSlot, clearSessionSlot } = await import('../../core/task-manager.js')
+        const task = await getTask(updated.taskId)
+        if (mode === 'plan') {
+          // Promote to plan slot (if plan slot is free)
+          if (!task.plan_session_id || task.plan_session_id === sessionId) {
+            if (task.exec_session_id === sessionId) await clearSessionSlot(updated.taskId, sessionId, 'exec')
+            await linkSessionSlot(updated.taskId, sessionId, 'plan')
+            const updatedTask = await getTask(updated.taskId)
+            bus.emit(EventNames.TASK_UPDATED, { task: updatedTask }, ['web-ui'], { source: 'session-mode-change' })
+          }
+        } else {
+          // Demote from plan slot to exec
+          if (task.plan_session_id === sessionId) {
+            await clearSessionSlot(updated.taskId, sessionId, 'plan')
+            if (!task.exec_session_id) await linkSessionSlot(updated.taskId, sessionId, 'exec')
+            const updatedTask = await getTask(updated.taskId)
+            bus.emit(EventNames.TASK_UPDATED, { task: updatedTask }, ['web-ui'], { source: 'session-mode-change' })
+          }
+        }
+      } catch { /* task not found or lock contention — ignore */ }
     }
 
     // Archive: clear task session slot to free it for new sessions

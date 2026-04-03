@@ -13,7 +13,7 @@ import { useSlashCommands } from '@/hooks/useSlashCommands';
 import { useSessionHistory } from '@/hooks/useSessionHistory';
 import type { ImageAttachment } from '@/api/chat';
 import { useEvent } from '@/hooks/useWebSocket';
-import { fetchSession, executePlanContinue, executePlanSession } from '@/api/sessions';
+import { fetchSession, executePlanContinue, executePlanSession, updateSession } from '@/api/sessions';
 import { fetchTask } from '@/api/tasks';
 import { fetchPinnedTasks, pinTask, unpinTask } from '@/api/focus';
 import { timeAgo } from '@/utils/time';
@@ -738,6 +738,36 @@ export const SessionPanel = memo(function SessionPanel({ sessionId, onClose, onT
               {sendError}
             </div>
           )}
+          {session && (() => {
+            // Mode toggle uses session.mode only (not planCompleted) — planCompleted
+            // is a separate flag meaning "plan was produced", it shouldn't lock the toggle.
+            const currentMode = session.mode || 'default';
+            const isPlan = currentMode === 'plan';
+            const modeLabel = isPlan ? 'Plan' : currentMode === 'bypass' ? 'Bypass' : currentMode === 'accept' ? 'Accept' : 'Default';
+            const toggleMode = async () => {
+              const nextMode = isPlan ? 'bypass' : 'plan';
+              try {
+                const updated = await updateSession(session.claudeSessionId, { mode: nextMode });
+                setSession(updated);
+              } catch (err) {
+                console.warn('[session-panel] mode toggle failed', session.claudeSessionId, nextMode, err);
+              }
+            };
+            return (
+              <div className="session-mode-bar">
+                <button
+                  className={`mode-toggle-pill${isPlan ? ' plan-active' : ''}`}
+                  onClick={toggleMode}
+                  title={`Mode: ${currentMode}. Click or Shift+Tab to switch to ${isPlan ? 'Bypass' : 'Plan'}`}
+                >
+                  <span className="mode-toggle-pill-label">
+                    {isPlan ? '\uD83D\uDCCB Plan' : '\u26A1 ' + modeLabel}
+                  </span>
+                  <span className="mode-toggle-pill-shortcut">{'\u21E7'}Tab</span>
+                </button>
+              </div>
+            );
+          })()}
           <ChatInput
             onSend={handleSend}
             onInterruptSend={handleInterruptSend}
@@ -748,6 +778,16 @@ export const SessionPanel = memo(function SessionPanel({ sessionId, onClose, onT
             searchSessionCommands={searchSlashCommands}
             onControlCommand={handleControlCommand}
             draftKey={`draft:session:${sessionId}`}
+            onToggleMode={session ? async () => {
+              const isPlan = session.mode === 'plan';
+              const nextMode = isPlan ? 'bypass' : 'plan';
+              try {
+                const updated = await updateSession(session.claudeSessionId, { mode: nextMode });
+                setSession(updated);
+              } catch (err) {
+                console.warn('[session-panel] mode toggle failed', session.claudeSessionId, nextMode, err);
+              }
+            } : undefined}
           />
           {modelPickerOpen && (
             <ModelPicker

@@ -141,6 +141,15 @@ export function SessionDetailPanel({ session, taskTitle, summary, phase: propPha
   const sessionIdRef = useRef(session?.claudeSessionId);
   sessionIdRef.current = session?.claudeSessionId;
 
+  // Local mode override — applied after user clicks mode toggle (session prop doesn't update immediately)
+  const [modeOverride, setModeOverride] = useState<string | null>(null);
+  // Reset override when session changes
+  const prevSessionId = useRef(session?.claudeSessionId);
+  if (session?.claudeSessionId !== prevSessionId.current) {
+    prevSessionId.current = session?.claudeSessionId;
+    if (modeOverride !== null) setModeOverride(null);
+  }
+
   // Action chip toggle state
   const [planPopoverOpen, setPlanPopoverOpen] = useState(false);
   const [notesOpen, setNotesOpen] = useState(false);
@@ -517,6 +526,32 @@ export function SessionDetailPanel({ session, taskTitle, summary, phase: propPha
                 return count > 0 ? <span className="session-action-chip-count">{count}</span> : null;
               })()}
             </button>
+            {(() => {
+              const currentMode = (modeOverride ?? session.mode) || 'default';
+              const isPlan = currentMode === 'plan';
+              const modeLabel = isPlan ? 'Plan' : currentMode === 'bypass' ? 'Bypass' : currentMode === 'accept' ? 'Accept' : 'Default';
+              const handleModeToggle = async () => {
+                const nextMode = isPlan ? 'bypass' : 'plan';
+                setModeOverride(nextMode);
+                try {
+                  await updateSession(sessionId, { mode: nextMode });
+                } catch (err) {
+                  setModeOverride(null); // revert on error
+                  console.warn('[session-detail] mode toggle failed', sessionId, nextMode, err);
+                }
+              };
+              return (
+                <button
+                  className={`mode-toggle-pill${isPlan ? ' plan-active' : ''}`}
+                  onClick={handleModeToggle}
+                  title={`Mode: ${currentMode}. Click to switch to ${isPlan ? 'Bypass' : 'Plan'}`}
+                >
+                  <span className="mode-toggle-pill-label">
+                    {isPlan ? '\uD83D\uDCCB Plan' : '\u26A1 ' + modeLabel}
+                  </span>
+                </button>
+              );
+            })()}
           </div>
 
           {/* Collapsible details */}

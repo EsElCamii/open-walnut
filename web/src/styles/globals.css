@@ -251,6 +251,7 @@ input:focus, textarea:focus, select:focus {
   flex-shrink: 0;
   vertical-align: -4px;
   display: inline-block;
+  border-radius: 4px;
 }
 
 .sidebar-nav {
@@ -12342,6 +12343,12 @@ img[data-lightbox-src],
   background: var(--accent);
   border-radius: 7px;
   line-height: 1;
+}
+
+/* Mode bar above session input */
+.session-mode-bar {
+  display: flex;
+  padding: 4px 12px 0;
 }
 
 /* Plan popover — based on .session-fork-popover */

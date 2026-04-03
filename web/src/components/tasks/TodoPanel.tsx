@@ -1056,7 +1056,7 @@ function TaskDetailPane({ task, allTasks, onClose, onOpenSession, onOpenTriageFo
                 const taskStatus = task.session_status;
                 const processStatus = taskStatus?.process_status || 'stopped';
                 const taskPhase = (task.phase || 'TODO') as TaskPhase;
-                const isPlan = taskStatus?.mode === 'plan';
+                const isPlan = taskStatus?.mode === 'plan' || !!taskStatus?.planCompleted;
                 const statusLabel = PHASE_LABELS[taskPhase] ?? taskPhase;
                 return (
                   <div
@@ -1089,7 +1089,7 @@ function TaskDetailPane({ task, allTasks, onClose, onOpenSession, onOpenTriageFo
                 const sessionPhase = (task.phase || 'TODO') as TaskPhase;
                 const label = record?.title || 'Untitled session';
                 const ago = timeAgo(record?.lastActiveAt || record?.startedAt || '');
-                const isPlan = record?.mode === 'plan';
+                const isPlan = record?.mode === 'plan' || !!record?.planCompleted;
                 const modeLabel = record?.mode && record.mode !== 'default' && record.mode !== 'plan' && !record?.planCompleted ? record.mode : null;
                 const statusLabel = (PHASE_LABELS[sessionPhase] ?? sessionPhase) + (modeLabel ? ` · ${modeLabel}` : '');
                 return (

@@ -176,7 +176,7 @@ export function SessionTreePanel({
   const renderSession = (s: SessionRecord) => {
     const sid = s.claudeSessionId;
     const title = s.title || s.description || sid || 'Untitled session';
-    const isPlan = s.mode === 'plan';
+    const isPlan = s.mode === 'plan' || !!s.planCompleted;
     return (
       <div
         key={sid}

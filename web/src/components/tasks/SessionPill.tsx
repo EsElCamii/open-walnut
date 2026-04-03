@@ -79,7 +79,9 @@ export function SessionPill({ sessionId, sessionStatus, phase, planSessionId, ex
   const handleClick = clickable ? (e: React.MouseEvent) => { e.stopPropagation(); onClick!(e); } : undefined;
 
   // Resolve mode label: Plan or Bypass (only these two matter to the user)
-  const modeLabel = mode === 'plan' ? 'Plan' : 'Bypass';
+  // planCompleted on the session_status indicates a plan was produced even if mode !== 'plan'
+  const isPlanSession = mode === 'plan' || !!sessionStatus?.planCompleted || !!planStatus?.planCompleted;
+  const modeLabel = isPlanSession ? 'Plan' : 'Bypass';
 
   // New single-slot model: prefer sessionId + sessionStatus
   if (sessionId || sessionStatus) {
