@@ -1633,15 +1633,22 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
       .slice(0, 50);
   }, [tasks, pinnedTaskIds]);
 
+  // Stable sensor config — inline objects in useSensor destabilize dnd-kit's internal
+  // memoization (Object.values({distance:5}) produces new ref each render → sensors
+  // re-register on every render → cascading re-renders during drag-end transition).
+  const pointerConstraint = useRef({ distance: 5 }).current;
+  const pointerOpts = useMemo(() => ({ activationConstraint: pointerConstraint }), [pointerConstraint]);
+  const keyboardOpts = useMemo(() => ({ coordinateGetter: sortableKeyboardCoordinates }), []);
+
   const sensors = useSensors(
-    useSensor(PointerSensor, { activationConstraint: { distance: 5 } }),
-    useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
+    useSensor(PointerSensor, pointerOpts),
+    useSensor(KeyboardSensor, keyboardOpts),
   );
 
   // Sensors for pinned section DnD (separate from main task DnD)
   const pinnedSensors = useSensors(
-    useSensor(PointerSensor, { activationConstraint: { distance: 5 } }),
-    useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
+    useSensor(PointerSensor, pointerOpts),
+    useSensor(KeyboardSensor, keyboardOpts),
   );
 
   const pinnedTaskIds_arr = useMemo(() => pinnedTasks.map((t) => t.id), [pinnedTasks]);
@@ -1653,14 +1660,26 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
   const DROP_ZONE_TIERS: Record<string, FocusTier> = { 'focus-drop-zone': 'focus', 'next-drop-zone': 'next', 'satellite-drop-zone': 'satellite' };
 
   // Local tier arrays that can be overridden during drag
-  const [dragFocusIds, setDragFocusIds] = useState<string[] | null>(null);
-  const [dragNextIds, setDragNextIds] = useState<string[] | null>(null);
-  const [dragSatelliteIds, setDragSatelliteIds] = useState<string[] | null>(null);
+  // Drag overlay arrays stored as refs (NOT state) to avoid triggering React re-renders
+  // during DnD Kit's rapid onDragOver events. A single tick counter forces a re-render
+  // when we explicitly want the UI to update (during over + on end).
+  const dragFocusIdsRef = useRef<string[] | null>(null);
+  const dragNextIdsRef = useRef<string[] | null>(null);
+  const dragSatelliteIdsRef = useRef<string[] | null>(null);
+  const [, setDragTick] = useState(0);
+  const bumpDragTick = useCallback(() => setDragTick(n => n + 1), []);
+  // Convenience getters for the current render
+  const dragFocusIds = dragFocusIdsRef.current;
+  const dragNextIds = dragNextIdsRef.current;
+  const dragSatelliteIds = dragSatelliteIdsRef.current;
 
-  // Active arrays: use drag overrides when dragging, else the source-of-truth
-  const focusIds_arr = dragFocusIds ?? focusTasksLocal.map((t) => t.id);
-  const nextIds_arr = dragNextIds ?? nextTasksLocal.map((t) => t.id);
-  const satelliteIds_arr = dragSatelliteIds ?? satelliteTasksLocal.map((t) => t.id);
+  // Active arrays: use drag overrides when dragging, else the source-of-truth.
+  // MUST be memoized — .map() creates a new array on every render, which makes
+  // SortableContext receive new `items` each time → internal re-registration →
+  // state update → re-render → infinite loop (React #185) during drag-end.
+  const focusIds_arr = useMemo(() => dragFocusIds ?? focusTasksLocal.map((t) => t.id), [dragFocusIds, focusTasksLocal]);
+  const nextIds_arr = useMemo(() => dragNextIds ?? nextTasksLocal.map((t) => t.id), [dragNextIds, nextTasksLocal]);
+  const satelliteIds_arr = useMemo(() => dragSatelliteIds ?? satelliteTasksLocal.map((t) => t.id), [dragSatelliteIds, satelliteTasksLocal]);
 
   // Resolve tier ID arrays to Task objects (uses drag overrides when active)
   const pinnedTaskMap = useMemo(() => new Map(pinnedTasks.map((t) => [t.id, t])), [pinnedTasks]);
@@ -1722,22 +1741,20 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
 
     // For items from Recent: check if already placed in a tier during this drag
     if (isFromRecent) {
+      const getRef = (tier: FocusTier) => tier === 'focus' ? (dragFocusIdsRef.current ?? snap.focus) : tier === 'next' ? (dragNextIdsRef.current ?? snap.next) : (dragSatelliteIdsRef.current ?? snap.satellite);
+      const setRef = (tier: FocusTier, val: string[]) => { if (tier === 'focus') dragFocusIdsRef.current = val; else if (tier === 'next') dragNextIdsRef.current = val; else dragSatelliteIdsRef.current = val; };
       const currentPlacement =
-        (dragFocusIds ?? snap.focus).includes(activeId) ? 'focus' :
-        (dragNextIds ?? snap.next).includes(activeId) ? 'next' :
-        (dragSatelliteIds ?? snap.satellite).includes(activeId) ? 'satellite' : null;
+        getRef('focus').includes(activeId) ? 'focus' as FocusTier :
+        getRef('next').includes(activeId) ? 'next' as FocusTier :
+        getRef('satellite').includes(activeId) ? 'satellite' as FocusTier : null;
       if (currentPlacement === targetTier) return;
-      // Remove from current placement (if any) and add to target
       const remove = (arr: string[]) => arr.filter((id) => id !== activeId);
       if (currentPlacement) {
-        const getArr = (tier: FocusTier) => tier === 'focus' ? (dragFocusIds ?? snap.focus) : tier === 'next' ? (dragNextIds ?? snap.next) : (dragSatelliteIds ?? snap.satellite);
-        const setArr = (tier: FocusTier, val: string[]) => { if (tier === 'focus') setDragFocusIds(val); else if (tier === 'next') setDragNextIds(val); else setDragSatelliteIds(val); };
-        setArr(currentPlacement, remove(getArr(currentPlacement)));
+        setRef(currentPlacement, remove(getRef(currentPlacement)));
       }
-      // Add to target tier
-      const targetArr = targetTier === 'focus' ? (dragFocusIds ?? snap.focus) : targetTier === 'next' ? (dragNextIds ?? snap.next) : (dragSatelliteIds ?? snap.satellite);
-      const setTargetArr = (val: string[]) => { if (targetTier === 'focus') setDragFocusIds(val); else if (targetTier === 'next') setDragNextIds(val); else setDragSatelliteIds(val); };
-      setTargetArr([...remove(targetArr), activeId]);
+      const targetArr = getRef(targetTier);
+      setRef(targetTier, [...remove(targetArr), activeId]);
+      bumpDragTick();
       return;
     }
 
@@ -1755,19 +1772,20 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
       return copy;
     };
 
-    const getArr = (tier: FocusTier) => tier === 'focus' ? (dragFocusIds ?? snap.focus) : tier === 'next' ? (dragNextIds ?? snap.next) : (dragSatelliteIds ?? snap.satellite);
-    const setArr = (tier: FocusTier, val: string[]) => { if (tier === 'focus') setDragFocusIds(val); else if (tier === 'next') setDragNextIds(val); else setDragSatelliteIds(val); };
+    const getArr = (tier: FocusTier) => tier === 'focus' ? (dragFocusIdsRef.current ?? snap.focus) : tier === 'next' ? (dragNextIdsRef.current ?? snap.next) : (dragSatelliteIdsRef.current ?? snap.satellite);
+    const setArr = (tier: FocusTier, val: string[]) => { if (tier === 'focus') dragFocusIdsRef.current = val; else if (tier === 'next') dragNextIdsRef.current = val; else dragSatelliteIdsRef.current = val; };
 
     setArr(currentTier, remove(getArr(currentTier)));
     setArr(targetTier, addAt(getArr(targetTier), overId));
-  }, [dragFocusIds, dragNextIds, dragSatelliteIds, tierOfIdInArrays]);
+    bumpDragTick(); // trigger visual update
+  }, [tierOfIdInArrays, bumpDragTick]);
 
   const clearDragState = useCallback(() => {
-    setActiveDragPinnedId(null);
-    setDragFocusIds(null);
-    setDragNextIds(null);
-    setDragSatelliteIds(null);
+    dragFocusIdsRef.current = null;
+    dragNextIdsRef.current = null;
+    dragSatelliteIdsRef.current = null;
     dragStartSnapshot.current = null;
+    setActiveDragPinnedId(null);
   }, []);
 
   const handlePinnedDragCancel = useCallback(() => {
@@ -1793,7 +1811,7 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
         ?? (snap.focus.includes(overId) ? 'focus' : undefined)
         ?? (snap.next.includes(overId) ? 'next' : undefined)
         ?? (snap.satellite.includes(overId) ? 'satellite' : undefined);
-      if (!targetTier) return; // Dropped outside any tier — no-op
+      if (!targetTier) return;
       // Pin first, then set tier. setFocusTier requires task.pinned===true in the
       // store, so we delay to let the pin write complete before changing tier.
       onPinTask?.(activeId);
@@ -2105,6 +2123,15 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
   const [sortOrder, setSortOrder] = useState<string[]>(() => computeSortOrder(filtered));
   const sortByRef = useRef(sortBy);
   const prevFilteredIdsRef = useRef<Set<string>>(new Set(filtered.map((t) => t.id)));
+  // Equality check for sort order — prevents no-op re-renders when task data changes
+  // but the sorted order is identical (e.g. focus_tier change doesn't affect sort position).
+  const stableSortUpdate = useCallback((newOrder: string[]) => {
+    setSortOrder(prev => {
+      if (prev.length === newOrder.length && prev.every((id, i) => id === newOrder[i])) return prev;
+      return newOrder;
+    });
+  }, []);
+
   useEffect(() => {
     const newOrder = computeSortOrder(filtered);
 
@@ -2115,15 +2142,15 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
     if (sortByRef.current !== sortBy || structural) {
       sortByRef.current = sortBy;
       prevFilteredIdsRef.current = currIds;
-      setSortOrder(newOrder);
+      stableSortUpdate(newOrder);
       return;
     }
     prevFilteredIdsRef.current = currIds;
 
     // Same set of tasks, just reordered (e.g. priority change): debounce 3s
-    const timer = setTimeout(() => setSortOrder(newOrder), 3000);
+    const timer = setTimeout(() => stableSortUpdate(newOrder), 3000);
     return () => clearTimeout(timer);
-  }, [filtered, sortBy, computeSortOrder]);
+  }, [filtered, sortBy, computeSortOrder, stableSortUpdate]);
 
   // --- Combine: latest task data arranged in deferred sort order ---
   // This ensures badges/fields update INSTANTLY while position delays.

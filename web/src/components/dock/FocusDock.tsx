@@ -8,6 +8,7 @@ import { useSlashCommands } from '@/hooks/useSlashCommands';
 import { useFullscreen } from '@/hooks/useFullscreen';
 import type { ImageAttachment } from '@/api/chat';
 import type { UseFocusBarReturn } from '@/hooks/useFocusBar';
+import { useTasksContext } from '@/contexts/TasksContext';
 import { ICON_CHAT } from '@/components/common/Icons';
 
 // ── Custom events for Dock ↔ MainPage communication ──
@@ -201,15 +202,20 @@ interface FocusDockProps {
 const FOCUS_DOCK_MAX_VISIBLE = 3;
 
 export function FocusDock({ focusBar }: FocusDockProps) {
-  const { focusTasks, unpin } = focusBar;
+  const { unpin, focusIds, pinnedIds } = focusBar;
+  // Resolve tasks from TasksContext directly (FocusBarContext no longer triggers
+  // on task data changes — only on ID changes — to prevent double-trigger cascade).
+  const { tasks } = useTasksContext();
+  const taskMap = useMemo(() => new Map(tasks.map((t) => [t.id, t])), [tasks]);
   // Show Focus tier tasks (max 3) in the dock — semantically correct: dock = current focus.
   // Falls back to first 3 pinned if no focus tasks set (backward compat).
-  const pinnedTasks = useMemo(
-    () => focusTasks.length > 0
-      ? focusTasks.slice(0, FOCUS_DOCK_MAX_VISIBLE)
-      : focusBar.pinnedTasks.slice(0, FOCUS_DOCK_MAX_VISIBLE),
-    [focusTasks, focusBar.pinnedTasks],
-  );
+  const pinnedTasks = useMemo(() => {
+    const ids = focusIds.length > 0 ? focusIds : pinnedIds;
+    return ids
+      .slice(0, FOCUS_DOCK_MAX_VISIBLE)
+      .map((id) => taskMap.get(id))
+      .filter((t): t is Task => !!t);
+  }, [focusIds, pinnedIds, taskMap]);
 
   // Self-manage active state by listening to custom events
   const [activeTaskId, setActiveTaskId] = useState<string | null>(null);

@@ -7,12 +7,15 @@ const FocusBarContext = createContext<UseFocusBarReturn | null>(null);
 export function FocusBarProvider({ children }: { children: ReactNode }) {
   const { tasks } = useTasksContext();
   const focusBar = useFocusBar(tasks);
-  // Stabilize context value: only re-render consumers when data actually changes.
-  // Callbacks are already stable (useCallback), so only data arrays trigger updates.
+  // Stabilize context value: only update when focus bar STATE changes (IDs or visibility),
+  // NOT when task data changes. Task[] arrays (pinnedTasks, focusTasks, etc.) always get
+  // new references when `tasks` changes, which would cause a double-trigger cascade:
+  // task:updated → TasksContext change → MainPage render AND FocusBarContext change →
+  // MainPage render again → TodoPanel filtered recalc → setSortOrder → exceeds max depth.
+  // Consumers that need fresh task data already get it from TasksContext.
   const value = useMemo<UseFocusBarReturn>(() => focusBar,
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- callbacks stable via useCallback
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- only IDs + visible trigger context update
     [focusBar.pinnedIds, focusBar.focusIds, focusBar.nextIds, focusBar.satelliteIds,
-     focusBar.pinnedTasks, focusBar.focusTasks, focusBar.nextTasks, focusBar.satelliteTasks,
      focusBar.visible]);
   return <FocusBarContext.Provider value={value}>{children}</FocusBarContext.Provider>;
 }
