@@ -10,7 +10,7 @@
 
 import fs from 'node:fs'
 import path from 'node:path'
-import { SESSIONS_DIR } from '../constants.js'
+import { NOTES_DIR, SESSIONS_DIR } from '../constants.js'
 import { estimateTokens } from '../core/daily-log.js'
 import { log } from '../logging/index.js'
 
@@ -25,6 +25,7 @@ const SESSION_BUDGET = 600
 const PROJECT_MEMORY_BUDGET = 1500
 const REPOSITORY_BUDGET = 2000
 const REPO_MEMORY_BUDGET = 1500
+const NOTES_CONTEXT_BUDGET = 4000
 
 const MAX_SESSIONS = 3
 
@@ -256,6 +257,22 @@ export async function buildSessionContext(taskId: string, cwd?: string, host?: s
       // non-critical — repository matching is best-effort
     }
   }
+
+  // ── Notes vault context (AGENTS.md from Obsidian vault) ──
+  try {
+    const agentsFile = path.join(NOTES_DIR, 'AGENTS.md')
+    if (fs.existsSync(agentsFile)) {
+      const content = fs.readFileSync(agentsFile, 'utf-8')
+      if (content.trim()) {
+        sections.push(
+          truncateToTokenBudget(
+            `<notes_context>\n${content}\n</notes_context>`,
+            NOTES_CONTEXT_BUDGET,
+          ),
+        )
+      }
+    }
+  } catch { /* non-critical — vault guide is best-effort */ }
 
   // Always include the server safety warning, even when there are no task-specific
   // sections. Sessions may still run exec commands that could affect the server.
