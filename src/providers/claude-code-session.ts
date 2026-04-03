@@ -3087,8 +3087,11 @@ export class SessionRunner {
             }
           }
 
-          log.session.info('resuming session via CLI', { sessionId, taskId: record.taskId, messageLength: combined.length, model: resolvedModel })
-          session.send(combined, record.cwd ?? undefined, sessionId, resolvedMode ?? mode, resolvedModel, undefined, record.host ?? undefined, sshTarget)
+          // Fall back to record.mode when no explicit mode provided — prevents
+          // mode silently reverting to 'default' on --resume (send() treats undefined as default).
+          const resumeMode = resolvedMode ?? mode ?? record.mode
+          log.session.info('resuming session via CLI', { sessionId, taskId: record.taskId, messageLength: combined.length, model: resolvedModel, mode: resumeMode })
+          session.send(combined, record.cwd ?? undefined, sessionId, resumeMode, resolvedModel, undefined, record.host ?? undefined, sshTarget)
 
           // Write synthetic user events — send() is sync, _outputFile is set immediately
           for (const wmId of walnutMessageIds) {
@@ -3140,9 +3143,11 @@ export class SessionRunner {
         }
       }
 
-      // Resume the session with the combined message (with optional mode/model override)
-      log.session.info('resuming session via CLI (existing target)', { sessionId, taskId: targetSession.taskId, messageLength: combined.length, host: resumeHost, model: resolvedModel })
-      targetSession.send(combined, targetSession.cwd ?? undefined, sessionId, resolvedMode ?? mode, resolvedModel, undefined, resumeHost ?? undefined, resumeSshTarget)
+      // Resume the session with the combined message (with optional mode/model override).
+      // Fall back to targetSession._mode to prevent mode silently reverting to 'default'.
+      const existingResumeMode = resolvedMode ?? mode ?? targetSession._mode
+      log.session.info('resuming session via CLI (existing target)', { sessionId, taskId: targetSession.taskId, messageLength: combined.length, host: resumeHost, model: resolvedModel, mode: existingResumeMode })
+      targetSession.send(combined, targetSession.cwd ?? undefined, sessionId, existingResumeMode, resolvedModel, undefined, resumeHost ?? undefined, resumeSshTarget)
 
       // Write synthetic user events — send() is sync, _outputFile is set immediately
       for (const wmId of walnutMessageIds) {
