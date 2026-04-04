@@ -1388,6 +1388,29 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
   const [collapsedProjects, setCollapsedProjects] = useState<Set<string>>(() => readSetFromStorage(LS_COLLAPSED_PROJS_KEY));
   // Tracks which parent tasks the user has EXPANDED (default = all collapsed)
   const [expandedParents, setExpandedParents] = useState<Set<string>>(() => readSetFromStorage(LS_EXPANDED_PARENTS_KEY));
+  // Auto-expand parents with active (non-completed) children on initial load.
+  // Handles edge case: fork created while page was closed (task:created WS never received).
+  const didAutoExpandRef = useRef(false);
+  useEffect(() => {
+    if (loading || tasks.length === 0 || didAutoExpandRef.current) return;
+    didAutoExpandRef.current = true;
+    const parentsToExpand: string[] = [];
+    for (const t of tasks) {
+      if (!t.parent_task_id || t.status === 'done') continue;
+      const parent = tasks.find((p) => p.id.startsWith(t.parent_task_id!));
+      if (parent && !expandedParents.has(parent.id)) {
+        parentsToExpand.push(parent.id);
+      }
+    }
+    if (parentsToExpand.length === 0) return;
+    setExpandedParents((prev) => {
+      const next = new Set(prev);
+      for (const id of parentsToExpand) next.add(id);
+      persistSet(LS_EXPANDED_PARENTS_KEY, next);
+      return next;
+    });
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- run once after initial load
+  }, [loading, tasks]);
   const [activeDragId, setActiveDragId] = useState<string | null>(null);
   const [activeDragType, setActiveDragType] = useState<string | null>(null);
   const [detailTarget, setDetailTarget] = useState<DetailTarget>(null);
@@ -1570,6 +1593,7 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
   }, [focusedTaskId, focusNonce, tasks, activeCategory, collapsedCategories, collapsedProjects, favorites]);
 
   // Auto-expand parent when a child task is created (via WS event)
+  // Persist to localStorage so expansion survives page refresh (fork subtask bug fix)
   useEvent('task:created', (data) => {
     const { task } = data as { task: { parent_task_id?: string } };
     if (!task?.parent_task_id) return;
@@ -1580,6 +1604,7 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
         if (prev.has(parentTask.id)) return prev;
         const next = new Set(prev);
         next.add(parentTask.id);
+        persistSet(LS_EXPANDED_PARENTS_KEY, next);
         return next;
       });
     }
