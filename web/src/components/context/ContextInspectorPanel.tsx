@@ -94,6 +94,10 @@ export function ContextInspectorPanel({ data, loading, error, onRefresh }: Conte
           <pre className="context-pre">{sections.projectSummaries.content || '(No projects)'}</pre>
         </ContextSection>
 
+        <ContextSection title="Notes Context" tokens={sections.notesContext.tokens}>
+          <pre className="context-pre">{sections.notesContext.content || '(No notes/AGENTS.md)'}</pre>
+        </ContextSection>
+
         <ContextSection title="Daily Logs" tokens={sections.dailyLogs.tokens}>
           <pre className="context-pre">{sections.dailyLogs.content || '(No recent activity)'}</pre>
         </ContextSection>

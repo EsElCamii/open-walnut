@@ -7,7 +7,7 @@ import { Router, type Request, type Response, type NextFunction } from 'express'
 import { getConfig } from '../../core/config-manager.js'
 import { DEFAULT_MODEL } from '../../agent/model.js'
 import { DEFAULT_MAX_TOKENS } from '../../agent/providers/defaults.js'
-import { buildRoleSection, buildSystemPrompt, buildTaskCategoriesSection } from '../../agent/context.js'
+import { buildRoleSection, buildSystemPrompt, buildTaskCategoriesSection, getNotesContext } from '../../agent/context.js'
 import { buildSkillsPrompt } from '../../core/skill-loader.js'
 import { getCompactionSummary, getModelContext } from '../../core/chat-history.js'
 import { getMemoryFile } from '../../core/memory-file.js'
@@ -104,6 +104,10 @@ contextInspectorRouter.get('/', async (_req: Request, res: Response, next: NextF
           content: projectSummariesText,
           tokens: projectSummariesTokens,
           count: projectSummaries.length,
+        },
+        notesContext: {
+          content: getNotesContext(),
+          tokens: estimateTokens(getNotesContext()),
         },
         dailyLogs: {
           content: dailyLogs,

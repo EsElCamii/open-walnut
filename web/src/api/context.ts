@@ -32,6 +32,7 @@ export interface ContextInspectorResponse {
     taskCategories: ContextSection;
     globalMemory: ContextSection;
     projectSummaries: ContextSection;
+    notesContext: ContextSection;
     dailyLogs: ContextSection;
     tools: ContextSection<ToolSchema[]>;
     apiMessages: ContextSection<ApiMessage[]>;
