@@ -9522,6 +9522,36 @@ img[data-lightbox-src],
   overflow-y: auto;
 }
 
+/* Markdown-rendered context sections */
+.context-markdown {
+  font-size: 13px;
+  line-height: 1.55;
+  padding: 8px 12px;
+  max-height: 400px;
+  overflow-y: auto;
+  color: var(--fg-secondary);
+}
+
+.context-markdown h1,
+.context-markdown h2,
+.context-markdown h3 {
+  color: var(--fg-primary);
+}
+
+.context-markdown h1 { font-size: 16px; }
+.context-markdown h2 { font-size: 14px; }
+.context-markdown h3 { font-size: 13px; }
+
+.context-markdown pre {
+  font-size: 12px;
+  max-height: 200px;
+  overflow: auto;
+}
+
+.context-markdown table {
+  font-size: 12px;
+}
+
 /* Tool cards */
 .context-tools-list {
   display: flex;

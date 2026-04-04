@@ -1,4 +1,6 @@
+import { useMemo } from 'react';
 import type { ContextInspectorResponse } from '@/api/context';
+import { renderMarkdownWithRefs } from '@/utils/markdown';
 import { ContextSection } from './ContextSection';
 import { ToolCard } from './ToolCard';
 import { ApiMessageBlock } from './ApiMessageBlock';
@@ -8,6 +10,18 @@ interface ContextInspectorPanelProps {
   loading: boolean;
   error: string | null;
   onRefresh: () => void;
+}
+
+/** Memoized markdown block for context sections */
+function ContextMarkdown({ content, fallback }: { content: string; fallback?: string }) {
+  const text = content || fallback || '';
+  const html = useMemo(() => renderMarkdownWithRefs(text), [text]);
+  return (
+    <div
+      className="context-markdown markdown-body"
+      dangerouslySetInnerHTML={{ __html: html }}
+    />
+  );
 }
 
 export function ContextInspectorPanel({ data, loading, error, onRefresh }: ContextInspectorPanelProps) {
@@ -67,23 +81,23 @@ export function ContextInspectorPanel({ data, loading, error, onRefresh }: Conte
         </ContextSection>
 
         <ContextSection title="Role & Rules" tokens={sections.roleAndRules.tokens}>
-          <pre className="context-pre">{sections.roleAndRules.content}</pre>
+          <ContextMarkdown content={sections.roleAndRules.content} />
         </ContextSection>
 
         <ContextSection title="Skills" tokens={sections.skills.tokens}>
-          <pre className="context-pre">{sections.skills.content || '(No skills loaded)'}</pre>
+          <ContextMarkdown content={sections.skills.content} fallback="(No skills loaded)" />
         </ContextSection>
 
         <ContextSection title="Compaction Summary" tokens={sections.compactionSummary.tokens}>
-          <pre className="context-pre">{sections.compactionSummary.content || '(No compaction yet)'}</pre>
+          <ContextMarkdown content={sections.compactionSummary.content} fallback="(No compaction yet)" />
         </ContextSection>
 
         <ContextSection title="Task Categories & Projects" tokens={sections.taskCategories.tokens}>
-          <pre className="context-pre">{sections.taskCategories.content || '(No active tasks)'}</pre>
+          <ContextMarkdown content={sections.taskCategories.content} fallback="(No active tasks)" />
         </ContextSection>
 
         <ContextSection title="Global Memory" tokens={sections.globalMemory.tokens}>
-          <pre className="context-pre">{sections.globalMemory.content || '(Empty)'}</pre>
+          <ContextMarkdown content={sections.globalMemory.content} fallback="(Empty)" />
         </ContextSection>
 
         <ContextSection
@@ -91,15 +105,15 @@ export function ContextInspectorPanel({ data, loading, error, onRefresh }: Conte
           tokens={sections.projectSummaries.tokens}
           count={sections.projectSummaries.count}
         >
-          <pre className="context-pre">{sections.projectSummaries.content || '(No projects)'}</pre>
+          <ContextMarkdown content={sections.projectSummaries.content} fallback="(No projects)" />
         </ContextSection>
 
         <ContextSection title="Notes Context" tokens={sections.notesContext.tokens}>
-          <pre className="context-pre">{sections.notesContext.content || '(No notes/AGENTS.md)'}</pre>
+          <ContextMarkdown content={sections.notesContext.content} fallback="(No notes/AGENTS.md)" />
         </ContextSection>
 
         <ContextSection title="Daily Logs" tokens={sections.dailyLogs.tokens}>
-          <pre className="context-pre">{sections.dailyLogs.content || '(No recent activity)'}</pre>
+          <ContextMarkdown content={sections.dailyLogs.content} fallback="(No recent activity)" />
         </ContextSection>
 
         <ContextSection title="Tools" tokens={sections.tools.tokens} count={sections.tools.count}>
