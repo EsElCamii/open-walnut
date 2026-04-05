@@ -427,18 +427,10 @@ function SortableTaskItem({ task, isFocused, isRecentlyDone, depth = 0, childCou
         </button>
       )}
 
-      {/* — content area: single-line [status] [phase] [title] [badges] [⋮] — */}
+      {/* — content area: single-line [phase] [session] [title] [badges] [⋮] — */}
       <div className="todo-item-content">
         <div className="todo-item-title-row">
-          {/* Status indicators before phase icon */}
-          {task.needs_attention && !isDone && (
-            <span className="task-attention-dot" role="img" aria-label="Needs your attention" title="Needs your attention" />
-          )}
-          <TaskStatusDot task={task} onClick={onOpenSession ? () => {
-            const sid = resolveTaskSessionId(task);
-            if (sid) onOpenSession(sid);
-          } : undefined} />
-          {/* Phase icon inline before title text */}
+          {/* Phase icon — always first */}
           <div className="phase-picker-wrapper phase-picker-inline" ref={phaseWrapperRef}>
             <button
               className={`task-phase-icon-btn task-status-${task.status} task-phase-${task.phase?.toLowerCase()}`}
@@ -476,6 +468,11 @@ function SortableTaskItem({ task, isFocused, isRecentlyDone, depth = 0, childCou
               </div>
             )}
           </div>
+          {/* Session status — between phase icon and title */}
+          <TaskStatusDot task={task} onClick={onOpenSession ? () => {
+            const sid = resolveTaskSessionId(task);
+            if (sid) onOpenSession(sid);
+          } : undefined} />
           <span
             ref={titleRef}
             className={`todo-item-title${isEditing ? ' editing' : ''}`}
