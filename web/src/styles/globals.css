@@ -7263,32 +7263,24 @@ img[data-lightbox-src],
 
 .todo-item-title-row {
   display: flex;
-  align-items: baseline;
+  align-items: center;
   gap: 4px;
 }
-/* Phase icon sits on text baseline; wrapper uses matching line-height */
+/* Phase icon — centered in single-line layout */
 .todo-item-title-row .phase-picker-inline {
   display: inline-flex;
   align-items: center;
   flex-shrink: 0;
-  /* Shift down so the icon center aligns with text midline (baseline offset) */
-  position: relative;
-  top: 2px;
 }
 
-/* Attention dot — sits below phase icon via negative margin.
-   meta-row has margin-left:22px; dot pulls back -22px to land under 🏃,
-   then margin-right:-2px keeps S badge at the 22px mark (0+18(width)+(-2)+6(gap)=22). */
+/* Attention dot — small red circle inline before session badge */
 .task-attention-dot {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  /* Match S badge height so flex centering aligns them */
-  width: 18px;  /* same as phase icon width — centers dot under 🏃 */
-  height: 20px;
+  width: 14px;
+  height: 14px;
   flex-shrink: 0;
-  margin-left: -22px; /* pull back past meta-row indent */
-  margin-right: -2px; /* 22 - 18(width) - 6(gap) + 4 = compensate so S stays at 22px */
 }
 .task-attention-dot::after {
   content: '';
@@ -7300,6 +7292,8 @@ img[data-lightbox-src],
 }
 
 .todo-item-title {
+  flex: 1;
+  min-width: 0;
   font-size: 13px;
   color: var(--fg);
   white-space: normal;
@@ -7322,7 +7316,7 @@ img[data-lightbox-src],
   align-items: center;
   gap: 6px;
   flex-wrap: wrap;
-  /* Align first badge with title text (skip past phase icon 18px + gap 4px) */
+  /* Only used for search score pills now — align with title text */
   margin-left: 22px;
 }
 
@@ -9402,6 +9396,135 @@ img[data-lightbox-src],
 .task-star-btn:hover { color: var(--warning); background: rgba(255, 149, 0, 0.08); }
 .task-pin-btn.pinned { color: var(--accent); background: rgba(0, 122, 255, 0.12); }
 .task-pin-btn:hover { color: var(--accent); }
+
+/* ===== Task Kebab Menu ===== */
+
+.task-kebab-wrapper {
+  position: relative;
+  flex-shrink: 0;
+  margin-left: auto;
+}
+
+.task-kebab-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--fg-muted);
+  font-size: 16px;
+  font-weight: 700;
+  cursor: pointer;
+  padding: 0;
+  line-height: 1;
+  letter-spacing: 1px;
+  opacity: 0;
+  transition: opacity 0.15s, background 0.15s, color 0.15s;
+}
+
+/* Show kebab on row hover or when menu is open */
+.todo-panel-item:hover .task-kebab-btn,
+.task-kebab-btn:focus-visible,
+.task-kebab-wrapper:has(.task-kebab-menu) .task-kebab-btn {
+  opacity: 1;
+}
+
+.task-kebab-btn:hover {
+  background: var(--accent-subtle);
+  color: var(--accent);
+}
+
+.task-kebab-menu {
+  min-width: 180px;
+  background: var(--card-bg);
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.15);
+  padding: 4px 0;
+  font-size: 12px;
+}
+
+.task-kebab-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 6px 12px;
+  border: none;
+  background: none;
+  color: var(--fg);
+  cursor: pointer;
+  font-size: 12px;
+  text-decoration: none;
+  text-align: left;
+  transition: background 0.1s;
+}
+
+.task-kebab-item:hover {
+  background: var(--accent-subtle);
+}
+
+.task-kebab-item-active {
+  color: var(--accent);
+}
+
+.task-kebab-info {
+  cursor: default;
+  color: var(--fg-secondary);
+}
+
+.task-kebab-info:hover {
+  background: none;
+}
+
+.task-kebab-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  flex-shrink: 0;
+}
+
+.task-kebab-divider {
+  height: 1px;
+  background: var(--border);
+  margin: 4px 8px;
+}
+
+.task-kebab-priority {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+}
+
+.task-kebab-priority-label {
+  font-size: 12px;
+  color: var(--fg-secondary);
+  white-space: nowrap;
+}
+
+.task-kebab-priority-options {
+  display: flex;
+  gap: 4px;
+}
+
+.task-kebab-priority-options .badge-active {
+  outline: 2px solid var(--accent);
+  outline-offset: -1px;
+}
+
+/* Info badges in title row — keep compact */
+.todo-item-title-row .todo-item-due-pill,
+.todo-item-title-row .task-blocked-badge,
+.todo-item-title-row .task-children-badge,
+.todo-item-title-row .task-completed-time {
+  flex-shrink: 0;
+}
 
 /* ===== Context Inspector ===== */
 

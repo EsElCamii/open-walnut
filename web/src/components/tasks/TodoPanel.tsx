@@ -15,7 +15,6 @@ import type { TaskPhase } from '@/types/session';
 import { PHASE_LABELS, PHASE_COLORS, PROCESS_COLORS, PROCESS_LABELS, resolveTaskSessionId } from '@/utils/session-status';
 import type { UseFavoritesReturn } from '@/hooks/useFavorites';
 import type { UseOrderingReturn } from '@/hooks/useOrdering';
-import { PriorityPicker } from '../common/PriorityPicker';
 import * as ICONS from '../common/Icons';
 import type { TaskPriority } from '@walnut/core';
 import { TodoSearchBar } from './TodoSearchBar';
@@ -46,6 +45,7 @@ import {
 } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
 import { TaskStatusDot } from './TaskStatusDot';
+import { TaskKebabMenu } from './TaskKebabMenu';
 import { ViewDropdown, type SortBy, type GroupBy } from './ViewDropdown';
 import { PersonIcon } from '../common/PersonIcon';
 import { useVerticalSplitter } from '@/hooks/useVerticalSplitter';
@@ -246,7 +246,6 @@ interface SortableTaskItemProps {
 }
 
 function SortableTaskItem({ task, isFocused, isRecentlyDone, depth = 0, childCount, isExpanded, onToggleExpand, onClick, onSetPhase, onStar, onSetPriority, onUpdateTitle, onOpenSession, openSessionIds, onExpandDetail, onClearFocus, onPinTask, onUnpinTask, isPinned, searchContext, searchMatchField, searchScore, searchKeywordScore, searchSemanticScore }: SortableTaskItemProps) {
-  const integrations = useIntegrations();
   const hookPhases = usePhaseHooks();
   const {
     attributes,
@@ -428,9 +427,17 @@ function SortableTaskItem({ task, isFocused, isRecentlyDone, depth = 0, childCou
         </button>
       )}
 
-      {/* — content area: title + single bottom row (flex:1) — */}
+      {/* — content area: single-line [status] [phase] [title] [badges] [⋮] — */}
       <div className="todo-item-content">
         <div className="todo-item-title-row">
+          {/* Status indicators before phase icon */}
+          {task.needs_attention && !isDone && (
+            <span className="task-attention-dot" role="img" aria-label="Needs your attention" title="Needs your attention" />
+          )}
+          <TaskStatusDot task={task} onClick={onOpenSession ? () => {
+            const sid = resolveTaskSessionId(task);
+            if (sid) onOpenSession(sid);
+          } : undefined} />
           {/* Phase icon inline before title text */}
           <div className="phase-picker-wrapper phase-picker-inline" ref={phaseWrapperRef}>
             <button
@@ -484,105 +491,7 @@ function SortableTaskItem({ task, isFocused, isRecentlyDone, depth = 0, childCou
           >
             {task.title}
           </span>
-        </div>
-        {/* — badge row: [attention dot below 🏃] status · source · link · actions — */}
-        <div className="todo-item-meta-row">
-          {task.needs_attention && !isDone && (
-            <span className="task-attention-dot" role="img" aria-label="Needs your attention" title="Needs your attention" />
-          )}
-          <TaskStatusDot task={task} onClick={onOpenSession ? () => {
-            const sid = resolveTaskSessionId(task);
-            if (sid) onOpenSession(sid);
-          } : undefined} />
-          {task.source && (() => {
-            const meta = getIntegrationMeta(integrations, task.source);
-            const badge = task.source === 'local' ? 'L' : (meta?.badge ?? task.source.charAt(0).toUpperCase());
-            const integrationName = task.source === 'local' ? 'Local' : (meta?.name ?? task.source);
-            const badgeColor = meta?.badgeColor;
-            const synced = task.source !== 'local' && (!!task.ext?.[task.source] || !!((task as unknown as Record<string, unknown>)[({ 'ms-todo': 'ms_todo_id' } as Record<string, string>)[task.source] ?? '']));
-            const errorClass = task.sync_error ? ' task-source-badge-error' : '';
-            const unsyncedClass = !task.sync_error && task.source !== 'local' && !synced ? ' task-source-badge-unsynced' : '';
-            return (
-              <span
-                className={`task-source-badge${errorClass}${unsyncedClass}`}
-                style={!task.sync_error && !unsyncedClass && badgeColor ? { background: badgeColor, color: 'white' } : task.source === 'local' ? { background: '#8E8E93', color: 'white' } : undefined}
-                title={
-                  task.sync_error
-                    ? `Sync error: ${task.sync_error}`
-                    : task.source === 'local'
-                      ? 'Local only — not synced'
-                      : synced ? `Synced to ${integrationName}` : `Not synced to ${integrationName} — will retry`
-                }
-              >
-                {task.sync_error ? '!' : badge}
-              </span>
-            );
-          })()}
-          {task.external_url && (() => {
-            const meta = getIntegrationMeta(integrations, task.source);
-            const label = meta?.externalLinkLabel ?? meta?.name ?? 'external';
-            return (
-              <a
-                className="task-external-link"
-                href={task.external_url}
-                target="_blank"
-                rel="noopener noreferrer"
-                title={`Open in ${label}`}
-                onClick={(e) => e.stopPropagation()}
-              >
-                &#x2197;
-              </a>
-            );
-          })()}
-          <button
-            className={`task-action-btn task-expand-btn${isFocused ? ' active' : ''}`}
-            onClick={(e) => {
-              e.stopPropagation();
-              if (isFocused) {
-                onClearFocus?.();
-              } else {
-                onExpandDetail?.(task);
-              }
-            }}
-            title={isFocused ? 'Close detail' : 'Open detail'}
-          >
-            {ICONS.ICON_INFO}
-          </button>
-          {onSetPriority ? (
-            <PriorityPicker
-              priority={task.priority}
-              onChange={(p) => onSetPriority(task.id, p)}
-            />
-          ) : (
-            <span className={`badge badge-${task.priority}`}>{task.priority === 'immediate' ? '!!' : task.priority === 'important' ? '!' : task.priority === 'backlog' ? '~' : '--'}</span>
-          )}
-          {onStar && (
-            <button
-              className={`task-action-btn task-star-btn${task.starred ? ' starred' : ''}`}
-              onClick={(e) => { e.stopPropagation(); onStar(task.id); }}
-              title={task.starred ? 'Unstar' : 'Star'}
-            >
-              {task.starred ? ICONS.ICON_STAR_FILLED : ICONS.ICON_STAR_EMPTY}
-            </button>
-          )}
-          {onPinTask && !isPinned && task.status !== 'done' && task.phase !== 'COMPLETE' && (
-            <button
-              className="task-action-btn task-pin-btn"
-              onClick={(e) => { e.stopPropagation(); onPinTask(task.id); }}
-              title="Pin to Focus Dock"
-            >
-              {ICONS.ICON_PIN}
-            </button>
-          )}
-          {isPinned && onUnpinTask && (
-            <button
-              className="task-action-btn task-pin-btn pinned"
-              onClick={(e) => { e.stopPropagation(); onUnpinTask(task.id); }}
-              title="Unpin from Focus Dock"
-            >
-              {ICONS.ICON_PIN_FILLED}
-            </button>
-          )}
+          {/* Inline info badges (read-only, compact) */}
           {dueDateInfo && (
             <span className={`todo-item-due-pill${dueDateInfo.overdue ? ' todo-item-due-overdue' : ''}`}>
               {dueDateInfo.label}
@@ -599,38 +508,56 @@ function SortableTaskItem({ task, isFocused, isRecentlyDone, depth = 0, childCou
           {isDone && task.completed_at && (
             <span className="task-completed-time">{timeAgo(task.completed_at)}</span>
           )}
-          {searchScore != null && (() => {
-            const kwW = (searchKeywordScore ?? 0) * 0.4;
-            const semW = (searchSemanticScore ?? 0) * 0.6;
-            const kwDominant = kwW >= semW;
-            return (
-              <span className={`todo-search-score-pill todo-search-score-${kwDominant ? 'keyword' : 'semantic'}`}>
-                {searchScore.toFixed(2)}
-                <span className="todo-search-score-tooltip">
-                  <span className={`todo-search-score-row${kwDominant ? ' is-dominant' : ''}`}>
-                    <span className="todo-search-score-label keyword-label">Keyword</span>
-                    {kwW > 0
-                      ? <><span className="todo-search-score-val">{kwW.toFixed(2)}</span><span className="todo-search-score-field">{searchMatchField && searchMatchField !== 'semantic' ? searchMatchField : ''}</span></>
-                      : <span className="todo-search-score-none">—</span>
-                    }
-                  </span>
-                  <span className={`todo-search-score-row${!kwDominant ? ' is-dominant' : ''}`}>
-                    <span className="todo-search-score-label semantic-label">Semantic</span>
-                    {semW > 0
-                      ? <span className="todo-search-score-val">{semW.toFixed(2)}</span>
-                      : <span className="todo-search-score-none">—</span>
-                    }
+          {/* Kebab menu — all actions consolidated */}
+          <TaskKebabMenu
+            task={task}
+            isFocused={isFocused}
+            isPinned={!!isPinned}
+            isDone={isDone}
+            onExpandDetail={onExpandDetail}
+            onClearFocus={onClearFocus}
+            onSetPriority={onSetPriority}
+            onStar={onStar}
+            onPinTask={onPinTask}
+            onUnpinTask={onUnpinTask}
+          />
+        </div>
+        {/* Search result scores (only visible during search) */}
+        {(searchScore != null || searchContext) && (
+          <div className="todo-item-meta-row">
+            {searchScore != null && (() => {
+              const kwW = (searchKeywordScore ?? 0) * 0.4;
+              const semW = (searchSemanticScore ?? 0) * 0.6;
+              const kwDominant = kwW >= semW;
+              return (
+                <span className={`todo-search-score-pill todo-search-score-${kwDominant ? 'keyword' : 'semantic'}`}>
+                  {searchScore.toFixed(2)}
+                  <span className="todo-search-score-tooltip">
+                    <span className={`todo-search-score-row${kwDominant ? ' is-dominant' : ''}`}>
+                      <span className="todo-search-score-label keyword-label">Keyword</span>
+                      {kwW > 0
+                        ? <><span className="todo-search-score-val">{kwW.toFixed(2)}</span><span className="todo-search-score-field">{searchMatchField && searchMatchField !== 'semantic' ? searchMatchField : ''}</span></>
+                        : <span className="todo-search-score-none">—</span>
+                      }
+                    </span>
+                    <span className={`todo-search-score-row${!kwDominant ? ' is-dominant' : ''}`}>
+                      <span className="todo-search-score-label semantic-label">Semantic</span>
+                      {semW > 0
+                        ? <span className="todo-search-score-val">{semW.toFixed(2)}</span>
+                        : <span className="todo-search-score-none">—</span>
+                      }
+                    </span>
                   </span>
                 </span>
+              );
+            })()}
+            {searchContext && (
+              <span className="todo-search-context-pill" title={searchContext}>
+                {searchContext}
               </span>
-            );
-          })()}
-          {searchContext && (
-            <span className="todo-search-context-pill" title={searchContext}>
-              {searchContext}
-            </span>
-          )}
-        </div>
+            )}
+          </div>
+        )}
       </div>
     </div>
   );
