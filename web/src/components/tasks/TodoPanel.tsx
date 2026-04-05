@@ -428,10 +428,14 @@ function SortableTaskItem({ task, isFocused, isRecentlyDone, depth = 0, childCou
         </button>
       )}
 
-      {/* — content area: single-line [phase] [title] [badges] [⋮] — */}
+      {/* — content area: single-line [●] [phase] [title] [badges] [⋮] — */}
       <div className="todo-item-content">
         <div className="todo-item-title-row">
-          {/* Phase icon — always first */}
+          {/* Attention dot — like unread indicator in messaging apps */}
+          {task.needs_attention && !isDone && (
+            <span className="task-attention-dot" role="img" aria-label="Needs your attention" title="Needs your attention" />
+          )}
+          {/* Phase icon */}
           <div className="phase-picker-wrapper phase-picker-inline" ref={phaseWrapperRef}>
             <button
               className={`task-phase-icon-btn task-status-${task.status} task-phase-${task.phase?.toLowerCase()}`}
