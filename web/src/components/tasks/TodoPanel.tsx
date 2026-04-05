@@ -44,7 +44,6 @@ import {
   type AnimateLayoutChanges,
 } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
-import { TaskStatusDot } from './TaskStatusDot';
 import { TaskKebabMenu } from './TaskKebabMenu';
 import { ViewDropdown, type SortBy, type GroupBy } from './ViewDropdown';
 import { PersonIcon } from '../common/PersonIcon';
@@ -427,7 +426,7 @@ function SortableTaskItem({ task, isFocused, isRecentlyDone, depth = 0, childCou
         </button>
       )}
 
-      {/* — content area: single-line [phase] [session] [title] [badges] [⋮] — */}
+      {/* — content area: single-line [phase] [title] [badges] [⋮] — */}
       <div className="todo-item-content">
         <div className="todo-item-title-row">
           {/* Phase icon — always first */}
@@ -468,11 +467,6 @@ function SortableTaskItem({ task, isFocused, isRecentlyDone, depth = 0, childCou
               </div>
             )}
           </div>
-          {/* Session status — between phase icon and title */}
-          <TaskStatusDot task={task} onClick={onOpenSession ? () => {
-            const sid = resolveTaskSessionId(task);
-            if (sid) onOpenSession(sid);
-          } : undefined} />
           <span
             ref={titleRef}
             className={`todo-item-title${isEditing ? ' editing' : ''}`}
@@ -517,6 +511,7 @@ function SortableTaskItem({ task, isFocused, isRecentlyDone, depth = 0, childCou
             onStar={onStar}
             onPinTask={onPinTask}
             onUnpinTask={onUnpinTask}
+            onOpenSession={onOpenSession}
           />
         </div>
         {/* Search result scores (only visible during search) */}

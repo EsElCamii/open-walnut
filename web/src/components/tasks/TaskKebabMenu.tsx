@@ -9,6 +9,7 @@ import { useState, useRef, useEffect, useCallback } from 'react';
 import type { Task, TaskPriority } from '@walnut/core';
 import * as ICONS from '../common/Icons';
 import { getIntegrationMeta, useIntegrations } from '@/hooks/useIntegrations';
+import { resolveTaskSessionId } from '@/utils/session-status';
 
 interface TaskKebabMenuProps {
   task: Task;
@@ -21,6 +22,7 @@ interface TaskKebabMenuProps {
   onStar?: (id: string) => void;
   onPinTask?: (id: string) => void;
   onUnpinTask?: (id: string) => void;
+  onOpenSession?: (sessionId: string) => void;
 }
 
 const PRIORITY_OPTIONS: { value: TaskPriority; icon: string; label: string }[] = [
@@ -30,7 +32,7 @@ const PRIORITY_OPTIONS: { value: TaskPriority; icon: string; label: string }[] =
   { value: 'none', icon: '--', label: 'None' },
 ];
 
-export function TaskKebabMenu({ task, isFocused, isPinned, isDone, onExpandDetail, onClearFocus, onSetPriority, onStar, onPinTask, onUnpinTask }: TaskKebabMenuProps) {
+export function TaskKebabMenu({ task, isFocused, isPinned, isDone, onExpandDetail, onClearFocus, onSetPriority, onStar, onPinTask, onUnpinTask, onOpenSession }: TaskKebabMenuProps) {
   const integrations = useIntegrations();
   const [open, setOpen] = useState(false);
   const [menuPos, setMenuPos] = useState<{ top: number; right: number } | null>(null);
@@ -88,6 +90,30 @@ export function TaskKebabMenu({ task, isFocused, isPinned, isDone, onExpandDetai
           className="task-kebab-menu"
           style={menuPos ? { position: 'fixed', top: menuPos.top, right: menuPos.right, zIndex: 9999 } : undefined}
         >
+          {/* Session status */}
+          {(() => {
+            const sessionId = resolveTaskSessionId(task);
+            const ss = task.session_status;
+            if (!sessionId && !ss) return null;
+            const isRunning = ss?.process_status === 'running';
+            const isError = ss?.process_status === 'error';
+            const needsAttention = task.phase === 'AGENT_COMPLETE' || task.phase === 'AWAIT_HUMAN_ACTION';
+            const color = isError || needsAttention ? 'var(--error)' : isRunning ? 'var(--success)' : 'var(--fg-muted)';
+            const label = isRunning ? 'AI is working...' : isError ? 'Session error' : needsAttention ? 'Needs your attention' : 'Session idle';
+            return (
+              <button
+                className="task-kebab-item"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  if (sessionId && onOpenSession) { onOpenSession(sessionId); closeMenu(); }
+                }}
+              >
+                <span className="task-kebab-icon" style={{ color }}>●</span>
+                <span>{label}</span>
+              </button>
+            );
+          })()}
+
           {/* Source badge */}
           {task.source && (
             <div className="task-kebab-item task-kebab-info">
