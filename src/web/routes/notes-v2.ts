@@ -7,6 +7,7 @@ import fsp from 'node:fs/promises'
 import path from 'node:path'
 import { Router, type Request, type Response, type NextFunction } from 'express'
 import { NOTES_DIR } from '../../constants.js'
+import { computeContentHash } from '../../utils/file-ops.js'
 import { log } from '../../logging/index.js'
 
 const MAX_NOTE_SIZE = 2_000_000 // 2 MB
@@ -122,7 +123,8 @@ notesV2Router.get('/content/*path', async (req: Request, res: Response, next: Ne
       throw err
     }
 
-    res.json({ content, updatedAt })
+    const contentHash = computeContentHash(content)
+    res.json({ content, updatedAt, contentHash })
   } catch (err) {
     next(err)
   }
@@ -134,7 +136,7 @@ notesV2Router.put('/content/*path', async (req: Request, res: Response, next: Ne
     const notePath = getWildcardPath(req)
     if (!notePath) { res.status(400).json({ error: 'path required' }); return }
 
-    const { content } = req.body
+    const { content, expectedHash } = req.body
     if (typeof content !== 'string') {
       res.status(400).json({ error: 'content (string) is required' })
       return
@@ -149,12 +151,33 @@ notesV2Router.put('/content/*path', async (req: Request, res: Response, next: Ne
 
     const filePath = fullPath.endsWith('.md') ? fullPath : fullPath + '.md'
 
+    // Optimistic locking: reject if file was modified externally.
+    // Optional for backward compatibility — callers that don't send
+    // expectedHash accept last-write-wins semantics.
+    if (expectedHash) {
+      try {
+        const currentContent = await fsp.readFile(filePath, 'utf-8')
+        const currentHash = computeContentHash(currentContent)
+        if (currentHash !== expectedHash) {
+          res.status(409).json({
+            error: 'Content was modified externally',
+            currentHash,
+          })
+          return
+        }
+      } catch (err: any) {
+        if (err.code !== 'ENOENT') throw err
+        // File doesn't exist — no conflict possible
+      }
+    }
+
     await fsp.mkdir(path.dirname(filePath), { recursive: true })
     await fsp.writeFile(filePath, content, 'utf-8')
 
     const stat = await fsp.stat(filePath)
+    const contentHash = computeContentHash(content)
     log.memory.info('Note updated', { path: notePath, size: content.length })
-    res.json({ ok: true, updatedAt: stat.mtime.toISOString() })
+    res.json({ ok: true, updatedAt: stat.mtime.toISOString(), contentHash })
   } catch (err) {
     next(err)
   }

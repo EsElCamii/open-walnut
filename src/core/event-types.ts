@@ -303,6 +303,15 @@ export interface CronJobEvent {
   [key: string]: unknown;
 }
 
+// ── Notes events ──
+
+export interface NotesUpdatedEvent {
+  /** Source URI, e.g. 'notes/global' or 'notes/recipes' */
+  source: string;
+  /** SHA256-based content hash after the write */
+  contentHash: string;
+}
+
 // ── Master type map: EventName → Payload ──
 
 export interface EventPayloadMap {
@@ -355,6 +364,8 @@ export interface EventPayloadMap {
   'chat:history-updated': ChatHistoryUpdatedEvent;
   'chat:compacting': ChatCompactingEvent;
   'chat:compacted': ChatCompactedEvent;
+
+  'notes:updated': NotesUpdatedEvent;
 
   'config:changed': ConfigChangedEvent;
 

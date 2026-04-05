@@ -86,6 +86,9 @@ export const EventNames = {
   CATEGORY_CREATED: 'category:created',
   CATEGORY_UPDATED: 'category:updated',
 
+  // Notes events
+  NOTES_UPDATED: 'notes:updated',
+
   // Config events
   CONFIG_CHANGED: 'config:changed',
 

@@ -1,12 +1,11 @@
 import { apiGet, apiPost, apiPut } from './client';
 
-export async function fetchGlobalNotes(): Promise<string> {
-  const res = await apiGet<{ content: string }>('/api/notes/global');
-  return res.content;
+export async function fetchGlobalNotes(): Promise<{ content: string; contentHash: string }> {
+  return apiGet<{ content: string; contentHash: string }>('/api/notes/global');
 }
 
-export async function saveGlobalNotes(content: string): Promise<void> {
-  await apiPut('/api/notes/global', { content });
+export async function saveGlobalNotes(content: string, expectedHash?: string): Promise<{ contentHash: string }> {
+  return apiPut<{ ok: boolean; contentHash: string }>('/api/notes/global', { content, expectedHash });
 }
 
 /** Upload a base64 image and return the server URL */

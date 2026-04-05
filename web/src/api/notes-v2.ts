@@ -29,12 +29,12 @@ export async function fetchNotesTree(): Promise<NoteTreeNode[]> {
   return res.tree;
 }
 
-export async function fetchNoteContent(notePath: string): Promise<{ content: string; updatedAt: string }> {
-  return apiGet<{ content: string; updatedAt: string }>(`/api/notes-v2/content/${notePath}`);
+export async function fetchNoteContent(notePath: string): Promise<{ content: string; updatedAt: string; contentHash: string }> {
+  return apiGet<{ content: string; updatedAt: string; contentHash: string }>(`/api/notes-v2/content/${notePath}`);
 }
 
-export async function saveNoteContent(notePath: string, content: string): Promise<{ updatedAt: string }> {
-  return apiPut<{ ok: boolean; updatedAt: string }>(`/api/notes-v2/content/${notePath}`, { content });
+export async function saveNoteContent(notePath: string, content: string, expectedHash?: string): Promise<{ updatedAt: string; contentHash: string }> {
+  return apiPut<{ ok: boolean; updatedAt: string; contentHash: string }>(`/api/notes-v2/content/${notePath}`, { content, expectedHash });
 }
 
 export async function deleteNote(notePath: string): Promise<void> {

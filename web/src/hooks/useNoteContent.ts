@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { fetchNoteContent, saveNoteContent } from '@/api/notes-v2';
+import { useEvent } from '@/hooks/useWebSocket';
 import type { Editor } from '@tiptap/core';
 import { log } from '@/utils/log';
 
@@ -17,6 +18,49 @@ export function useNoteContent(notePath: string | null) {
   const savedFadeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const currentPathRef = useRef<string | null>(null);
   const editorRef = useRef<Editor | null>(null);
+  const contentHashRef = useRef<string | null>(null);
+  /** Set when reloading from external update — prevents reload from triggering a save */
+  const externalUpdateRef = useRef(false);
+
+  // ── Reload helper (used by WS handler and 409 recovery) ──
+  const reloadContent = useCallback((targetPath: string) => {
+    fetchNoteContent(targetPath)
+      .then(({ content: c, updatedAt: u, contentHash }) => {
+        if (currentPathRef.current !== targetPath) return;
+        contentHashRef.current = contentHash;
+        dirtyRef.current = false;
+        externalUpdateRef.current = true;
+        setContent(c);
+        setUpdatedAt(u);
+        setSaveStatus('idle');
+      })
+      .catch(() => {});
+  }, []);
+
+  // ── Listen for external notes updates via WebSocket ──
+  useEvent('notes:updated', (data: unknown) => {
+    if (!data || typeof (data as any).source !== 'string') return;
+    const { source, contentHash } = data as { source: string; contentHash: string };
+    const path = currentPathRef.current;
+    if (!path) return;
+
+    // Map current note path to the source format used by files tools.
+    // Source format must stay in sync with files-tools.ts bus.emit(NOTES_UPDATED, { source }).
+    // Notes v2 paths are like "folder/note.md" → source is "notes/folder/note"
+    const normalizedPath = path.replace(/\.md$/, '');
+    if (source !== `notes/${normalizedPath}`) return;
+
+    if (contentHash !== contentHashRef.current) {
+      log.info('notes', 'Note updated externally, reloading', { path, contentHash });
+      // Cancel any pending save to prevent overwriting the external write
+      if (timerRef.current) {
+        clearTimeout(timerRef.current);
+        timerRef.current = null;
+      }
+      savingRef.current = false;
+      reloadContent(path);
+    }
+  });
 
   // Load content when path changes
   useEffect(() => {
@@ -29,6 +73,7 @@ export function useNoteContent(notePath: string | null) {
       setContent(null);
       setUpdatedAt(null);
       setSaveStatus('idle');
+      contentHashRef.current = null;
       return;
     }
 
@@ -50,7 +95,8 @@ export function useNoteContent(notePath: string | null) {
       if (dirtyRef.current && editorRef.current && prevPath) {
         const editor = editorRef.current;
         const md = editor.storage.markdown.getMarkdown();
-        saveNoteContent(prevPath, md).catch(() => {});
+        const hash = contentHashRef.current ?? undefined;
+        saveNoteContent(prevPath, md, hash).catch(() => {});
       }
     }
 
@@ -58,13 +104,15 @@ export function useNoteContent(notePath: string | null) {
     setContent(null);
     setSaveStatus('idle');
     dirtyRef.current = false;
+    contentHashRef.current = null;
 
     let cancelled = false;
     fetchNoteContent(notePath)
-      .then(({ content: c, updatedAt: u }) => {
+      .then(({ content: c, updatedAt: u, contentHash }) => {
         if (cancelled) return;
         setContent(c);
         setUpdatedAt(u);
+        contentHashRef.current = contentHash;
       })
       .catch((err) => {
         if (cancelled) return;
@@ -72,6 +120,7 @@ export function useNoteContent(notePath: string | null) {
         if (err.status === 404) {
           setContent('');
           setUpdatedAt(null);
+          contentHashRef.current = null;
         } else {
           setContent(null);
           log.error('notes', 'Failed to load note', { path: notePath, error: err.message });
@@ -92,10 +141,12 @@ export function useNoteContent(notePath: string | null) {
 
     try {
       const md = editor.storage.markdown.getMarkdown();
-      const result = await saveNoteContent(pathToSave, md);
+      const hash = contentHashRef.current ?? undefined;
+      const result = await saveNoteContent(pathToSave, md, hash);
       // Only update if we're still on the same note
       if (currentPathRef.current === pathToSave) {
         setUpdatedAt(result.updatedAt);
+        contentHashRef.current = result.contentHash;
         setSaveStatus('saved');
         dirtyRef.current = false;
         // Fade "Saved" indicator after 2s
@@ -103,6 +154,13 @@ export function useNoteContent(notePath: string | null) {
         savedFadeTimerRef.current = setTimeout(() => setSaveStatus('idle'), 2000);
       }
     } catch (err: any) {
+      // 409 Conflict — agent writes take priority over unsaved user edits;
+      // at most ~500ms of typing may be lost due to the debounce window.
+      if (err?.status === 409 && currentPathRef.current === pathToSave) {
+        log.info('notes', 'Note save conflict, reloading', { path: pathToSave });
+        reloadContent(pathToSave);
+        return;
+      }
       log.error('notes', 'Failed to save note', { path: pathToSave, error: err.message });
       if (currentPathRef.current === pathToSave) {
         setSaveStatus('error');
@@ -118,11 +176,18 @@ export function useNoteContent(notePath: string | null) {
         }, DEBOUNCE_MS);
       }
     }
-  }, []);
+  }, [reloadContent]);
 
   // Debounced editor update handler
   const onEditorUpdate = useCallback((editor: Editor) => {
     editorRef.current = editor;
+
+    // Skip save trigger when content was set by external reload
+    if (externalUpdateRef.current) {
+      externalUpdateRef.current = false;
+      return;
+    }
+
     dirtyRef.current = true;
     setSaveStatus('idle');
 
@@ -152,7 +217,10 @@ export function useNoteContent(notePath: string | null) {
         const pathToSave = currentPathRef.current;
         if (pathToSave) {
           const md = editor.storage.markdown.getMarkdown();
-          saveNoteContent(pathToSave, md).catch(() => {});
+          const hash = contentHashRef.current ?? undefined;
+          saveNoteContent(pathToSave, md, hash).catch((e) => {
+            log.warn('notes', 'Unmount flush failed', { error: e instanceof Error ? e.message : String(e) });
+          });
         }
       }
     };
