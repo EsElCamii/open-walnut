@@ -431,10 +431,11 @@ function SortableTaskItem({ task, isFocused, isRecentlyDone, depth = 0, childCou
       {/* — content area: single-line [●] [phase] [title] [badges] [⋮] — */}
       <div className="todo-item-content">
         <div className="todo-item-title-row">
-          {/* Attention dot — like unread indicator in messaging apps */}
-          {task.needs_attention && !isDone && (
-            <span className="task-attention-dot" role="img" aria-label="Needs your attention" title="Needs your attention" />
-          )}
+          {/* Attention dot — fixed slot, phase icon never shifts */}
+          <span
+            className={`task-attention-dot${task.needs_attention && !isDone ? ' active' : ''}`}
+            title={task.needs_attention && !isDone ? 'Needs your attention' : undefined}
+          />
           {/* Phase icon */}
           <div className="phase-picker-wrapper phase-picker-inline" ref={phaseWrapperRef}>
             <button

@@ -7273,7 +7273,8 @@ img[data-lightbox-src],
   flex-shrink: 0;
 }
 
-/* Attention dot — small red circle inline before session badge */
+/* Attention dot — fixed-width slot so phase icon never shifts position.
+   Always rendered; red circle only appears when .active. */
 .task-attention-dot {
   display: inline-flex;
   align-items: center;
@@ -7282,7 +7283,7 @@ img[data-lightbox-src],
   height: 14px;
   flex-shrink: 0;
 }
-.task-attention-dot::after {
+.task-attention-dot.active::after {
   content: '';
   display: block;
   width: 8px;
@@ -16101,4 +16102,71 @@ a.file-link:hover {
   padding: 1px 5px;
   border-radius: 3px;
   flex-shrink: 0;
+}
+
+/* ===== Recording Button ===== */
+
+.recording-btn {
+  position: fixed;
+  bottom: 20px;
+  right: 20px;
+  z-index: 200;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 12px;
+  border: none;
+  border-radius: 20px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  color: var(--fg-secondary);
+  cursor: pointer;
+  font-size: 12px;
+  font-family: inherit;
+  transition: all 0.2s ease;
+  box-shadow: var(--card-shadow);
+}
+
+.recording-btn:hover {
+  background: var(--bg-tertiary);
+  box-shadow: var(--card-shadow-hover);
+}
+
+.recording-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.recording-btn__dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--fg-muted);
+  flex-shrink: 0;
+  transition: background 0.2s ease;
+}
+
+.recording-btn--active {
+  background: rgba(255, 59, 48, 0.08);
+  border-color: rgba(255, 59, 48, 0.2);
+  color: var(--error);
+}
+
+.recording-btn--active:hover {
+  background: rgba(255, 59, 48, 0.12);
+}
+
+.recording-btn--active .recording-btn__dot {
+  background: var(--error);
+  animation: recording-pulse 1.5s ease-in-out infinite;
+}
+
+.recording-btn__duration {
+  font-variant-numeric: tabular-nums;
+  font-weight: 500;
+}
+
+@keyframes recording-pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.5; transform: scale(0.85); }
 }
