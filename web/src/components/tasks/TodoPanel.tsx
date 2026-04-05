@@ -236,7 +236,9 @@ interface SortableTaskItemProps {
   onClearFocus?: () => void;
   onPinTask?: (taskId: string) => void;
   onUnpinTask?: (taskId: string) => void;
+  onSetTier?: (taskId: string, tier: FocusTier) => void;
   isPinned?: boolean;
+  pinnedTier?: FocusTier;
   searchContext?: string; // Category/Project context pill shown in search mode
   searchMatchField?: string;  // Best keyword field ('title','note',etc.) or 'semantic'
   searchScore?: number;       // Combined normalized score [0,1]
@@ -244,7 +246,7 @@ interface SortableTaskItemProps {
   searchSemanticScore?: number; // Normalized semantic contribution [0,1]
 }
 
-function SortableTaskItem({ task, isFocused, isRecentlyDone, depth = 0, childCount, isExpanded, onToggleExpand, onClick, onSetPhase, onStar, onSetPriority, onUpdateTitle, onOpenSession, openSessionIds, onExpandDetail, onClearFocus, onPinTask, onUnpinTask, isPinned, searchContext, searchMatchField, searchScore, searchKeywordScore, searchSemanticScore }: SortableTaskItemProps) {
+function SortableTaskItem({ task, isFocused, isRecentlyDone, depth = 0, childCount, isExpanded, onToggleExpand, onClick, onSetPhase, onStar, onSetPriority, onUpdateTitle, onOpenSession, openSessionIds, onExpandDetail, onClearFocus, onPinTask, onUnpinTask, onSetTier, isPinned, pinnedTier, searchContext, searchMatchField, searchScore, searchKeywordScore, searchSemanticScore }: SortableTaskItemProps) {
   const hookPhases = usePhaseHooks();
   const {
     attributes,
@@ -504,6 +506,7 @@ function SortableTaskItem({ task, isFocused, isRecentlyDone, depth = 0, childCou
             task={task}
             isFocused={isFocused}
             isPinned={!!isPinned}
+            pinnedTier={pinnedTier}
             isDone={isDone}
             onExpandDetail={onExpandDetail}
             onClearFocus={onClearFocus}
@@ -511,6 +514,7 @@ function SortableTaskItem({ task, isFocused, isRecentlyDone, depth = 0, childCou
             onStar={onStar}
             onPinTask={onPinTask}
             onUnpinTask={onUnpinTask}
+            onSetTier={onSetTier}
             onOpenSession={onOpenSession}
           />
         </div>
@@ -1560,6 +1564,14 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
     const nSet = nextTaskIds ?? new Set<string>();
     return pinnedTasks.filter((t) => !fSet.has(t.id) && !nSet.has(t.id));
   }, [pinnedTasks, focusTaskIds, nextTaskIds]);
+
+  // Helper: resolve a task's current tier
+  const getTier = useCallback((taskId: string): FocusTier | undefined => {
+    if (!pinnedTaskIds?.has(taskId)) return undefined;
+    if (focusTaskIds?.has(taskId)) return 'focus';
+    if (nextTaskIds?.has(taskId)) return 'next';
+    return 'satellite';
+  }, [pinnedTaskIds, focusTaskIds, nextTaskIds]);
 
   // Recent tasks: all non-completed tasks excluding pinned, sorted by most recent activity
   const recentTasks = useMemo(() => {
@@ -2918,7 +2930,9 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
                     onClearFocus={onClearFocus}
                     onPinTask={onPinTask}
                     onUnpinTask={onUnpinTask}
+                    onSetTier={onSetTier}
                     isPinned={pinnedTaskIds?.has(task.id)}
+                    pinnedTier={getTier(task.id)}
                     searchContext={`${task.category}${task.project && task.project !== task.category ? ` / ${task.project}` : ''}`}
                     searchMatchField={searchMeta.get(task.id)?.matchField}
                     searchScore={searchMeta.get(task.id)?.score}
@@ -3029,7 +3043,9 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
                                   onClearFocus={onClearFocus}
                                   onPinTask={onPinTask}
                                   onUnpinTask={onUnpinTask}
-                                  isPinned={pinnedTaskIds?.has(task.id)}
+                                  onSetTier={onSetTier}
+                    isPinned={pinnedTaskIds?.has(task.id)}
+                    pinnedTier={getTier(task.id)}
                                 />
                               );
                             })}
@@ -3090,7 +3106,9 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
                                                 onClearFocus={onClearFocus}
                                                 onPinTask={onPinTask}
                                                 onUnpinTask={onUnpinTask}
-                                                isPinned={pinnedTaskIds?.has(task.id)}
+                                                onSetTier={onSetTier}
+                    isPinned={pinnedTaskIds?.has(task.id)}
+                    pinnedTier={getTier(task.id)}
                                               />
                                             );
                                           })}

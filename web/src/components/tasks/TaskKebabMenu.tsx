@@ -7,6 +7,7 @@
 
 import { useState, useRef, useEffect, useCallback } from 'react';
 import type { Task, TaskPriority } from '@walnut/core';
+import type { FocusTier } from '@/api/focus';
 import * as ICONS from '../common/Icons';
 import { getIntegrationMeta, useIntegrations } from '@/hooks/useIntegrations';
 import { resolveTaskSessionId } from '@/utils/session-status';
@@ -15,6 +16,7 @@ interface TaskKebabMenuProps {
   task: Task;
   isFocused: boolean;
   isPinned: boolean;
+  pinnedTier?: FocusTier;
   isDone: boolean;
   onExpandDetail?: (task: Task) => void;
   onClearFocus?: () => void;
@@ -22,8 +24,21 @@ interface TaskKebabMenuProps {
   onStar?: (id: string) => void;
   onPinTask?: (id: string) => void;
   onUnpinTask?: (id: string) => void;
+  onSetTier?: (id: string, tier: FocusTier) => void;
   onOpenSession?: (sessionId: string) => void;
 }
+
+const TIER_OPTIONS: { value: FocusTier; label: string; icon: string }[] = [
+  { value: 'focus', label: 'Focus', icon: '●' },
+  { value: 'next', label: 'Next', icon: '●' },
+  { value: 'satellite', label: 'Satellite', icon: '○' },
+];
+
+const TIER_COLORS: Record<FocusTier, string> = {
+  focus: 'var(--accent)',
+  next: '#FF9500',
+  satellite: 'var(--fg-muted)',
+};
 
 const PRIORITY_OPTIONS: { value: TaskPriority; icon: string; label: string }[] = [
   { value: 'immediate', icon: '!!', label: 'Immediate' },
@@ -32,7 +47,7 @@ const PRIORITY_OPTIONS: { value: TaskPriority; icon: string; label: string }[] =
   { value: 'none', icon: '--', label: 'None' },
 ];
 
-export function TaskKebabMenu({ task, isFocused, isPinned, isDone, onExpandDetail, onClearFocus, onSetPriority, onStar, onPinTask, onUnpinTask, onOpenSession }: TaskKebabMenuProps) {
+export function TaskKebabMenu({ task, isFocused, isPinned, pinnedTier, isDone, onExpandDetail, onClearFocus, onSetPriority, onStar, onPinTask, onUnpinTask, onSetTier, onOpenSession }: TaskKebabMenuProps) {
   const integrations = useIntegrations();
   const [open, setOpen] = useState(false);
   const [menuPos, setMenuPos] = useState<{ top: number; right: number } | null>(null);
@@ -176,32 +191,49 @@ export function TaskKebabMenu({ task, isFocused, isPinned, isDone, onExpandDetai
             </button>
           )}
 
-          {/* Pin */}
-          {onPinTask && !isPinned && !isDone && (
-            <button
-              className="task-kebab-item"
-              onClick={(e) => {
-                e.stopPropagation();
-                onPinTask(task.id);
-                closeMenu();
-              }}
-            >
-              <span className="task-kebab-icon">{ICONS.ICON_PIN}</span>
-              <span>Pin to Focus</span>
-            </button>
-          )}
-          {isPinned && onUnpinTask && (
-            <button
-              className={`task-kebab-item task-kebab-item-active`}
-              onClick={(e) => {
-                e.stopPropagation();
-                onUnpinTask(task.id);
-                closeMenu();
-              }}
-            >
-              <span className="task-kebab-icon">{ICONS.ICON_PIN_FILLED}</span>
-              <span>Unpin</span>
-            </button>
+          {/* Pin / Tier */}
+          {!isDone && (onPinTask || isPinned) && (
+            <>
+              <div className="task-kebab-divider" />
+              {isPinned && onUnpinTask && (
+                <button
+                  className="task-kebab-item"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onUnpinTask(task.id);
+                    closeMenu();
+                  }}
+                >
+                  <span className="task-kebab-icon">{ICONS.ICON_PIN_FILLED}</span>
+                  <span>Unpin</span>
+                </button>
+              )}
+              <div className="task-kebab-tier">
+                <span className="task-kebab-tier-label">{isPinned ? 'Move to' : 'Pin to'}</span>
+                <div className="task-kebab-tier-options">
+                  {TIER_OPTIONS.map((t) => (
+                    <button
+                      key={t.value}
+                      className={`task-kebab-tier-btn${pinnedTier === t.value ? ' active' : ''}`}
+                      style={{ color: TIER_COLORS[t.value] }}
+                      title={t.label}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        if (isPinned) {
+                          if (pinnedTier !== t.value) onSetTier?.(task.id, t.value);
+                        } else {
+                          onPinTask?.(task.id);
+                          setTimeout(() => onSetTier?.(task.id, t.value), 100);
+                        }
+                        closeMenu();
+                      }}
+                    >
+                      {t.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            </>
           )}
 
           {/* Priority */}
