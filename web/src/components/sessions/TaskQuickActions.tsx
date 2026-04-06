@@ -15,6 +15,7 @@ import { usePhaseHooks } from '@/hooks/usePhaseHooks';
 import * as ICONS from '@/components/common/Icons';
 import type { FocusTier } from '@/api/focus';
 import { getIntegrationMeta, useIntegrations } from '@/hooks/useIntegrations';
+import { DatePicker, formatDateDisplay } from '@/components/common/DatePicker';
 
 /* ── Phase constants ─────────────────────────────────────────────── */
 
@@ -218,6 +219,15 @@ export function TaskQuickActions({ taskId, task: externalTask, isPinned, pinnedT
     closeKebab();
   }, [task, taskId, closeKebab]);
 
+  const handleSetDate = useCallback((date: string | null) => {
+    if (!task) return;
+    setTask(prev => prev ? { ...prev, due_date: date ?? undefined } : prev);
+    updateTask(taskId, { due_date: date ?? '' }).catch(() => {
+      fetchTask(taskId).then(setTask).catch(() => {});
+    });
+    closeKebab();
+  }, [task, taskId, closeKebab]);
+
   const handleKebabToggle = (e: React.MouseEvent) => {
     e.stopPropagation();
     if (!kebabOpen && kebabBtnRef.current) {
@@ -372,6 +382,19 @@ export function TaskQuickActions({ taskId, task: externalTask, isPinned, pinnedT
                 </button>
               ))}
             </div>
+          </div>
+
+          {/* Date */}
+          <div className="task-kebab-divider" />
+          <div className="task-kebab-date">
+            <span className="task-kebab-date-label">
+              Date{task.due_date ? `: ${formatDateDisplay(task.due_date)}` : ''}
+            </span>
+            <DatePicker
+              date={task.due_date}
+              onChange={handleSetDate}
+              inline
+            />
           </div>
 
           {/* Source badge — combined with external link if available */}
