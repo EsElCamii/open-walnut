@@ -9535,6 +9535,11 @@ img[data-lightbox-src],
   background: none;
 }
 
+/* Element-type specificity trick:
+   div.task-kebab-info = non-interactive source display (no external URL)
+   a.task-kebab-info   = clickable external link (has external URL)
+   Hover override relies on element specificity (a > div) so the link
+   version gets pointer cursor + highlight without an extra class. */
 a.task-kebab-info {
   cursor: pointer;
   text-decoration: none;

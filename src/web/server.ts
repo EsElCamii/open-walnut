@@ -62,6 +62,7 @@ import { systemRouter } from './routes/system.js'
 import { notesRouter } from './routes/notes.js'
 import { notesV2Router } from './routes/notes-v2.js'
 import { repositoriesRouter } from './routes/repositories.js'
+import { sttRouter } from './routes/stt.js'
 import { migrateGlobalNotes } from '../core/notes-migration.js'
 import { authMiddleware } from './middleware/auth.js'
 import { pushRouter } from './routes/push.js'
@@ -411,6 +412,7 @@ export async function startServer(options: ServerOptions = {}): Promise<HttpServ
   app.use('/api/push', pushRouter)
   app.use('/api/auth', authRouter)
   app.use('/api/browser-logs', browserLogsRouter)
+  app.use('/api/stt', sttRouter)
   app.get('/api/task-phase-hooks', async (_req, res) => {
     const { getHookInfoList } = await import('../core/task-phase-hooks/index.js')
     res.json(getHookInfoList())

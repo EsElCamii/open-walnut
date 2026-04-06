@@ -3,7 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { SessionChatHistory } from './SessionChatHistory';
 import { SessionNotes } from './SessionNotes';
 import { FileViewer } from '../common/FileViewer';
-import { ICON_ROBOT, ICON_EXPAND, ICON_COLLAPSE, ICON_PIN, ICON_PIN_FILLED, ICON_CLOSE } from '../common/Icons';
+import { ICON_ROBOT, ICON_EXPAND, ICON_COLLAPSE, ICON_CLOSE } from '../common/Icons';
 import { UserMessagesSummary } from './UserMessagesSummary';
 // PlanPreviewSection replaced by inline plan popover in meta bar
 import { ChatInput } from '@/components/chat/ChatInput';
@@ -13,9 +13,10 @@ import { useSlashCommands } from '@/hooks/useSlashCommands';
 import { useSessionHistory } from '@/hooks/useSessionHistory';
 import type { ImageAttachment } from '@/api/chat';
 import { useEvent } from '@/hooks/useWebSocket';
-import { fetchSession, executePlanContinue, executePlanSession, updateSession } from '@/api/sessions';
+import { fetchSession, executePlanContinue, executePlanSession, updateSession, restartSession } from '@/api/sessions';
 import { fetchTask } from '@/api/tasks';
-import { fetchPinnedTasks, pinTask, unpinTask } from '@/api/focus';
+import { fetchPinnedTasks, pinTask, unpinTask, setTaskTier } from '@/api/focus';
+import type { FocusTier } from '@/api/focus';
 import { timeAgo } from '@/utils/time';
 import { PhasePicker } from './WorkStatusPicker';
 import { SessionCopyButtons } from './SessionCopyButtons';
@@ -192,13 +193,23 @@ export const SessionPanel = memo(function SessionPanel({ sessionId, onClose, onT
 
   // Pin state — self-contained (calls focus API directly)
   const [pinned, setPinned] = useState(false);
-  const [pinBusy, setPinBusy] = useState(false);
+  const [pinnedTier, setPinnedTier] = useState<FocusTier | undefined>(undefined);
 
   // Check if this session's task is pinned (on mount + config changes)
   const refreshPinState = useCallback((taskId: string | undefined) => {
     if (!taskId) return;
     fetchPinnedTasks()
-      .then((data) => setPinned(data.pinned_tasks.includes(taskId)))
+      .then((data) => {
+        const isPinned = data.pinned_tasks.includes(taskId);
+        setPinned(isPinned);
+        if (isPinned) {
+          const tier: FocusTier = data.focus_tasks?.includes(taskId) ? 'focus'
+            : data.next_tasks?.includes(taskId) ? 'next' : 'satellite';
+          setPinnedTier(tier);
+        } else {
+          setPinnedTier(undefined);
+        }
+      })
       .catch(() => {});
   }, []);
 
@@ -208,23 +219,33 @@ export const SessionPanel = memo(function SessionPanel({ sessionId, onClose, onT
     refreshPinState(session?.taskId);
   });
 
-  const handleTogglePin = useCallback(async () => {
-    if (!session?.taskId || pinBusy) return;
-    setPinBusy(true);
+  const handlePinTask = useCallback(async (id: string) => {
     try {
-      if (pinned) {
-        await unpinTask(session.taskId);
-        setPinned(false);
-      } else {
-        await pinTask(session.taskId);
-        setPinned(true);
-      }
+      await pinTask(id);
+      setPinned(true);
     } catch (err) {
-      console.error('Pin toggle failed:', err);
-    } finally {
-      setPinBusy(false);
+      console.error('Pin failed:', err);
     }
-  }, [session?.taskId, pinned, pinBusy]);
+  }, []);
+
+  const handleUnpinTask = useCallback(async (id: string) => {
+    try {
+      await unpinTask(id);
+      setPinned(false);
+      setPinnedTier(undefined);
+    } catch (err) {
+      console.error('Unpin failed:', err);
+    }
+  }, []);
+
+  const handleSetTier = useCallback(async (id: string, tier: FocusTier) => {
+    try {
+      await setTaskTier(id, tier);
+      setPinnedTier(tier);
+    } catch (err) {
+      console.error('Set tier failed:', err);
+    }
+  }, []);
 
   // Fetch session metadata
   useEffect(() => {
@@ -403,6 +424,15 @@ export const SessionPanel = memo(function SessionPanel({ sessionId, onClose, onT
   const handleRetried = useCallback((taskId: string) => {
     retryTaskIdRef.current = taskId;
   }, []);
+  const [restartBusy, setRestartBusy] = useState(false);
+  const handleRestart = useCallback(async () => {
+    setRestartBusy(true);
+    try {
+      const result = await restartSession(sessionId);
+      retryTaskIdRef.current = result.taskId;
+    } catch { /* ignore — banner will stay */ }
+    setRestartBusy(false);
+  }, [sessionId]);
   useEvent('task:updated', (data: unknown) => {
     const d = data as { task?: { id?: string; exec_session_id?: string; plan_session_id?: string } };
     const t = d.task;
@@ -485,17 +515,6 @@ export const SessionPanel = memo(function SessionPanel({ sessionId, onClose, onT
               >
                 {isFullscreen ? ICON_COLLAPSE : ICON_EXPAND}
               </button>
-              {session?.taskId && (
-                <button
-                  className={`task-action-btn session-panel-pin${pinned ? ' pinned' : ''}`}
-                  onClick={handleTogglePin}
-                  disabled={pinBusy}
-                  title={pinned ? 'Unpin from Focus Bar' : 'Pin to Focus Bar'}
-                  aria-label={pinned ? 'Unpin from Focus Bar' : 'Pin to Focus Bar'}
-                >
-                  {pinned ? ICON_PIN_FILLED : ICON_PIN}
-                </button>
-              )}
               <button className="task-action-btn session-panel-close" onClick={() => onClose(sessionId)} title="Close session panel">
                 {ICON_CLOSE}
               </button>
@@ -515,7 +534,15 @@ export const SessionPanel = memo(function SessionPanel({ sessionId, onClose, onT
                 <span className="session-panel-task-title">{taskTitle || session.taskId}</span>
                 <span className="session-panel-task-arrow">&#x2197;</span>
               </div>
-              <TaskQuickActions taskId={session.taskId} task={sessionTask} />
+              <TaskQuickActions
+                taskId={session.taskId}
+                task={sessionTask}
+                isPinned={pinned}
+                pinnedTier={pinnedTier}
+                onPinTask={handlePinTask}
+                onUnpinTask={handleUnpinTask}
+                onSetTier={handleSetTier}
+              />
             </div>
           )}
           {/* Meta row 1: ID + copy chips + SSH */}
@@ -545,6 +572,16 @@ export const SessionPanel = memo(function SessionPanel({ sessionId, onClose, onT
               }}
               onForkFailed={(errMsg) => onForkFailed?.(errMsg)}
             />
+            {!session?.archived && (
+              <button
+                className="session-copy-chip"
+                onClick={handleRestart}
+                disabled={restartBusy}
+                title="Restart session"
+              >
+                {restartBusy ? 'Restarting...' : 'Restart'}
+              </button>
+            )}
             {session?.host && (
               <span
                 className="session-panel-host"
@@ -709,6 +746,17 @@ export const SessionPanel = memo(function SessionPanel({ sessionId, onClose, onT
             </div>
           );
         })()}
+        {!historyLoading && (ps === 'stopped' || ps === 'error') && !session?.archived
+          && historyMessages.filter(m => m.role === 'assistant').length === 0
+          && historyMessages.some(m => m.role === 'user') && (
+          <div className="session-error-banner" style={{ background: 'color-mix(in srgb, var(--warning) 8%, transparent)', borderColor: 'color-mix(in srgb, var(--warning) 25%, transparent)' }}>
+            <span className="session-error-banner-icon">{'\u26A0\uFE0F'}</span>
+            <span className="session-error-banner-text">Session returned empty — Claude may have encountered an issue.</span>
+            <button className="session-retry-btn" onClick={handleRestart} disabled={restartBusy}>
+              {restartBusy ? 'Restarting...' : 'Restart'}
+            </button>
+          </div>
+        )}
         <div className="session-panel-body" ref={bodyRef}>
           <SessionChatHistory
             key={sessionId}
@@ -741,11 +789,19 @@ export const SessionPanel = memo(function SessionPanel({ sessionId, onClose, onT
           {session && (() => {
             // Mode toggle uses session.mode only (not planCompleted) — planCompleted
             // is a separate flag meaning "plan was produced", it shouldn't lock the toggle.
+            // Cycle order: default → bypass → plan → accept → default
+            const MODE_CYCLE: Array<SessionRecord['mode']> = ['default', 'bypass', 'plan', 'accept'];
+            const MODE_LABELS: Record<string, string> = {
+              default: 'Default', bypass: 'Bypass', plan: 'Plan', accept: 'Accept',
+            };
+            const MODE_ICONS: Record<string, string> = {
+              default: '\u2699\uFE0F', bypass: '\u26A1', plan: '\uD83D\uDCCB', accept: '\u2705',
+            };
             const currentMode = session.mode || 'default';
             const isPlan = currentMode === 'plan';
-            const modeLabel = isPlan ? 'Plan' : currentMode === 'bypass' ? 'Bypass' : currentMode === 'accept' ? 'Accept' : 'Default';
+            const currentIdx = MODE_CYCLE.indexOf(currentMode as typeof MODE_CYCLE[number]);
+            const nextMode = MODE_CYCLE[(currentIdx + 1) % MODE_CYCLE.length]!;
             const toggleMode = async () => {
-              const nextMode = isPlan ? 'bypass' : 'plan';
               try {
                 const updated = await updateSession(session.claudeSessionId, { mode: nextMode });
                 setSession(updated);
@@ -753,15 +809,17 @@ export const SessionPanel = memo(function SessionPanel({ sessionId, onClose, onT
                 console.warn('[session-panel] mode toggle failed', session.claudeSessionId, nextMode, err);
               }
             };
+            const icon = MODE_ICONS[currentMode] ?? '\u2699\uFE0F';
+            const label = MODE_LABELS[currentMode] ?? currentMode;
             return (
               <div className="session-mode-bar">
                 <button
                   className={`mode-toggle-pill${isPlan ? ' plan-active' : ''}`}
                   onClick={toggleMode}
-                  title={`Mode: ${currentMode}. Click or Shift+Tab to switch to ${isPlan ? 'Bypass' : 'Plan'}`}
+                  title={`Mode: ${currentMode}. Click or Shift+Tab to cycle → ${nextMode}`}
                 >
                   <span className="mode-toggle-pill-label">
-                    {isPlan ? '\uD83D\uDCCB Plan' : '\u26A1 ' + modeLabel}
+                    {icon} {label}
                   </span>
                   <span className="mode-toggle-pill-shortcut">{'\u21E7'}Tab</span>
                 </button>
@@ -779,13 +837,15 @@ export const SessionPanel = memo(function SessionPanel({ sessionId, onClose, onT
             onControlCommand={handleControlCommand}
             draftKey={`draft:session:${sessionId}`}
             onToggleMode={session ? async () => {
-              const isPlan = session.mode === 'plan';
-              const nextMode = isPlan ? 'bypass' : 'plan';
+              // Same cycle as the pill: default → bypass → plan → accept → default
+              const CYCLE = ['default', 'bypass', 'plan', 'accept'];
+              const cur = session.mode || 'default';
+              const next = CYCLE[(CYCLE.indexOf(cur) + 1) % CYCLE.length]!;
               try {
-                const updated = await updateSession(session.claudeSessionId, { mode: nextMode });
+                const updated = await updateSession(session.claudeSessionId, { mode: next });
                 setSession(updated);
               } catch (err) {
-                console.warn('[session-panel] mode toggle failed', session.claudeSessionId, nextMode, err);
+                console.warn('[session-panel] mode toggle failed', session.claudeSessionId, next, err);
               }
             } : undefined}
           />

@@ -1,12 +1,22 @@
-import { useState, useEffect, useRef, useCallback, useMemo, type ReactNode } from 'react';
+/**
+ * TaskQuickActions — phase badge (inline) + kebab "⋮" menu for task actions.
+ *
+ * Used in session panels to show task status and actions.
+ * Phase badge stays visible; priority, star, attention, pin, source
+ * are consolidated into the kebab dropdown.
+ */
+
+import { useState, useEffect, useRef, useCallback, type ReactNode } from 'react';
 import type { Task, TaskPhase, TaskPriority } from '@open-walnut/core';
 import { fetchTask, updateTask, starTask } from '@/api/tasks';
 import { ApiError } from '@/api/client';
 import { useEvent } from '@/hooks/useWebSocket';
-import { PriorityPicker } from '@/components/common/PriorityPicker';
 import { usePhaseHooks } from '@/hooks/usePhaseHooks';
+import * as ICONS from '@/components/common/Icons';
+import type { FocusTier } from '@/api/focus';
+import { getIntegrationMeta, useIntegrations } from '@/hooks/useIntegrations';
 
-/* ── Phase constants (shared with TodoPanel) ─────────────────────── */
+/* ── Phase constants ─────────────────────────────────────────────── */
 
 const PHASE_ICON: Record<string, ReactNode> = {
   TODO: '○',
@@ -38,27 +48,58 @@ const PHASE_ORDER: string[] = [
   'PEER_CODE_REVIEW', 'RELEASE_IN_PIPELINE', 'COMPLETE',
 ];
 
+const TIER_OPTIONS: { value: FocusTier; label: string }[] = [
+  { value: 'focus', label: 'Focus' },
+  { value: 'next', label: 'Next' },
+  { value: 'satellite', label: 'Satellite' },
+];
+
+const TIER_COLORS: Record<FocusTier, string> = {
+  focus: 'var(--accent)',
+  next: '#FF9500',
+  satellite: 'var(--fg-muted)',
+};
+
+const PRIORITY_OPTIONS: { value: TaskPriority; icon: string; label: string }[] = [
+  { value: 'immediate', icon: '!!', label: 'Immediate' },
+  { value: 'important', icon: '!', label: 'Important' },
+  { value: 'backlog', icon: '~', label: 'Backlog' },
+  { value: 'none', icon: '--', label: 'None' },
+];
+
 /* ── Component ───────────────────────────────────────────────────── */
 
 interface TaskQuickActionsProps {
   taskId: string;
   /** If parent already has the task, pass it to avoid an extra fetch. */
   task?: Task | null;
+  /** Pin/unpin/tier callbacks (from session panel). */
+  isPinned?: boolean;
+  pinnedTier?: FocusTier;
+  onPinTask?: (id: string) => void;
+  onUnpinTask?: (id: string) => void;
+  onSetTier?: (id: string, tier: FocusTier) => void;
 }
 
-export function TaskQuickActions({ taskId, task: externalTask }: TaskQuickActionsProps) {
+export function TaskQuickActions({ taskId, task: externalTask, isPinned, pinnedTier, onPinTask, onUnpinTask, onSetTier }: TaskQuickActionsProps) {
+  const integrations = useIntegrations();
   const [task, setTask] = useState<Task | null>(externalTask ?? null);
   const [phaseMenuOpen, setPhaseMenuOpen] = useState(false);
-  const [menuPos, setMenuPos] = useState<{ top: number; left: number } | null>(null);
+  const [phaseMenuPos, setPhaseMenuPos] = useState<{ top: number; left: number } | null>(null);
+  const [kebabOpen, setKebabOpen] = useState(false);
+  const [kebabPos, setKebabPos] = useState<{ top: number; right: number } | null>(null);
   const hookPhases = usePhaseHooks();
   const phaseRef = useRef<HTMLDivElement>(null);
   const phaseBtnRef = useRef<HTMLButtonElement>(null);
-  const menuRef = useRef<HTMLDivElement>(null);
+  const phaseMenuRef = useRef<HTMLDivElement>(null);
+  const kebabBtnRef = useRef<HTMLButtonElement>(null);
+  const kebabMenuRef = useRef<HTMLDivElement>(null);
+
+  const closeKebab = useCallback(() => setKebabOpen(false), []);
 
   // Fetch task if not provided externally
   useEffect(() => {
     if (externalTask !== undefined) { setTask(externalTask ?? null); return; }
-    // Reset to avoid showing stale task while the new one loads
     setTask(null);
     fetchTask(taskId).then(setTask).catch((err) => {
       console.error('[TaskQuickActions] Failed to fetch task:', err);
@@ -83,10 +124,9 @@ export function TaskQuickActions({ taskId, task: externalTask }: TaskQuickAction
   useEffect(() => {
     if (!phaseMenuOpen) return;
     const handleClick = (e: MouseEvent) => {
-      // Check if click is inside the button wrapper or the fixed menu
       const target = e.target as Node;
       if (phaseRef.current?.contains(target)) return;
-      if (menuRef.current?.contains(target)) return;
+      if (phaseMenuRef.current?.contains(target)) return;
       setPhaseMenuOpen(false);
     };
     const handleScroll = () => setPhaseMenuOpen(false);
@@ -98,11 +138,27 @@ export function TaskQuickActions({ taskId, task: externalTask }: TaskQuickAction
     };
   }, [phaseMenuOpen]);
 
+  // Close kebab on outside click or scroll
+  useEffect(() => {
+    if (!kebabOpen) return;
+    const handleClick = (e: MouseEvent) => {
+      if (kebabBtnRef.current?.contains(e.target as Node)) return;
+      if (kebabMenuRef.current?.contains(e.target as Node)) return;
+      closeKebab();
+    };
+    const handleScroll = () => closeKebab();
+    document.addEventListener('mousedown', handleClick);
+    window.addEventListener('scroll', handleScroll, true);
+    return () => {
+      document.removeEventListener('mousedown', handleClick);
+      window.removeEventListener('scroll', handleScroll, true);
+    };
+  }, [kebabOpen, closeKebab]);
+
   const handlePhaseChange = useCallback((phase: string) => {
     if (!task || task.phase === phase) { setPhaseMenuOpen(false); return; }
     const now = new Date().toISOString();
     const completing = phase === 'COMPLETE';
-    // Full optimistic update — match server-side applyPhase behavior
     setTask(prev => {
       if (!prev) return prev;
       return {
@@ -114,19 +170,15 @@ export function TaskQuickActions({ taskId, task: externalTask }: TaskQuickAction
       };
     });
     setPhaseMenuOpen(false);
-    // Local-first: retry on network errors, only revert on 4xx client errors
     const attempt = (retries: number) => {
       updateTask(taskId, { phase }).catch((err) => {
         if (err instanceof ApiError && err.status >= 400 && err.status < 500) {
-          // Client error (validation, conflict) — revert to server truth
           fetchTask(taskId).then(setTask).catch(() => {});
           return;
         }
-        // Network or server error — keep optimistic state and retry
         if (retries > 0) {
           setTimeout(() => attempt(retries - 1), 2000);
         } else {
-          // All retries exhausted — fetch server truth as last resort
           fetchTask(taskId).then(setTask).catch(() => {});
         }
       });
@@ -140,16 +192,17 @@ export function TaskQuickActions({ taskId, task: externalTask }: TaskQuickAction
     updateTask(taskId, { priority }).catch(() => {
       fetchTask(taskId).then(setTask).catch(() => {});
     });
-  }, [task, taskId]);
+    closeKebab();
+  }, [task, taskId, closeKebab]);
 
   const handleToggleStar = useCallback(() => {
     if (!task) return;
-    // Compute next value inside updater to use latest state (guards against rapid clicks)
     setTask(prev => prev ? { ...prev, starred: !prev.starred } : prev);
     starTask(taskId).catch(() => {
       fetchTask(taskId).then(setTask).catch(() => {});
     });
-  }, [task, taskId]);
+    closeKebab();
+  }, [task, taskId, closeKebab]);
 
   const handleToggleAttention = useCallback(() => {
     if (!task) return;
@@ -159,11 +212,20 @@ export function TaskQuickActions({ taskId, task: externalTask }: TaskQuickAction
       nextAttention = !prev.needs_attention;
       return { ...prev, needs_attention: nextAttention };
     });
-    // nextAttention is set synchronously by the updater above before the async call
     updateTask(taskId, { needs_attention: nextAttention }).catch(() => {
       fetchTask(taskId).then(setTask).catch(() => {});
     });
-  }, [task, taskId]);
+    closeKebab();
+  }, [task, taskId, closeKebab]);
+
+  const handleKebabToggle = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (!kebabOpen && kebabBtnRef.current) {
+      const rect = kebabBtnRef.current.getBoundingClientRect();
+      setKebabPos({ top: rect.bottom + 2, right: window.innerWidth - rect.right });
+    }
+    setKebabOpen(!kebabOpen);
+  };
 
   if (!task) return null;
 
@@ -171,7 +233,7 @@ export function TaskQuickActions({ taskId, task: externalTask }: TaskQuickAction
 
   return (
     <div className="task-quick-actions">
-      {/* Phase picker */}
+      {/* Phase picker — stays inline */}
       <div className="task-quick-phase" ref={phaseRef}>
         <button
           ref={phaseBtnRef}
@@ -180,7 +242,7 @@ export function TaskQuickActions({ taskId, task: externalTask }: TaskQuickAction
             e.stopPropagation();
             if (!phaseMenuOpen && phaseBtnRef.current) {
               const rect = phaseBtnRef.current.getBoundingClientRect();
-              setMenuPos({ top: rect.bottom + 2, left: rect.left });
+              setPhaseMenuPos({ top: rect.bottom + 2, left: rect.left });
             }
             setPhaseMenuOpen(!phaseMenuOpen);
           }}
@@ -189,11 +251,11 @@ export function TaskQuickActions({ taskId, task: externalTask }: TaskQuickAction
           <span className="task-quick-phase-icon">{PHASE_ICON[task.phase] ?? '○'}</span>
           <span className="task-quick-phase-label">{PHASE_LABEL[task.phase] ?? task.phase}</span>
         </button>
-        {phaseMenuOpen && menuPos && (
+        {phaseMenuOpen && phaseMenuPos && (
           <div
-            ref={menuRef}
+            ref={phaseMenuRef}
             className="phase-picker-menu task-quick-phase-menu"
-            style={{ top: menuPos.top, left: menuPos.left }}
+            style={{ top: phaseMenuPos.top, left: phaseMenuPos.left }}
           >
             {PHASE_ORDER.map((phase) => (
               <button
@@ -215,31 +277,170 @@ export function TaskQuickActions({ taskId, task: externalTask }: TaskQuickAction
         )}
       </div>
 
-      {/* Priority */}
-      <PriorityPicker
-        priority={task.priority}
-        onChange={handleSetPriority}
-        fixed
-      />
-
-      {/* Star */}
+      {/* Kebab menu button */}
       <button
-        className={`task-quick-star${task.starred ? ' starred' : ''}`}
-        onClick={(e) => { e.stopPropagation(); handleToggleStar(); }}
-        title={task.starred ? 'Unstar' : 'Star'}
+        ref={kebabBtnRef}
+        className="task-kebab-btn"
+        onClick={handleKebabToggle}
+        title="More actions"
+        aria-label="More actions"
+        style={{ opacity: 1 }}
       >
-        {task.starred ? '★' : '☆'}
+        ⋮
       </button>
-
-      {/* Needs attention */}
-      {!isDone && (
-        <button
-          className={`task-quick-attention${task.needs_attention ? ' active' : ''}`}
-          onClick={(e) => { e.stopPropagation(); handleToggleAttention(); }}
-          title={task.needs_attention ? 'Clear attention flag' : 'Flag as needs attention'}
+      {kebabOpen && (
+        <div
+          ref={kebabMenuRef}
+          className="task-kebab-menu"
+          style={kebabPos ? { position: 'fixed', top: kebabPos.top, right: kebabPos.right, zIndex: 9999 } : undefined}
         >
-          <span className="task-quick-attention-dot" />
-        </button>
+          {/* Star */}
+          <button
+            className={`task-kebab-item${task.starred ? ' task-kebab-item-active' : ''}`}
+            onClick={(e) => { e.stopPropagation(); handleToggleStar(); }}
+          >
+            <span className="task-kebab-icon">{task.starred ? ICONS.ICON_STAR_FILLED : ICONS.ICON_STAR_EMPTY}</span>
+            <span>{task.starred ? 'Unstar' : 'Star'}</span>
+          </button>
+
+          {/* Attention */}
+          {!isDone && (
+            <button
+              className={`task-kebab-item${task.needs_attention ? ' task-kebab-item-active' : ''}`}
+              onClick={(e) => { e.stopPropagation(); handleToggleAttention(); }}
+            >
+              <span className="task-kebab-icon" style={{ color: task.needs_attention ? 'var(--error)' : undefined }}>●</span>
+              <span>{task.needs_attention ? 'Clear attention' : 'Needs attention'}</span>
+            </button>
+          )}
+
+          {/* Pin / Tier — same as TodoPanel kebab */}
+          {!isDone && (onPinTask || isPinned) && (
+            <>
+              <div className="task-kebab-divider" />
+              {isPinned && onUnpinTask && (
+                <button
+                  className="task-kebab-item"
+                  onClick={(e) => { e.stopPropagation(); onUnpinTask(taskId); closeKebab(); }}
+                >
+                  <span className="task-kebab-icon">{ICONS.ICON_PIN_FILLED}</span>
+                  <span>Unpin</span>
+                </button>
+              )}
+              <div className="task-kebab-tier">
+                <span className="task-kebab-tier-label">{isPinned ? 'Move to' : 'Pin to'}</span>
+                <div className="task-kebab-tier-options">
+                  {TIER_OPTIONS.map((t) => (
+                    <button
+                      key={t.value}
+                      className={`task-kebab-tier-btn${pinnedTier === t.value ? ' active' : ''}`}
+                      style={{ color: TIER_COLORS[t.value] }}
+                      title={t.label}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        if (isPinned) {
+                          if (pinnedTier !== t.value) onSetTier?.(taskId, t.value);
+                        } else {
+                          onPinTask?.(taskId);
+                          setTimeout(() => onSetTier?.(taskId, t.value), 100);
+                        }
+                        closeKebab();
+                      }}
+                    >
+                      {t.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            </>
+          )}
+
+          <div className="task-kebab-divider" />
+
+          {/* Priority */}
+          <div className="task-kebab-priority">
+            <span className="task-kebab-priority-label">Priority</span>
+            <div className="task-kebab-priority-options">
+              {PRIORITY_OPTIONS.map((p) => (
+                <button
+                  key={p.value}
+                  className={`badge badge-${p.value}${task.priority === p.value ? ' badge-active' : ''} badge-clickable`}
+                  title={p.label}
+                  onClick={(e) => { e.stopPropagation(); if (p.value !== task.priority) handleSetPriority(p.value); else closeKebab(); }}
+                >
+                  {p.icon}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {/* Source badge — combined with external link if available */}
+          {(() => {
+            if (!task.source) {
+              // External link without source
+              if (task.external_url) {
+                const label = 'external';
+                return (
+                  <>
+                    <div className="task-kebab-divider" />
+                    <a
+                      className="task-kebab-item"
+                      href={task.external_url}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      onClick={(e) => { e.stopPropagation(); closeKebab(); }}
+                    >
+                      <span className="task-kebab-icon">↗</span>
+                      <span>Open in {label}</span>
+                    </a>
+                  </>
+                );
+              }
+              return null;
+            }
+            const sourceMeta = getIntegrationMeta(integrations, task.source);
+            const badge = task.source === 'local' ? 'L' : (sourceMeta?.badge ?? task.source?.charAt(0).toUpperCase());
+            const integrationName = task.source === 'local' ? 'Local' : (sourceMeta?.name ?? task.source);
+            const badgeColor = sourceMeta?.badgeColor;
+            const synced = task.source !== 'local' && (!!task.ext?.[task.source] || !!((task as unknown as Record<string, unknown>)[({ 'ms-todo': 'ms_todo_id' } as Record<string, string>)[task.source] ?? '']));
+            const statusText = task.sync_error ? ' (sync error)' : synced ? '' : task.source !== 'local' ? ' (unsynced)' : '';
+            const badgeEl = (
+              <span
+                className="task-source-badge"
+                style={!task.sync_error && badgeColor ? { background: badgeColor, color: 'white' } : task.source === 'local' ? { background: '#8E8E93', color: 'white' } : undefined}
+              >
+                {task.sync_error ? '!' : badge}
+              </span>
+            );
+            if (task.external_url) {
+              return (
+                <>
+                  <div className="task-kebab-divider" />
+                  <a
+                    className="task-kebab-item task-kebab-info"
+                    href={task.external_url}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    onClick={(e) => { e.stopPropagation(); closeKebab(); }}
+                  >
+                    {badgeEl}
+                    <span>{integrationName}{statusText}</span>
+                    <span className="task-kebab-external-arrow">↗</span>
+                  </a>
+                </>
+              );
+            }
+            return (
+              <>
+                <div className="task-kebab-divider" />
+                <div className="task-kebab-item task-kebab-info">
+                  {badgeEl}
+                  <span>{integrationName}{statusText}</span>
+                </div>
+              </>
+            );
+          })()}
+        </div>
       )}
     </div>
   );

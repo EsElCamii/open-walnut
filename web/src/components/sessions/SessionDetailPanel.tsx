@@ -8,7 +8,7 @@ import { UserMessagesSummary } from './UserMessagesSummary';
 import { PhasePicker } from './WorkStatusPicker';
 import { SessionCopyButtons } from './SessionCopyButtons';
 import { TaskQuickActions } from './TaskQuickActions';
-import { updateSession, executePlanSession, executePlanContinue } from '@/api/sessions';
+import { updateSession, executePlanSession, executePlanContinue, restartSession } from '@/api/sessions';
 import { SessionRetryButton } from './SessionRetryButton';
 import { useSessionHistory } from '@/hooks/useSessionHistory';
 import { useSessionPlan } from '@/hooks/useSessionPlan';
@@ -210,6 +210,16 @@ export function SessionDetailPanel({ session, taskTitle, summary, phase: propPha
   const handleRetried = useCallback((taskId: string) => {
     retryTaskIdRef.current = taskId;
   }, []);
+  const [restartBusy, setRestartBusy] = useState(false);
+  const handleRestart = useCallback(async () => {
+    if (!session?.claudeSessionId) return;
+    setRestartBusy(true);
+    try {
+      const result = await restartSession(session.claudeSessionId);
+      retryTaskIdRef.current = result.taskId;
+    } catch { /* ignore */ }
+    setRestartBusy(false);
+  }, [session?.claudeSessionId]);
   useEvent('task:updated', (data: unknown) => {
     const d = data as { task?: { id?: string; exec_session_id?: string; plan_session_id?: string } };
     const t = d.task;
@@ -374,7 +384,9 @@ export function SessionDetailPanel({ session, taskTitle, summary, phase: propPha
                 <a href={`/tasks/${session.taskId}`} className="session-detail-link" title={`Task: ${session.taskId}`}>
                   {taskLabel}
                 </a>
-                <TaskQuickActions taskId={session.taskId} />
+                <TaskQuickActions
+                  taskId={session.taskId}
+                />
               </>
             )}
             {displayModel && (
@@ -410,6 +422,16 @@ export function SessionDetailPanel({ session, taskTitle, summary, phase: propPha
                 taskId={session.taskId}
                 taskTitle={taskTitle}
               />
+            )}
+            {!session.archived && (
+              <button
+                className="session-copy-chip"
+                onClick={handleRestart}
+                disabled={restartBusy}
+                title="Restart session"
+              >
+                {restartBusy ? 'Restarting...' : 'Restart'}
+              </button>
             )}
             {ps === 'stopped' && !session.archived && (
               <button
@@ -527,11 +549,14 @@ export function SessionDetailPanel({ session, taskTitle, summary, phase: propPha
               })()}
             </button>
             {(() => {
+              // Cycle: default → bypass → plan → accept → default
+              const CYCLE = ['default', 'bypass', 'plan', 'accept'];
+              const LABELS: Record<string, string> = { default: 'Default', bypass: 'Bypass', plan: 'Plan', accept: 'Accept' };
+              const ICONS: Record<string, string> = { default: '\u2699\uFE0F', bypass: '\u26A1', plan: '\uD83D\uDCCB', accept: '\u2705' };
               const currentMode = (modeOverride ?? session.mode) || 'default';
               const isPlan = currentMode === 'plan';
-              const modeLabel = isPlan ? 'Plan' : currentMode === 'bypass' ? 'Bypass' : currentMode === 'accept' ? 'Accept' : 'Default';
+              const nextMode = CYCLE[(CYCLE.indexOf(currentMode) + 1) % CYCLE.length]!;
               const handleModeToggle = async () => {
-                const nextMode = isPlan ? 'bypass' : 'plan';
                 setModeOverride(nextMode);
                 try {
                   await updateSession(sessionId, { mode: nextMode });
@@ -540,14 +565,16 @@ export function SessionDetailPanel({ session, taskTitle, summary, phase: propPha
                   console.warn('[session-detail] mode toggle failed', sessionId, nextMode, err);
                 }
               };
+              const icon = ICONS[currentMode] ?? '\u2699\uFE0F';
+              const label = LABELS[currentMode] ?? currentMode;
               return (
                 <button
                   className={`mode-toggle-pill${isPlan ? ' plan-active' : ''}`}
                   onClick={handleModeToggle}
-                  title={`Mode: ${currentMode}. Click to switch to ${isPlan ? 'Bypass' : 'Plan'}`}
+                  title={`Mode: ${currentMode}. Click to cycle → ${nextMode}`}
                 >
                   <span className="mode-toggle-pill-label">
-                    {isPlan ? '\uD83D\uDCCB Plan' : '\u26A1 ' + modeLabel}
+                    {icon} {label}
                   </span>
                 </button>
               );
@@ -667,6 +694,17 @@ export function SessionDetailPanel({ session, taskTitle, summary, phase: propPha
             </div>
           );
         })()}
+        {!historyLoading && (ps === 'stopped' || ps === 'error') && !session.archived
+          && historyMessages.filter(m => m.role === 'assistant').length === 0
+          && historyMessages.some(m => m.role === 'user') && (
+          <div className="session-error-banner" style={{ background: 'color-mix(in srgb, var(--warning) 8%, transparent)', borderColor: 'color-mix(in srgb, var(--warning) 25%, transparent)' }}>
+            <span className="session-error-banner-icon">{ICON_WARNING}</span>
+            <span className="session-error-banner-text">Session returned empty — Claude may have encountered an issue.</span>
+            <button className="session-retry-btn" onClick={handleRestart} disabled={restartBusy}>
+              {restartBusy ? 'Restarting...' : 'Restart'}
+            </button>
+          </div>
+        )}
         <SessionChatHistory
           key={sessionId}
           sessionId={sessionId}

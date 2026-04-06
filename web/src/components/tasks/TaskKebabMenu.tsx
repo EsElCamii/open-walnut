@@ -289,8 +289,7 @@ export function TaskKebabMenu({ task, isFocused, isPinned, pinnedTier, isDone, o
           })()}
           {/* External link without source */}
           {!task.source && task.external_url && (() => {
-            const meta = getIntegrationMeta(integrations, task.source);
-            const label = meta?.externalLinkLabel ?? meta?.name ?? 'external';
+            const label = 'external';
             return (
               <>
                 <div className="task-kebab-divider" />
