@@ -5910,47 +5910,6 @@ img[data-lightbox-src],
   animation: pulse 1.5s infinite;
 }
 
-/* Work status picker dropdown */
-.work-status-picker-dropdown {
-  position: absolute;
-  top: calc(100% + 4px);
-  right: 0;
-  z-index: 100;
-  background: var(--card-bg);
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.15);
-  padding: 4px;
-  min-width: 140px;
-}
-
-.work-status-picker-option {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  width: 100%;
-  padding: 6px 10px;
-  border: none;
-  background: none;
-  color: var(--fg-primary);
-  font-size: 12px;
-  font-weight: 500;
-  border-radius: 6px;
-  cursor: pointer;
-  text-align: left;
-}
-
-.work-status-picker-option:hover {
-  background: var(--bg-tertiary);
-}
-
-.work-status-picker-dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  flex-shrink: 0;
-}
-
 /* Session header buttons — inherits pill base from .task-action-btn */
 .session-panel-close:hover { color: var(--error); background: rgba(255, 59, 48, 0.08); }
 .session-panel-pin.pinned { color: var(--accent); background: rgba(0, 122, 255, 0.12); }

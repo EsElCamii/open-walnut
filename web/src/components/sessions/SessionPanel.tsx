@@ -18,7 +18,7 @@ import { fetchTask } from '@/api/tasks';
 import { fetchPinnedTasks, pinTask, unpinTask, setTaskTier } from '@/api/focus';
 import type { FocusTier } from '@/api/focus';
 import { timeAgo } from '@/utils/time';
-import { PhasePicker } from './WorkStatusPicker';
+import { ProcessStatusBadge } from './WorkStatusPicker';
 import { SessionCopyButtons } from './SessionCopyButtons';
 import { ModelPicker } from './ModelPicker';
 import { TaskQuickActions } from './TaskQuickActions';
@@ -465,6 +465,8 @@ export const SessionPanel = memo(function SessionPanel({ sessionId, onClose, onT
   }, [sessionId, retryFailed]);
 
   const ps = session?.process_status;
+  // Phase is forwarded to SessionChatHistory for resume detection logic,
+  // not for UI display in this panel.
   const taskPhase = (sessionTask?.phase ?? 'TODO') as TaskPhase;
 
   // Header content
@@ -495,11 +497,9 @@ export const SessionPanel = memo(function SessionPanel({ sessionId, onClose, onT
                   {ICON_ROBOT} Embedded
                 </span>
               )}
-              {!loading && ps && session?.taskId && (
-                <PhasePicker
-                  taskId={session.taskId}
+              {!loading && ps && (
+                <ProcessStatusBadge
                   processStatus={ps}
-                  phase={taskPhase}
                   size="sm"
                   errorMessage={session?.errorMessage}
                 />

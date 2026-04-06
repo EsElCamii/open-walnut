@@ -5,7 +5,7 @@ import { SessionNotes } from './SessionNotes';
 import { FileViewer } from '../common/FileViewer';
 import { UserMessagesSummary } from './UserMessagesSummary';
 // PlanPreviewSection replaced by inline plan popover in meta bar
-import { PhasePicker } from './WorkStatusPicker';
+import { ProcessStatusBadge } from './WorkStatusPicker';
 import { SessionCopyButtons } from './SessionCopyButtons';
 import { TaskQuickActions } from './TaskQuickActions';
 import { updateSession, executePlanSession, executePlanContinue, restartSession } from '@/api/sessions';
@@ -23,8 +23,6 @@ interface SessionDetailPanelProps {
   session: SessionRecord | null;
   taskTitle?: string;
   summary?: string;
-  /** Task phase — used for phase display (replaces old work_status). */
-  phase?: TaskPhase;
   /** @deprecated No longer used — kept for backward compat. */
   taskHasExecSession?: boolean;
   onTitleChanged?: () => void;
@@ -129,7 +127,7 @@ function EditableTitle({ sessionId, title, onSaved }: { sessionId: string; title
   );
 }
 
-export function SessionDetailPanel({ session, taskTitle, summary, phase: propPhase, onTitleChanged, onSessionReplaced, optimisticMessages, onMessagesDelivered, onBatchCompleted, onEditQueued, onDeleteQueued, onAgentQueued, onClearCommitted, onRetryFailed, onDismissFailed }: SessionDetailPanelProps) {
+export function SessionDetailPanel({ session, taskTitle, summary, onTitleChanged, onSessionReplaced, optimisticMessages, onMessagesDelivered, onBatchCompleted, onEditQueued, onDeleteQueued, onAgentQueued, onClearCommitted, onRetryFailed, onDismissFailed }: SessionDetailPanelProps) {
   const navigate = useNavigate();
   const [executing, setExecuting] = useState(false);
   const [executeError, setExecuteError] = useState<string | null>(null);
@@ -278,7 +276,10 @@ export function SessionDetailPanel({ session, taskTitle, summary, phase: propPha
   const sessionId = session.claudeSessionId || '';
   const title = session.title || session.description || session.slug || sessionId || 'Untitled session';
   const ps = session.process_status ?? 'stopped';
-  const taskPhase: TaskPhase = propPhase ?? 'TODO';
+  // SessionsPage doesn't pass task phase; hardcoded 'TODO' is safe because
+  // SessionChatHistory only uses it for resume detection (checking IN_PROGRESS),
+  // and the detail panel doesn't need that feature.
+  const taskPhase: TaskPhase = 'TODO';
   const isEmbedded = session.provider === 'embedded';
   // planCompleted=true means the plan is definitively done — show Execute even if session is still running
   // (SSH FIFO sessions stay alive after plan completion; execution creates a new session anyway).
@@ -365,15 +366,11 @@ export function SessionDetailPanel({ session, taskTitle, summary, phase: propPha
                   SSH: {session.host}
                 </span>
               )}
-              {session.taskId && (
-                <PhasePicker
-                  taskId={session.taskId}
-                  processStatus={ps}
-                  phase={taskPhase}
-                  size="md"
-                  errorMessage={session.errorMessage}
-                />
-              )}
+              <ProcessStatusBadge
+                processStatus={ps}
+                size="md"
+                errorMessage={session.errorMessage}
+              />
             </div>
           </div>
 
