@@ -151,6 +151,7 @@ export const NOTES_DIR = path.join(WALNUT_HOME, 'notes');
 export const REPOSITORIES_DIR = path.join(WALNUT_HOME, 'repositories');
 export const REPOS_MEMORY_DIR = path.join(MEMORY_DIR, 'repos');
 export const TIMELINE_DIR = path.join(WALNUT_HOME, 'timeline');
+export const RECORDINGS_DIR = path.join(WALNUT_HOME, 'recordings');
 export const LOG_DIR = '/tmp/open-walnut';
 export const LOG_PREFIX = 'open-walnut-';
 /** Directory containing pre-compiled daemon binaries (built by scripts/build-daemon.sh). */

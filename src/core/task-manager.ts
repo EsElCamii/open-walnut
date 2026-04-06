@@ -14,11 +14,17 @@ import yaml from 'js-yaml';
 const EMPTY_STORE: TaskStore = { version: 1, tasks: [] };
 
 /** Ask the task's plugin to validate content before writing. Throws on rejection. */
-function runPluginContentValidation(task: { source: string }, field: string, value: string): void {
+function runPluginContentValidation(task: { source: string; id?: string }, field: string, value: string): void {
   const plugin = registry.get(task.source);
-  if (plugin?.sync.validateContent) {
-    const error = plugin.sync.validateContent(task as Task, field, value);
-    if (error) throw new Error(error);
+  if (!plugin) {
+    log.task.warn('content validation skipped: plugin not loaded', { source: task.source, field, taskId: (task as Task).id });
+    return;
+  }
+  if (!plugin.sync.validateContent) return;
+  const error = plugin.sync.validateContent(task as Task, field, value);
+  if (error) {
+    log.task.info('content validation rejected', { source: task.source, field, taskId: (task as Task).id, error });
+    throw new Error(error);
   }
 }
 

@@ -46,3 +46,6 @@ CLAUDE.local.md
 
 # V8 isolate logs (contain local paths)
 isolate-*.log
+
+# Downloaded installer packages
+*.pkg

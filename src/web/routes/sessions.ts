@@ -10,6 +10,7 @@ import { listTasks, getTask, addTask, updateTask } from '../../core/task-manager
 import { getConfig } from '../../core/config-manager.js'
 import { bus, EventNames, eventData } from '../../core/event-bus.js'
 import fs from 'node:fs'
+import fsp from 'node:fs/promises'
 import path from 'path'
 import { isSessionProcessAlive } from '../../utils/session-liveness.js'
 import { readPlanFromSession, buildPlanExecutionMessage } from '../../utils/plan-message.js'
@@ -223,7 +224,13 @@ sessionsRouter.get('/list-dirs', async (req: Request, res: Response, next: NextF
 
       const { getDaemonConnection } = await import('../../providers/daemon-connection.js')
       const sshTarget = { hostname, user: hostDef.user, port: hostDef.port }
-      const conn = await getDaemonConnection(host, sshTarget)
+      // Race against a timeout to prevent blocking the response for 42+ seconds
+      const rejectAfter = (ms: number, msg: string) =>
+        new Promise<never>((_, reject) => setTimeout(() => reject(new Error(msg)), ms))
+      const conn = await Promise.race([
+        getDaemonConnection(host, sshTarget),
+        rejectAfter(15_000, `Remote connection to ${host} timed out`),
+      ])
 
       // Recursive BFS directory listing via daemon's fs.ls command.
       // The daemon's fs.ls expands ~ to the remote home directory.
@@ -288,27 +295,27 @@ sessionsRouter.get('/list-dirs', async (req: Request, res: Response, next: NextF
 
       res.json({ dirs: entries, parent: resolvedDir })
     } else {
-      // Local filesystem — also preload multiple levels
+      // Local filesystem — also preload multiple levels (async to avoid blocking event loop)
       const entries: string[] = []
-      const walkLocal = (d: string, currentDepth: number) => {
+      const walkLocal = async (d: string, currentDepth: number) => {
         if (currentDepth > depth || entries.length >= 500) return
         try {
-          const names = fs.readdirSync(d)
+          const names = await fsp.readdir(d)
           for (const name of names) {
             if (entries.length >= 500) break
             // Skip hidden directories
             if (name.startsWith('.')) continue
             const full = path.join(d, name)
             try {
-              if (fs.statSync(full).isDirectory()) {
+              if ((await fsp.stat(full)).isDirectory()) {
                 entries.push(full)
-                if (currentDepth < depth) walkLocal(full, currentDepth + 1)
+                if (currentDepth < depth) await walkLocal(full, currentDepth + 1)
               }
             } catch { /* skip unreadable */ }
           }
         } catch { /* dir doesn't exist */ }
       }
-      walkLocal(dir, 1)
+      await walkLocal(dir, 1)
 
       res.json({ dirs: entries, parent: dir })
     }
@@ -653,10 +660,18 @@ sessionsRouter.patch('/:sessionId', async (req: Request, res: Response, next: Ne
     log.web.info('session updated via REST', { sessionId, fields: Object.keys(updates) })
 
     // Sync mode to in-memory session so emitStatusChanged() uses the new value.
-    if (mode !== undefined) {
+    // Also set pendingMode so the next message forces --resume instead of FIFO write.
+    // FIFO stdin doesn't carry permission-mode — only --resume spawn applies it.
+    if (mode !== undefined && existingRecord?.mode !== mode) {
       const liveSession = sessionRunner.findByClaudeId(sessionId)
       if (liveSession) {
         liveSession._mode = mode as SessionMode
+      }
+      // Set pendingMode so processNext() knows to skip FIFO and use --resume
+      // with the new --permission-mode flag. Without this, a FIFO session would
+      // silently keep running in the old mode until the process dies.
+      if (updated.process_status !== 'stopped') {
+        await updateSessionRecord(sessionId, { pendingMode: mode })
       }
     }
 
@@ -1154,6 +1169,67 @@ sessionsRouter.post('/:sessionId/retry', async (req: Request, res: Response, nex
       oldSessionId: sessionId, taskId: task.id,
     })
     res.json({ status: 'pending', taskId: task.id, oldSessionId: sessionId })
+  } catch (err) {
+    next(err)
+  }
+})
+
+// POST /api/sessions/:sessionId/restart — kill process, archive, start fresh with same prompt
+sessionsRouter.post('/:sessionId/restart', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const sessionId = req.params.sessionId as string
+    const record = await getSessionByClaudeId(sessionId)
+    if (!record) { res.status(404).json({ error: 'Session not found' }); return }
+    if (!record.taskId) { res.status(400).json({ error: 'Session has no associated task' }); return }
+
+    const task = await getTask(record.taskId)
+    if (!task) { res.status(404).json({ error: 'Associated task not found' }); return }
+
+    // Kill process if alive
+    if (record.pid != null) {
+      const { isSessionProcessAlive: isAlive } = await import('../../utils/session-liveness.js')
+      if (await isAlive(record)) {
+        const { getRegisteredSessionManager } = await import('../../providers/session-manager.js')
+        const mgr = getRegisteredSessionManager(sessionId)
+        if (mgr) {
+          mgr.kill()
+        } else {
+          try { process.kill(-record.pid, 'SIGTERM') } catch { /* already dead */ }
+        }
+      }
+    }
+
+    // Archive old session + clear task slot
+    await updateSessionRecord(sessionId, { archived: true, archive_reason: 'restart' })
+    try {
+      const { clearSession, clearSessionSlot } = await import('../../core/task-manager.js')
+      await clearSession(task.id, sessionId)
+      await clearSessionSlot(task.id, sessionId)
+    } catch { /* task may not exist */ }
+
+    // Recover original prompt from JSONL history
+    let restartMessage = 'Restart session'
+    try {
+      const messages = await readSessionHistory(sessionId, record.cwd, record.host, record.outputFile)
+      const firstUser = messages.find(m => m.role === 'user')
+      if (firstUser?.text) restartMessage = firstUser.text
+    } catch { /* history may be unavailable */ }
+
+    // Start new session with same task + mode + model
+    bus.emit(EventNames.SESSION_START, {
+      taskId: task.id,
+      message: restartMessage,
+      cwd: record.cwd,
+      project: task.project ?? '',
+      mode: record.mode !== 'default' ? record.mode : undefined,
+      model: record.model,
+      host: record.host,
+    }, ['session-runner'], { source: 'restart' })
+
+    log.web.info('session restart: killed + archived + started new', {
+      oldSessionId: sessionId, taskId: task.id,
+    })
+    res.json({ status: 'restarting', taskId: task.id, oldSessionId: sessionId })
   } catch (err) {
     next(err)
   }

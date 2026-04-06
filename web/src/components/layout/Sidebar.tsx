@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import { NavLink } from 'react-router-dom';
 import { useSystemHealth } from '@/hooks/useSystemHealth';
+import { useAudioCapture } from '@/hooks/useAudioCapture';
 import { NotificationPanel } from '@/components/common/NotificationPanel';
 
 const SS_CHAT_VISIBLE_KEY = 'open-walnut-home-chat-visible';
@@ -15,6 +16,7 @@ interface SidebarProps {
 export function Sidebar({ open, collapsed, onToggleCollapse }: SidebarProps) {
   const cls = `sidebar${open ? ' open' : ''}${collapsed ? ' collapsed' : ''}`;
   const { hasIssues } = useSystemHealth();
+  const audio = useAudioCapture();
   const [notifOpen, setNotifOpen] = useState(false);
 
   // Panel visibility state — synced from MainPage via custom events
@@ -143,8 +145,24 @@ export function Sidebar({ open, collapsed, onToggleCollapse }: SidebarProps) {
         </NavLink>
       </nav>
 
-      {/* Notification bell — between nav and stats */}
+      {/* Recording + Notification — bottom area */}
       <div className="sidebar-notification-area">
+        {audio.available && (
+          <button
+            className={`sidebar-link sidebar-recording-btn${audio.recording ? ' recording-active' : ''}${audio.loading ? ' recording-loading' : ''}`}
+            onClick={audio.toggleRecording}
+            disabled={audio.loading}
+            title={collapsed
+              ? (audio.loading ? 'Starting...' : audio.recording ? `Recording ${formatDuration(audio.totalDuration)}` : 'Start recording')
+              : undefined}
+            aria-label={audio.loading ? 'Starting...' : audio.recording ? 'Stop recording' : 'Start recording'}
+          >
+            <RecordingIcon recording={audio.recording} loading={audio.loading} />
+            <span className="sidebar-label">
+              {audio.loading ? 'Starting...' : audio.recording ? formatDuration(audio.totalDuration) : 'Record'}
+            </span>
+          </button>
+        )}
         <button
           className="sidebar-link sidebar-notification-btn"
           onClick={() => setNotifOpen(!notifOpen)}
@@ -333,11 +351,7 @@ function NotesIcon() {
 
 function WalnutIcon() {
   return (
-    <svg viewBox="0 0 24 24" fill="none" strokeLinecap="round" strokeLinejoin="round" className="sidebar-open-walnut-icon">
-      <ellipse cx="11.5" cy="12" rx="7.5" ry="8.5" fill="currentColor" />
-      <ellipse cx="12.5" cy="12" rx="7.5" ry="8.5" fill="currentColor" />
-      <line x1="12" y1="3.5" x2="12" y2="20.5" stroke="var(--bg-secondary)" strokeWidth="1.5" />
-    </svg>
+    <img src="/walnut-icon.png" alt="Walnut" className="sidebar-open-walnut-icon" />
   );
 }
 
@@ -379,5 +393,24 @@ function TodoListIcon() {
       <line x1="3" y1="18" x2="3.01" y2="18" />
     </svg>
   );
+}
+
+function RecordingIcon({ recording, loading }: { recording: boolean; loading?: boolean }) {
+  const fill = loading ? 'var(--fg-muted)' : recording ? 'var(--error)' : 'none';
+  const stroke = loading ? 'var(--fg-muted)' : recording ? 'var(--error)' : 'currentColor';
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <circle cx="12" cy="12" r="6" fill={fill} stroke={stroke} />
+      <circle cx="12" cy="12" r="10" />
+    </svg>
+  );
+}
+
+function formatDuration(seconds: number): string {
+  const h = Math.floor(seconds / 3600);
+  const m = Math.floor((seconds % 3600) / 60);
+  const s = Math.floor(seconds % 60);
+  if (h > 0) return `${h}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+  return `${m}:${String(s).padStart(2, '0')}`;
 }
 

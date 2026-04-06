@@ -5356,6 +5356,160 @@ input:focus, textarea:focus, select:focus {
   to { transform: rotate(360deg); }
 }
 
+/* ── STT Detection Panel ── */
+
+.stt-detection-panel {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 12px;
+  margin-bottom: 12px;
+  background: var(--bg-secondary);
+}
+
+.stt-detection-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+.stt-detection-header h4 {
+  margin: 0;
+  font-size: 0.9rem;
+}
+
+.stt-check-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-bottom: 8px;
+}
+
+.stt-check-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.85rem;
+  line-height: 1.5;
+}
+
+.stt-check-icon {
+  width: 18px;
+  text-align: center;
+  font-weight: bold;
+  flex-shrink: 0;
+}
+.stt-check-ok { color: var(--success); }
+.stt-check-missing { color: var(--error); }
+
+.stt-check-label {
+  font-weight: 500;
+  min-width: 120px;
+}
+
+.stt-check-detail {
+  color: var(--text-muted);
+  font-size: 0.8rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.stt-check-error { color: var(--error); }
+
+.stt-recommendation {
+  padding: 10px 12px;
+  border-radius: 6px;
+  margin-top: 8px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.stt-recommendation p { margin: 0; font-size: 0.85rem; flex: 1; min-width: 200px; }
+.stt-rec-ready { background: color-mix(in srgb, var(--success) 10%, transparent); border: 1px solid var(--success); }
+.stt-rec-action { background: color-mix(in srgb, var(--accent) 10%, transparent); border: 1px solid var(--accent); }
+
+.stt-model-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.stt-model-card {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  padding: 10px !important;
+  text-align: left;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+.stt-model-card:hover { border-color: var(--accent); }
+
+/* ── STT Setup Progress ── */
+
+.stt-setup-progress {
+  margin-top: 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 10px;
+}
+
+.stt-setup-step {
+  padding: 6px 0;
+}
+.stt-setup-step + .stt-setup-step {
+  border-top: 1px solid var(--border);
+}
+
+.stt-step-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.85rem;
+}
+
+.stt-step-indicator {
+  width: 16px;
+  text-align: center;
+  flex-shrink: 0;
+}
+.stt-step-done .stt-step-indicator { color: var(--success); }
+.stt-step-error .stt-step-indicator { color: var(--error); }
+.stt-step-running .stt-step-indicator { color: var(--accent); }
+
+.stt-step-label { font-weight: 500; flex: 1; }
+.stt-step-percent { color: var(--text-muted); font-size: 0.8rem; }
+
+.stt-step-message {
+  margin: 4px 0 0 24px;
+  font-size: 0.8rem;
+  color: var(--text-muted);
+}
+.stt-step-error .stt-step-message { color: var(--error); }
+
+.stt-progress-bar-track {
+  height: 4px;
+  background: var(--border);
+  border-radius: 2px;
+  margin: 6px 0 0 24px;
+  overflow: hidden;
+}
+
+.stt-progress-bar-fill {
+  height: 100%;
+  background: var(--accent);
+  border-radius: 2px;
+  transition: width 0.3s ease;
+}
+
+.stt-setup-actions {
+  margin-top: 10px;
+  display: flex;
+  gap: 8px;
+}
+
 .chat-image-previews {
   display: flex;
   gap: 8px;

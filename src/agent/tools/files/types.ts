@@ -33,6 +33,10 @@ export interface FilesReadResult {
   showing: string;
   /** Structured parse output when parse=true. */
   parsed?: ParseResult;
+  /** Internal: file mtime for readFileState tracking. Stripped before returning to model. */
+  _mtimeMs?: number;
+  /** Internal: whether this is a partial view (offset/limit applied). */
+  _isPartialView?: boolean;
 }
 
 // ── Write / edit results ──
@@ -79,7 +83,7 @@ export interface ParseResult {
 // ── Handler interface ──
 
 export interface FileHandler {
-  read(resolved: ResolvedSource, opts?: { offset?: number; limit?: number }): Promise<FilesReadResult | ToolResultContent>;
+  read(resolved: ResolvedSource, opts?: { offset?: number; limit?: number; pages?: string }): Promise<FilesReadResult | ToolResultContent>;
   write(resolved: ResolvedSource, content: string, opts?: { mode?: 'overwrite' | 'append'; contentHash?: string }): Promise<FilesWriteResult>;
   edit(resolved: ResolvedSource, oldContent: string, newContent: string, opts?: { contentHash?: string; replaceAll?: boolean }): Promise<FilesEditResult>;
   list(resolved: ResolvedSource): Promise<FilesListItem[]>;

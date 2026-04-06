@@ -48,9 +48,7 @@ import fsp from 'node:fs/promises';
 import path from 'node:path';
 import { log } from '../logging/index.js';
 import { CLAUDE_HOME } from '../constants.js';
-import { readTool } from './tools/read-tool.js';
-import { writeTool } from './tools/write-tool.js';
-import { editTool } from './tools/edit-tool.js';
+// standalone read_file, edit_file, write_file removed — unified into files_* tools
 import { execTool } from './tools/exec-tool.js';
 import { slackTool } from './tools/slack-tool.js';
 import { ttsTool } from './tools/tts-tool.js';
@@ -1220,6 +1218,18 @@ and is always allowed.`,
           }
         }
 
+        // Validate: local-looking paths should not be sent to remote hosts.
+        // Common mistake: category/project has default_host but cwd is a local Mac path.
+        if (resolvedHost && resolvedCwd && /^\/Users\//.test(resolvedCwd)) {
+          const hostSource = params.host ? 'explicit host param' : 'inherited from project/category default_host';
+          return `Error: Local path "${resolvedCwd}" cannot be used on remote host "${resolvedHost}" (${hostSource}). ` +
+            `The cwd must exist on the remote machine. Either:\n` +
+            `  1. Provide a remote path as working_directory (e.g. /workplace/...)\n` +
+            `  2. Set host=null to run locally instead of on "${resolvedHost}"\n` +
+            `  3. Update the task cwd: update_task(id:'${task?.id ?? '...'}', cwd:'/remote/path')\n` +
+            `Note: host "${resolvedHost}" was resolved via: ${hostSource}`;
+        }
+
         // Local sessions still require a cwd — give actionable guidance
         if (!resolvedCwd) {
           const hint = task
@@ -1961,11 +1971,6 @@ defaults (same resolution chain as start_session).`,
       }
     },
   },
-
-  // ── Coding Tools ──
-  readTool,
-  writeTool,
-  editTool,
 
   // ── Exec Tool ──
   execTool,

@@ -312,6 +312,34 @@ export interface NotesUpdatedEvent {
   contentHash: string;
 }
 
+// ── Audio capture events ──
+
+export interface AudioStartedEvent {
+  recordingId: string;
+  source: 'system' | 'mic' | 'both';
+  apps?: string[];
+  startedAt: string;
+}
+
+export interface AudioStoppedEvent {
+  recordingId: string;
+  duration: number;
+  chunks: number;
+}
+
+export interface AudioChunkSavedEvent {
+  recordingId: string;
+  chunkIndex: number;
+  filePath: string;
+  duration: number;
+  size: number;
+}
+
+export interface AudioErrorEvent {
+  recordingId?: string;
+  error: string;
+}
+
 // ── Master type map: EventName → Payload ──
 
 export interface EventPayloadMap {
@@ -370,6 +398,11 @@ export interface EventPayloadMap {
   'config:changed': ConfigChangedEvent;
 
   'system:health': SystemHealthEvent;
+
+  'audio:started': AudioStartedEvent;
+  'audio:stopped': AudioStoppedEvent;
+  'audio:chunk-saved': AudioChunkSavedEvent;
+  'audio:error': AudioErrorEvent;
 
   'cron:job-added': CronJobEvent;
   'cron:job-updated': CronJobEvent;

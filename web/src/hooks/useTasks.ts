@@ -5,6 +5,7 @@ import { wsClient, type ConnectionState } from '@/api/ws';
 import * as tasksApi from '@/api/tasks';
 import { ApiError } from '@/api/client';
 import { perf } from '@/utils/perf-logger';
+import { log } from '@/utils/log';
 
 /**
  * Optimistic default status for a newly-linked session (before the first
@@ -238,14 +239,39 @@ export function useTasks(filter?: tasksApi.TaskFilter): UseTasksReturn {
     return true;
   }, []);
 
-  const refetch = useCallback(() => {
-    setLoading(true);
-    setError(null);
-    const endPerf = perf.start('tasks:fetch');
+  const refetch = useCallback((attempt = 0) => {
+    const MAX_RETRIES = 3;
+    if (attempt === 0) {
+      setLoading(true);
+      setError(null);
+      // Reset WS event counters on fresh fetch
+      wsEventCounts.current = { created: 0, updated: 0, completed: 0, sessionChanged: 0, lastLogAt: 0 };
+    }
+    const endPerf = attempt === 0 ? perf.start('tasks:fetch') : undefined;
+    const t0 = performance.now();
+    log.info('tasks', 'fetch started', { attempt, filter, wsState: wsClient.state });
     tasksApi.fetchTasks(filter)
-      .then((tasks) => { endPerf(`${tasks.length} tasks`); setTasks(tasks); })
-      .catch((e: Error) => { endPerf('error'); setError(e.message); })
-      .finally(() => setLoading(false));
+      .then((tasks) => {
+        const elapsed = Math.round(performance.now() - t0);
+        endPerf?.(`${tasks.length} tasks`);
+        log.info('tasks', 'fetch complete', { count: tasks.length, elapsed, attempt });
+        setTasks(tasks);
+        setLoading(false);
+      })
+      .catch((e: Error) => {
+        const elapsed = Math.round(performance.now() - t0);
+        endPerf?.('error');
+        const isRetryable = e.name === 'TimeoutError' || e.name === 'TypeError' || (e instanceof ApiError && e.status >= 500);
+        log.error('tasks', 'fetch FAILED', { error: e.message, elapsed, attempt, isRetryable, isTimeout: e.name === 'TimeoutError' });
+        if (isRetryable && attempt < MAX_RETRIES) {
+          const delayMs = 2000 * (attempt + 1);
+          log.info('tasks', `auto-retry in ${delayMs}ms`, { attempt: attempt + 1 });
+          setTimeout(() => refetch(attempt + 1), delayMs);
+        } else {
+          setError(e.message);
+          setLoading(false);
+        }
+      });
   }, [filter]);
 
   useEffect(() => {
@@ -256,7 +282,10 @@ export function useTasks(filter?: tasksApi.TaskFilter): UseTasksReturn {
   const isFirstConnect = useRef(true);
   const [wsConnected, setWsConnected] = useState(wsClient.state === 'connected');
   useEffect(() => {
-    const onStateChange = (state: ConnectionState) => setWsConnected(state === 'connected');
+    const onStateChange = (state: ConnectionState) => {
+      log.info('tasks', `ws state → ${state}`);
+      setWsConnected(state === 'connected');
+    };
     wsClient.onConnectionChange(onStateChange);
     return () => { wsClient.offConnectionChange(onStateChange); };
   }, []);
@@ -266,9 +295,13 @@ export function useTasks(filter?: tasksApi.TaskFilter): UseTasksReturn {
         isFirstConnect.current = false;
         return; // skip — initial fetch already handled above
       }
+      log.info('tasks', 'ws reconnected → refetching tasks');
       refetch();
     }
   }, [wsConnected, refetch]);
+
+  // WS event counters for startup diagnostics — resets on refetch
+  const wsEventCounts = useRef({ created: 0, updated: 0, completed: 0, sessionChanged: 0, lastLogAt: 0 });
 
   // Real-time event handlers — single source of truth for state changes
   // Server emits { task: <Task> } wrapper objects
@@ -276,13 +309,22 @@ export function useTasks(filter?: tasksApi.TaskFilter): UseTasksReturn {
     const { task } = data as { task: Task };
     // Skip tasks with missing or empty titles (e.g. from sync race conditions)
     if (!task.title || task.title.trim() === '') return;
+    wsEventCounts.current.created++;
+    // Log every 10th event or first event (to spot event storms)
+    const c = wsEventCounts.current;
+    const now = Date.now();
+    if (c.created === 1 || c.created % 10 === 0 || now - c.lastLogAt > 5000) {
+      c.lastLogAt = now;
+      log.info('tasks', 'ws event counts', { created: c.created, updated: c.updated, completed: c.completed, sessionChanged: c.sessionChanged });
+    }
     // Deduplicate: if task with same id already exists, skip
     setTasks((prev) => prev.some((t) => t.id === task.id) ? prev : [task, ...prev]);
   });
 
   useEvent('task:updated', (data) => {
+    wsEventCounts.current.updated++;
     const { task } = data as { task?: Task };
-    if (!task) { refetch(); return; }  // bulk change (e.g. category rename) — refetch all
+    if (!task) { log.info('tasks', 'ws task:updated bulk → refetch'); refetch(); return; }
     if (consumeEcho(`move:${task.id}`)) return;
     if (consumeEcho(`update:${task.id}`)) return;
     if (consumeEcho(`phase:${task.id}`)) return;
@@ -290,8 +332,9 @@ export function useTasks(filter?: tasksApi.TaskFilter): UseTasksReturn {
   });
 
   useEvent('task:completed', (data) => {
+    wsEventCounts.current.completed++;
     const { task } = data as { task?: Task };
-    if (!task) { refetch(); return; }
+    if (!task) { log.info('tasks', 'ws task:completed bulk → refetch'); refetch(); return; }
     if (consumeEcho(`complete:${task.id}`)) return;
     setTasks((prev) => prev.map((t) => (t.id === task.id ? mergeTask(t, task) : t)));
   });
@@ -316,6 +359,7 @@ export function useTasks(filter?: tasksApi.TaskFilter): UseTasksReturn {
 
   // When a session's status changes, update the enriched session status on the affected task
   useEvent('session:status-changed', (data) => {
+    wsEventCounts.current.sessionChanged++;
     const { sessionId, taskId, phase, process_status, mode, activity, planCompleted } = data as {
       sessionId?: string; taskId?: string; phase?: string; process_status?: string;
       mode?: string; activity?: string; planCompleted?: boolean;

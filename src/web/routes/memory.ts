@@ -3,6 +3,7 @@
  */
 
 import fs from 'node:fs'
+import fsp from 'node:fs/promises'
 import path from 'node:path'
 import { Router, type Request, type Response, type NextFunction } from 'express'
 import { listMemories, getMemory } from '../../core/memory.js'
@@ -25,14 +26,14 @@ interface BrowseDailyItem extends BrowseItem {
   date: string
 }
 
-memoryRouter.get('/browse', (_req: Request, res: Response, next: NextFunction) => {
+memoryRouter.get('/browse', async (_req: Request, res: Response, next: NextFunction) => {
   try {
     // Global MEMORY.md
     let global: BrowseItem | null = null
     try {
       const result = getMemoryFile()
       if (result) {
-        const stat = fs.statSync(MEMORY_FILE)
+        const stat = await fsp.stat(MEMORY_FILE)
         global = { path: 'MEMORY.md', title: 'Global Memory', updatedAt: stat.mtime.toISOString() }
       }
     } catch { /* no global memory file */ }
@@ -40,9 +41,9 @@ memoryRouter.get('/browse', (_req: Request, res: Response, next: NextFunction) =
     // Daily logs — reverse chronological
     const daily: BrowseDailyItem[] = []
     try {
-      const files = fs.readdirSync(DAILY_DIR).filter(f => f.endsWith('.md')).sort().reverse()
+      const files = (await fsp.readdir(DAILY_DIR)).filter(f => f.endsWith('.md')).sort().reverse()
       for (const f of files) {
-        const stat = fs.statSync(path.join(DAILY_DIR, f))
+        const stat = await fsp.stat(path.join(DAILY_DIR, f))
         const date = f.replace(/\.md$/, '')
         daily.push({ path: `daily/${f}`, title: date, date, updatedAt: stat.mtime.toISOString() })
       }
@@ -67,12 +68,12 @@ memoryRouter.get('/browse', (_req: Request, res: Response, next: NextFunction) =
     // Repo environment memories
     const repos: BrowseItem[] = []
     try {
-      const dirs = fs.readdirSync(REPOS_MEMORY_DIR, { withFileTypes: true })
+      const dirs = await fsp.readdir(REPOS_MEMORY_DIR, { withFileTypes: true })
       for (const d of dirs) {
         if (!d.isDirectory()) continue
         const memFile = path.join(REPOS_MEMORY_DIR, d.name, 'MEMORY.md')
         try {
-          const stat = fs.statSync(memFile)
+          const stat = await fsp.stat(memFile)
           repos.push({ path: `repos/${d.name}/MEMORY.md`, title: d.name, updatedAt: stat.mtime.toISOString() })
         } catch { /* no MEMORY.md */ }
       }
@@ -86,14 +87,14 @@ memoryRouter.get('/browse', (_req: Request, res: Response, next: NextFunction) =
 
 // ── Global MEMORY.md dedicated endpoint ──
 
-memoryRouter.get('/global', (_req: Request, res: Response, next: NextFunction) => {
+memoryRouter.get('/global', async (_req: Request, res: Response, next: NextFunction) => {
   try {
     const result = getMemoryFile()
     if (!result) {
       res.status(404).json({ error: 'Global MEMORY.md not found' })
       return
     }
-    const stat = fs.statSync(MEMORY_FILE)
+    const stat = await fsp.stat(MEMORY_FILE)
     res.json({
       memory: {
         path: 'MEMORY.md',
@@ -111,16 +112,16 @@ memoryRouter.get('/global', (_req: Request, res: Response, next: NextFunction) =
 
 // ── PUT /api/memory/global — write global MEMORY.md ──
 
-memoryRouter.put('/global', (req: Request, res: Response, next: NextFunction) => {
+memoryRouter.put('/global', async (req: Request, res: Response, next: NextFunction) => {
   try {
     const { content } = req.body
     if (typeof content !== 'string') {
       res.status(400).json({ error: 'content (string) is required' })
       return
     }
-    fs.mkdirSync(path.dirname(MEMORY_FILE), { recursive: true })
-    fs.writeFileSync(MEMORY_FILE, content, 'utf-8')
-    const stat = fs.statSync(MEMORY_FILE)
+    await fsp.mkdir(path.dirname(MEMORY_FILE), { recursive: true })
+    await fsp.writeFile(MEMORY_FILE, content, 'utf-8')
+    const stat = await fsp.stat(MEMORY_FILE)
     log.memory.info('Global MEMORY.md updated via browser', { size: content.length })
     res.json({ ok: true, updatedAt: stat.mtime.toISOString() })
   } catch (err) {
@@ -206,7 +207,7 @@ memoryRouter.post('/daily-log/compact', async (req: Request, res: Response, next
 })
 
 // PUT /api/memory/* — write a memory file by path
-memoryRouter.use((req: Request, res: Response, next: NextFunction) => {
+memoryRouter.use(async (req: Request, res: Response, next: NextFunction) => {
   if (req.method !== 'PUT' || req.path === '/' || req.path === '/global') return next()
   try {
     const memPath = req.path.startsWith('/') ? req.path.slice(1) : req.path
@@ -223,12 +224,14 @@ memoryRouter.use((req: Request, res: Response, next: NextFunction) => {
       res.status(403).json({ error: 'Path traversal not allowed' })
       return
     }
-    if (!fs.existsSync(resolved)) {
+    try {
+      await fsp.access(resolved)
+    } catch {
       res.status(404).json({ error: 'Memory file not found' })
       return
     }
-    fs.writeFileSync(resolved, content, 'utf-8')
-    const stat = fs.statSync(resolved)
+    await fsp.writeFile(resolved, content, 'utf-8')
+    const stat = await fsp.stat(resolved)
     log.memory.info('Memory file updated via browser', { path: memPath, size: content.length })
     res.json({ ok: true, updatedAt: stat.mtime.toISOString() })
   } catch (err) {

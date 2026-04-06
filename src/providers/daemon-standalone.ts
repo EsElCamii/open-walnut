@@ -19,6 +19,7 @@
  */
 
 import fs from 'node:fs'
+import os from 'node:os'
 import path from 'node:path'
 import { spawn, execSync } from 'node:child_process'
 import type { ChildProcess } from 'node:child_process'
@@ -287,7 +288,7 @@ function cmdStart(ws: ServerWebSocket<WsData>, id: number, cmd: Record<string, u
   // when the real issue is a non-existent working directory (e.g. local Mac path
   // sent to a remote Linux host).
   if (!fs.existsSync(cwd)) {
-    return sendError(ws, id, `start: cwd does not exist on this host: ${cwd}`)
+    return sendError(ws, id, `start: cwd does not exist on this host (${os.hostname()}): ${cwd}`)
   }
 
   fs.mkdirSync(STREAMS_DIR, { recursive: true })
@@ -357,7 +358,7 @@ function cmdStart(ws: ServerWebSocket<WsData>, id: number, cmd: Record<string, u
     try { fs.unlinkSync(stderrPath) } catch {}
     // Drain the async error event to prevent unhandled rejection
     proc.on('error', () => {})
-    return sendError(ws, id, `spawn failed: process could not start (cwd: ${cwd})`)
+    return sendError(ws, id, `spawn failed: process could not start on ${os.hostname()} (cwd: ${cwd})`)
   }
 
   // Handle late spawn errors (shouldn't happen after pid is set, but defensive)

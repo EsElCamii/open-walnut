@@ -83,7 +83,7 @@ function buildRecognizerConfig(cfg: SherpaConfig) {
         featConfig: { sampleRate: 16000, featureDim: 80 },
       };
     default:
-      log.warn('stt', `Unknown sherpa model type: ${cfg.modelType}, falling back to sense_voice config`);
+      log.stt.warn(`Unknown sherpa model type: ${cfg.modelType}, falling back to sense_voice config`);
       return {
         modelConfig: {
           senseVoice: {
@@ -113,12 +113,12 @@ async function getRecognizer(cfg: SherpaConfig) {
   }
 
   const config = buildRecognizerConfig(cfg);
-  log.info('stt', `Loading sherpa-onnx model from ${cfg.modelDir} (type: ${cfg.modelType})`);
+  log.stt.info(`Loading sherpa-onnx model from ${cfg.modelDir} (type: ${cfg.modelType})`);
   const t0 = Date.now();
 
   const recognizer = new (sherpa as any).OfflineRecognizer(config);
 
-  log.info('stt', `sherpa-onnx model loaded in ${Date.now() - t0}ms`);
+  log.stt.info(`sherpa-onnx model loaded in ${Date.now() - t0}ms`);
   cachedRecognizer = recognizer;
   cachedModelDir = cfg.modelDir;
   cachedModelType = cfg.modelType;

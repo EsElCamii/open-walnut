@@ -299,6 +299,9 @@ export class ClaudeCodeSession {
   private _lastMessageDeliveryTs = 0
   /** Timestamp of the last JSONL event received from the output file. */
   private _lastJsonlEventTs = 0
+  /** Timestamp of the last JSONL event produced by Claude Code (excludes walnut-injected user events).
+   *  Used by health monitor to detect hung API calls: message delivered but no Claude output. */
+  private _lastClaudeOutputTs = 0
   /** Output file size at the time of last message delivery — used to detect stalled output. */
   private _fileSizeAtDelivery = 0
   /** Timer for diagnosing "Running but no response" — fires if no JSONL event arrives after message delivery. */
@@ -371,6 +374,13 @@ export class ClaudeCodeSession {
   get host(): string | null {
     return this._host
   }
+
+  /** Timestamp of last JSONL event produced by Claude Code (excludes walnut-injected).
+   *  0 means no Claude output received yet (e.g. right after resume spawn). */
+  get lastClaudeOutputAt(): number { return this._lastClaudeOutputTs }
+
+  /** Timestamp of last message delivered to Claude via FIFO or --resume. */
+  get lastMessageDeliveryAt(): number { return this._lastMessageDeliveryTs }
 
   get cwd(): string | null {
     return this._cwd
@@ -1184,6 +1194,14 @@ export class ClaudeCodeSession {
     } catch {
       log.session.warn('malformed JSONL line skipped', { sessionId: this.claudeSessionId, taskId: this.taskId, linePreview: line.slice(0, 80) })
       return
+    }
+
+    // Track Claude Code output separately from walnut-injected user events.
+    // walnut-injected events are written by Walnut to the JSONL file — they refresh
+    // _lastJsonlEventTs (file mtime) but should NOT reset the "Claude is responsive" timer.
+    const isWalnutInjected = event.type === 'user' && (event as unknown as Record<string, unknown>).subtype === 'walnut-injected'
+    if (!isWalnutInjected) {
+      this._lastClaudeOutputTs = Date.now()
     }
 
     try {
@@ -2219,6 +2237,13 @@ export class SessionRunner {
       if (session.sessionId === claudeSessionId) return session
     }
     return undefined
+  }
+
+  /** Public lookup for health monitor — returns hung-detection timestamps for a session. */
+  getSessionTimestamps(claudeSessionId: string): { lastClaudeOutputAt: number; lastMessageDeliveryAt: number } | undefined {
+    const session = this.findSessionByClaudeId(claudeSessionId)
+    if (!session) return undefined
+    return { lastClaudeOutputAt: session.lastClaudeOutputAt, lastMessageDeliveryAt: session.lastMessageDeliveryAt }
   }
 
   /**

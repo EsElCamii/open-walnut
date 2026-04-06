@@ -62,6 +62,7 @@ import { systemRouter } from './routes/system.js'
 import { notesRouter } from './routes/notes.js'
 import { notesV2Router } from './routes/notes-v2.js'
 import { repositoriesRouter } from './routes/repositories.js'
+import { audioRouter } from './routes/audio.js'
 import { sttRouter } from './routes/stt.js'
 import { migrateGlobalNotes } from '../core/notes-migration.js'
 import { authMiddleware } from './middleware/auth.js'
@@ -412,6 +413,7 @@ export async function startServer(options: ServerOptions = {}): Promise<HttpServ
   app.use('/api/push', pushRouter)
   app.use('/api/auth', authRouter)
   app.use('/api/browser-logs', browserLogsRouter)
+  app.use('/api/audio', audioRouter)
   app.use('/api/stt', sttRouter)
   app.get('/api/task-phase-hooks', async (_req, res) => {
     const { getHookInfoList } = await import('../core/task-phase-hooks/index.js')
@@ -474,16 +476,24 @@ export async function startServer(options: ServerOptions = {}): Promise<HttpServ
   // -- Push notification service --
   initPushNotifications()
 
+  // -- Startup timing: track each phase to diagnose slow startups --
+  const startupT0 = Date.now()
+  const startupPhase = (name: string) => {
+    const elapsed = Date.now() - startupT0
+    log.web.info(`startup: ${name}`, { elapsedSinceListenMs: elapsed })
+  }
+
   // -- Pull latest data from git (remote hooks may have pushed new data) --
   if (!isEphemeral) {
     await gitPullWalnut()
+    startupPhase('git pull done')
   }
 
   // -- Prewarm task store: force load + migration before accepting requests --
   // Without this, early HTTP requests can hit an uninitialized store and return [].
   try {
-    await listTasks()
-    log.web.info('task store prewarmed')
+    const tasks = await listTasks()
+    startupPhase(`task store prewarmed (${tasks.length} tasks)`)
   } catch (err) {
     log.web.warn('task store prewarm failed', { error: err instanceof Error ? err.message : String(err) })
   }
@@ -494,6 +504,7 @@ export async function startServer(options: ServerOptions = {}): Promise<HttpServ
     const { reconcileSessions } = await import('../core/session-reconciler.js')
     const result = await reconcileSessions()
     reconnectable = result.reconnectable
+    startupPhase(`session reconcile done (${reconnectable.length} reconnectable)`)
   } catch (err) {
     log.session.warn('session reconciliation failed on startup', {
       error: err instanceof Error ? err.message : String(err),
@@ -504,6 +515,7 @@ export async function startServer(options: ServerOptions = {}): Promise<HttpServ
   try {
     const { migrateCompletedTaskSessions } = await import('../core/task-manager.js')
     await migrateCompletedTaskSessions()
+    startupPhase('completed-task session migration done')
   } catch (err) {
     log.session.warn('completed-task session migration failed', {
       error: err instanceof Error ? err.message : String(err),
@@ -521,6 +533,7 @@ export async function startServer(options: ServerOptions = {}): Promise<HttpServ
         .map(s => s.claudeSessionId),
     )
     await cleanupStreamFiles(preserveIds)
+    startupPhase('stream file cleanup done')
   } catch (err) {
     log.session.debug('stream file cleanup failed', {
       error: err instanceof Error ? err.message : String(err),
@@ -611,6 +624,7 @@ export async function startServer(options: ServerOptions = {}): Promise<HttpServ
   // -- Start session health monitor --
   healthMonitor = new SessionHealthMonitor()
   healthMonitor.start()
+  startupPhase('health monitor started')
 
   // -- Start session reaper (periodic cleanup of high-volume triage session records) --
   sessionReaper = new SessionReaper()
@@ -1345,6 +1359,7 @@ export async function startServer(options: ServerOptions = {}): Promise<HttpServ
 
   // -- Start generic plugin sync polling --
   startPluginSyncPolling()
+  startupPhase('plugin sync polling started')
 
   // -- Process exit diagnostics --
   // Log WHY the server dies so we can diagnose silent crashes
@@ -1375,6 +1390,7 @@ export async function startServer(options: ServerOptions = {}): Promise<HttpServ
     log.heartbeat.error('failed to start heartbeat', { error: err instanceof Error ? err.message : String(err) })
   })
 
+  startupPhase('ALL DONE — server fully initialized')
   return httpServer!
 }
 
@@ -1655,6 +1671,7 @@ function startPluginSyncPolling(): void {
     const timer = setInterval(async () => {
       if (syncing) return
       syncing = true
+      const syncT0 = Date.now()
       try {
         const { listTasks, updateTaskRaw, addTaskFull, deleteTask, autoPushIfConfigured } = await import('../core/task-manager.js')
         const localTasks = await listTasks()
@@ -1748,6 +1765,10 @@ function startPluginSyncPolling(): void {
           }
         }
         consecutiveFailures = 0
+        const syncElapsed = Date.now() - syncT0
+        if (syncElapsed > 2000) {
+          log.web.warn(`${plugin.id} sync: slow tick`, { elapsed: syncElapsed })
+        }
       } catch (err) {
         consecutiveFailures++
         const errorMsg = err instanceof Error ? err.message : String(err)

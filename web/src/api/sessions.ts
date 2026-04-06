@@ -168,6 +168,12 @@ export async function retrySession(sessionId: string): Promise<
   return apiPost(`/api/sessions/${sessionId}/retry`, {});
 }
 
+export async function restartSession(sessionId: string): Promise<
+  { status: 'restarting'; taskId: string; oldSessionId: string }
+> {
+  return apiPost(`/api/sessions/${sessionId}/restart`, {});
+}
+
 export async function forkSessionInWalnut(
   sessionId: string,
   opts?: { child_title?: string; message?: string; model?: string },

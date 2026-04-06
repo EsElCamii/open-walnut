@@ -142,13 +142,13 @@ export class RemoteSessionManager implements SessionManager {
     }
 
     if (!result.ok) {
-      throw new Error(`Daemon start failed: ${result.error}`)
+      throw new Error(`Daemon start failed on host "${this.hostKey}": ${result.error}`)
     }
 
     // Detect spawn failures: daemon returns ok but pid is missing when
     // posix_spawn fails (e.g. cwd doesn't exist on remote host).
     if (!result.pid) {
-      throw new Error(`Daemon spawn failed: no PID returned. The working directory may not exist on the remote host.`)
+      throw new Error(`Daemon spawn failed on host "${this.hostKey}": no PID returned (cwd: "${opts.cwd}"). The working directory may not exist on the remote host.`)
     }
 
     this._pid = (result.pid as number) ?? null
@@ -265,7 +265,7 @@ export class RemoteSessionManager implements SessionManager {
     }
 
     if (!result.ok) {
-      throw new Error(`Daemon attach failed: ${result.error}`)
+      throw new Error(`Daemon attach failed on host "${this.hostKey}": ${result.error}`)
     }
 
     this._pid = (result.pid as number) ?? null

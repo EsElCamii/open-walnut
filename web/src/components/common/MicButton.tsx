@@ -2,10 +2,12 @@
  * Microphone button for speech-to-text input.
  *
  * States: idle (gray) → recording (red pulse) → transcribing (spinner)
+ * Disabled with tooltip when STT is not configured or engine unavailable.
  * Gracefully hidden when MediaRecorder is not supported.
  */
 
 import { useSpeechToText } from '@/hooks/useSpeechToText';
+import { useSttStatus } from '@/hooks/useSttStatus';
 
 interface MicButtonProps {
   /** Called with transcribed text */
@@ -23,30 +25,37 @@ export function MicButton({ onTranscribe, language, disabled, size = 'md' }: Mic
     onTranscribe,
     language,
   });
+  const sttStatus = useSttStatus();
 
   if (!isSupported) return null;
+
+  const sttUnavailable = !sttStatus.isLoading && (!sttStatus.isConfigured || !sttStatus.isAvailable);
+  const isDisabled = disabled || isTranscribing || sttUnavailable;
 
   const className = [
     'btn mic-btn',
     size === 'sm' && 'mic-btn-sm',
     isRecording && 'mic-recording',
     isTranscribing && 'mic-transcribing',
+    sttUnavailable && 'mic-disabled',
   ].filter(Boolean).join(' ');
 
-  const title = error
-    ? `Error: ${error}`
-    : isTranscribing
-      ? 'Transcribing...'
-      : isRecording
-        ? 'Stop recording'
-        : 'Voice input';
+  const title = sttUnavailable
+    ? (sttStatus.error ?? 'Configure STT in Settings')
+    : error
+      ? `Error: ${error}`
+      : isTranscribing
+        ? 'Transcribing...'
+        : isRecording
+          ? 'Stop recording'
+          : 'Voice input';
 
   return (
     <button
       className={className}
       onClick={toggleRecording}
       type="button"
-      disabled={disabled || isTranscribing}
+      disabled={isDisabled}
       aria-label={title}
       title={title}
     >

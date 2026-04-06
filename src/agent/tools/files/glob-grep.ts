@@ -6,23 +6,12 @@
  */
 import { globSync, readFileSync, statSync } from 'node:fs';
 import path from 'node:path';
+import { isBinaryContent, SKIP_DIRS, MAX_GREP_FILE_SIZE } from '../../../constants/files.js';
 
 // ── Shared constants ──
 
-const MAX_GLOB_RESULTS = 1000; // ~1000 paths fits within typical LLM context limits
-const MAX_GREP_RESULTS_DEFAULT = 50; // grep returns full line content per match, so lower limit than glob
-const MAX_FILE_SIZE = 1 * 1024 * 1024; // 1 MB
-const BINARY_CHECK_BYTES = 8192; // matches the heuristic used by the `file` command
-
-const SKIP_DIRS = new Set([
-  'node_modules',
-  '.git',
-  '.hg',
-  '.svn',
-  'dist',
-  '.next',
-  '.cache',
-]);
+const MAX_GLOB_RESULTS = 1000;
+const MAX_GREP_RESULTS_DEFAULT = 50;
 
 /** Common file-type → glob mappings (aligned with ripgrep --type). */
 const TYPE_GLOBS: Record<string, string> = {
@@ -47,14 +36,6 @@ const TYPE_GLOBS: Record<string, string> = {
 };
 
 // ── Helpers ──
-
-function isBinaryBuffer(buf: Buffer): boolean {
-  const len = Math.min(buf.length, BINARY_CHECK_BYTES);
-  for (let i = 0; i < len; i++) {
-    if (buf[i] === 0) return true;
-  }
-  return false;
-}
 
 function shouldSkipPath(filePath: string): boolean {
   const parts = filePath.split(path.sep);
@@ -197,7 +178,7 @@ export function filesGrep(pattern: string, opts: GrepOptions = {}): GrepResult {
     // Skip large files
     try {
       const st = statSync(filePath);
-      if (st.size > MAX_FILE_SIZE) continue;
+      if (st.size > MAX_GREP_FILE_SIZE) continue;
     } catch {
       continue;
     }
@@ -209,7 +190,7 @@ export function filesGrep(pattern: string, opts: GrepOptions = {}): GrepResult {
     } catch {
       continue;
     }
-    if (isBinaryBuffer(buf)) continue;
+    if (isBinaryContent(buf)) continue;
 
     filesSearched++;
 

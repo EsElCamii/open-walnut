@@ -9,7 +9,8 @@ class ApiError extends Error {
 }
 
 async function request<T>(method: string, path: string, body?: unknown, extra?: { signal?: AbortSignal }): Promise<T> {
-  const timeoutSignal = AbortSignal.timeout(15_000);
+  const timeoutMs = 15_000;
+  const timeoutSignal = AbortSignal.timeout(timeoutMs);
   const signal = extra?.signal
     ? AbortSignal.any([extra.signal, timeoutSignal])
     : timeoutSignal;
@@ -21,7 +22,17 @@ async function request<T>(method: string, path: string, body?: unknown, extra?: 
   if (body !== undefined) {
     opts.body = JSON.stringify(body);
   }
-  const res = await fetch(path, opts);
+  const t0 = performance.now();
+  let res: Response;
+  try {
+    res = await fetch(path, opts);
+  } catch (err) {
+    const elapsed = Math.round(performance.now() - t0);
+    const isTimeout = err instanceof DOMException && err.name === 'TimeoutError';
+    console.error(`[api] ${method} ${path} FAILED after ${elapsed}ms${isTimeout ? ` (timeout ${timeoutMs}ms)` : ''}`, err);
+    throw err;
+  }
+  const elapsed = Math.round(performance.now() - t0);
   if (!res.ok) {
     let message = res.statusText;
     try {
@@ -30,10 +41,19 @@ async function request<T>(method: string, path: string, body?: unknown, extra?: 
     } catch {
       // use statusText
     }
+    console.error(`[api] ${method} ${path} → ${res.status} in ${elapsed}ms: ${message}`);
     throw new ApiError(res.status, message);
   }
   if (res.status === 204) return undefined as T;
-  return res.json();
+  const jsonT0 = performance.now();
+  const data = await res.json();
+  const jsonMs = Math.round(performance.now() - jsonT0);
+  // Log slow requests (>500ms network or >100ms JSON parse)
+  if (elapsed > 500 || jsonMs > 100) {
+    const size = res.headers.get('content-length') ?? '?';
+    console.warn(`[api] ${method} ${path} → 200 in ${elapsed}ms (json parse: ${jsonMs}ms, size: ${size})`);
+  }
+  return data;
 }
 
 export function apiGet<T>(path: string, params?: Record<string, string>, opts?: { signal?: AbortSignal }): Promise<T> {

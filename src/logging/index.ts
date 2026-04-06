@@ -28,6 +28,8 @@ export const log = {
   heartbeat: createSubsystemLogger('heartbeat'),
   git: createSubsystemLogger('git'),
   browser: createSubsystemLogger('browser'),
+  audio: createSubsystemLogger('audio'),
+  stt: createSubsystemLogger('stt'),
 };
 
 // ── Initialization ──

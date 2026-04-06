@@ -20,7 +20,8 @@
  *   Events: { ev, ...data } (no id — unsolicited)
  */
 
-import { spawn, execFileSync, type ChildProcess } from 'node:child_process'
+import { spawn, execFile as execFileCb, type ChildProcess } from 'node:child_process'
+import { promisify } from 'node:util'
 import { WebSocket } from 'ws'
 import fs from 'node:fs'
 import os from 'node:os'
@@ -30,6 +31,8 @@ import { getDaemonSource } from './daemon-source.js'
 import { DAEMON_BINARIES_DIR } from '../constants.js'
 import { buildRemotePreamble } from './session-io.js'
 import type { SshTarget } from './session-io.js'
+
+const execFileAsync = promisify(execFileCb)
 
 // ── Types ──
 
@@ -105,29 +108,29 @@ export class DaemonConnection {
    * Detect the remote host's architecture via `uname -m`.
    * Cached per connection — only one SSH round-trip.
    */
-  private detectRemoteArch(): string {
+  private async detectRemoteArch(): Promise<string> {
     if (this._remoteArch) return this._remoteArch
-    const raw = this.sshExec('uname -m').trim()
+    const raw = (await this.sshExec('uname -m')).trim()
     this._remoteArch = raw === 'aarch64' ? 'arm64' : 'x64'
     return this._remoteArch
   }
 
   /** Binary name for the detected remote arch. */
-  private get remoteBinaryName(): string {
-    return `daemon-linux-${this.detectRemoteArch()}`
+  private async getRemoteBinaryName(): Promise<string> {
+    return `daemon-linux-${await this.detectRemoteArch()}`
   }
 
   /** Full remote path where the binary is deployed. */
-  private get remoteDaemonPath(): string {
-    return `/tmp/open-walnut/${this.remoteBinaryName}`
+  private async getRemoteDaemonPath(): Promise<string> {
+    return `/tmp/open-walnut/${await this.getRemoteBinaryName()}`
   }
 
   /**
    * Check if pre-compiled daemon binaries exist locally.
    * Returns the local binary path if available, null otherwise.
    */
-  private getLocalBinaryPath(): string | null {
-    const binaryPath = path.join(DAEMON_BINARIES_DIR, this.remoteBinaryName)
+  private async getLocalBinaryPath(): Promise<string | null> {
+    const binaryPath = path.join(DAEMON_BINARIES_DIR, await this.getRemoteBinaryName())
     try {
       if (fs.statSync(binaryPath).isFile()) return binaryPath
     } catch { /* not built yet */ }
@@ -192,7 +195,7 @@ export class DaemonConnection {
 
     try {
       // Step 0: Establish SSH ControlMaster (one connection for all subsequent commands)
-      this.ensureControlMaster()
+      await this.ensureControlMaster()
 
       // Step 1: Check if daemon is already running
       let daemonPort = await this.checkDaemonRunning()
@@ -302,8 +305,8 @@ export class DaemonConnection {
       this.tunnel = null
     }
 
-    // Stop SSH ControlMaster
-    this.stopControlMaster()
+    // Stop SSH ControlMaster (fire-and-forget — cleanup only)
+    this.stopControlMaster().catch(() => {})
 
     log.session.info('DaemonConnection: disconnected', { host: this.hostKey })
   }
@@ -332,7 +335,7 @@ export class DaemonConnection {
    * separate SSH connections during connect(), which triggers rate-limiting
    * on corporate hosts.
    */
-  private ensureControlMaster(): void {
+  private async ensureControlMaster(): Promise<void> {
     if (this._controlMaster) return
     const socketPath = path.join(os.tmpdir(), `walnut-ssh-${this.hostKey}-${process.pid}`)
     this._controlPath = socketPath
@@ -350,8 +353,8 @@ export class DaemonConnection {
     args.push('-fN', this.sshHostString)  // -f: background, -N: no command
 
     try {
-      execFileSync('ssh', args, { timeout: 15_000, stdio: 'pipe' })
-      // execFileSync returns when -f backgrounds. ControlMaster is now running.
+      await execFileAsync('ssh', args, { timeout: 15_000 })
+      // execFileAsync resolves when -f backgrounds. ControlMaster is now running.
       log.session.info('DaemonConnection: SSH ControlMaster started', {
         host: this.hostKey, socketPath,
       })
@@ -366,11 +369,11 @@ export class DaemonConnection {
   /**
    * Stop the SSH ControlMaster connection.
    */
-  private stopControlMaster(): void {
+  private async stopControlMaster(): Promise<void> {
     if (this._controlPath) {
       try {
-        execFileSync('ssh', ['-o', `ControlPath=${this._controlPath}`, '-O', 'exit', this.sshHostString], {
-          timeout: 5_000, stdio: 'pipe',
+        await execFileAsync('ssh', ['-o', `ControlPath=${this._controlPath}`, '-O', 'exit', this.sshHostString], {
+          timeout: 5_000,
         })
       } catch { /* already gone */ }
       this._controlPath = null
@@ -382,13 +385,13 @@ export class DaemonConnection {
    * Execute a command on the remote host via SSH and return stdout.
    * Uses ControlMaster if available (single TCP connection for all commands).
    */
-  private sshExec(remoteCmd: string, timeoutMs = 10_000): string {
+  private async sshExec(remoteCmd: string, timeoutMs = 10_000): Promise<string> {
     const args = [...this.baseSshArgs, this.sshHostString, remoteCmd]
-    return execFileSync('ssh', args, {
+    const { stdout } = await execFileAsync('ssh', args, {
       encoding: 'utf-8',
       timeout: timeoutMs,
-      stdio: ['pipe', 'pipe', 'pipe'],
-    }).trim()
+    })
+    return stdout.trim()
   }
 
   // ── Private: Daemon management ──
@@ -403,7 +406,8 @@ export class DaemonConnection {
   private async checkDaemonRunning(): Promise<number | null> {
     // Try binary daemon first
     try {
-      const result = this.sshExec(`${this.remoteDaemonPath} --status 2>/dev/null`)
+      const remotePath = await this.getRemoteDaemonPath()
+      const result = await this.sshExec(`${remotePath} --status 2>/dev/null`)
       const status = JSON.parse(result)
       if (status.running && status.port) {
         log.session.info('DaemonConnection: daemon already running (binary)', {
@@ -416,7 +420,7 @@ export class DaemonConnection {
     // Fallback: check old node-based daemon (may still be running from previous deploy)
     try {
       const preamble = buildRemotePreamble(this.sshTarget.shell_setup)
-      const result = this.sshExec(`${preamble}; node /tmp/open-walnut/daemon.js --status 2>/dev/null`)
+      const result = await this.sshExec(`${preamble}; node /tmp/open-walnut/daemon.js --status 2>/dev/null`)
       const status = JSON.parse(result)
       if (status.running && status.port) {
         log.session.info('DaemonConnection: daemon already running (node)', {
@@ -437,7 +441,7 @@ export class DaemonConnection {
    * binaries haven't been built yet (dev workflow).
    */
   private async deployDaemon(): Promise<void> {
-    const localBinary = this.getLocalBinaryPath()
+    const localBinary = await this.getLocalBinaryPath()
 
     if (localBinary) {
       await this.deployBinary(localBinary)
@@ -459,7 +463,7 @@ export class DaemonConnection {
 
     try {
       // Create directory
-      this.sshExec('mkdir -p /tmp/open-walnut')
+      await this.sshExec('mkdir -p /tmp/open-walnut')
 
       // Check if remote binary is already up to date by comparing version strings.
       // The binary embeds a version via --define at build time.
@@ -469,7 +473,8 @@ export class DaemonConnection {
       try {
         const versionFile = localBinaryPath + '.version'
         const localVersion = fs.readFileSync(versionFile, 'utf-8').trim()
-        const remoteVersion = this.sshExec(`${this.remoteDaemonPath} --version 2>/dev/null`, 5_000)
+        const remoteDaemonPath = await this.getRemoteDaemonPath()
+        const remoteVersion = await this.sshExec(`${remoteDaemonPath} --version 2>/dev/null`, 5_000)
         if (localVersion && remoteVersion && localVersion === remoteVersion) {
           needsDeploy = false
           log.session.info('DaemonConnection: binary already up to date', {
@@ -483,13 +488,19 @@ export class DaemonConnection {
         // Many corporate hosts kill large SSH data transfers (SCP/pipe >10MB).
         // Instead: start a temporary HTTP server locally, create a reverse SSH
         // tunnel so the remote can reach it, then curl the compressed binary.
-        const remotePath = this.remoteDaemonPath
+        const remotePath = await this.getRemoteDaemonPath()
         const gzPath = localBinaryPath + '.gz'
 
         // Compress if needed (cached alongside binary)
         if (!fs.existsSync(gzPath)) {
-          const { execFileSync: execF } = await import('node:child_process')
-          execF('gzip', ['-c', localBinaryPath], { stdio: ['pipe', fs.openSync(gzPath, 'w'), 'pipe'] })
+          await new Promise<void>((resolve, reject) => {
+            const out = fs.createWriteStream(gzPath)
+            const gzip = spawn('gzip', ['-c', localBinaryPath], { stdio: ['pipe', 'pipe', 'pipe'] })
+            gzip.stdout!.pipe(out)
+            out.on('finish', resolve)
+            gzip.on('error', reject)
+            out.on('error', reject)
+          })
         }
 
         // Start temporary HTTP server on random port
@@ -525,9 +536,10 @@ export class DaemonConnection {
             throw new Error(`binary deploy failed (exit ${exitCode}): ${stderr.slice(0, 300)}`)
           }
 
+          const remoteBinaryName = await this.getRemoteBinaryName()
           log.session.info('DaemonConnection: binary deployed via reverse tunnel', {
             host: this.hostKey, deployMs: Date.now() - t0,
-            bytes: binarySize, gzBytes: gzData.length, binary: this.remoteBinaryName,
+            bytes: binarySize, gzBytes: gzData.length, binary: remoteBinaryName,
           })
         } finally {
           httpServer.close()
@@ -549,7 +561,7 @@ export class DaemonConnection {
 
     try {
       // Create directory and write daemon.js
-      this.sshExec('mkdir -p /tmp/open-walnut')
+      await this.sshExec('mkdir -p /tmp/open-walnut')
 
       const args = [...this.baseSshArgs, this.sshHostString, 'cat > /tmp/open-walnut/daemon.js']
       const proc = spawn('ssh', args, { stdio: ['pipe', 'pipe', 'pipe'] })
@@ -565,7 +577,7 @@ export class DaemonConnection {
 
       // Ensure 'ws' package is available for the daemon's WebSocket server.
       try {
-        this.sshExec(`${preamble}; cd /tmp/open-walnut && node -e "require('ws')" 2>/dev/null || npm install --prefix /tmp/open-walnut ws 2>/dev/null`, 30_000)
+        await this.sshExec(`${preamble}; cd /tmp/open-walnut && node -e "require('ws')" 2>/dev/null || npm install --prefix /tmp/open-walnut ws 2>/dev/null`, 30_000)
       } catch {
         log.session.debug('DaemonConnection: ws install skipped', { host: this.hostKey })
       }
@@ -589,9 +601,10 @@ export class DaemonConnection {
       // Determine the start command based on what was deployed.
       // Binary: direct execution. Source: needs node PATH discovery.
       let startCmd: string
-      if (this.getLocalBinaryPath()) {
+      if (await this.getLocalBinaryPath()) {
         // Binary deploy — run directly, no PATH setup needed
-        startCmd = `nohup ${this.remoteDaemonPath} --start > /tmp/open-walnut/daemon-start.log 2>&1 & ` +
+        const remotePath = await this.getRemoteDaemonPath()
+        startCmd = `nohup ${remotePath} --start > /tmp/open-walnut/daemon-start.log 2>&1 & ` +
           'sleep 2 && cat /tmp/open-walnut/daemon.port'
       } else {
         // Source deploy — needs node PATH discovery
@@ -600,13 +613,13 @@ export class DaemonConnection {
           'sleep 2 && cat /tmp/open-walnut/daemon.port'
       }
 
-      const output = this.sshExec(startCmd, 20_000)
+      const output = await this.sshExec(startCmd, 20_000)
 
       const port = parseInt(output.trim(), 10)
       if (isNaN(port) || port < 1 || port > 65535) {
         // Read the startup log for diagnostics
         let startLog = ''
-        try { startLog = this.sshExec('cat /tmp/open-walnut/daemon-start.log 2>/dev/null', 5_000) } catch {}
+        try { startLog = await this.sshExec('cat /tmp/open-walnut/daemon-start.log 2>/dev/null', 5_000) } catch {}
         throw new Error(`Invalid daemon port: "${output.trim()}". Startup log: ${startLog.slice(0, 500)}`)
       }
 
@@ -978,16 +991,28 @@ export function setOnDaemonStatusChange(cb: () => void): void {
 const connectionPool = new Map<string, DaemonConnection>()
 /** Pending connection promises — prevents concurrent connect() races. */
 const connectingPromises = new Map<string, Promise<DaemonConnection>>()
+/** Cache recent connection failures to avoid repeated 42s SSH timeouts. */
+const failureCache = new Map<string, { time: number; error: string }>()
+const FAILURE_CACHE_TTL_MS = 60_000  // 60 seconds
 
 /**
  * Get or create a DaemonConnection for a remote host.
  * Returns a connected connection ready for commands.
  * Thread-safe: concurrent callers share the same connect() promise.
+ *
+ * Caches connection failures for 60s to avoid blocking the event loop
+ * with repeated SSH timeout attempts when a host is unreachable.
  */
 export async function getDaemonConnection(hostKey: string, sshTarget: SshTarget): Promise<DaemonConnection> {
   // Fast path: already connected
   const existing = connectionPool.get(hostKey)
   if (existing?.connected) return existing
+
+  // Check failure cache — avoid retrying a recently-failed host
+  const cached = failureCache.get(hostKey)
+  if (cached && Date.now() - cached.time < FAILURE_CACHE_TTL_MS) {
+    throw new Error(`Connection to ${hostKey} failed recently (${Math.round((Date.now() - cached.time) / 1000)}s ago): ${cached.error}`)
+  }
 
   // Dedup: if another caller is already connecting, wait for their result
   const pending = connectingPromises.get(hostKey)
@@ -1002,9 +1027,15 @@ export async function getDaemonConnection(hostKey: string, sshTarget: SshTarget)
 
   const promise = conn.connect().then(() => {
     connectingPromises.delete(hostKey)
+    failureCache.delete(hostKey)  // Clear failure cache on success
     return conn!
   }).catch((err) => {
     connectingPromises.delete(hostKey)
+    // Cache the failure so subsequent requests fail fast
+    failureCache.set(hostKey, {
+      time: Date.now(),
+      error: err instanceof Error ? err.message : String(err),
+    })
     throw err
   })
 

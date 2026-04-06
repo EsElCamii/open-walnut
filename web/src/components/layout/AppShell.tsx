@@ -2,6 +2,7 @@ import { useState, useCallback, useEffect, useRef, type ReactNode } from 'react'
 import { useLocation } from 'react-router-dom';
 import { Sidebar } from './Sidebar';
 import { CronToast } from '../common/CronToast';
+
 import { FocusDock } from '../dock/FocusDock';
 import { TasksProvider } from '@/contexts/TasksContext';
 import { FocusBarProvider, useFocusBarContext } from '@/contexts/FocusBarContext';

@@ -11,6 +11,7 @@
  */
 
 import fs from 'node:fs'
+import fsp from 'node:fs/promises'
 import { log } from '../logging/index.js'
 import { isProcessAliveAsync } from '../utils/process.js'
 import { isSessionProcessAlive } from '../utils/session-liveness.js'
@@ -38,13 +39,16 @@ export class SessionHealthMonitor {
   }
 
   async check(): Promise<void> {
+    const checkT0 = Date.now()
     const { listNonTerminalSessions, updateSessionRecord } = await import('./session-tracker.js')
 
     // Kill orphaned processes from terminal/stopped sessions (leaked processes)
     await this.killOrphanedProcesses()
+    const tOrphan = Date.now()
 
     // Auto-recover remote sessions stuck in 'error' due to connection loss
     await this.recoverConnectionLostSessions(updateSessionRecord)
+    const tRecover = Date.now()
 
     let sessions
     try {
@@ -56,7 +60,11 @@ export class SessionHealthMonitor {
       return
     }
 
-    if (sessions.length === 0) return
+    if (sessions.length === 0) {
+      const total = Date.now() - checkT0
+      if (total > 500) log.session.warn('health monitor: check() slow (no active sessions)', { totalMs: total, orphanMs: tOrphan - checkT0, recoverMs: tRecover - tOrphan })
+      return
+    }
 
     // Batch-load all tasks upfront to avoid N+1 queries when checking task.phase
     let taskMap = new Map<string, Task>()
@@ -73,6 +81,12 @@ export class SessionHealthMonitor {
     // Detect stale AWAIT_HUMAN_ACTION sessions (stuck sub-agents)
     await this.checkStaleAwaitingSessions(sessions, updateSessionRecord, taskMap)
 
+    // Detect hung Claude Code processes: message delivered but no Claude output for 5 minutes.
+    // Root cause: Claude Code can hang internally (e.g. between autocompact and API call)
+    // while the process stays alive. Idle timeout misses this because Walnut's own user
+    // message writes refresh the file mtime.
+    const hungKilledIds = await this.checkHungSessions(sessions, updateSessionRecord)
+
     // Idle timeout — kill sessions with stale outputFile mtime past the configured threshold.
     // Returns IDs of sessions it killed — the main loop must skip those to avoid
     // a race where the stale in-memory process_status ('idle') causes the main loop
@@ -80,8 +94,9 @@ export class SessionHealthMonitor {
     const idleTimedOutIds = await this.checkIdleTimeout(sessions, updateSessionRecord, taskMap)
 
     for (const session of sessions) {
-      // Skip sessions already handled by idle timeout (prevents stale-state race)
+      // Skip sessions already handled by idle timeout or hung detection (prevents stale-state race)
       if (idleTimedOutIds.has(session.claudeSessionId)) continue
+      if (hungKilledIds.has(session.claudeSessionId)) continue
 
       const alive = await isSessionProcessAlive(session)
 
@@ -92,35 +107,42 @@ export class SessionHealthMonitor {
         const taskPhase = session.taskId ? taskMap.get(session.taskId)?.phase : undefined
         const isWorkInProgress = taskPhase === 'IN_PROGRESS'
 
+        // Remote session: daemon disconnection ≠ process death.
+        // The remote process may still be alive — we just can't verify it right now.
+        // Always use recoverable 'error' + "Connection lost" path regardless of
+        // process_status or task phase, so recoverConnectionLostSessions() can
+        // probe and restore the session after the daemon reconnects.
+        if (session.host) {
+          await updateSessionRecord(session.claudeSessionId, {
+            process_status: 'error',
+            errorMessage: 'Connection lost — unable to reach remote host',
+            activity: undefined,
+            last_status_change: now,
+            status_reason: 'remote_unreachable',
+            status_changed_by: 'health-monitor',
+          } as any)
+          log.session.warn('health monitor: remote session unreachable', {
+            sessionId: session.claudeSessionId,
+            taskId: session.taskId,
+            previousProcessStatus: session.process_status,
+            taskPhase,
+          })
+          bus.emit(EventNames.SESSION_STATUS_CHANGED, {
+            sessionId: session.claudeSessionId,
+            taskId: session.taskId,
+            process_status: 'error',
+            errorMessage: 'Connection lost — unable to reach remote host',
+          }, ['*'], { source: 'health-monitor', urgency: 'urgent' })
+          continue
+        }
+
+        // --- Local sessions only from here ---
+
         if (session.process_status === 'running' && isWorkInProgress) {
           // Process died while work was in progress — determine outcome.
 
-          if (session.host) {
-            // Remote session: daemon confirms process is dead (or grace period exceeded).
-            // Set process_status='error' directly with detail message.
-            await updateSessionRecord(session.claudeSessionId, {
-              process_status: 'error',
-              errorMessage: 'Connection lost — unable to reach remote host',
-              activity: undefined,
-              last_status_change: now,
-              status_reason: 'remote_unreachable',
-              status_changed_by: 'health-monitor',
-            } as any)
-            log.session.warn('health monitor: remote session unreachable', {
-              sessionId: session.claudeSessionId,
-              taskId: session.taskId,
-            })
-            bus.emit(EventNames.SESSION_STATUS_CHANGED, {
-              sessionId: session.claudeSessionId,
-              taskId: session.taskId,
-              process_status: 'error',
-              errorMessage: 'Connection lost — unable to reach remote host',
-            }, ['*'], { source: 'health-monitor', urgency: 'urgent' })
-            continue
-          }
-
           // Local sessions: read the last 8KB of the JSONL file to check for a result event.
-          const hasResult = session.outputFile ? this.outputFileHasResult(session.outputFile) : false
+          const hasResult = session.outputFile ? await this.outputFileHasResult(session.outputFile) : false
 
           if (hasResult) {
             // Normal completion — process_status 'stopped'
@@ -172,14 +194,14 @@ export class SessionHealthMonitor {
             process_status: newProcessStatus,
           }, ['*'], { source: 'health-monitor', urgency: 'urgent' })
         } else {
-          // Process died while idle or in non-in_progress state.
+          // Process died while idle or in non-in_progress state (local only).
           const updates: Record<string, unknown> = {
             last_status_change: now,
           }
 
           if (isWorkInProgress) {
-            const hasResult = session.outputFile && !session.outputFile.startsWith('remote://')
-              ? this.outputFileHasResult(session.outputFile) : false
+            const hasResult = session.outputFile
+              ? await this.outputFileHasResult(session.outputFile) : false
             if (hasResult) {
               updates.process_status = 'stopped'
               updates.status_reason = 'normal_completion'
@@ -217,6 +239,80 @@ export class SessionHealthMonitor {
         }
       }
     }
+
+    // Log total check duration (> 500ms = worth investigating)
+    const checkTotal = Date.now() - checkT0
+    if (checkTotal > 500) {
+      log.session.warn('health monitor: check() slow', {
+        totalMs: checkTotal, orphanMs: tOrphan - checkT0, recoverMs: tRecover - tOrphan,
+        sessionCount: sessions.length, taskCount: taskMap.size,
+      })
+    }
+  }
+
+  /**
+   * Detect sessions where a message was delivered but Claude produced no output.
+   * Does NOT kill — just logs a warning and updates the activity field so the UI
+   * shows a yellow banner. The user or idle timeout handles the actual recovery.
+   *
+   * Logs at 5 min (warn, once) so next time we have server-side evidence without
+   * needing to dig through Claude Code's internal debug log.
+   */
+  private async checkHungSessions(
+    sessions: SessionRecord[],
+    updateSessionRecord: (id: string, update: Record<string, unknown>) => Promise<unknown>,
+  ): Promise<Set<string>> {
+    const WARN_THRESHOLD_MS = 5 * 60 * 1000  // log warning after 5 min with no Claude output
+    const flaggedIds = new Set<string>()
+
+    let runner: { getSessionTimestamps(id: string): { lastClaudeOutputAt: number; lastMessageDeliveryAt: number } | undefined } | undefined
+    try {
+      const { sessionRunner } = await import('../providers/claude-code-session.js')
+      runner = sessionRunner
+    } catch { return flaggedIds }
+
+    for (const session of sessions) {
+      if (session.process_status !== 'running') continue
+      if (session.host) continue  // remote sessions use different transport — skip for now
+
+      const ts = runner.getSessionTimestamps(session.claudeSessionId)
+      if (!ts) continue
+      if (ts.lastMessageDeliveryAt === 0) continue  // no message delivered yet
+
+      // Only flag if a message was delivered AFTER the last Claude output
+      if (ts.lastClaudeOutputAt >= ts.lastMessageDeliveryAt) continue
+
+      const waitingMs = Date.now() - ts.lastMessageDeliveryAt
+      if (waitingMs < WARN_THRESHOLD_MS) continue
+
+      const waitingMin = Math.round(waitingMs / 60_000)
+
+      // Log warning (every 30s health check will re-log, but that's fine for diagnostics)
+      log.session.warn('health monitor: possible hung session — no Claude output after message delivery', {
+        sessionId: session.claudeSessionId,
+        taskId: session.taskId,
+        pid: session.pid,
+        waitingMinutes: waitingMin,
+        lastMessageDeliveryAt: new Date(ts.lastMessageDeliveryAt).toISOString(),
+        lastClaudeOutputAt: ts.lastClaudeOutputAt ? new Date(ts.lastClaudeOutputAt).toISOString() : 'never',
+      })
+
+      // Update activity so UI shows a yellow warning banner
+      await updateSessionRecord(session.claudeSessionId, {
+        activity: `Waiting for response (${waitingMin} min)...`,
+      })
+
+      bus.emit(EventNames.SESSION_STATUS_CHANGED, {
+        sessionId: session.claudeSessionId,
+        taskId: session.taskId,
+        process_status: 'running',
+        activity: `Waiting for response (${waitingMin} min)...`,
+      }, ['*'], { source: 'health-monitor' })
+
+      flaggedIds.add(session.claudeSessionId)
+    }
+
+    return flaggedIds
   }
 
   /**
@@ -277,7 +373,7 @@ export class SessionHealthMonitor {
         if (lastActiveMs === 0) continue  // No events received yet — skip
       } else if (session.outputFile && !session.outputFile.startsWith('remote://')) {
         try {
-          const stat = fs.statSync(session.outputFile)
+          const stat = await fsp.stat(session.outputFile)
           lastActiveMs = stat.mtimeMs
         } catch {
           continue  // Can't stat file — skip
@@ -372,7 +468,7 @@ export class SessionHealthMonitor {
         if (lastActiveMs === 0) continue  // No events yet — not stale
       } else if (session.outputFile && !session.outputFile.startsWith('remote://')) {
         try {
-          lastActiveMs = fs.statSync(session.outputFile).mtimeMs
+          lastActiveMs = (await fsp.stat(session.outputFile)).mtimeMs
         } catch {
           continue
         }
@@ -592,35 +688,34 @@ export class SessionHealthMonitor {
     }
   }
 
-  private outputFileHasResult(filePath: string): boolean {
+  private async outputFileHasResult(filePath: string): Promise<boolean> {
     // Only read last ~8KB — result event is always the final JSONL line.
     // Avoids reading 100MB+ files for long sessions.
+    let fh: fsp.FileHandle | undefined
     try {
-      const fd = fs.openSync(filePath, 'r')
-      try {
-        const stat = fs.fstatSync(fd)
-        const TAIL_BYTES = 8192
-        const start = Math.max(0, stat.size - TAIL_BYTES)
-        const buf = Buffer.alloc(Math.min(TAIL_BYTES, stat.size))
-        fs.readSync(fd, buf, 0, buf.length, start)
-        const tail = buf.toString('utf-8')
-        for (const line of tail.split('\n')) {
-          if (!line.trim()) continue
-          try {
-            const event = JSON.parse(line)
-            // A result with is_error:true (e.g. --resume "No conversation found")
-            // is NOT a successful completion — treat it as no result.
-            if (event.type === 'result') return !event.is_error
-          } catch { continue }  // expected: partial JSON lines in tail buffer
-        }
-      } finally {
-        fs.closeSync(fd)
+      fh = await fsp.open(filePath, 'r')
+      const stat = await fh.stat()
+      const TAIL_BYTES = 8192
+      const start = Math.max(0, stat.size - TAIL_BYTES)
+      const buf = Buffer.alloc(Math.min(TAIL_BYTES, stat.size))
+      await fh.read(buf, 0, buf.length, start)
+      const tail = buf.toString('utf-8')
+      for (const line of tail.split('\n')) {
+        if (!line.trim()) continue
+        try {
+          const event = JSON.parse(line)
+          // A result with is_error:true (e.g. --resume "No conversation found")
+          // is NOT a successful completion — treat it as no result.
+          if (event.type === 'result') return !event.is_error
+        } catch { continue }  // expected: partial JSON lines in tail buffer
       }
     } catch (err) {
       log.session.debug('health monitor: cannot read output file for result check', {
         filePath,
         error: err instanceof Error ? err.message : String(err),
       })
+    } finally {
+      await fh?.close()
     }
     return false
   }

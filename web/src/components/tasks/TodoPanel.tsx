@@ -1221,7 +1221,9 @@ function TaskDetailPane({ task, allTasks, onClose, onOpenSession, onOpenTriageFo
 }
 
 const RECENT_VISIBLE_MAX = 3;
-const PINNED_VISIBLE_MAX = 7;
+/** Per-tier visible-card limits — overflow becomes scrollable */
+const TIER_VISIBLE_MAX = { focus: 7, next: 5, satellite: 5 } as const;
+const CARD_HEIGHT_PX = 30; // ~28px min-height + 2px gap
 
 // ── RecentCard — recent-activity task card (no drag, has pin button) ──
 
@@ -2794,11 +2796,13 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
                     </div>
                     {!focusCollapsed && (
                       <SortableContext items={focusIds_arr} strategy={verticalListSortingStrategy}>
-                        <TierDropZone id="focus-drop-zone" isEmpty={focusTasksDisplay.length === 0}>
-                          {focusTasksDisplay.map((task) => (
-                            <SortableTierCard key={task.id} task={task} tier="focus" isFocused={focusedTaskId === task.id} onClick={handlePinnedCardClick} onSetTier={onSetTier} onUnpinTask={onUnpinTask} onPinTask={onPinTask} onSetPriority={onSetPriority} onSetDate={onSetDate} onStar={onStar} onExpandDetail={handleExpandDetail} onClearFocus={onClearFocus} onOpenSession={onOpenSession} />
-                          ))}
-                        </TierDropZone>
+                        <div className="todo-pinned-list-scroll" style={focusTasksDisplay.length > TIER_VISIBLE_MAX.focus ? { maxHeight: TIER_VISIBLE_MAX.focus * CARD_HEIGHT_PX } : undefined}>
+                          <TierDropZone id="focus-drop-zone" isEmpty={focusTasksDisplay.length === 0}>
+                            {focusTasksDisplay.map((task) => (
+                              <SortableTierCard key={task.id} task={task} tier="focus" isFocused={focusedTaskId === task.id} onClick={handlePinnedCardClick} onSetTier={onSetTier} onUnpinTask={onUnpinTask} onPinTask={onPinTask} onSetPriority={onSetPriority} onSetDate={onSetDate} onStar={onStar} onExpandDetail={handleExpandDetail} onClearFocus={onClearFocus} onOpenSession={onOpenSession} />
+                            ))}
+                          </TierDropZone>
+                        </div>
                       </SortableContext>
                     )}
                   </div>
@@ -2813,11 +2817,13 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
                     </div>
                     {!nextCollapsed && (
                       <SortableContext items={nextIds_arr} strategy={verticalListSortingStrategy}>
-                        <TierDropZone id="next-drop-zone" isEmpty={nextTasksDisplay.length === 0}>
-                          {nextTasksDisplay.map((task) => (
-                            <SortableTierCard key={task.id} task={task} tier="next" isFocused={focusedTaskId === task.id} onClick={handlePinnedCardClick} onSetTier={onSetTier} onUnpinTask={onUnpinTask} onPinTask={onPinTask} onSetPriority={onSetPriority} onSetDate={onSetDate} onStar={onStar} onExpandDetail={handleExpandDetail} onClearFocus={onClearFocus} onOpenSession={onOpenSession} />
-                          ))}
-                        </TierDropZone>
+                        <div className="todo-pinned-list-scroll" style={nextTasksDisplay.length > TIER_VISIBLE_MAX.next ? { maxHeight: TIER_VISIBLE_MAX.next * CARD_HEIGHT_PX } : undefined}>
+                          <TierDropZone id="next-drop-zone" isEmpty={nextTasksDisplay.length === 0}>
+                            {nextTasksDisplay.map((task) => (
+                              <SortableTierCard key={task.id} task={task} tier="next" isFocused={focusedTaskId === task.id} onClick={handlePinnedCardClick} onSetTier={onSetTier} onUnpinTask={onUnpinTask} onPinTask={onPinTask} onSetPriority={onSetPriority} onSetDate={onSetDate} onStar={onStar} onExpandDetail={handleExpandDetail} onClearFocus={onClearFocus} onOpenSession={onOpenSession} />
+                            ))}
+                          </TierDropZone>
+                        </div>
                       </SortableContext>
                     )}
                   </div>
@@ -2833,7 +2839,7 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
                       </div>
                       {!satelliteCollapsed && (
                         <SortableContext items={satelliteIds_arr} strategy={verticalListSortingStrategy}>
-                          <div className="todo-pinned-list todo-pinned-list-scroll" style={{ maxHeight: PINNED_VISIBLE_MAX * 30 }}>
+                          <div className="todo-pinned-list todo-pinned-list-scroll" style={satelliteTasksDisplay.length > TIER_VISIBLE_MAX.satellite ? { maxHeight: TIER_VISIBLE_MAX.satellite * CARD_HEIGHT_PX } : undefined}>
                             {satelliteTasksDisplay.map((task) => (
                               <SortableTierCard key={task.id} task={task} tier="satellite" isFocused={focusedTaskId === task.id} onClick={handlePinnedCardClick} onSetTier={onSetTier} onUnpinTask={onUnpinTask} onPinTask={onPinTask} onSetPriority={onSetPriority} onSetDate={onSetDate} onStar={onStar} onExpandDetail={handleExpandDetail} onClearFocus={onClearFocus} onOpenSession={onOpenSession} />
                             ))}

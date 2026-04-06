@@ -23,6 +23,10 @@ export interface ReadFileMeta {
   totalLines: number;
   /** Human-readable range, e.g. "1-87 of 87". */
   showing: string;
+  /** File modification time in ms (Math.floor), used by readFileState. */
+  mtimeMs: number;
+  /** Whether the result is a partial view (offset/limit applied). */
+  isPartialView: boolean;
 }
 
 export interface EditFileResult {
@@ -46,6 +50,18 @@ export function computeContentHash(content: string): string {
   return crypto.createHash('sha256').update(content).digest('hex').slice(0, 12);
 }
 
+/** Max file size for readFileWithMeta fast path (10 MB). Above this, reject. */
+const MAX_READ_SIZE = 10 * 1024 * 1024;
+
+export class FileTooLargeError extends Error {
+  constructor(public sizeInBytes: number, public maxSizeBytes: number) {
+    super(
+      `File (${(sizeInBytes / 1_048_576).toFixed(1)} MB) exceeds maximum allowed size (${(maxSizeBytes / 1_048_576).toFixed(0)} MB). Use offset and limit to read specific portions.`,
+    );
+    this.name = 'FileTooLargeError';
+  }
+}
+
 // ── Read ──
 
 /**
@@ -56,21 +72,45 @@ export function computeContentHash(content: string): string {
  *
  * The `contentHash` is always computed on the full file content,
  * not just the slice shown — so it can be passed to edit/write for stale checks.
+ *
+ * Default limit: 2000 lines (aligned with Claude Code).
+ * Strips BOM and normalizes CRLF→LF.
+ * Returns mtime for readFileState tracking.
  */
 export async function readFileWithMeta(
   filePath: string,
-  opts?: { offset?: number; limit?: number },
+  opts?: { offset?: number; limit?: number; maxSizeBytes?: number },
 ): Promise<ReadFileMeta> {
-  const raw = await fsp.readFile(filePath, 'utf-8');
+  const stat = await fsp.stat(filePath);
+  const mtimeMs = Math.floor(stat.mtimeMs);
+  const maxSize = opts?.maxSizeBytes ?? MAX_READ_SIZE;
+
+  if (stat.size > maxSize) {
+    throw new FileTooLargeError(stat.size, maxSize);
+  }
+
+  let raw = await fsp.readFile(filePath, 'utf-8');
+
+  // Strip UTF-8 BOM
+  if (raw.charCodeAt(0) === 0xFEFF) {
+    raw = raw.slice(1);
+  }
+
+  // Normalize CRLF → LF
+  if (raw.includes('\r\n')) {
+    raw = raw.replace(/\r\n/g, '\n');
+  }
+
   const contentHash = computeContentHash(raw);
   const allLines = raw.split('\n');
   const totalLines = allLines.length;
 
+  const DEFAULT_MAX_LINES = 2000;
   const offset = Math.max(1, opts?.offset ?? 1);
-  const limit = opts?.limit;
+  const limit = opts?.limit ?? DEFAULT_MAX_LINES;
 
   const start = offset - 1; // 0-based
-  const sliced = limit != null ? allLines.slice(start, start + limit) : allLines.slice(start);
+  const sliced = allLines.slice(start, start + limit);
 
   const numbered = sliced.map(
     (line, i) => `${String(start + i + 1).padStart(6)}\t${line}`,
@@ -79,8 +119,9 @@ export async function readFileWithMeta(
   const content = numbered.join('\n');
   const endLine = start + sliced.length;
   const showing = `${start + 1}-${endLine} of ${totalLines}`;
+  const isPartialView = offset > 1 || endLine < totalLines;
 
-  return { content, contentHash, totalLines, showing };
+  return { content, contentHash, totalLines, showing, mtimeMs, isPartialView };
 }
 
 // ── Edit ──

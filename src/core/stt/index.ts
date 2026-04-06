@@ -37,7 +37,7 @@ export function createEngine(config: Config): SttEngine | null {
         modelPath: stt.whisper_cpp_model ?? '',
       });
     default:
-      log.warn('stt', `Unknown STT engine: ${stt.engine}`);
+      log.stt.warn(`Unknown STT engine: ${stt.engine}`);
       return null;
   }
 }
@@ -54,8 +54,8 @@ export async function transcribeAudio(config: Config, req: SttRequest): Promise<
     throw new Error(`STT engine "${engine.name}" is not available: ${error}`);
   }
 
-  log.info('stt', `Transcribing with ${engine.name} (format=${req.format}, lang=${req.language ?? 'auto'})`);
+  log.stt.info(`Transcribing with ${engine.name} (format=${req.format}, lang=${req.language ?? 'auto'})`);
   const result = await engine.transcribe(req);
-  log.info('stt', `Transcription complete: ${result.text.length} chars in ${result.durationMs}ms`);
+  log.stt.info(`Transcription complete: ${result.text.length} chars in ${result.durationMs}ms`);
   return result;
 }

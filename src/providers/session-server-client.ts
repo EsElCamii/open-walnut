@@ -164,7 +164,7 @@ export class SessionServerClient {
     // Reject all pending requests
     for (const [id, pending] of this.pendingRequests) {
       clearTimeout(pending.timer)
-      pending.reject(new Error('Client destroyed'))
+      pending.reject(new Error(`Session server client destroyed (${this.hostName}, ${this.url})`))
     }
     this.pendingRequests.clear()
 
@@ -237,7 +237,7 @@ export class SessionServerClient {
       const id = crypto.randomBytes(6).toString('hex')
       const timer = setTimeout(() => {
         this.pendingRequests.delete(id)
-        reject(new Error(`Command ${method} timed out after ${this.commandTimeoutMs}ms`))
+        reject(new Error(`Command ${method} timed out after ${this.commandTimeoutMs}ms (${this.hostName}, ${this.url})`))
       }, this.commandTimeoutMs)
 
       this.pendingRequests.set(id, { resolve, reject, timer })
@@ -275,7 +275,7 @@ export class SessionServerClient {
     if (frame.ok) {
       pending.resolve(frame.data)
     } else {
-      pending.reject(new Error(frame.error ?? 'Unknown error'))
+      pending.reject(new Error(frame.error ?? `Unknown error from session server (${this.hostName}, ${this.url})`))
     }
   }
 
@@ -382,7 +382,7 @@ export class SessionServerClient {
     // Reject all pending requests
     for (const [id, pending] of this.pendingRequests) {
       clearTimeout(pending.timer)
-      pending.reject(new Error('Connection closed'))
+      pending.reject(new Error(`Session server connection closed (${this.hostName}, ${this.url})`))
     }
     this.pendingRequests.clear()
 

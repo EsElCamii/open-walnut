@@ -92,6 +92,12 @@ export const EventNames = {
   // Config events
   CONFIG_CHANGED: 'config:changed',
 
+  // Audio capture events
+  AUDIO_STARTED: 'audio:started',
+  AUDIO_STOPPED: 'audio:stopped',
+  AUDIO_CHUNK_SAVED: 'audio:chunk-saved',
+  AUDIO_ERROR: 'audio:error',
+
   // System health events
   SYSTEM_HEALTH: 'system:health',
 } as const;

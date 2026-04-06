@@ -7,7 +7,15 @@
  * files_list  — list contents under a source prefix
  * files_glob  — find files by glob pattern
  * files_grep  — search file contents by regex
+ *
+ * readFileState mechanism:
+ *   files_read stores { content, mtime } for each file path read.
+ *   files_edit/files_write on file sources check:
+ *     1. File was read → error if not
+ *     2. File mtime unchanged → error if modified since read
+ *   Memory/notes/repos sources still use content_hash for safety.
  */
+import fsp from 'node:fs/promises';
 import type { ToolDefinition, ToolResultContent } from '../tools.js';
 import {
   resolveSource,
@@ -24,10 +32,66 @@ import {
   StaleHashError,
   ContentNotFoundError,
   AmbiguousMatchError,
+  FileTooLargeError,
 } from '../../utils/file-ops.js';
+import { bus, EventNames } from '../../core/event-bus.js';
+import { findSimilarFile } from '../../utils/file-utils.js';
+import { isBinaryByExtension } from '../../utils/binary-detect.js';
+import { isBlockedDevicePath } from '../../constants/files.js';
 
 function json(data: unknown): string {
   return JSON.stringify(data, null, 2);
+}
+
+// ── readFileState — "Must Read Before Write/Edit" ──
+
+interface ReadFileStateEntry {
+  /** File mtime at read time (Math.floor(mtimeMs)). */
+  timestamp: number;
+  /** Whether the read was partial (offset/limit applied). */
+  isPartialView: boolean;
+}
+
+/**
+ * Tracks which files have been read and their mtime at read time.
+ * Used to enforce "must read before write/edit" for file sources.
+ * Keyed by absolute file path.
+ */
+const readFileState = new Map<string, ReadFileStateEntry>();
+
+/** Export for testing. */
+export function getReadFileState(): Map<string, ReadFileStateEntry> {
+  return readFileState;
+}
+
+/**
+ * Validate that a file was read before write/edit.
+ * Returns error string if validation fails, undefined if OK.
+ */
+async function validateReadState(filePath: string): Promise<string | undefined> {
+  const entry = readFileState.get(filePath);
+  if (!entry) {
+    return `Error: File has not been read yet. You must use files_read to read "${filePath}" before editing or writing to it.`;
+  }
+  if (entry.isPartialView) {
+    return `Error: File was only partially read (with offset/limit). You must read the full file before editing or writing to it. Use files_read without offset/limit.`;
+  }
+
+  // Check if file has been modified since we read it
+  try {
+    const stat = await fsp.stat(filePath);
+    const currentMtime = Math.floor(stat.mtimeMs);
+    if (currentMtime > entry.timestamp) {
+      return `Error: File "${filePath}" has been modified since it was last read (read at ${entry.timestamp}, now ${currentMtime}). Read it again before editing.`;
+    }
+  } catch (err: unknown) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+      return `Error: File "${filePath}" no longer exists. It was deleted since last read.`;
+    }
+    // Other stat errors — don't block, let the write/edit try
+  }
+
+  return undefined;
 }
 
 /** Get the handler for a resolved source. */
@@ -52,9 +116,14 @@ function formatError(err: unknown, source: string): string {
   if (err instanceof AmbiguousMatchError) {
     return `Error: ${err.message}`;
   }
+  if (err instanceof FileTooLargeError) {
+    return `Error: ${err.message}`;
+  }
   const code = (err as NodeJS.ErrnoException).code;
   if (code === 'ENOENT') {
-    return `Error: Source not found: "${source}". File does not exist.`;
+    const similar = findSimilarFile(source.startsWith('/') ? source : '');
+    const suggestion = similar ? ` Did you mean "${similar}"?` : '';
+    return `Error: Source not found: "${source}". File does not exist.${suggestion}`;
   }
   if (code === 'EACCES') {
     return `Error: Permission denied: "${source}".`;
@@ -69,7 +138,9 @@ function formatError(err: unknown, source: string): string {
 
 export const filesReadTool: ToolDefinition = {
   name: 'files_read',
-  description: `Read any content source. Returns line-numbered text + content_hash. Images return inline.
+  description: `Read any content source. Returns line-numbered text + content_hash. Images return inline. PDFs supported.
+
+IMPORTANT: You must read a file before editing or writing to it. The system tracks which files have been read.
 
 Special sources (use these URIs instead of raw file paths):
   notes/global           — The Notes panel on the home page: user's personal scratchpad
@@ -87,8 +158,11 @@ Special sources (use these URIs instead of raw file paths):
   repos/                 — List all registered repositories (name, description, hosts).
   repos/{name}           — Read repository details (YAML: hosts, tech stack, architecture, commands).
   /absolute/path         — Any file on disk. Images (PNG/JPEG/GIF/WebP) return inline.
+                           PDFs return as document blocks. Binary files are rejected.
 
-Set parse=true to also return structured extraction (headers, todos, task-refs, links).`,
+Default limit: 2000 lines. Use offset/limit for large files.
+Set parse=true to also return structured extraction (headers, todos, task-refs, links).
+For PDFs: use pages parameter (e.g. "1-5", "3", "10-20") to extract specific pages as images.`,
   input_schema: {
     type: 'object',
     properties: {
@@ -102,7 +176,11 @@ Set parse=true to also return structured extraction (headers, todos, task-refs, 
       },
       limit: {
         type: 'number',
-        description: 'Max lines to return.',
+        description: 'Max lines to return. Default: 2000.',
+      },
+      pages: {
+        type: 'string',
+        description: 'PDF page range (e.g. "1-5", "3", "10-20"). Only for PDF files. Max 20 pages per request.',
       },
       parse: {
         type: 'boolean',
@@ -122,21 +200,27 @@ Set parse=true to also return structured extraction (headers, todos, task-refs, 
       const result = await handler.read(resolved, {
         offset: params.offset as number | undefined,
         limit: params.limit as number | undefined,
+        pages: params.pages as string | undefined,
       });
 
-      // If handler returned raw content (e.g. image blocks), pass through
+      // If handler returned raw content (e.g. image blocks, PDF blocks, error strings), pass through
       if (typeof result === 'string' || Array.isArray(result)) {
         return result;
       }
 
       const readResult = result as FilesReadResult;
 
+      // ── Store readFileState for file sources ──
+      if (resolved.type === 'file' && readResult._mtimeMs !== undefined) {
+        readFileState.set(resolved.filePath, {
+          timestamp: readResult._mtimeMs,
+          isPartialView: readResult._isPartialView ?? false,
+        });
+      }
+
       // Optionally parse
       if (params.parse) {
-        // We need the raw (un-numbered) content for parsing.
-        // Reconstruct from line-numbered output by stripping line numbers.
         const rawLines = readResult.content.split('\n').map((line) => {
-          // Line format: "    42\tcontent..." — strip the 6-char number + tab prefix
           const tabIdx = line.indexOf('\t');
           return tabIdx >= 0 ? line.slice(tabIdx + 1) : line;
         });
@@ -144,7 +228,9 @@ Set parse=true to also return structured extraction (headers, todos, task-refs, 
         readResult.parsed = parseMarkdown(rawContent);
       }
 
-      return json(readResult);
+      // Strip internal fields before returning to model
+      const { _mtimeMs, _isPartialView, ...cleanResult } = readResult;
+      return json(cleanResult);
     } catch (err) {
       return formatError(err, source);
     }
@@ -156,10 +242,13 @@ Set parse=true to also return structured extraction (headers, todos, task-refs, 
 export const filesWriteTool: ToolDefinition = {
   name: 'files_write',
   description: `Write or append content to any source.
+
+IMPORTANT: For file sources (/absolute/path), you MUST read the file first with files_read before writing.
+           The system will reject writes to files that haven't been read. New files (that don't exist yet) are exempt.
+
 Mode 'overwrite' replaces entire content (default). Mode 'append' adds to end.
 For memory sources: append auto-prepends timestamp heading.
 content_hash (from files_read) required for overwrite on memory/notes sources — prevents stale writes.
-For file sources: content_hash is optional but recommended for safety.
 
 Sources: notes/global, notes/{name}, memory/global, memory/project/{path},
 memory/daily[/YYYY-MM-DD], memory/repo/{slug}, repos/{name}, /absolute/path — see files_read for full descriptions.`,
@@ -195,11 +284,62 @@ memory/daily[/YYYY-MM-DD], memory/repo/{slug}, repos/{name}, /absolute/path — 
 
     try {
       const resolved = resolveSource(source);
+
+      // ── readFileState check for file sources ──
+      if (resolved.type === 'file') {
+        // Check if file exists — new files are exempt from "must read first"
+        let fileExists = false;
+        try {
+          await fsp.stat(resolved.filePath);
+          fileExists = true;
+        } catch (err: unknown) {
+          if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+        }
+
+        if (fileExists) {
+          // Blocked device check
+          if (isBlockedDevicePath(resolved.filePath)) {
+            return `Error: "${resolved.filePath}" is a blocked device path and cannot be written.`;
+          }
+          // Binary check
+          if (isBinaryByExtension(resolved.filePath)) {
+            return `Error: "${resolved.filePath}" is a binary file and cannot be written as text.`;
+          }
+
+          const readError = await validateReadState(resolved.filePath);
+          if (readError) return readError;
+        }
+      }
+
       const handler = getHandler(resolved.type);
       const result = await handler.write(resolved, content, {
         mode: (params.mode as 'overwrite' | 'append') ?? 'overwrite',
         contentHash: params.content_hash as string | undefined,
       });
+
+      // ── Update readFileState after successful write ──
+      if (resolved.type === 'file') {
+        try {
+          const stat = await fsp.stat(resolved.filePath);
+          readFileState.set(resolved.filePath, {
+            timestamp: Math.floor(stat.mtimeMs),
+            isPartialView: false,
+          });
+        } catch {
+          // Non-critical — state update failed but write succeeded
+        }
+      }
+
+      // ── Notify UI when notes are modified via agent API ──
+      // Scoped to web-ui only — broadcasting to '*' would hit main-agent's
+      // CoalescingQueue and trigger an unnecessary AI turn.
+      if (resolved.type === 'notes' && result.content_hash) {
+        bus.emit(EventNames.NOTES_UPDATED, {
+          source,
+          contentHash: result.content_hash,
+        }, ['web-ui'], { source: 'files-tools' });
+      }
+
       return json(result);
     } catch (err) {
       return formatError(err, source);
@@ -212,8 +352,11 @@ memory/daily[/YYYY-MM-DD], memory/repo/{slug}, repos/{name}, /absolute/path — 
 export const filesEditTool: ToolDefinition = {
   name: 'files_edit',
   description: `Edit by exact string replacement in any source.
+
+IMPORTANT: For file sources (/absolute/path), you MUST read the file first with files_read before editing.
+           The system will reject edits to files that haven't been read.
+
 content_hash (from files_read) required for memory/notes sources — prevents stale edits.
-For file sources: content_hash is optional but recommended.
 
 Sources: notes/global, notes/{name}, memory/global, memory/project/{path},
 memory/daily[/YYYY-MM-DD], memory/repo/{slug}, repos/{name}, /absolute/path — see files_read for full descriptions.`,
@@ -253,11 +396,49 @@ memory/daily[/YYYY-MM-DD], memory/repo/{slug}, repos/{name}, /absolute/path — 
 
     try {
       const resolved = resolveSource(source);
+
+      // ── readFileState check for file sources ──
+      if (resolved.type === 'file') {
+        if (isBlockedDevicePath(resolved.filePath)) {
+          return `Error: "${resolved.filePath}" is a blocked device path and cannot be edited.`;
+        }
+        if (isBinaryByExtension(resolved.filePath)) {
+          return `Error: "${resolved.filePath}" is a binary file and cannot be edited as text.`;
+        }
+
+        const readError = await validateReadState(resolved.filePath);
+        if (readError) return readError;
+      }
+
       const handler = getHandler(resolved.type);
       const result = await handler.edit(resolved, oldContent, newContent, {
         contentHash: params.content_hash as string | undefined,
         replaceAll: (params.replace_all as boolean) ?? false,
       });
+
+      // ── Update readFileState after successful edit ──
+      if (resolved.type === 'file') {
+        try {
+          const stat = await fsp.stat(resolved.filePath);
+          readFileState.set(resolved.filePath, {
+            timestamp: Math.floor(stat.mtimeMs),
+            isPartialView: false,
+          });
+        } catch {
+          // Non-critical
+        }
+      }
+
+      // ── Notify UI when notes are modified via agent API ──
+      // Scoped to web-ui only — broadcasting to '*' would hit main-agent's
+      // CoalescingQueue and trigger an unnecessary AI turn.
+      if (resolved.type === 'notes' && result.content_hash) {
+        bus.emit(EventNames.NOTES_UPDATED, {
+          source,
+          contentHash: result.content_hash,
+        }, ['web-ui'], { source: 'files-tools' });
+      }
+
       return json(result);
     } catch (err) {
       return formatError(err, source);

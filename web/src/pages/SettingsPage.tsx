@@ -42,7 +42,7 @@ const SECTION_IDS = [
 ];
 
 export function SettingsPage() {
-  const { config, loading, error, saveSection } = useSettingsConfig();
+  const { config, loading, error, saveSection, reload } = useSettingsConfig();
   const [activeSection, setActiveSection] = useState('providers');
   const contentRef = useRef<HTMLDivElement>(null);
 
@@ -118,7 +118,7 @@ export function SettingsPage() {
           <SectionErrorBoundary name="Claude Code Session"><SessionsSection config={config} onSave={saveSection} /></SectionErrorBoundary>
           <SectionErrorBoundary name="Integrations"><IntegrationsSection config={config} onSave={saveSection} /></SectionErrorBoundary>
           <SectionErrorBoundary name="Search"><SearchSection config={config} onSave={saveSection} /></SectionErrorBoundary>
-          <SectionErrorBoundary name="Speech-to-Text"><SttSection config={config} onSave={saveSection} /></SectionErrorBoundary>
+          <SectionErrorBoundary name="Speech-to-Text"><SttSection config={config} onSave={saveSection} onReload={reload} /></SectionErrorBoundary>
           <SectionErrorBoundary name="Heartbeat"><HeartbeatSection config={config} onSave={saveSection} /></SectionErrorBoundary>
           <SectionErrorBoundary name="Remote Hosts"><RemoteHostsSection config={config} onSave={saveSection} /></SectionErrorBoundary>
           <SectionErrorBoundary name="Advanced"><AdvancedSection config={config} onSave={saveSection} /></SectionErrorBoundary>

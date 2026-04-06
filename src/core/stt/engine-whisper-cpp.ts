@@ -58,7 +58,7 @@ export function createWhisperCppEngine(cfg: WhisperCppConfig): SttEngine {
           args.push('-l', req.language);
         }
 
-        log.info('stt', `Running whisper-cpp: ${cfg.binaryPath} ${args.join(' ')}`);
+        log.stt.info(`Running whisper-cpp: ${cfg.binaryPath} ${args.join(' ')}`);
 
         const { stdout } = await execFileAsync(cfg.binaryPath, args, {
           timeout: 60_000,

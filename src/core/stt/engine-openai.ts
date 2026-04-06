@@ -44,7 +44,7 @@ export function createOpenAiEngine(cfg: OpenAiSttConfig): SttEngine {
       }
 
       const url = `${baseUrl}/audio/transcriptions`;
-      log.info('stt', `POST ${url} (model=${model}, size=${audioBuffer.length})`);
+      log.stt.info(`POST ${url} (model=${model}, size=${audioBuffer.length})`);
 
       const res = await fetch(url, {
         method: 'POST',
