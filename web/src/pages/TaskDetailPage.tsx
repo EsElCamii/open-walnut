@@ -4,6 +4,7 @@ import type { Task } from '@open-walnut/core';
 import { renderNoteMarkdown } from '@/utils/markdown';
 import { fetchTask, toggleCompleteTask, starTask, addNote, updateNote, updateDescription, deleteTask, addTag, removeTag, addDependency, removeDependency, updateTask } from '@/api/tasks';
 import { SprintPicker } from '@/components/tasks/SprintPicker';
+import { DatePicker } from '@/components/common/DatePicker';
 import { fetchSessionsForTask, updateSession } from '@/api/sessions';
 import type { SessionRecord } from '@open-walnut/core';
 import { PriorityBadge } from '@/components/common/PriorityBadge';
@@ -206,6 +207,12 @@ export function TaskDetailPage() {
     setTask(updated);
   };
 
+  const handleDateChange = async (date: string | null) => {
+    if (!id) return;
+    const updated = await updateTask(id, { due_date: date ?? '' });
+    setTask(updated);
+  };
+
   const handleDelete = async () => {
     if (!id) return;
     const confirmed = window.confirm(`Delete task "${task?.title}"? This cannot be undone.`);
@@ -296,7 +303,7 @@ export function TaskDetailPage() {
           <StatusBadge status={task.status} phase={task.phase} />
           <PriorityBadge priority={task.priority} />
           <span className="text-sm text-muted">{task.category}{task.project && task.project !== task.category ? ` / ${task.project}` : ''}</span>
-          {task.due_date && <span className="text-sm text-muted">Due: {task.due_date}</span>}
+          <DatePicker date={task.due_date} onChange={handleDateChange} />
           <SprintPicker sprint={task.sprint} onSprintChange={handleSprintChange} />
         </div>
         {/* Dependencies */}

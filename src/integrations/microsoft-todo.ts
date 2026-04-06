@@ -639,8 +639,11 @@ export function mapToRemote(task: Task): Partial<MSTodoTask> {
   }
 
   if (task.due_date) {
+    // due_date may be date-only "2026-04-10" or full ISO "2026-04-05T16:30:00.000Z"
+    // MS Graph expects "YYYY-MM-DDT00:00:00.0000000" — extract date part only
+    const datePart = task.due_date.split('T')[0];
     msTask.dueDateTime = {
-      dateTime: task.due_date + 'T00:00:00.0000000',
+      dateTime: datePart + 'T00:00:00.0000000',
       timeZone: 'UTC',
     };
   }

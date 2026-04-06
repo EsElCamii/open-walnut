@@ -5297,6 +5297,65 @@ input:focus, textarea:focus, select:focus {
   cursor: not-allowed;
 }
 
+/* ── Mic button (speech-to-text) ── */
+
+.mic-btn {
+  background: transparent;
+  border: 1px solid var(--border-strong);
+  color: var(--fg-muted);
+  padding: 6px 8px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: color 0.15s, border-color 0.15s, box-shadow 0.15s;
+  flex-shrink: 0;
+}
+
+.mic-btn:hover:not(:disabled) {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+.mic-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.mic-btn-sm {
+  padding: 4px 6px;
+}
+.mic-btn-sm svg {
+  width: 14px;
+  height: 14px;
+}
+
+.mic-recording {
+  color: var(--error) !important;
+  border-color: var(--error) !important;
+  animation: mic-pulse 1.2s ease-in-out infinite;
+}
+
+.mic-transcribing {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+.mic-spinner {
+  animation: mic-spin 1s linear infinite;
+}
+
+@keyframes mic-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(255, 59, 48, 0.4); }
+  50% { box-shadow: 0 0 0 6px rgba(255, 59, 48, 0); }
+}
+
+@keyframes mic-spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
 .chat-image-previews {
   display: flex;
   gap: 8px;
@@ -7150,6 +7209,7 @@ img[data-lightbox-src],
 }
 
 .todo-panel-item {
+  position: relative;
   display: flex;
   align-items: flex-start;
   gap: 4px;
@@ -7273,21 +7333,15 @@ img[data-lightbox-src],
   flex-shrink: 0;
 }
 
-/* Attention dot — fixed-width slot so phase icon never shifts position.
-   Always rendered; red circle only appears when .active. */
+/* Attention dot — absolutely positioned in todo-panel-item's left padding area.
+   Always before chevron and phase icon; doesn't add width to the flow. */
 .task-attention-dot {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 14px;
-  height: 14px;
-  flex-shrink: 0;
-}
-.task-attention-dot.active::after {
-  content: '';
-  display: block;
-  width: 8px;
-  height: 8px;
+  position: absolute;
+  left: 8px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 7px;
+  height: 7px;
   border-radius: 50%;
   background: var(--error);
 }
@@ -9481,6 +9535,21 @@ img[data-lightbox-src],
   background: none;
 }
 
+a.task-kebab-info {
+  cursor: pointer;
+  text-decoration: none;
+}
+
+a.task-kebab-info:hover {
+  background: var(--accent-subtle);
+}
+
+.task-kebab-external-arrow {
+  margin-left: auto;
+  opacity: 0.5;
+  font-size: 11px;
+}
+
 .task-kebab-icon {
   display: inline-flex;
   align-items: center;
@@ -9557,6 +9626,84 @@ img[data-lightbox-src],
   background: color-mix(in srgb, currentColor 10%, transparent);
   font-weight: 600;
 }
+
+/* ── Kebab menu: Date section ── */
+.task-kebab-date {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 6px 12px;
+}
+.task-kebab-date-label {
+  font-size: 12px;
+  color: var(--fg-secondary);
+  white-space: nowrap;
+}
+
+/* ── DatePicker component ── */
+.dp-wrapper { position: relative; display: inline-block; }
+.dp-trigger {
+  font-size: 11px;
+  font-weight: 500;
+  padding: 2px 8px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: none;
+  color: var(--fg-secondary);
+  cursor: pointer;
+  transition: background 0.1s, border-color 0.1s;
+}
+.dp-trigger:hover { background: var(--bg-tertiary); }
+.dp-trigger-has-date { background: var(--bg-tertiary); color: var(--fg-primary); }
+.dp-trigger-overdue {
+  background: rgba(255, 59, 48, 0.12);
+  color: var(--error);
+  border-color: rgba(255, 59, 48, 0.3);
+}
+.dp-popover {
+  min-width: 220px;
+  background: var(--bg-primary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm, 8px);
+  box-shadow: 0 4px 16px rgba(0,0,0,0.18);
+  padding: 8px;
+  z-index: 9999;
+}
+.dp-content { display: flex; flex-direction: column; gap: 6px; }
+.dp-pills { display: flex; gap: 4px; flex-wrap: wrap; }
+.dp-pill {
+  padding: 3px 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: none;
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--fg-secondary);
+  cursor: pointer;
+  transition: background 0.1s;
+}
+.dp-pill:hover { background: var(--accent-subtle, var(--bg-tertiary)); color: var(--fg-primary); }
+.dp-calendar-row { display: flex; align-items: center; gap: 4px; }
+.dp-date-input {
+  flex: 1;
+  font-size: 12px;
+  padding: 3px 6px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-secondary, var(--bg-primary));
+  color: var(--fg-primary);
+  color-scheme: dark;
+}
+.dp-clear {
+  padding: 2px 6px;
+  border: none;
+  background: none;
+  color: var(--fg-muted);
+  font-size: 14px;
+  cursor: pointer;
+  border-radius: 4px;
+}
+.dp-clear:hover { background: var(--bg-tertiary); color: var(--error); }
 
 /* Info badges in title row — keep compact */
 .todo-item-title-row .todo-item-due-pill,
@@ -16104,69 +16251,31 @@ a.file-link:hover {
   flex-shrink: 0;
 }
 
-/* ===== Recording Button ===== */
+/* ===== Sidebar Recording Button ===== */
 
-.recording-btn {
-  position: fixed;
-  bottom: 20px;
-  right: 20px;
-  z-index: 200;
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 8px 12px;
-  border: none;
-  border-radius: 20px;
-  background: var(--bg-secondary);
-  border: 1px solid var(--border);
-  color: var(--fg-secondary);
-  cursor: pointer;
-  font-size: 12px;
-  font-family: inherit;
-  transition: all 0.2s ease;
-  box-shadow: var(--card-shadow);
-}
-
-.recording-btn:hover {
-  background: var(--bg-tertiary);
-  box-shadow: var(--card-shadow-hover);
-}
-
-.recording-btn:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
-
-.recording-btn__dot {
-  width: 10px;
-  height: 10px;
-  border-radius: 50%;
-  background: var(--fg-muted);
-  flex-shrink: 0;
-  transition: background 0.2s ease;
-}
-
-.recording-btn--active {
-  background: rgba(255, 59, 48, 0.08);
-  border-color: rgba(255, 59, 48, 0.2);
+.sidebar-recording-btn.recording-active {
   color: var(--error);
 }
 
-.recording-btn--active:hover {
-  background: rgba(255, 59, 48, 0.12);
-}
-
-.recording-btn--active .recording-btn__dot {
-  background: var(--error);
+.sidebar-recording-btn.recording-active svg circle[fill] {
   animation: recording-pulse 1.5s ease-in-out infinite;
 }
 
-.recording-btn__duration {
+.sidebar-recording-btn.recording-loading {
+  opacity: 0.6;
+  animation: recording-blink 0.8s ease-in-out infinite;
+}
+
+.sidebar-recording-btn .sidebar-label {
   font-variant-numeric: tabular-nums;
-  font-weight: 500;
 }
 
 @keyframes recording-pulse {
-  0%, 100% { opacity: 1; transform: scale(1); }
-  50% { opacity: 0.5; transform: scale(0.85); }
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}
+
+@keyframes recording-blink {
+  0%, 100% { opacity: 0.6; }
+  50% { opacity: 0.3; }
 }

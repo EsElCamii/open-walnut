@@ -11,6 +11,7 @@ import type { FocusTier } from '@/api/focus';
 import * as ICONS from '../common/Icons';
 import { getIntegrationMeta, useIntegrations } from '@/hooks/useIntegrations';
 import { resolveTaskSessionId } from '@/utils/session-status';
+import { DatePicker, formatDateDisplay } from '../common/DatePicker';
 
 interface TaskKebabMenuProps {
   task: Task;
@@ -26,6 +27,7 @@ interface TaskKebabMenuProps {
   onUnpinTask?: (id: string) => void;
   onSetTier?: (id: string, tier: FocusTier) => void;
   onOpenSession?: (sessionId: string) => void;
+  onSetDate?: (id: string, date: string | null) => void;
 }
 
 const TIER_OPTIONS: { value: FocusTier; label: string; icon: string }[] = [
@@ -47,7 +49,7 @@ const PRIORITY_OPTIONS: { value: TaskPriority; icon: string; label: string }[] =
   { value: 'none', icon: '--', label: 'None' },
 ];
 
-export function TaskKebabMenu({ task, isFocused, isPinned, pinnedTier, isDone, onExpandDetail, onClearFocus, onSetPriority, onStar, onPinTask, onUnpinTask, onSetTier, onOpenSession }: TaskKebabMenuProps) {
+export function TaskKebabMenu({ task, isFocused, isPinned, pinnedTier, isDone, onExpandDetail, onClearFocus, onSetPriority, onStar, onPinTask, onUnpinTask, onSetTier, onOpenSession, onSetDate }: TaskKebabMenuProps) {
   const integrations = useIntegrations();
   const [open, setOpen] = useState(false);
   const [menuPos, setMenuPos] = useState<{ top: number; right: number } | null>(null);
@@ -128,39 +130,6 @@ export function TaskKebabMenu({ task, isFocused, isPinned, pinnedTier, isDone, o
               </button>
             );
           })()}
-
-          {/* Source badge */}
-          {task.source && (
-            <div className="task-kebab-item task-kebab-info">
-              <span
-                className="task-source-badge"
-                style={!task.sync_error && badgeColor ? { background: badgeColor, color: 'white' } : task.source === 'local' ? { background: '#8E8E93', color: 'white' } : undefined}
-              >
-                {task.sync_error ? '!' : badge}
-              </span>
-              <span>{integrationName}{task.sync_error ? ' (sync error)' : synced ? '' : task.source !== 'local' ? ' (unsynced)' : ''}</span>
-            </div>
-          )}
-
-          {/* External link */}
-          {task.external_url && (() => {
-            const meta = getIntegrationMeta(integrations, task.source);
-            const label = meta?.externalLinkLabel ?? meta?.name ?? 'external';
-            return (
-              <a
-                className="task-kebab-item"
-                href={task.external_url}
-                target="_blank"
-                rel="noopener noreferrer"
-                onClick={(e) => { e.stopPropagation(); closeMenu(); }}
-              >
-                <span className="task-kebab-icon">↗</span>
-                <span>Open in {label}</span>
-              </a>
-            );
-          })()}
-
-          {(task.source || task.external_url) && <div className="task-kebab-divider" />}
 
           {/* Details */}
           <button
@@ -261,6 +230,83 @@ export function TaskKebabMenu({ task, isFocused, isPinned, pinnedTier, isDone, o
               </div>
             </>
           )}
+
+          {/* Date */}
+          {onSetDate && (
+            <>
+              <div className="task-kebab-divider" />
+              <div className="task-kebab-date">
+                <span className="task-kebab-date-label">
+                  Date{task.due_date ? `: ${formatDateDisplay(task.due_date)}` : ''}
+                </span>
+                <DatePicker
+                  date={task.due_date}
+                  onChange={(date) => { onSetDate(task.id, date); closeMenu(); }}
+                  inline
+                />
+              </div>
+            </>
+          )}
+
+          {/* Source badge — combined with external link if available */}
+          {task.source && (() => {
+            const statusText = task.sync_error ? ' (sync error)' : synced ? '' : task.source !== 'local' ? ' (unsynced)' : '';
+            const badgeEl = (
+              <span
+                className="task-source-badge"
+                style={!task.sync_error && badgeColor ? { background: badgeColor, color: 'white' } : task.source === 'local' ? { background: '#8E8E93', color: 'white' } : undefined}
+              >
+                {task.sync_error ? '!' : badge}
+              </span>
+            );
+            if (task.external_url) {
+              return (
+                <>
+                  <div className="task-kebab-divider" />
+                  <a
+                    className="task-kebab-item task-kebab-info"
+                    href={task.external_url}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    onClick={(e) => { e.stopPropagation(); closeMenu(); }}
+                  >
+                    {badgeEl}
+                    <span>{integrationName}{statusText}</span>
+                    <span className="task-kebab-external-arrow">↗</span>
+                  </a>
+                </>
+              );
+            }
+            return (
+              <>
+                <div className="task-kebab-divider" />
+                <div className="task-kebab-item task-kebab-info">
+                  {badgeEl}
+                  <span>{integrationName}{statusText}</span>
+                </div>
+              </>
+            );
+          })()}
+          {/* External link without source */}
+          {!task.source && task.external_url && (() => {
+            const meta = getIntegrationMeta(integrations, task.source);
+            const label = meta?.externalLinkLabel ?? meta?.name ?? 'external';
+            return (
+              <>
+                <div className="task-kebab-divider" />
+                <a
+                  className="task-kebab-item"
+                  href={task.external_url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  onClick={(e) => { e.stopPropagation(); closeMenu(); }}
+                >
+                  <span className="task-kebab-icon">↗</span>
+                  <span>Open in {label}</span>
+                </a>
+              </>
+            );
+          })()}
         </div>
       )}
     </div>

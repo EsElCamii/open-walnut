@@ -10,6 +10,7 @@ import { useState, useRef, useEffect, useCallback } from 'react';
 
 export type SortBy = 'priority' | 'date' | 'updated';
 export type GroupBy = 'category' | 'none';
+export type DateFilter = '' | 'now' | 'overdue' | 'this-week' | 'no-date';
 
 export interface ViewDropdownProps {
   categories: string[];
@@ -25,6 +26,9 @@ export interface ViewDropdownProps {
   tagFilter: string;
   onTagFilterChange: (v: string) => void;
   availableTags?: string[];
+
+  dateFilter: DateFilter;
+  onDateFilterChange: (v: DateFilter) => void;
 
   sortBy: SortBy;
   onSortByChange: (v: SortBy) => void;
@@ -56,17 +60,26 @@ const PRIORITY_OPTIONS = [
   { value: 'none', label: '--' },
 ];
 
+const DATE_FILTER_OPTIONS = [
+  { value: '', label: 'All' },
+  { value: 'now', label: 'Now' },
+  { value: 'overdue', label: 'Overdue' },
+  { value: 'this-week', label: 'Week' },
+  { value: 'no-date', label: 'No date' },
+];
+
 export function ViewDropdown({
   categories, activeCategory, onCategoryChange, categoryCounts, hasStarredContent,
   phaseFilter, onPhaseFilterChange, priorityFilter, onPriorityFilterChange,
   tagFilter, onTagFilterChange, availableTags,
+  dateFilter, onDateFilterChange,
   sortBy, onSortByChange, groupBy, onGroupByChange,
   showCompleted, onShowCompletedChange, onClearAll,
 }: ViewDropdownProps) {
   const [open, setOpen] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
 
-  const hasActiveFilter = !!(phaseFilter || priorityFilter || tagFilter || activeCategory || showCompleted);
+  const hasActiveFilter = !!(phaseFilter || priorityFilter || tagFilter || dateFilter || activeCategory || showCompleted);
 
   useEffect(() => {
     if (!open) return;
@@ -109,6 +122,7 @@ export function ViewDropdown({
           <div className="vd-filters">
             <InlineSelect label="Phase" value={phaseFilter} options={PHASE_OPTIONS} onChange={onPhaseFilterChange} />
             <InlineSelect label="Priority" value={priorityFilter} options={PRIORITY_OPTIONS} onChange={onPriorityFilterChange} />
+            <InlineSelect label="Date" value={dateFilter} options={DATE_FILTER_OPTIONS} onChange={(v) => onDateFilterChange(v as DateFilter)} />
             {availableTags && availableTags.length > 0 && (
               <InlineSelect
                 label="Tag"

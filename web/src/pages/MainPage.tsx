@@ -741,6 +741,10 @@ export function MainPage({ visible = true, navigateRef }: MainPageProps) {
     update(id, { priority });
   }, [update]);
 
+  const handleSetDate = useCallback((id: string, date: string | null) => {
+    update(id, { due_date: date ?? '' });
+  }, [update]);
+
   const handleUpdate = useCallback((id: string, updates: { title?: string }) => {
     update(id, updates);
   }, [update]);
@@ -884,6 +888,7 @@ export function MainPage({ visible = true, navigateRef }: MainPageProps) {
           onUpdate={handleUpdate}
           onStar={star}
           onSetPriority={handleSetPriority}
+          onSetDate={handleSetDate}
           onFocusTask={handleFocusTask}
           onClearFocus={handleClearFocus}
           focusedTaskId={focusedTask?.id}
