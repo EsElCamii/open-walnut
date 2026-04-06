@@ -302,6 +302,22 @@ export interface Config {
     /** How many session panels to show side-by-side: '1', '2', or 'auto' (breakpoint-driven). */
     session_panels?: '1' | '2' | 'auto';
   };
+  /** Speech-to-text configuration for voice input */
+  stt?: {
+    engine?: 'sherpa-onnx' | 'openai' | 'whisper-cpp';
+    /** ISO 639-1 language hint (e.g. zh, en). Empty = auto-detect. */
+    language?: string;
+    // sherpa-onnx — local (SenseVoice / Whisper / Paraformer / other ONNX models)
+    sherpa_model_dir?: string;
+    sherpa_model_type?: 'sense_voice' | 'whisper' | 'paraformer';
+    // OpenAI-compatible — cloud (OpenAI / Groq / Fireworks etc.)
+    openai_api_key?: string;
+    openai_base_url?: string;
+    openai_model?: string;
+    // whisper.cpp — local CLI
+    whisper_cpp_path?: string;
+    whisper_cpp_model?: string;
+  };
   /** API keys for remote client authentication (iOS app, etc.) */
   api_keys?: ApiKeyEntry[];
   /** Registered push notification tokens for mobile clients */

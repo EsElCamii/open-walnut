@@ -7,6 +7,7 @@ import { MAX_QUEUE_SIZE } from '@/hooks/useChat';
 import { CommandPalette, type PaletteItem } from './CommandPalette';
 import type { Task } from '@open-walnut/core';
 import { StatusBadge } from '../common/StatusBadge';
+import { MicButton } from '../common/MicButton';
 
 const ALLOWED_TYPES = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp']);
 const MAX_IMAGES = 5;
@@ -486,6 +487,10 @@ export function ChatInput({ onSend, onCommand, onStop, onInterruptSend, onClearQ
             rows={1}
           />
         </div>
+        <MicButton
+          onTranscribe={(text) => handleChange(value ? value + ' ' + text : text)}
+          disabled={disabled}
+        />
         <input
           ref={fileInputRef}
           type="file"

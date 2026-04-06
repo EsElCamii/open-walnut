@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef } from 'react';
+import { MicButton } from '../common/MicButton';
 
 interface SearchBarProps {
   onSearch: (query: string) => void;
@@ -35,6 +36,7 @@ export function SearchBar({ onSearch, debounceMs = 300 }: SearchBarProps) {
           &times;
         </button>
       )}
+      <MicButton size="sm" onTranscribe={(text) => setValue(text)} />
     </div>
   );
 }

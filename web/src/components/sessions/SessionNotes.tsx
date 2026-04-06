@@ -1,5 +1,6 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
 import { updateSession } from '@/api/sessions';
+import { MicButton } from '../common/MicButton';
 
 interface SessionNotesProps {
   sessionId: string;
@@ -82,7 +83,7 @@ export function SessionNotes({ sessionId, initialNote, onNoteChanged }: SessionN
         )}
       </button>
       {isExpanded && (
-        <div className="session-notes-body">
+        <div className="session-notes-body" style={{ display: 'flex', gap: 6, alignItems: 'flex-start' }}>
           <textarea
             ref={textareaRef}
             className="session-notes-textarea"
@@ -90,7 +91,9 @@ export function SessionNotes({ sessionId, initialNote, onNoteChanged }: SessionN
             onChange={(e) => handleChange(e.target.value)}
             placeholder="Write session notes here... (supports plain text)"
             rows={4}
+            style={{ flex: 1 }}
           />
+          <MicButton size="sm" onTranscribe={(text) => handleChange(note ? note + ' ' + text : text)} />
         </div>
       )}
     </div>

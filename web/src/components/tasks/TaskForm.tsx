@@ -1,5 +1,6 @@
 import { useState, type FormEvent } from 'react';
 import type { Task, TaskPriority } from '@open-walnut/core';
+import { MicButton } from '../common/MicButton';
 
 export interface TaskFormData {
   title: string;
@@ -46,15 +47,19 @@ export function TaskForm({ initial, categories, projects, onSubmit, onCancel }: 
 
         <div className="form-group">
           <label htmlFor="task-title">Title</label>
-          <input
-            id="task-title"
-            type="text"
-            value={title}
-            onChange={(e) => setTitle(e.target.value)}
-            placeholder="Task title"
-            required
-            autoFocus
-          />
+          <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+            <input
+              id="task-title"
+              type="text"
+              value={title}
+              onChange={(e) => setTitle(e.target.value)}
+              placeholder="Task title"
+              required
+              autoFocus
+              style={{ flex: 1 }}
+            />
+            <MicButton size="sm" onTranscribe={(text) => setTitle(title ? title + ' ' + text : text)} />
+          </div>
         </div>
 
         <div className="form-row">
@@ -114,13 +119,17 @@ export function TaskForm({ initial, categories, projects, onSubmit, onCancel }: 
         {!initial && (
           <div className="form-group">
             <label htmlFor="task-note">Note</label>
-            <textarea
-              id="task-note"
-              value={note}
-              onChange={(e) => setNote(e.target.value)}
-              placeholder="Optional note..."
-              rows={3}
-            />
+            <div style={{ display: 'flex', gap: 6, alignItems: 'flex-start' }}>
+              <textarea
+                id="task-note"
+                value={note}
+                onChange={(e) => setNote(e.target.value)}
+                placeholder="Optional note..."
+                rows={3}
+                style={{ flex: 1 }}
+              />
+              <MicButton size="sm" onTranscribe={(text) => setNote(note ? note + ' ' + text : text)} />
+            </div>
           </div>
         )}
 

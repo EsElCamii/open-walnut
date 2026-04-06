@@ -5,6 +5,7 @@
 
 import { useRef, useEffect, useCallback } from 'react';
 import { ICON_SEARCH } from '@/components/common/Icons';
+import { MicButton } from '../common/MicButton';
 
 interface TodoSearchBarProps {
   query: string;
@@ -70,6 +71,7 @@ export function TodoSearchBar({
           &#x2715;
         </button>
       )}
+      <MicButton size="sm" onTranscribe={(text) => onQueryChange(text)} />
     </div>
   );
 }
