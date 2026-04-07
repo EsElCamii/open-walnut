@@ -317,6 +317,8 @@ export interface Config {
     // whisper.cpp — local CLI
     whisper_cpp_path?: string;
     whisper_cpp_model?: string;
+    whisper_cpp_vad_model?: string;
+    whisper_cpp_prompt?: string;
   };
   /** API keys for remote client authentication (iOS app, etc.) */
   api_keys?: ApiKeyEntry[];

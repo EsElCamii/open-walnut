@@ -16,6 +16,8 @@ const execFileAsync = promisify(execFile);
 interface WhisperCppConfig {
   binaryPath: string;   // path to whisper-cli or main binary
   modelPath: string;    // path to ggml model file
+  vadModelPath?: string; // path to Silero VAD model — prevents hallucination during silence
+  prompt?: string;       // domain words to bias decoder (max 224 tokens)
 }
 
 async function fileExists(p: string): Promise<boolean> {
@@ -38,6 +40,9 @@ export function createWhisperCppEngine(cfg: WhisperCppConfig): SttEngine {
       if (!(await fileExists(cfg.modelPath))) {
         return { available: false, error: `Model file not found: ${cfg.modelPath}` };
       }
+      if (cfg.vadModelPath && !(await fileExists(cfg.vadModelPath))) {
+        return { available: false, error: `VAD model not found: ${cfg.vadModelPath}` };
+      }
       if (!(await isFfmpegAvailable())) {
         return { available: false, error: 'ffmpeg is required for audio conversion but not found' };
       }
@@ -53,7 +58,15 @@ export function createWhisperCppEngine(cfg: WhisperCppConfig): SttEngine {
           '-m', cfg.modelPath,
           '-f', wavPath,
           '--no-timestamps',
+          // 64 prevents repetition loops (0 = too aggressive, unlimited = loops). Tested on 107-min audio.
+          '--max-context', '64',
         ];
+        if (cfg.vadModelPath) {
+          args.push('--vad', '--vad-model', cfg.vadModelPath);
+        }
+        if (cfg.prompt) {
+          args.push('--prompt', cfg.prompt);
+        }
         if (req.language) {
           args.push('-l', req.language);
         }
@@ -61,8 +74,8 @@ export function createWhisperCppEngine(cfg: WhisperCppConfig): SttEngine {
         log.stt.info(`Running whisper-cpp: ${cfg.binaryPath} ${args.join(' ')}`);
 
         const { stdout } = await execFileAsync(cfg.binaryPath, args, {
-          timeout: 60_000,
-          maxBuffer: 10 * 1024 * 1024,
+          timeout: 0,             // No timeout — whisper-cli is RAM-bounded (~115 MB/hr audio), not time-bounded.
+          maxBuffer: 50 * 1024 * 1024,
         });
 
         const text = stdout.trim();

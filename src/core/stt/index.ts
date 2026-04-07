@@ -35,6 +35,8 @@ export function createEngine(config: Config): SttEngine | null {
       return createWhisperCppEngine({
         binaryPath: stt.whisper_cpp_path ?? 'whisper-cli',
         modelPath: stt.whisper_cpp_model ?? '',
+        vadModelPath: stt.whisper_cpp_vad_model,
+        prompt: stt.whisper_cpp_prompt,
       });
     default:
       log.stt.warn(`Unknown STT engine: ${stt.engine}`);

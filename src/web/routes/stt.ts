@@ -3,10 +3,12 @@
  */
 
 import express, { Router, type Request, type Response, type NextFunction } from 'express';
+import { unlink, stat } from 'node:fs/promises';
+import { join } from 'node:path';
 import { getConfig, updateConfig } from '../../core/config-manager.js';
 import { transcribeAudio, createEngine } from '../../core/stt/index.js';
 import { detectSystem } from '../../core/stt/detect.js';
-import { installViaBrew, downloadGgmlModel, MODEL_CATALOG, getModelDir } from '../../core/stt/setup.js';
+import { installViaBrew, downloadGgmlModel, MODEL_CATALOG, VAD_MODEL, getModelDir, SHERPA_MODEL_CATALOG, downloadSherpaModel, getSherpaModelDir, findSherpaModels } from '../../core/stt/setup.js';
 import { log } from '../../logging/index.js';
 
 export const sttRouter = Router();
@@ -133,6 +135,27 @@ sttRouter.post('/setup', express.json(), async (req: Request, res: Response) => 
       for await (const event of downloadGgmlModel(catalogEntry.url, destDir, catalogEntry.filename)) {
         send(event);
       }
+    } else if (action === 'download_vad_model') {
+      const destDir = getModelDir();
+      for await (const event of downloadGgmlModel(VAD_MODEL.url, destDir, VAD_MODEL.filename)) {
+        send(event);
+      }
+    } else if (action === 'download_sherpa_model') {
+      const { model } = req.body;
+      if (!model || typeof model !== 'string') {
+        send({ type: 'error', message: 'Missing "model" field' });
+        res.end();
+        return;
+      }
+      const catalogEntry = SHERPA_MODEL_CATALOG.find(m => m.name === model);
+      if (!catalogEntry) {
+        send({ type: 'error', message: `Unknown sherpa model: ${model}` });
+        res.end();
+        return;
+      }
+      for await (const event of downloadSherpaModel(catalogEntry)) {
+        send(event);
+      }
     } else {
       send({ type: 'error', message: `Unknown action: ${action}` });
     }
@@ -143,6 +166,180 @@ sttRouter.post('/setup', express.json(), async (req: Request, res: Response) => 
   }
 
   res.end();
+});
+
+/**
+ * DELETE /api/stt/models/:name
+ * Delete a downloaded ggml model file.
+ */
+sttRouter.delete('/models/:name', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { name } = req.params;
+    const catalogEntry = MODEL_CATALOG.find(m => m.name === name);
+    if (!catalogEntry) {
+      res.status(404).json({ error: `Unknown model: ${name}` });
+      return;
+    }
+
+    const modelPath = join(getModelDir(), catalogEntry.filename);
+    try {
+      await stat(modelPath);
+    } catch {
+      res.status(404).json({ error: `Model file not found: ${catalogEntry.filename}` });
+      return;
+    }
+
+    // If this model is the currently active one, clear config
+    const config = await getConfig();
+    if (config.stt?.whisper_cpp_model?.includes(catalogEntry.filename) ||
+        config.stt?.whisper_cpp_model?.includes(name)) {
+      await updateConfig({ stt: { ...config.stt, whisper_cpp_model: undefined } });
+    }
+
+    await unlink(modelPath);
+    log.stt.info(`Deleted model: ${modelPath}`);
+    res.json({ deleted: name });
+  } catch (err) {
+    next(err);
+  }
+});
+
+/**
+ * POST /api/stt/activate-model
+ * Switch the active whisper-cpp model.
+ * Body: { model: string } — catalog name like "ggml-base.en"
+ */
+sttRouter.post('/activate-model', express.json(), async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { model } = req.body;
+    if (!model || typeof model !== 'string') {
+      res.status(400).json({ error: 'Missing "model" field' });
+      return;
+    }
+
+    const catalogEntry = MODEL_CATALOG.find(m => m.name === model);
+    if (!catalogEntry) {
+      res.status(404).json({ error: `Unknown model: ${model}` });
+      return;
+    }
+
+    const modelPath = join(getModelDir(), catalogEntry.filename);
+    try {
+      await stat(modelPath);
+    } catch {
+      res.status(404).json({ error: `Model file not found. Download it first.` });
+      return;
+    }
+
+    const config = await getConfig();
+    const whisperPath = config.stt?.whisper_cpp_path || 'whisper-cli';
+    await updateConfig({
+      stt: {
+        ...config.stt,
+        engine: 'whisper-cpp',
+        whisper_cpp_path: whisperPath,
+        whisper_cpp_model: modelPath,
+      },
+    });
+
+    log.stt.info(`Activated model: ${model} → ${modelPath}`);
+    res.json({ activated: model, path: modelPath });
+  } catch (err) {
+    next(err);
+  }
+});
+
+/**
+ * GET /api/stt/sherpa-models
+ * List downloaded sherpa-onnx models.
+ */
+sttRouter.get('/sherpa-models', async (_req: Request, res: Response, next: NextFunction) => {
+  try {
+    const models = await findSherpaModels();
+    res.json({ models });
+  } catch (err) {
+    next(err);
+  }
+});
+
+/**
+ * POST /api/stt/activate-sherpa
+ * Activate a sherpa-onnx model.
+ * Body: { model: string } — catalog name like "sense-voice-zh-en"
+ */
+sttRouter.post('/activate-sherpa', express.json(), async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { model } = req.body;
+    if (!model || typeof model !== 'string') {
+      res.status(400).json({ error: 'Missing "model" field' });
+      return;
+    }
+
+    const catalogEntry = SHERPA_MODEL_CATALOG.find(m => m.name === model);
+    if (!catalogEntry) {
+      res.status(404).json({ error: `Unknown sherpa model: ${model}` });
+      return;
+    }
+
+    const modelDir = join(getSherpaModelDir(), catalogEntry.dirName);
+    try {
+      await stat(join(modelDir, catalogEntry.files[0].localName));
+    } catch {
+      res.status(404).json({ error: `Model not downloaded. Download it first.` });
+      return;
+    }
+
+    const config = await getConfig();
+    await updateConfig({
+      stt: {
+        ...config.stt,
+        engine: 'sherpa-onnx',
+        sherpa_model_dir: modelDir,
+        sherpa_model_type: catalogEntry.modelType,
+      },
+    });
+
+    log.stt.info(`Activated sherpa model: ${model} → ${modelDir}`);
+    res.json({ activated: model, path: modelDir, modelType: catalogEntry.modelType });
+  } catch (err) {
+    next(err);
+  }
+});
+
+/**
+ * DELETE /api/stt/sherpa-models/:name
+ * Delete a downloaded sherpa-onnx model directory.
+ */
+sttRouter.delete('/sherpa-models/:name', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { name } = req.params;
+    const catalogEntry = SHERPA_MODEL_CATALOG.find(m => m.name === name);
+    if (!catalogEntry) {
+      res.status(404).json({ error: `Unknown sherpa model: ${name}` });
+      return;
+    }
+
+    const modelDir = join(getSherpaModelDir(), catalogEntry.dirName);
+    const { rm } = await import('node:fs/promises');
+    try {
+      await stat(modelDir);
+    } catch {
+      res.status(404).json({ error: `Model directory not found` });
+      return;
+    }
+
+    // If active, clear config
+    const config = await getConfig();
+    if (config.stt?.sherpa_model_dir === modelDir) {
+      await updateConfig({ stt: { ...config.stt, sherpa_model_dir: undefined } });
+    }
+
+    await rm(modelDir, { recursive: true });
+    log.stt.info(`Deleted sherpa model: ${modelDir}`);
+    res.json({ deleted: name });
+  } catch (err) {
+    next(err);
+  }
 });
 
 /**
@@ -172,11 +369,15 @@ sttRouter.post('/auto-config', express.json(), async (_req: Request, res: Respon
         return;
       }
 
+      const vadPath = detection.vadModel?.path;
+      const existingConfig = await getConfig();
       await updateConfig({
         stt: {
+          ...existingConfig.stt,
           engine: 'whisper-cpp',
           whisper_cpp_path: whisperPath,
           whisper_cpp_model: modelPath,
+          whisper_cpp_vad_model: vadPath,
         },
       });
 
@@ -188,7 +389,7 @@ sttRouter.post('/auto-config', express.json(), async (_req: Request, res: Respon
       res.json({
         success: status.available,
         engine: 'whisper-cpp',
-        config: { whisper_cpp_path: whisperPath, whisper_cpp_model: modelPath },
+        config: { whisper_cpp_path: whisperPath, whisper_cpp_model: modelPath, whisper_cpp_vad_model: vadPath },
         status,
       });
     } else {

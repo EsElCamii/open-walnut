@@ -10,6 +10,18 @@ import { homedir } from 'node:os';
 
 const execFileAsync = promisify(execFile);
 
+/** Common directories where whisper-cpp models (ggml) and VAD models may be found. */
+const MODEL_SEARCH_DIRS = (() => {
+  const home = homedir();
+  return [
+    join(home, '.local', 'share', 'whisper-cpp'),
+    join(home, '.local', 'share', 'whisper-cpp', 'models'),
+    '/opt/homebrew/share/whisper-cpp/models',
+    join(home, 'whisper-models'),
+    join(home, '.cache', 'whisper'),
+  ];
+})();
+
 export interface DetectionItem {
   name: string;
   found: boolean;
@@ -30,6 +42,7 @@ export interface DetectionResult {
   sherpaOnnxNode: DetectionItem;
   homebrew: DetectionItem;
   models: GgmlModel[];
+  vadModel: GgmlModel | null;
   recommendation: Recommendation | null;
 }
 
@@ -110,19 +123,10 @@ export async function detectHomebrew(): Promise<DetectionItem> {
 
 /** Scan common directories for ggml model files */
 export async function findGgmlModels(): Promise<GgmlModel[]> {
-  const home = homedir();
-  const searchDirs = [
-    join(home, '.local', 'share', 'whisper-cpp'),
-    join(home, '.local', 'share', 'whisper-cpp', 'models'),
-    '/opt/homebrew/share/whisper-cpp/models',
-    join(home, 'whisper-models'),
-    join(home, '.cache', 'whisper'),
-  ];
-
   const models: GgmlModel[] = [];
   const seen = new Set<string>();
 
-  for (const dir of searchDirs) {
+  for (const dir of MODEL_SEARCH_DIRS) {
     try {
       const entries = await readdir(dir);
       for (const entry of entries) {
@@ -132,7 +136,9 @@ export async function findGgmlModels(): Promise<GgmlModel[]> {
           const s = await stat(fullPath);
           if (s.isFile() && s.size > 1_000_000) {
             seen.add(entry);
-            models.push({ name: entry, path: fullPath, sizeBytes: s.size });
+            // Strip .bin suffix so name matches catalog (e.g. "ggml-base.en")
+            const name = entry.endsWith('.bin') ? entry.slice(0, -4) : entry;
+            models.push({ name, path: fullPath, sizeBytes: s.size });
           }
         } catch { /* skip */ }
       }
@@ -140,6 +146,27 @@ export async function findGgmlModels(): Promise<GgmlModel[]> {
   }
 
   return models.sort((a, b) => a.name.localeCompare(b.name));
+}
+
+/** Scan common directories for a Silero VAD model file */
+export async function findVadModel(): Promise<GgmlModel | null> {
+  for (const dir of MODEL_SEARCH_DIRS) {
+    try {
+      const entries = await readdir(dir);
+      for (const entry of entries) {
+        if (!entry.includes('silero')) continue;
+        const fullPath = join(dir, entry);
+        try {
+          const s = await stat(fullPath);
+          if (s.isFile()) {
+            const name = entry.endsWith('.bin') ? entry.slice(0, -4) : entry;
+            return { name, path: fullPath, sizeBytes: s.size };
+          }
+        } catch { /* skip */ }
+      }
+    } catch { /* dir doesn't exist */ }
+  }
+  return null;
 }
 
 export function getRecommendation(result: Pick<DetectionResult, 'ffmpeg' | 'whisperCli' | 'sherpaOnnxNode' | 'homebrew' | 'models'>): Recommendation | null {
@@ -192,15 +219,16 @@ export function getRecommendation(result: Pick<DetectionResult, 'ffmpeg' | 'whis
 
 /** Run full system detection */
 export async function detectSystem(): Promise<DetectionResult> {
-  const [ffmpeg, whisperCli, sherpaOnnxNode, homebrew, models] = await Promise.all([
+  const [ffmpeg, whisperCli, sherpaOnnxNode, homebrew, models, vadModel] = await Promise.all([
     detectFfmpeg(),
     detectWhisperCli(),
     detectSherpaOnnxNode(),
     detectHomebrew(),
     findGgmlModels(),
+    findVadModel(),
   ]);
 
   const recommendation = getRecommendation({ ffmpeg, whisperCli, sherpaOnnxNode, homebrew, models });
 
-  return { ffmpeg, whisperCli, sherpaOnnxNode, homebrew, models, recommendation };
+  return { ffmpeg, whisperCli, sherpaOnnxNode, homebrew, models, vadModel, recommendation };
 }
