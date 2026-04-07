@@ -87,7 +87,7 @@ interface TodoPanelProps {
   onPinTask?: (taskId: string) => void;
   onUnpinTask?: (taskId: string) => void;
   onReorderPinned?: (newIds: string[]) => void;
-  onSetTier?: (taskId: string, tier: FocusTier) => void;
+  onSetTier?: (taskId: string, tier: FocusTier, newPinnedOrder?: string[]) => void;
   onSetDate?: (taskId: string, date: string | null) => void;
   pinnedTaskIds?: Set<string>;
   focusTaskIds?: Set<string>;
@@ -226,7 +226,7 @@ interface SortableTaskItemProps {
   onClearFocus?: () => void;
   onPinTask?: (taskId: string) => void;
   onUnpinTask?: (taskId: string) => void;
-  onSetTier?: (taskId: string, tier: FocusTier) => void;
+  onSetTier?: (taskId: string, tier: FocusTier, newPinnedOrder?: string[]) => void;
   onSetDate?: (taskId: string, date: string | null) => void;
   isPinned?: boolean;
   pinnedTier?: FocusTier;
@@ -1771,7 +1771,26 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
 
     // Existing pinned-to-pinned cross-tier logic
     const currentTier = tierOfIdInArrays(activeId);
-    if (currentTier === targetTier) return;
+    if (currentTier === targetTier) {
+      // After a cross-tier move, also track within-tier position changes so
+      // buildOrderFromRefs() in dragEnd has the exact drop position. Only
+      // applies when live refs are active (a cross-tier move already happened).
+      const refArr = currentTier === 'focus' ? dragFocusIdsRef.current : currentTier === 'next' ? dragNextIdsRef.current : dragSatelliteIdsRef.current;
+      if (refArr) {
+        const ai = refArr.indexOf(activeId);
+        const oi = refArr.indexOf(overId);
+        if (ai !== -1 && oi !== -1 && ai !== oi) {
+          const updated = [...refArr];
+          updated.splice(ai, 1);
+          updated.splice(oi, 0, activeId);
+          if (currentTier === 'focus') dragFocusIdsRef.current = updated;
+          else if (currentTier === 'next') dragNextIdsRef.current = updated;
+          else dragSatelliteIdsRef.current = updated;
+          bumpDragTick();
+        }
+      }
+      return;
+    }
 
     // Move activeId from current to target tier arrays
     const remove = (arr: string[]) => arr.filter((id) => id !== activeId);
@@ -1824,6 +1843,16 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
     // Check if item came from Recent section
     const isFromRecent = snap.recent?.includes(activeId) ?? false;
 
+    // Build new global pinned order from live tier arrays — preserves the drop
+    // position that handlePinnedDragOver calculated. Per-tier display order is
+    // derived from the global pinnedIds order, so this controls where the moved
+    // item appears within the target tier.
+    const buildOrderFromRefs = () => [
+      ...(liveFocus ?? snap.focus),
+      ...(liveNext ?? snap.next),
+      ...(liveSatellite ?? snap.satellite),
+    ];
+
     // When over === active, collision detected the dragged card itself (its center
     // follows the pointer). handlePinnedDragOver may have moved it cross-tier —
     // check live refs to persist that move.
@@ -1834,13 +1863,14 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
         (liveSatellite ?? snap.satellite).includes(activeId) ? 'satellite' : undefined;
       if (isFromRecent) {
         if (currentTier) {
+          const order = buildOrderFromRefs();
           onPinTask?.(activeId);
-          setTimeout(() => onSetTier?.(activeId, currentTier), 100);
+          setTimeout(() => onSetTier?.(activeId, currentTier, order), 100);
         }
       } else {
         const origTier: FocusTier = snap.focus.includes(activeId) ? 'focus' : snap.next.includes(activeId) ? 'next' : 'satellite';
         if (currentTier && origTier !== currentTier) {
-          onSetTier?.(activeId, currentTier);
+          onSetTier?.(activeId, currentTier, buildOrderFromRefs());
         }
       }
       return;
@@ -1855,8 +1885,9 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
       if (!targetTier) return;
       // Pin first, then set tier. setFocusTier requires task.pinned===true in the
       // store, so we delay to let the pin write complete before changing tier.
+      const order = buildOrderFromRefs();
       onPinTask?.(activeId);
-      setTimeout(() => onSetTier?.(activeId, targetTier), 100);
+      setTimeout(() => onSetTier?.(activeId, targetTier, order), 100);
       return;
     }
 
@@ -1868,7 +1899,7 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
       ?? 'satellite';
 
     if (origTier !== targetTier) {
-      onSetTier?.(activeId, targetTier);
+      onSetTier?.(activeId, targetTier, buildOrderFromRefs());
       return;
     }
 

@@ -120,7 +120,8 @@ export function useFocusBar(tasks: Task[]): UseFocusBarReturn {
     }
   });
   useEvent('task:updated', (data: unknown) => {
-    const { task } = data as { task: { id: string; phase?: string; status?: string } };
+    const { task } = data as { task: { id: string; phase?: string; status?: string } | null };
+    if (!task?.id) return; // null task = bulk signal from plugin sync batch
     if ((task.phase === 'COMPLETE' || task.status === 'done') && pinnedIds.includes(task.id)) {
       lastWriteRef.current = Date.now();
       removeFromAll(task.id);
@@ -163,7 +164,7 @@ export function useFocusBar(tasks: Task[]): UseFocusBarReturn {
     }
   }, [fetchPinned]);
 
-  const setTier = useCallback(async (taskId: string, tier: FocusTier) => {
+  const setTier = useCallback(async (taskId: string, tier: FocusTier, newPinnedOrder?: string[]) => {
     lastWriteRef.current = Date.now();
     // Optimistic: remove from old tier, add to new.
     // Only create new array when the item is actually added/removed (avoids no-op state updates).
@@ -172,7 +173,11 @@ export function useFocusBar(tasks: Task[]): UseFocusBarReturn {
     setFocusIds(tier === 'focus' ? addTo : removeFrom);
     setNextIds(tier === 'next' ? addTo : removeFrom);
     setSatelliteIds(tier === 'satellite' ? addTo : removeFrom);
+    if (newPinnedOrder) setPinnedIds(newPinnedOrder);
     try {
+      // When reordering, persist order FIRST so the setTier response
+      // (which includes pinned_tasks) reflects the correct position.
+      if (newPinnedOrder) await focusApi.reorderPinnedTasks(newPinnedOrder);
       const result = await focusApi.setTaskTier(taskId, tier);
       applyData(result);
     } catch {
