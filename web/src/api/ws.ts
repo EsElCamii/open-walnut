@@ -48,6 +48,13 @@ const SUPPRESSED_EVENTS = new Set([
   'agent:thinking',
 ]);
 
+/** Human-readable labels for WebSocket close codes (RFC 6455). */
+const WS_CLOSE_CODES: Record<number, string> = {
+  1000: 'normal', 1001: 'going away', 1002: 'protocol error',
+  1003: 'unsupported', 1006: 'abnormal (no close frame)',
+  1011: 'server error', 1012: 'server restart', 1013: 'try again later',
+};
+
 class WsClient {
   private ws: WebSocket | null = null;
   private eventListeners = new Map<string, Set<EventCallback>>();
@@ -93,7 +100,11 @@ class WsClient {
     };
 
     ws.onclose = (ev) => {
-      log.info('ws', 'disconnected', { code: ev.code, reason: ev.reason || 'none' });
+      log.info('ws', 'disconnected', {
+        code: ev.code,
+        codeDesc: WS_CLOSE_CODES[ev.code] ?? 'unknown',
+        reason: ev.reason || 'none',
+      });
       this.ws = null;
       this.setState('disconnected');
       this.rejectPending('WebSocket disconnected');
@@ -101,7 +112,10 @@ class WsClient {
     };
 
     ws.onerror = () => {
-      log.warn('ws', 'error');
+      log.warn('ws', 'error', {
+        readyState: this.ws?.readyState,
+        url: `${proto}://${window.location.host}/ws`,
+      });
     };
 
     ws.onmessage = (ev) => {

@@ -468,7 +468,7 @@ export async function syncTasks(
   localTasks: Task[],
   updateLocalTask: (id: string, updates: Partial<Task>) => Promise<void>,
   addLocalTask: (task: Omit<Task, 'id'>) => Promise<Task>,
-  updateTaskRaw: (id: string, updates: Partial<Task>) => Promise<void>,
+  updateTaskRaw: (id: string, updates: Partial<Task>) => Promise<{ changed: boolean }>,
 ): Promise<JiraSyncResult> {
   let pushed = 0;
   const config = await getConfig();

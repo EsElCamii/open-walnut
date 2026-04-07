@@ -7,7 +7,7 @@ import { initDirectories } from './init.js';
 import { getConfig, saveConfig } from './config-manager.js';
 import { bus, EventNames } from './event-bus.js';
 import { VALID_PRIORITIES as VALID_PRIORITIES_ARRAY, type Task, type TaskStore, type TaskStatus, type TaskPhase, type TaskPriority, type TaskSource, type DashboardData } from './types.js';
-import { applyPhase, deriveStatusFromPhase, phaseFromStatus, VALID_PHASES, migratePhase as migratePhaseValue } from './phase.js';
+import { applyPhase, deriveStatusFromPhase, phaseFromStatus, VALID_PHASES, TERMINAL_PHASES, migratePhase as migratePhaseValue } from './phase.js';
 import { registry } from './integration-registry.js';
 import yaml from 'js-yaml';
 
@@ -1336,13 +1336,30 @@ export async function updateTask(
     }
   }
   if (updates.phase !== undefined && VALID_PHASES.has(updates.phase)) {
-    if (updates.phase === 'COMPLETE') guardActiveChildren(store, task);
-    applyPhase(task, updates.phase);
+    // Terminal phase guard: only human-initiated sources can overwrite COMPLETE/HUMAN_VERIFIED
+    const source = eventOptions?.source ?? 'internal';
+    const isHumanSource = source === 'api' || source === 'user';
+    if (TERMINAL_PHASES.has(task.phase) && !TERMINAL_PHASES.has(updates.phase) && !isHumanSource) {
+      log.task.warn('terminal phase guard: blocked non-human phase change', {
+        taskId: task.id, currentPhase: task.phase, requestedPhase: updates.phase, source,
+      });
+    } else {
+      if (updates.phase === 'COMPLETE') guardActiveChildren(store, task);
+      applyPhase(task, updates.phase);
+    }
   } else if (updates.status !== undefined) {
     // Legacy: status without phase → derive phase from status
     const derivedPhase = phaseFromStatus(updates.status);
-    if (derivedPhase === 'COMPLETE') guardActiveChildren(store, task);
-    applyPhase(task, derivedPhase);
+    const source = eventOptions?.source ?? 'internal';
+    const isHumanSource = source === 'api' || source === 'user';
+    if (TERMINAL_PHASES.has(task.phase) && !TERMINAL_PHASES.has(derivedPhase) && !isHumanSource) {
+      log.task.warn('terminal phase guard: blocked non-human status change', {
+        taskId: task.id, currentPhase: task.phase, requestedPhase: derivedPhase, source,
+      });
+    } else {
+      if (derivedPhase === 'COMPLETE') guardActiveChildren(store, task);
+      applyPhase(task, derivedPhase);
+    }
   }
   if (updates.due_date !== undefined) task.due_date = updates.due_date;
   if (updates.project !== undefined) task.project = updates.project;
@@ -2810,20 +2827,63 @@ export async function addTaskFull(taskData: Omit<Task, 'id'>): Promise<Task> {
   });
 }
 
+/** Compare update fields against current task state. */
+function hasFieldChanges(task: Task, updates: Record<string, unknown>): boolean {
+  for (const [key, value] of Object.entries(updates)) {
+    if (key === 'id') continue;
+    const current = (task as any)[key];
+    // Fast path: identical references or both primitive-equal
+    if (current === value) continue;
+    // Deep compare for objects (handles key-order differences in ext, etc.)
+    if (typeof current === 'object' && typeof value === 'object') {
+      if (stableStringify(current) !== stableStringify(value)) return true;
+    } else {
+      return true; // primitives that aren't === are different
+    }
+  }
+  return false;
+}
+
+function stableStringify(v: unknown): string {
+  if (v === null || v === undefined) return String(v);
+  if (typeof v !== 'object') return JSON.stringify(v);
+  if (Array.isArray(v)) return '[' + v.map(stableStringify).join(',') + ']';
+  const sorted = Object.keys(v as Record<string, unknown>).sort();
+  return '{' + sorted.map(k => JSON.stringify(k) + ':' + stableStringify((v as Record<string, unknown>)[k])).join(',') + '}';
+}
+
 /**
  * Update a task by exact ID with raw partial fields (used by sync pull).
  * Does NOT trigger auto-push to avoid sync loops.
+ * Returns { changed: true } if any field was actually modified, { changed: false } otherwise.
  */
-export async function updateTaskRaw(id: string, updates: Partial<Task>): Promise<void> {
+export async function updateTaskRaw(id: string, updates: Partial<Task>): Promise<{ changed: boolean }> {
   return withWriteLock(async () => {
   const store = await readStore();
   const task = store.tasks.find((t) => t.id === id);
-  if (!task) return;
+  if (!task) return { changed: false };
 
   const { id: _ignoreId, ...safeUpdates } = updates;
   if (safeUpdates.priority !== undefined) {
     safeUpdates.priority = sanitizePriority(safeUpdates.priority);
   }
+  // Terminal phase guard: sync pull cannot overwrite COMPLETE/HUMAN_VERIFIED
+  // (only humans can reopen completed tasks, via updateTask with source='api')
+  const incomingPhase = safeUpdates.phase ?? (safeUpdates.status ? phaseFromStatus(safeUpdates.status) : undefined);
+  if (TERMINAL_PHASES.has(task.phase) && incomingPhase && !TERMINAL_PHASES.has(incomingPhase)) {
+    log.task.warn('terminal phase guard (raw): blocked sync phase change', {
+      taskId: task.id, currentPhase: task.phase, requestedPhase: incomingPhase,
+    });
+    delete safeUpdates.phase;
+    delete safeUpdates.status;
+    delete safeUpdates.completed_at;
+  }
+
+  // Dirty check: skip disk write + event if nothing actually changed
+  if (!hasFieldChanges(task, safeUpdates)) {
+    return { changed: false };
+  }
+
   Object.assign(task, safeUpdates);
   // Re-derive phase↔status consistency when only one side is provided
   if (safeUpdates.status && !safeUpdates.phase) {
@@ -2832,5 +2892,6 @@ export async function updateTaskRaw(id: string, updates: Partial<Task>): Promise
     task.status = deriveStatusFromPhase(task.phase);
   }
   await writeStore(store);
+  return { changed: true };
   });
 }

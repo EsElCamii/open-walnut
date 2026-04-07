@@ -990,6 +990,11 @@ export async function startServer(options: ServerOptions = {}): Promise<HttpServ
             await clearSession(taskId, sessionId).catch(() => {})
             bus.emit(EventNames.TASK_UPDATED, { task }, ['web-ui'], { source: 'session-error' })
           } catch (err) { log.web.warn('failed to clear session slot', { sessionId, taskId, error: String(err) }) }
+          // Phase sync: session error → AWAIT_HUMAN_ACTION
+          try {
+            const { applySessionPhase } = await import('../core/phase.js')
+            await applySessionPhase(taskId, 'session:error', 'server.ts:session-result-error', { sessionId })
+          } catch (err) { log.web.warn('failed to apply session:error phase', { taskId, error: String(err) }) }
         }
         // Emit session:ended so the Sessions page refreshes
         log.web.info('session ended event emitted', { sessionId, taskId })
@@ -1008,20 +1013,12 @@ export async function startServer(options: ServerOptions = {}): Promise<HttpServ
         //   1. Task phase reaches COMPLETE (user sets via PhasePicker)
         //   2. process_status transitions to 'error' (handled above in isError branch)
 
-        // Auto-progress task phase: ≤IN_PROGRESS → AGENT_COMPLETE on successful session
+        // Unconditional phase transition: session result → AGENT_COMPLETE
         try {
-          const { getTask: getTaskById, updateTaskRaw } = await import('../core/task-manager.js')
-          const { computeSessionCompletionPhase, applyPhase } = await import('../core/phase.js')
-          const task = await getTaskById(taskId)
-          const newPhase = computeSessionCompletionPhase(task.phase, false)
-          if (newPhase) {
-            applyPhase(task, newPhase)
-            await updateTaskRaw(task.id, { phase: task.phase, status: task.status })
-            bus.emit(EventNames.TASK_UPDATED, { task }, ['web-ui'], { source: 'session-phase-sync' })
-            log.web.info('auto-progressed task phase on session completion', { taskId, newPhase })
-          }
+          const { applySessionPhase } = await import('../core/phase.js')
+          await applySessionPhase(taskId, 'session:result', 'server.ts:session-result', { sessionId })
         } catch (err) {
-          log.web.warn('failed to auto-progress task phase', { taskId, error: String(err) })
+          log.web.warn('failed to apply session:result phase', { taskId, error: String(err) })
         }
 
         // Triage dispatch is now handled by SessionHookDispatcher
@@ -1063,6 +1060,11 @@ export async function startServer(options: ServerOptions = {}): Promise<HttpServ
           // Also clear new single-slot field (parallel 1-slot transition)
           await clearSession(taskId, sessionId).catch(() => {})
         } catch (err) { log.web.warn('failed to clear session slot', { sessionId, taskId, error: String(err) }) }
+        // Phase sync: session error → AWAIT_HUMAN_ACTION
+        try {
+          const { applySessionPhase } = await import('../core/phase.js')
+          await applySessionPhase(taskId, 'session:error', 'server.ts:session-error', { sessionId })
+        } catch (err) { log.web.warn('failed to apply session:error phase', { taskId, error: String(err) }) }
       }
       // Emit session:ended so the Sessions page refreshes
       log.web.info('session ended event emitted', { sessionId, taskId })
@@ -1268,22 +1270,15 @@ export async function startServer(options: ServerOptions = {}): Promise<HttpServ
           }, ['web-ui'])
         }
 
-        // Safety net: if triage completed but task is still at AGENT_COMPLETE,
-        // the triage failed to act (e.g. chose Outcome A without calling send_to_session,
-        // or errored mid-execution). Fall back to AWAIT_HUMAN_ACTION so the user sees it.
+        // Synchronous phase check: if triage completed but task is still at AGENT_COMPLETE,
+        // the triage failed to act. Transition to AWAIT_HUMAN_ACTION immediately (no timer).
         if (taskId) {
-          setTimeout(async () => {
-            try {
-              const task = await getTask(taskId)
-              if (task && task.phase === 'AGENT_COMPLETE') {
-                const { updateTask } = await import('../core/task-manager.js')
-                await updateTask(taskId, { phase: 'AWAIT_HUMAN_ACTION', needs_attention: true }, { source: 'triage-safety-net' })
-                log.web.warn('triage safety net: task still AGENT_COMPLETE after triage, falling back to AWAIT_HUMAN_ACTION', { taskId })
-              }
-            } catch (err) {
-              log.web.warn('triage safety net error', { taskId, error: err instanceof Error ? err.message : String(err) })
-            }
-          }, 5000) // 5s delay: give send_to_session time to roll back phase to IN_PROGRESS
+          try {
+            const { applySessionPhase } = await import('../core/phase.js')
+            await applySessionPhase(taskId, 'triage-sync', 'server.ts:triage-done', { sessionId: runId })
+          } catch (err) {
+            log.web.warn('triage phase sync error', { taskId, error: err instanceof Error ? err.message : String(err) })
+          }
         }
       } else {
         // Non-triage subagent: persist full result as notification
@@ -1672,6 +1667,7 @@ function startPluginSyncPolling(): void {
       if (syncing) return
       syncing = true
       const syncT0 = Date.now()
+      let changeCount = 0
       try {
         const { listTasks, updateTaskRaw, addTaskFull, deleteTask, autoPushIfConfigured } = await import('../core/task-manager.js')
         const localTasks = await listTasks()
@@ -1686,9 +1682,13 @@ function startPluginSyncPolling(): void {
             if (ext) {
               // ext is already scoped: { 'ms-todo': { id, list_id } } — spread to merge
               const mergedExt = { ...task.ext, ...ext as Record<string, unknown> }
-              await updateTaskRaw(task.id, { ext: mergedExt } as any)
+              const { changed } = await updateTaskRaw(task.id, { ext: mergedExt })
               Object.assign(task, { ext: mergedExt })
-              bus.emit(EventNames.TASK_UPDATED, { task }, ['web-ui'], { source: `${plugin.id}-sync` })
+              // Only emit if fields actually changed — avoids flooding WS with no-op task:updated events on each sync cycle
+              if (changed) {
+                bus.emit(EventNames.TASK_UPDATED, { task }, [], { source: `${plugin.id}-sync` })
+                changeCount++
+              }
             }
           } catch (err) {
             log.web.debug(`${plugin.id} sync: retry push failed`, {
@@ -1724,23 +1724,28 @@ function startPluginSyncPolling(): void {
             const effectiveUpdates = (existingTask?.sync_error && !('sync_error' in updates))
               ? { ...updates, sync_error: undefined }
               : updates
-            await updateTaskRaw(id, effectiveUpdates)
+            const { changed } = await updateTaskRaw(id, effectiveUpdates)
             const updatedTask = localTasks.find(t => t.id === id)
             if (updatedTask) {
               Object.assign(updatedTask, effectiveUpdates)
-              bus.emit(EventNames.TASK_UPDATED, { task: updatedTask }, ['web-ui'], { source: `${plugin.id}-sync` })
+              if (changed) {
+                bus.emit(EventNames.TASK_UPDATED, { task: updatedTask }, [], { source: `${plugin.id}-sync` })
+                changeCount++
+              }
             }
             // Return updated task (or fetch fresh if not in local list)
             return updatedTask ?? await (await import('../core/task-manager.js')).getTask(id)
           },
           addTask: async (taskData) => {
             const task = await addTaskFull(taskData)
-            bus.emit(EventNames.TASK_CREATED, { task }, ['web-ui'], { source: `${plugin.id}-sync` })
+            bus.emit(EventNames.TASK_CREATED, { task }, [], { source: `${plugin.id}-sync` })
+            changeCount++
             return task
           },
           deleteTask: async (id) => {
             const { task } = await deleteTask(id)
-            bus.emit(EventNames.TASK_DELETED, { task }, ['web-ui'], { source: `${plugin.id}-sync` })
+            bus.emit(EventNames.TASK_DELETED, { task }, [], { source: `${plugin.id}-sync` })
+            changeCount++
           },
           emit: (event, data) => {
             bus.emit(event, data, ['web-ui'], { source: `${plugin.id}-sync` })
@@ -1778,6 +1783,11 @@ function startPluginSyncPolling(): void {
           log.web.debug(`${plugin.id} sync failed`, { consecutiveFailures, error: errorMsg })
         }
       } finally {
+        // Send a single bulk signal to web-ui instead of 100+ individual events
+        if (changeCount > 0) {
+          bus.emit(EventNames.TASK_UPDATED, { task: null } as any, ['web-ui'], { source: `${plugin.id}-sync-batch` })
+          log.web.info(`${plugin.id} sync: batch complete`, { changeCount })
+        }
         syncing = false
       }
     }, intervalMs)
