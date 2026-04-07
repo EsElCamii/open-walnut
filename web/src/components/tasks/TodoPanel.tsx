@@ -56,6 +56,7 @@ import { GlobalNotesSection } from '../notes/GlobalNotesSection';
 import { useGlobalNotes } from '@/hooks/useGlobalNotes';
 import { SortableTierCard, TierDropZone } from './FocusSatelliteCards';
 import type { FocusTier } from '@/api/focus';
+import { useFocusBarContext } from '@/contexts/FocusBarContext';
 
 type DetailTarget =
   | { type: 'project'; category: string; project: string }
@@ -1221,8 +1222,6 @@ function TaskDetailPane({ task, allTasks, onClose, onOpenSession, onOpenTriageFo
 }
 
 const RECENT_VISIBLE_MAX = 3;
-/** Per-tier visible-card limits — overflow becomes scrollable */
-const TIER_VISIBLE_MAX = { focus: 7, next: 5, satellite: 5 } as const;
 const CARD_HEIGHT_PX = 30; // ~28px min-height + 2px gap
 
 // ── RecentCard — recent-activity task card (no drag, has pin button) ──
@@ -1315,6 +1314,7 @@ function SortableRecentCard({ task, isFocused, onClick, onPinTask }: RecentCardP
 export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onComplete, onSetPhase, onCreate, onUpdate, onStar, onSetPriority, onFocusTask, onClearFocus, focusedTaskId, focusNonce, favorites, ordering, onReorder, onMoveTask, onReparentTask, onOpenSession, onOpenTriageForTask, onPinTask, onUnpinTask, onReorderPinned, onSetTier, onSetDate, pinnedTaskIds, focusTaskIds, nextTaskIds, suppressDetail, openSessionIds, operationError, onClearOperationError, onOperationError, externalCategory, onCategoryChange }: TodoPanelProps) {
   // Hide .metadata* tasks (project/category configuration tasks, not user-visible)
   const tasks = useMemo(() => rawTasks.filter((t) => !t.title.startsWith('.metadata')), [rawTasks]);
+  const { tierLimits } = useFocusBarContext();
   const navigate = useNavigate();
   const [showCompleted, setShowCompleted] = useState(false);
   const [priorityFilter, setPriorityFilter] = useState('');
@@ -1727,17 +1727,27 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
     const activeId = active.id as string;
     const overId = over.id as string;
 
+    // Skip when hovering over the dragged item itself — its tier is determined
+    // by where we already placed it, not by where it was at drag start.
+    // Without this guard, the frozen snapshot says the item belongs to its
+    // original tier, causing it to be moved back → collision recalculates →
+    // oscillation → React #185 (infinite re-render loop).
+    if (activeId === overId) return;
+
     const snap = dragStartSnapshot.current;
     if (!snap) return;
 
     // Check if this item came from Recent
     const isFromRecent = snap.recent?.includes(activeId) ?? false;
 
-    // Determine target tier from drop zone or card
+    // Determine target tier from drop zone or the CURRENT position of the over-card.
+    // Use drag refs (live state during drag) with snapshot as fallback.
+    // IMPORTANT: only check drag refs, not raw snapshot, for non-drop-zone items —
+    // the snapshot is frozen at drag start and doesn't reflect cross-tier moves.
     const targetTier = DROP_ZONE_TIERS[overId]
-      ?? (snap.focus.includes(overId) || (dragFocusIds ?? snap.focus).includes(overId) ? 'focus' : undefined)
-      ?? (snap.next.includes(overId) || (dragNextIds ?? snap.next).includes(overId) ? 'next' : undefined)
-      ?? (snap.satellite.includes(overId) || (dragSatelliteIds ?? snap.satellite).includes(overId) ? 'satellite' : undefined);
+      ?? ((dragFocusIdsRef.current ?? snap.focus).includes(overId) ? 'focus' : undefined)
+      ?? ((dragNextIdsRef.current ?? snap.next).includes(overId) ? 'next' : undefined)
+      ?? ((dragSatelliteIdsRef.current ?? snap.satellite).includes(overId) ? 'satellite' : undefined);
     if (!targetTier) return;
 
     // For items from Recent: check if already placed in a tier during this drag
@@ -2796,7 +2806,7 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
                     </div>
                     {!focusCollapsed && (
                       <SortableContext items={focusIds_arr} strategy={verticalListSortingStrategy}>
-                        <div className="todo-pinned-list-scroll" style={focusTasksDisplay.length > TIER_VISIBLE_MAX.focus ? { maxHeight: TIER_VISIBLE_MAX.focus * CARD_HEIGHT_PX } : undefined}>
+                        <div className="todo-pinned-list-scroll" style={focusTasksDisplay.length > tierLimits.focus ? { maxHeight: tierLimits.focus * CARD_HEIGHT_PX } : undefined}>
                           <TierDropZone id="focus-drop-zone" isEmpty={focusTasksDisplay.length === 0}>
                             {focusTasksDisplay.map((task) => (
                               <SortableTierCard key={task.id} task={task} tier="focus" isFocused={focusedTaskId === task.id} onClick={handlePinnedCardClick} onSetTier={onSetTier} onUnpinTask={onUnpinTask} onPinTask={onPinTask} onSetPriority={onSetPriority} onSetDate={onSetDate} onStar={onStar} onExpandDetail={handleExpandDetail} onClearFocus={onClearFocus} onOpenSession={onOpenSession} />
@@ -2817,7 +2827,7 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
                     </div>
                     {!nextCollapsed && (
                       <SortableContext items={nextIds_arr} strategy={verticalListSortingStrategy}>
-                        <div className="todo-pinned-list-scroll" style={nextTasksDisplay.length > TIER_VISIBLE_MAX.next ? { maxHeight: TIER_VISIBLE_MAX.next * CARD_HEIGHT_PX } : undefined}>
+                        <div className="todo-pinned-list-scroll" style={nextTasksDisplay.length > tierLimits.next ? { maxHeight: tierLimits.next * CARD_HEIGHT_PX } : undefined}>
                           <TierDropZone id="next-drop-zone" isEmpty={nextTasksDisplay.length === 0}>
                             {nextTasksDisplay.map((task) => (
                               <SortableTierCard key={task.id} task={task} tier="next" isFocused={focusedTaskId === task.id} onClick={handlePinnedCardClick} onSetTier={onSetTier} onUnpinTask={onUnpinTask} onPinTask={onPinTask} onSetPriority={onSetPriority} onSetDate={onSetDate} onStar={onStar} onExpandDetail={handleExpandDetail} onClearFocus={onClearFocus} onOpenSession={onOpenSession} />
@@ -2839,7 +2849,7 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
                       </div>
                       {!satelliteCollapsed && (
                         <SortableContext items={satelliteIds_arr} strategy={verticalListSortingStrategy}>
-                          <div className="todo-pinned-list todo-pinned-list-scroll" style={satelliteTasksDisplay.length > TIER_VISIBLE_MAX.satellite ? { maxHeight: TIER_VISIBLE_MAX.satellite * CARD_HEIGHT_PX } : undefined}>
+                          <div className="todo-pinned-list todo-pinned-list-scroll" style={satelliteTasksDisplay.length > tierLimits.satellite ? { maxHeight: tierLimits.satellite * CARD_HEIGHT_PX } : undefined}>
                             {satelliteTasksDisplay.map((task) => (
                               <SortableTierCard key={task.id} task={task} tier="satellite" isFocused={focusedTaskId === task.id} onClick={handlePinnedCardClick} onSetTier={onSetTier} onUnpinTask={onUnpinTask} onPinTask={onPinTask} onSetPriority={onSetPriority} onSetDate={onSetDate} onStar={onStar} onExpandDetail={handleExpandDetail} onClearFocus={onClearFocus} onOpenSession={onOpenSession} />
                             ))}

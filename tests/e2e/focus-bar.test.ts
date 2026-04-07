@@ -126,4 +126,59 @@ describe('Focus Bar API', () => {
     expect(data.task.pinned).toBe(true);
     expect(typeof data.task.pin_order).toBe('number');
   });
+
+  // ── Tier management (the API path exercised during drag-and-drop) ──
+
+  it('PUT /api/focus/tasks/:id/tier sets focus tier', async () => {
+    const r = await api('PUT', `/api/focus/tasks/${taskIds[1]}/tier`, { tier: 'focus' });
+    expect(r.status).toBe(200);
+    expect(r.data.focus_tasks).toContain(taskIds[1]);
+    expect(r.data.next_tasks).not.toContain(taskIds[1]);
+  });
+
+  it('PUT /api/focus/tasks/:id/tier moves to next tier', async () => {
+    const r = await api('PUT', `/api/focus/tasks/${taskIds[1]}/tier`, { tier: 'next' });
+    expect(r.status).toBe(200);
+    expect(r.data.next_tasks).toContain(taskIds[1]);
+    expect(r.data.focus_tasks).not.toContain(taskIds[1]);
+  });
+
+  it('PUT /api/focus/tasks/:id/tier moves to satellite tier', async () => {
+    const r = await api('PUT', `/api/focus/tasks/${taskIds[1]}/tier`, { tier: 'satellite' });
+    expect(r.status).toBe(200);
+    expect(r.data.satellite_tasks).toContain(taskIds[1]);
+    expect(r.data.next_tasks).not.toContain(taskIds[1]);
+    expect(r.data.focus_tasks).not.toContain(taskIds[1]);
+  });
+
+  it('tier change persists across GET', async () => {
+    await api('PUT', `/api/focus/tasks/${taskIds[2]}/tier`, { tier: 'focus' });
+    const r = await api('GET', '/api/focus/tasks');
+    expect(r.data.focus_tasks).toContain(taskIds[2]);
+  });
+
+  it('set-tier on non-pinned task returns 400', async () => {
+    const r = await api('PUT', `/api/focus/tasks/${taskIds[0]}/tier`, { tier: 'focus' });
+    expect(r.status).toBe(400);
+  });
+
+  it('set-tier with invalid tier returns 400', async () => {
+    const r = await api('PUT', `/api/focus/tasks/${taskIds[1]}/tier`, { tier: 'invalid' });
+    expect(r.status).toBe(400);
+  });
+
+  it('rapid tier toggling does not corrupt state (simulates drag oscillation)', async () => {
+    // This test simulates the oscillation pattern that caused React #185:
+    // rapidly toggling a task between focus and next tiers.
+    const id = taskIds[3];
+    for (let i = 0; i < 10; i++) {
+      await api('PUT', `/api/focus/tasks/${id}/tier`, { tier: i % 2 === 0 ? 'focus' : 'next' });
+    }
+    // Final state should be 'next' (last iteration i=9, 9%2=1 → 'next')
+    const r = await api('GET', '/api/focus/tasks');
+    expect(r.data.next_tasks).toContain(id);
+    expect(r.data.focus_tasks).not.toContain(id);
+    // All pinned tasks should still be present
+    expect(r.data.pinned_tasks).toHaveLength(3);
+  });
 });

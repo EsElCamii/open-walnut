@@ -4,6 +4,12 @@ import * as focusApi from '@/api/focus';
 import type { FocusTier } from '@/api/focus';
 import type { Task } from '@open-walnut/core';
 
+export interface TierLimits {
+  focus: number;
+  next: number;
+  satellite: number;
+}
+
 export interface UseFocusBarReturn {
   pinnedIds: string[];
   pinnedTasks: Task[];
@@ -21,13 +27,30 @@ export interface UseFocusBarReturn {
   tierOf: (taskId: string) => FocusTier;
   visible: boolean;
   setVisible: (v: boolean) => void;
+  tierLimits: TierLimits;
+  setTierLimits: (limits: TierLimits) => void;
 }
 
 const SELF_CHANGE_COOLDOWN = 3000;
 const VISIBLE_KEY = 'open-walnut-focus-dock-visible';
+const TIER_LIMITS_KEY = 'open-walnut-focus-tier-limits';
+export const DEFAULT_TIER_LIMITS: TierLimits = { focus: 7, next: 5, satellite: 5 };
 
 function readVisible(): boolean {
   try { return localStorage.getItem(VISIBLE_KEY) === 'true'; } catch { return false; }
+}
+
+function readTierLimits(): TierLimits {
+  try {
+    const raw = localStorage.getItem(TIER_LIMITS_KEY);
+    if (!raw) return DEFAULT_TIER_LIMITS;
+    const parsed = JSON.parse(raw);
+    return {
+      focus: Number(parsed.focus) || DEFAULT_TIER_LIMITS.focus,
+      next: Number(parsed.next) || DEFAULT_TIER_LIMITS.next,
+      satellite: Number(parsed.satellite) || DEFAULT_TIER_LIMITS.satellite,
+    };
+  } catch { return DEFAULT_TIER_LIMITS; }
 }
 
 /** Shallow-compare two string arrays — avoids unnecessary state updates from server echoes. */
@@ -43,10 +66,16 @@ export function useFocusBar(tasks: Task[]): UseFocusBarReturn {
   const [nextIds, setNextIds] = useState<string[]>([]);
   const [satelliteIds, setSatelliteIds] = useState<string[]>([]);
   const [visible, setVisibleState] = useState(readVisible);
+  const [tierLimits, setTierLimitsState] = useState<TierLimits>(readTierLimits);
 
   const setVisible = useCallback((v: boolean) => {
     setVisibleState(v);
     try { localStorage.setItem(VISIBLE_KEY, String(v)); } catch { /* ignore */ }
+  }, []);
+
+  const setTierLimits = useCallback((limits: TierLimits) => {
+    setTierLimitsState(limits);
+    try { localStorage.setItem(TIER_LIMITS_KEY, JSON.stringify(limits)); } catch { /* ignore */ }
   }, []);
 
   const lastWriteRef = useRef(0);
@@ -179,5 +208,6 @@ export function useFocusBar(tasks: Task[]): UseFocusBarReturn {
     pin, unpin, reorder, setTier,
     isPinned, tierOf,
     visible, setVisible,
+    tierLimits, setTierLimits,
   };
 }

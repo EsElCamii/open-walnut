@@ -14,9 +14,9 @@ export function FocusBarProvider({ children }: { children: ReactNode }) {
   // MainPage render again → TodoPanel filtered recalc → setSortOrder → exceeds max depth.
   // Consumers that need fresh task data already get it from TasksContext.
   const value = useMemo<UseFocusBarReturn>(() => focusBar,
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- only IDs + visible trigger context update
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- only IDs + visible + tierLimits trigger context update
     [focusBar.pinnedIds, focusBar.focusIds, focusBar.nextIds, focusBar.satelliteIds,
-     focusBar.visible]);
+     focusBar.visible, focusBar.tierLimits]);
   return <FocusBarContext.Provider value={value}>{children}</FocusBarContext.Provider>;
 }
 
