@@ -9595,6 +9595,9 @@ img[data-lightbox-src],
 
 /* Show kebab on row hover or when menu is open */
 .todo-panel-item:hover .task-kebab-btn,
+.todo-focus-card:hover .task-kebab-btn,
+.todo-next-card:hover .task-kebab-btn,
+.todo-pinned-card:hover .task-kebab-btn,
 .task-kebab-btn:focus-visible,
 .task-kebab-wrapper:has(.task-kebab-menu) .task-kebab-btn {
   opacity: 1;
