@@ -1,13 +1,13 @@
 /**
  * NotesHandler — handles notes/global and notes/{name} sources.
  *
- * notes/global → GLOBAL_NOTES_FILE (~/.open-walnut/global-notes.md)
+ * notes/global → GLOBAL_NOTES_FILE (~/.open-walnut/notes/global-notes.md)
  * notes/{name} → ~/.open-walnut/notes/{name}.md
  */
 import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
-import { GLOBAL_NOTES_FILE, WALNUT_HOME } from '../../../constants.js';
+import { GLOBAL_NOTES_FILE, NOTES_DIR } from '../../../constants.js';
 import {
   readFileWithMeta,
   writeFileChecked,
@@ -15,8 +15,6 @@ import {
   computeContentHash,
 } from '../../../utils/file-ops.js';
 import type { FileHandler, ResolvedSource, FilesReadResult, FilesWriteResult, FilesEditResult, FilesListItem } from './types.js';
-
-const NOTES_DIR = path.join(WALNUT_HOME, 'notes');
 
 export const notesHandler: FileHandler = {
   async read(resolved, opts) {
@@ -101,8 +99,10 @@ export const notesHandler: FileHandler = {
 
     // List named notes from NOTES_DIR
     try {
+      // Exclude global-notes.md — it's listed as the synthetic "notes/global" entry above
+      const globalBase = path.basename(GLOBAL_NOTES_FILE);
       const files = fs.readdirSync(NOTES_DIR)
-        .filter((f) => f.endsWith('.md'))
+        .filter((f) => f.endsWith('.md') && f !== globalBase)
         .sort();
       for (const f of files) {
         const name = f.replace('.md', '');

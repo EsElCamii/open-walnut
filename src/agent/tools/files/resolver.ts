@@ -14,7 +14,7 @@ import {
   REPOS_MEMORY_DIR,
   DAILY_DIR,
   GLOBAL_NOTES_FILE,
-  WALNUT_HOME,
+  NOTES_DIR,
   REPOSITORIES_DIR,
 } from '../../../constants.js';
 import { formatDateKey } from '../../../core/daily-log.js';
@@ -122,6 +122,7 @@ export function resolveSource(source: string): ResolvedSource {
   }
 
   // ── notes/* → NotesHandler ──
+  // Exact match must precede startsWith('notes/') to avoid resolving to notes/global.md
   if (source === 'notes/global') {
     return {
       type: 'notes',
@@ -135,7 +136,7 @@ export function resolveSource(source: string): ResolvedSource {
     // List mode
     return {
       type: 'notes',
-      filePath: path.join(WALNUT_HOME, 'notes'),
+      filePath: NOTES_DIR,
       source,
       variant: 'notes-list',
     };
@@ -148,7 +149,7 @@ export function resolveSource(source: string): ResolvedSource {
     }
     return {
       type: 'notes',
-      filePath: path.join(WALNUT_HOME, 'notes', `${name}.md`),
+      filePath: path.join(NOTES_DIR, `${name}.md`),
       source,
       variant: 'named',
       meta: { name },

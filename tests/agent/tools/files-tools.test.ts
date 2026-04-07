@@ -49,6 +49,7 @@ describe('files_read', () => {
   });
 
   it('reads notes/global', async () => {
+    await fs.mkdir(path.dirname(GLOBAL_NOTES_FILE), { recursive: true });
     await fs.writeFile(GLOBAL_NOTES_FILE, '# My Notes\n- [ ] Buy groceries\n', 'utf-8');
 
     const result = await executeTool('files_read', { source: 'notes/global' });
@@ -317,12 +318,10 @@ describe('files_list', () => {
   });
 
   it('lists notes', async () => {
-    // Create global notes
-    await fs.writeFile(GLOBAL_NOTES_FILE, '# Notes\n', 'utf-8');
-
-    // Create named notes dir
+    // Create global notes (GLOBAL_NOTES_FILE is inside notes/ dir)
     const notesDir = path.join(tmpDir, 'notes');
     await fs.mkdir(notesDir, { recursive: true });
+    await fs.writeFile(GLOBAL_NOTES_FILE, '# Notes\n', 'utf-8');
     await fs.writeFile(path.join(notesDir, 'recipes.md'), '# Recipes\n', 'utf-8');
 
     const result = await executeTool('files_list', { prefix: 'notes' });

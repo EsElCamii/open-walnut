@@ -7,6 +7,7 @@ import path from 'node:path'
 import { Router, type Request, type Response, type NextFunction } from 'express'
 import { GLOBAL_NOTES_FILE } from '../../constants.js'
 import { computeContentHash } from '../../utils/file-ops.js'
+import { bus, EventNames } from '../../core/event-bus.js'
 import { log } from '../../logging/index.js'
 
 const MAX_NOTES_SIZE = 1_000_000 // 1 MB
@@ -67,6 +68,7 @@ notesRouter.put('/global', async (req: Request, res: Response, next: NextFunctio
     await fsp.writeFile(GLOBAL_NOTES_FILE, content, 'utf-8')
     const contentHash = computeContentHash(content)
     log.memory.info('Global notes updated via browser', { size: content.length })
+    bus.emit(EventNames.NOTES_UPDATED, { source: 'notes/global', contentHash }, ['web-ui'])
     res.json({ ok: true, contentHash })
   } catch (err) {
     next(err)

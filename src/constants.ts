@@ -146,8 +146,9 @@ export const BUILTIN_SKILLS_DIR = (() => {
   return path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'data', 'skills');
 })();
 export const FREQUENT_DIRS_FILE = path.join(WALNUT_HOME, 'frequent-directories.json');
-export const GLOBAL_NOTES_FILE = path.join(WALNUT_HOME, 'global-notes.md');
 export const NOTES_DIR = path.join(WALNUT_HOME, 'notes');
+/** Reserved filename inside NOTES_DIR — consumers listing NOTES_DIR must exclude it */
+export const GLOBAL_NOTES_FILE = path.join(NOTES_DIR, 'global-notes.md');
 export const REPOSITORIES_DIR = path.join(WALNUT_HOME, 'repositories');
 export const REPOS_MEMORY_DIR = path.join(MEMORY_DIR, 'repos');
 export const TIMELINE_DIR = path.join(WALNUT_HOME, 'timeline');

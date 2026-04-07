@@ -6,8 +6,9 @@
 import fsp from 'node:fs/promises'
 import path from 'node:path'
 import { Router, type Request, type Response, type NextFunction } from 'express'
-import { NOTES_DIR } from '../../constants.js'
+import { NOTES_DIR, GLOBAL_NOTES_FILE } from '../../constants.js'
 import { computeContentHash } from '../../utils/file-ops.js'
+import { bus, EventNames } from '../../core/event-bus.js'
 import { log } from '../../logging/index.js'
 
 const MAX_NOTE_SIZE = 2_000_000 // 2 MB
@@ -69,6 +70,9 @@ async function scanDir(dirPath: string, relBase: string): Promise<TreeNode[]> {
     return a.name.localeCompare(b.name)
   })
 
+  // global-notes.md is a reserved file managed by the Global Notes widget; exclude from v2 tree
+  const globalBase = path.basename(GLOBAL_NOTES_FILE)
+
   for (const entry of entries) {
     if (entry.name.startsWith('.')) continue // skip hidden files
     const relPath = relBase ? `${relBase}/${entry.name}` : entry.name
@@ -76,7 +80,7 @@ async function scanDir(dirPath: string, relBase: string): Promise<TreeNode[]> {
     if (entry.isDirectory()) {
       const children = await scanDir(path.join(dirPath, entry.name), relPath)
       nodes.push({ name: entry.name, path: relPath, type: 'folder', children })
-    } else if (entry.name.endsWith('.md')) {
+    } else if (entry.name.endsWith('.md') && !(entry.name === globalBase && !relBase)) {
       nodes.push({ name: entry.name, path: relPath, type: 'file' })
     }
   }
@@ -176,7 +180,10 @@ notesV2Router.put('/content/*path', async (req: Request, res: Response, next: Ne
 
     const stat = await fsp.stat(filePath)
     const contentHash = computeContentHash(content)
+    const normalizedPath = notePath.replace(/\.md$/, '')
     log.memory.info('Note updated', { path: notePath, size: content.length })
+    // source format `notes/{path}` is a shared contract with files-tools.ts and useNoteContent.ts
+    bus.emit(EventNames.NOTES_UPDATED, { source: `notes/${normalizedPath}`, contentHash }, ['web-ui'])
     res.json({ ok: true, updatedAt: stat.mtime.toISOString(), contentHash })
   } catch (err) {
     next(err)
@@ -406,7 +413,7 @@ notesV2Router.post('/folder', async (req: Request, res: Response, next: NextFunc
 
 // ─── Helpers ─────────────────────────────────────────────────────────────
 
-/** Recursively collect all .md files */
+/** Recursively collect all .md files (excludes global-notes.md at NOTES_DIR root) */
 async function getAllMdFiles(dir: string): Promise<string[]> {
   const results: string[] = []
   let entries: import('fs').Dirent[]
@@ -415,12 +422,13 @@ async function getAllMdFiles(dir: string): Promise<string[]> {
   } catch {
     return results
   }
+  const globalBase = path.basename(GLOBAL_NOTES_FILE)
   for (const entry of entries) {
     if (entry.name.startsWith('.')) continue
     const full = path.join(dir, entry.name)
     if (entry.isDirectory()) {
       results.push(...await getAllMdFiles(full))
-    } else if (entry.name.endsWith('.md')) {
+    } else if (entry.name.endsWith('.md') && !(entry.name === globalBase && dir === NOTES_DIR)) {
       results.push(full)
     }
   }

@@ -85,6 +85,28 @@ export function useGlobalNotes(): UseGlobalNotesReturn {
     }
   });
 
+  // ── Visibility / focus reload — catch external edits when tab regains focus ──
+  useEffect(() => {
+    let lastCheck = 0;
+    const THROTTLE_MS = 2000;
+
+    const check = () => {
+      if (dirty.current) return; // don't overwrite unsaved user edits
+      const now = Date.now();
+      if (now - lastCheck < THROTTLE_MS) return;
+      lastCheck = now;
+      reloadContent();
+    };
+
+    const onVisibility = () => { if (document.visibilityState === 'visible') check(); };
+    document.addEventListener('visibilitychange', onVisibility);
+    window.addEventListener('focus', check);
+    return () => {
+      document.removeEventListener('visibilitychange', onVisibility);
+      window.removeEventListener('focus', check);
+    };
+  }, [reloadContent]);
+
   // Lightweight dirty signal — no serialization, no React state update per keystroke
   const onEditorUpdate = useCallback((editor: Editor) => {
     editorRef.current = editor;
