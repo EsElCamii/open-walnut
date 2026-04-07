@@ -1806,15 +1806,45 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
   const handlePinnedDragEnd = useCallback((event: DragEndEvent) => {
     const { active, over } = event;
     const snap = dragStartSnapshot.current;
+
+    // Capture live tier positions BEFORE clearing — handlePinnedDragOver may have
+    // moved the active item cross-tier during drag. We need these to persist the
+    // final position when dnd-kit reports over === active (common after cross-tier
+    // moves, since the dragged card's center follows the pointer).
+    const liveFocus = dragFocusIdsRef.current;
+    const liveNext = dragNextIdsRef.current;
+    const liveSatellite = dragSatelliteIdsRef.current;
+
     clearDragState();
 
     if (!over || !snap) return;
     const activeId = active.id as string;
     const overId = over.id as string;
-    if (activeId === overId) return;
 
     // Check if item came from Recent section
     const isFromRecent = snap.recent?.includes(activeId) ?? false;
+
+    // When over === active, collision detected the dragged card itself (its center
+    // follows the pointer). handlePinnedDragOver may have moved it cross-tier —
+    // check live refs to persist that move.
+    if (activeId === overId) {
+      const currentTier: FocusTier | undefined =
+        (liveFocus ?? snap.focus).includes(activeId) ? 'focus' :
+        (liveNext ?? snap.next).includes(activeId) ? 'next' :
+        (liveSatellite ?? snap.satellite).includes(activeId) ? 'satellite' : undefined;
+      if (isFromRecent) {
+        if (currentTier) {
+          onPinTask?.(activeId);
+          setTimeout(() => onSetTier?.(activeId, currentTier), 100);
+        }
+      } else {
+        const origTier: FocusTier = snap.focus.includes(activeId) ? 'focus' : snap.next.includes(activeId) ? 'next' : 'satellite';
+        if (currentTier && origTier !== currentTier) {
+          onSetTier?.(activeId, currentTier);
+        }
+      }
+      return;
+    }
 
     if (isFromRecent) {
       // Determine target tier from drop zone or card
