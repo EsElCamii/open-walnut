@@ -5720,6 +5720,17 @@ input:focus, textarea:focus, select:focus {
 .stt-dropdown-option-body { display: flex; flex-direction: column; flex: 1; gap: 1px; }
 .stt-dropdown-option-name { display: flex; align-items: center; gap: 6px; font-weight: 500; }
 .stt-dropdown-option-desc { font-size: 0.8rem; color: var(--text-muted); }
+.stt-dropdown-option-features { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 2px; }
+.stt-feature-tag {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 5px;
+  border-radius: 3px;
+  font-size: 0.65rem;
+  color: var(--text-muted);
+  background: var(--bg-secondary);
+  white-space: nowrap;
+}
 .stt-dropdown-check { color: var(--accent); font-weight: bold; flex-shrink: 0; margin-top: 2px; }
 
 /* ── Badges ── */
@@ -5739,6 +5750,7 @@ input:focus, textarea:focus, select:focus {
 .stt-badge-active { background: color-mix(in srgb, var(--success) 15%, transparent); color: var(--success); }
 .stt-badge-downloaded { background: color-mix(in srgb, var(--accent) 12%, transparent); color: var(--text-muted); }
 .stt-badge-missing { background: color-mix(in srgb, var(--error) 12%, transparent); color: var(--error); font-size: 0.65rem; }
+.stt-badge-recommended { background: color-mix(in srgb, var(--accent) 15%, transparent); color: var(--accent); font-weight: 600; }
 
 /* ── Install Banner ── */
 
@@ -13275,6 +13287,61 @@ a.task-kebab-info:hover {
 
 .session-plan-popover-source a:hover {
   text-decoration: underline;
+}
+
+.session-plan-popover-content {
+  max-height: 300px;
+  overflow-y: auto;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--fg);
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+  padding: 8px 0;
+}
+
+.session-plan-popover-content h1,
+.session-plan-popover-content h2,
+.session-plan-popover-content h3 {
+  font-size: 12px;
+  font-weight: 600;
+  margin: 8px 0 4px;
+}
+
+.session-plan-popover-content h1:first-child,
+.session-plan-popover-content h2:first-child,
+.session-plan-popover-content h3:first-child {
+  margin-top: 0;
+}
+
+.session-plan-popover-content p {
+  margin: 4px 0;
+}
+
+.session-plan-popover-content ul,
+.session-plan-popover-content ol {
+  margin: 4px 0;
+  padding-left: 18px;
+}
+
+.session-plan-popover-content li {
+  margin: 2px 0;
+}
+
+.session-plan-popover-content code {
+  font-size: 11px;
+  background: var(--bg-tertiary);
+  padding: 1px 3px;
+  border-radius: 3px;
+}
+
+.session-plan-popover-content pre {
+  font-size: 11px;
+  background: var(--bg-tertiary);
+  padding: 6px 8px;
+  border-radius: 4px;
+  overflow-x: auto;
+  margin: 4px 0;
 }
 
 .session-plan-popover-actions {

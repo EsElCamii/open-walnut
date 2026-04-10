@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef, Component, type ReactNode, type ErrorInfo, memo } from 'react';
+import { useState, useEffect, useCallback, useRef, useMemo, Component, type ReactNode, type ErrorInfo, memo } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { SessionChatHistory } from './SessionChatHistory';
 import { SessionNotes } from './SessionNotes';
@@ -7,6 +7,7 @@ import { ICON_ROBOT, ICON_EXPAND, ICON_COLLAPSE, ICON_CLOSE } from '../common/Ic
 import { UserMessagesSummary } from './UserMessagesSummary';
 // PlanPreviewSection replaced by inline plan popover in meta bar
 import { ChatInput } from '@/components/chat/ChatInput';
+import { renderMarkdownWithRefs } from '@/utils/markdown';
 import { useSessionSend } from '@/hooks/useSessionSend';
 import { useSessionStream } from '@/hooks/useSessionStream';
 import { useSlashCommands } from '@/hooks/useSlashCommands';
@@ -28,6 +29,7 @@ import { useSessionPlan } from '@/hooks/useSessionPlan';
 import { SessionRetryButton } from './SessionRetryButton';
 import { wsClient } from '@/api/ws';
 import type { SessionRecord, TaskPhase } from '@/types/session';
+import { useEnabledModes } from '@/hooks/useEnabledModes';
 
 interface SessionPanelErrorBoundaryProps {
   sessionId: string;
@@ -80,6 +82,17 @@ class SessionPanelErrorBoundary extends Component<SessionPanelErrorBoundaryProps
   }
 }
 
+/** Renders plan markdown content inside the plan popover with scrollable area */
+function PlanPopoverContent({ content, cwd }: { content: string; cwd?: string }) {
+  const html = useMemo(() => renderMarkdownWithRefs(content, cwd), [content, cwd]);
+  return (
+    <div
+      className="session-plan-popover-content markdown-body"
+      dangerouslySetInnerHTML={{ __html: html }}
+    />
+  );
+}
+
 interface SessionPanelProps {
   sessionId: string;
   /** Stable close handler — receives the sessionId so parent can identify which panel to close. */
@@ -98,6 +111,7 @@ interface SessionPanelProps {
 
 export const SessionPanel = memo(function SessionPanel({ sessionId, onClose, onTaskClick, onSessionClick, onSessionReplaced, onForkPending, onForkResolved, onForkFailed }: SessionPanelProps) {
   const navigate = useNavigate();
+  const enabledModes = useEnabledModes();
   const [session, setSession] = useState<SessionRecord | null>(null);
   const [loading, setLoading] = useState(true);
   const { optimisticMsgs, sendError, send, interruptSend, retryFailed, dismissFailed, handleMessagesDelivered, handleBatchCompleted, handleEditQueued, handleDeleteQueued, addExternalQueued, clearCommitted } = useSessionSend(sessionId);
@@ -611,7 +625,7 @@ export const SessionPanel = memo(function SessionPanel({ sessionId, onClose, onT
                   Plan {planPopoverOpen ? '\u25B4' : '\u25BE'}
                 </button>
                 {planPopoverOpen && (
-                  <div className="session-plan-popover">
+                  <div className="session-plan-popover" onMouseDown={e => e.stopPropagation()}>
                     {plan && (
                       <>
                         <div className="session-plan-popover-file">
@@ -638,6 +652,9 @@ export const SessionPanel = memo(function SessionPanel({ sessionId, onClose, onT
                               {plan.sourceSessionId.slice(0, 12)}...
                             </a>
                           </div>
+                        )}
+                        {plan.content && (
+                          <PlanPopoverContent content={plan.content} cwd={session?.cwd} />
                         )}
                       </>
                     )}
@@ -789,8 +806,6 @@ export const SessionPanel = memo(function SessionPanel({ sessionId, onClose, onT
           {session && (() => {
             // Mode toggle uses session.mode only (not planCompleted) — planCompleted
             // is a separate flag meaning "plan was produced", it shouldn't lock the toggle.
-            // Cycle order: default → bypass → plan → accept → default
-            const MODE_CYCLE: Array<SessionRecord['mode']> = ['default', 'bypass', 'plan', 'accept'];
             const MODE_LABELS: Record<string, string> = {
               default: 'Default', bypass: 'Bypass', plan: 'Plan', accept: 'Accept',
             };
@@ -799,15 +814,14 @@ export const SessionPanel = memo(function SessionPanel({ sessionId, onClose, onT
             };
             const currentMode = session.mode || 'default';
             const isPlan = currentMode === 'plan';
-            const currentIdx = MODE_CYCLE.indexOf(currentMode as typeof MODE_CYCLE[number]);
-            const nextMode = MODE_CYCLE[(currentIdx + 1) % MODE_CYCLE.length]!;
-            const toggleMode = async () => {
-              try {
-                const updated = await updateSession(session.claudeSessionId, { mode: nextMode });
-                setSession(updated);
-              } catch (err) {
+            const currentIdx = enabledModes.indexOf(currentMode);
+            const nextMode = enabledModes[(currentIdx + 1) % enabledModes.length]!;
+            const toggleMode = () => {
+              setSession({ ...session, mode: nextMode });
+              updateSession(session.claudeSessionId, { mode: nextMode }).catch(err => {
+                setSession({ ...session, mode: currentMode }); // revert
                 console.warn('[session-panel] mode toggle failed', session.claudeSessionId, nextMode, err);
-              }
+              });
             };
             const icon = MODE_ICONS[currentMode] ?? '\u2699\uFE0F';
             const label = MODE_LABELS[currentMode] ?? currentMode;
@@ -836,17 +850,14 @@ export const SessionPanel = memo(function SessionPanel({ sessionId, onClose, onT
             searchSessionCommands={searchSlashCommands}
             onControlCommand={handleControlCommand}
             draftKey={`draft:session:${sessionId}`}
-            onToggleMode={session ? async () => {
-              // Same cycle as the pill: default → bypass → plan → accept → default
-              const CYCLE = ['default', 'bypass', 'plan', 'accept'];
+            onToggleMode={session ? () => {
               const cur = session.mode || 'default';
-              const next = CYCLE[(CYCLE.indexOf(cur) + 1) % CYCLE.length]!;
-              try {
-                const updated = await updateSession(session.claudeSessionId, { mode: next });
-                setSession(updated);
-              } catch (err) {
+              const next = enabledModes[(enabledModes.indexOf(cur) + 1) % enabledModes.length]!;
+              setSession({ ...session, mode: next });
+              updateSession(session.claudeSessionId, { mode: next }).catch(err => {
+                setSession({ ...session, mode: cur }); // revert
                 console.warn('[session-panel] mode toggle failed', session.claudeSessionId, next, err);
-              }
+              });
             } : undefined}
           />
           {modelPickerOpen && (

@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, useCallback, type KeyboardEvent } from 'react';
+import { useState, useRef, useEffect, useCallback, useMemo, type KeyboardEvent } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { SessionChatHistory } from './SessionChatHistory';
 import { SessionNotes } from './SessionNotes';
@@ -16,8 +16,10 @@ import { useSessionUsage, formatModelName, getContextWindowSize } from '@/hooks/
 import { useEvent } from '@/hooks/useWebSocket';
 import { PlanContentContext } from '@/contexts/PlanContentContext';
 import type { SessionRecord, TaskPhase } from '@/types/session';
+import { useEnabledModes } from '@/hooks/useEnabledModes';
 import { timeAgo } from '@/utils/time';
 import { ICON_CLIPBOARD, ICON_LIGHTNING, ICON_WARNING } from '@/components/common/Icons';
+import { renderMarkdownWithRefs } from '@/utils/markdown';
 
 interface SessionDetailPanelProps {
   session: SessionRecord | null;
@@ -37,6 +39,17 @@ interface SessionDetailPanelProps {
   onClearCommitted?: () => void;
   onRetryFailed?: (queueId: string) => void;
   onDismissFailed?: (queueId: string) => void;
+}
+
+/** Renders plan markdown content inside the plan popover with scrollable area */
+function PlanPopoverContent({ content, cwd }: { content: string; cwd?: string }) {
+  const html = useMemo(() => renderMarkdownWithRefs(content, cwd), [content, cwd]);
+  return (
+    <div
+      className="session-plan-popover-content markdown-body"
+      dangerouslySetInnerHTML={{ __html: html }}
+    />
+  );
 }
 
 function formatDate(dateStr: string): string {
@@ -129,6 +142,7 @@ function EditableTitle({ sessionId, title, onSaved }: { sessionId: string; title
 
 export function SessionDetailPanel({ session, taskTitle, summary, onTitleChanged, onSessionReplaced, optimisticMessages, onMessagesDelivered, onBatchCompleted, onEditQueued, onDeleteQueued, onAgentQueued, onClearCommitted, onRetryFailed, onDismissFailed }: SessionDetailPanelProps) {
   const navigate = useNavigate();
+  const enabledModes = useEnabledModes();
   const [executing, setExecuting] = useState(false);
   const [executeError, setExecuteError] = useState<string | null>(null);
   const [executeStarted, setExecuteStarted] = useState(false);
@@ -464,7 +478,7 @@ export function SessionDetailPanel({ session, taskTitle, summary, onTitleChanged
                   Plan {planPopoverOpen ? '\u25B4' : '\u25BE'}
                 </button>
                 {planPopoverOpen && (
-                  <div className="session-plan-popover">
+                  <div className="session-plan-popover" onMouseDown={e => e.stopPropagation()}>
                     {plan && (
                       <>
                         <div className="session-plan-popover-file">
@@ -491,6 +505,9 @@ export function SessionDetailPanel({ session, taskTitle, summary, onTitleChanged
                               {plan.sourceSessionId.slice(0, 12)}...
                             </a>
                           </div>
+                        )}
+                        {plan.content && (
+                          <PlanPopoverContent content={plan.content} cwd={session?.cwd} />
                         )}
                       </>
                     )}
@@ -546,13 +563,11 @@ export function SessionDetailPanel({ session, taskTitle, summary, onTitleChanged
               })()}
             </button>
             {(() => {
-              // Cycle: default → bypass → plan → accept → default
-              const CYCLE = ['default', 'bypass', 'plan', 'accept'];
               const LABELS: Record<string, string> = { default: 'Default', bypass: 'Bypass', plan: 'Plan', accept: 'Accept' };
               const ICONS: Record<string, string> = { default: '\u2699\uFE0F', bypass: '\u26A1', plan: '\uD83D\uDCCB', accept: '\u2705' };
               const currentMode = (modeOverride ?? session.mode) || 'default';
               const isPlan = currentMode === 'plan';
-              const nextMode = CYCLE[(CYCLE.indexOf(currentMode) + 1) % CYCLE.length]!;
+              const nextMode = enabledModes[(enabledModes.indexOf(currentMode) + 1) % enabledModes.length]!;
               const handleModeToggle = async () => {
                 setModeOverride(nextMode);
                 try {
