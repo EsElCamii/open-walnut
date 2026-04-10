@@ -565,6 +565,21 @@ export async function startServer(options: ServerOptions = {}): Promise<HttpServ
   // Skip for ephemeral servers — they use a temp copy of data, no need to backup
   if (!isEphemeral) {
     gitAutoCommitHandle = startGitAutoCommit()
+
+    // Recover from any crashed compaction, then schedule if due
+    const { recoverFromCrashedCompaction, runScheduledCompaction } = await import('../integrations/git-compaction.js')
+    recoverFromCrashedCompaction()
+    // Run compaction 60s after startup (low priority, non-blocking)
+    setTimeout(() => {
+      try {
+        const result = runScheduledCompaction()
+        if (result && !result.skipped) {
+          log.git.info('git compaction complete', { before: result.before, after: result.after })
+        }
+      } catch (err) {
+        log.git.warn('git compaction failed', { error: err instanceof Error ? err.message : String(err) })
+      }
+    }, 60_000)
   }
 
   // -- Init SubagentRunner + SessionRunner --
@@ -752,7 +767,7 @@ export async function startServer(options: ServerOptions = {}): Promise<HttpServ
         scheduleEmbeddingRetry()
       }
     }, 500) // 500ms debounce
-  })
+  }, { global: true }) // global: true — receives events with destinations:[] (plugin sync individual events)
 
   // Retry failed embeddings with exponential backoff (60s -> 120s -> 240s -> 300s cap)
   function scheduleEmbeddingRetry(): void {
@@ -861,6 +876,11 @@ export async function startServer(options: ServerOptions = {}): Promise<HttpServ
       const { sessionId, variant, message, detail } = eventData<'session:system-event'>(event)
       if (sessionId) {
         sessionStreamBuffer.appendSystem(sessionId, variant, message, detail)
+        sendStreamEvent(sessionId, event.name, event.data)
+      }
+    } else if (event.name === 'session:permission-request') {
+      const { sessionId } = event.data as { sessionId?: string }
+      if (sessionId) {
         sendStreamEvent(sessionId, event.name, event.data)
       }
     } else if (event.name === 'session:usage-update') {
@@ -1270,6 +1290,10 @@ export async function startServer(options: ServerOptions = {}): Promise<HttpServ
           }, ['web-ui'])
         }
 
+        // Synchronous, not delayed. The old setTimeout(5000) caused a cross-turn race:
+        // if a new session:input arrived during the 5s window, the delayed callback
+        // would overwrite the correct IN_PROGRESS with AWAIT_HUMAN_ACTION.
+        //
         // Synchronous phase check: if triage completed but task is still at AGENT_COMPLETE,
         // the triage failed to act. Transition to AWAIT_HUMAN_ACTION immediately (no timer).
         if (taskId) {
@@ -1667,7 +1691,7 @@ function startPluginSyncPolling(): void {
       if (syncing) return
       syncing = true
       const syncT0 = Date.now()
-      let changeCount = 0
+      let changeCount = 0 // captured by ctx closures — accumulates across delta pull + reconciler.tick
       try {
         const { listTasks, updateTaskRaw, addTaskFull, deleteTask, autoPushIfConfigured } = await import('../core/task-manager.js')
         const localTasks = await listTasks()
@@ -1685,6 +1709,7 @@ function startPluginSyncPolling(): void {
               const { changed } = await updateTaskRaw(task.id, { ext: mergedExt })
               Object.assign(task, { ext: mergedExt })
               // Only emit if fields actually changed — avoids flooding WS with no-op task:updated events on each sync cycle
+              // destinations: [] — only global subscribers (embedding-sync) receive individual events; web-ui gets one bulk signal at end of sync cycle
               if (changed) {
                 bus.emit(EventNames.TASK_UPDATED, { task }, [], { source: `${plugin.id}-sync` })
                 changeCount++
@@ -1719,6 +1744,13 @@ function startPluginSyncPolling(): void {
         const ctx: SyncPollContext = {
           getTasks: () => localTasks,
           updateTask: async (id, updates) => {
+            // pushInflight guard: skip pull update if task has active push
+            const { isPushInflight } = await import('../core/task-manager.js')
+            if (isPushInflight(id)) {
+              log.web.debug(`${plugin.id} sync: skipping pull update — push inflight`, { taskId: id })
+              const existingTask = localTasks.find(t => t.id === id)
+              return existingTask ?? await (await import('../core/task-manager.js')).getTask(id)
+            }
             // Clear stale sync_error when a remote pull successfully updates the task
             const existingTask = localTasks.find(t => t.id === id)
             const effectiveUpdates = (existingTask?.sync_error && !('sync_error' in updates))
@@ -1748,6 +1780,7 @@ function startPluginSyncPolling(): void {
             changeCount++
           },
           emit: (event, data) => {
+            // ctx.emit is for non-task plugin signals (e.g. sync:progress) — intentionally not batched
             bus.emit(event, data, ['web-ui'], { source: `${plugin.id}-sync` })
           },
         }
@@ -1783,10 +1816,16 @@ function startPluginSyncPolling(): void {
           log.web.debug(`${plugin.id} sync failed`, { consecutiveFailures, error: errorMsg })
         }
       } finally {
-        // Send a single bulk signal to web-ui instead of 100+ individual events
-        if (changeCount > 0) {
-          bus.emit(EventNames.TASK_UPDATED, { task: null } as any, ['web-ui'], { source: `${plugin.id}-sync-batch` })
-          log.web.info(`${plugin.id} sync: batch complete`, { changeCount })
+        // outer finally ensures bulk signal fires even if delta fails — reconciler runs in inner finally and may produce additional changes via ctx closures
+        try {
+          // Send a single bulk signal to web-ui instead of 100+ individual events
+          if (changeCount > 0) {
+            // null task = bulk signal; frontend useTasks.ts:327 handles by calling refetch()
+            bus.emit(EventNames.TASK_UPDATED, { task: null } as any, ['web-ui'], { source: `${plugin.id}-sync-batch` })
+            log.web.info(`${plugin.id} sync: batch complete`, { changeCount })
+          }
+        } catch (emitErr) {
+          log.web.warn(`${plugin.id} sync: bulk emit failed`, { error: emitErr instanceof Error ? emitErr.message : String(emitErr) })
         }
         syncing = false
       }

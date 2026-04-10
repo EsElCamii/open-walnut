@@ -13,6 +13,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { SYNC_DIR } from '../constants.js';
 import { log } from '../logging/index.js';
+import { isPushInflight } from './task-manager.js';
 import type { RegisteredPlugin, RemoteSyncItem, SyncPollContext } from './integration-types.js';
 import type { Task } from './types.js';
 
@@ -225,10 +226,15 @@ export class SyncReconciler {
     for (const [remoteId, remote] of remoteMap) {
       const local = localByRemoteId.get(remoteId);
       if (local) {
-        // Both exist — check if remote is newer
+        // Skip tasks with inflight push — avoid echo during push window
+        if (isPushInflight(local.id)) {
+          unchanged++;
+          continue;
+        }
+        // Both exist — check if remote is newer than last synced timestamp
         const remoteTime = new Date(remote.remoteUpdatedAt).getTime();
-        const localTime = new Date(local.updated_at).getTime();
-        if (remoteTime > localTime) {
+        const syncedAt = local._syncedAt ? new Date(local._syncedAt).getTime() : 0;
+        if (remoteTime > syncedAt) {
           toUpdate.push({ local, remote });
         } else {
           unchanged++;
@@ -291,6 +297,12 @@ export class SyncReconciler {
         delete (updates as any).session_ids;
         delete (updates as any).plan_session_id;
         delete (updates as any).exec_session_id;
+        // Never overwrite local-only sync metadata
+        delete (updates as any)._syncedAt;
+        // Never overwrite phase/status/needs_attention from remote (RC8 fix)
+        delete (updates as any).phase;
+        delete (updates as any).status;
+        delete (updates as any).needs_attention;
 
         await ctx.updateTask(local.id, updates);
       } catch (err) {

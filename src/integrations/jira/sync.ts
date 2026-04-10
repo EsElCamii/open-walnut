@@ -142,6 +142,7 @@ export interface JiraPushResult {
   jiraIssueId: string;
   jiraIssueKey: string;
   commentId?: string;
+  serverTimestamp?: string;
 }
 
 /** Returned when autoPushTask fails — carries the specific error reason. */
@@ -223,8 +224,15 @@ export async function autoPushTask(task: Task): Promise<JiraPushResult | JiraPus
         }
       }
 
+      // Fetch fresh issue to get server-side updated timestamp (Jira PUT returns 204)
+      let serverTimestamp: string | undefined;
+      try {
+        const freshIssue = await client.getIssue(issueKey);
+        serverTimestamp = freshIssue.fields.updated;
+      } catch { /* non-fatal — _syncedAt just won't be set */ }
+
       syncLog.info('pushed task update to Jira', { key: issueKey, title: task.title });
-      return { jiraIssueId: issueId ?? '', jiraIssueKey: issueKey, commentId };
+      return { jiraIssueId: issueId ?? '', jiraIssueKey: issueKey, commentId, serverTimestamp };
     } else {
       // ── Create new issue ──
       const projectKey = resolveProjectKey(task, config);
@@ -250,8 +258,15 @@ export async function autoPushTask(task: Task): Promise<JiraPushResult | JiraPus
         } catch { /* silent */ }
       }
 
+      // Fetch fresh issue to get server-side updated timestamp
+      let serverTimestamp: string | undefined;
+      try {
+        const freshIssue = await client.getIssue(created.key);
+        serverTimestamp = freshIssue.fields.updated;
+      } catch { /* non-fatal */ }
+
       syncLog.info('created issue in Jira', { key: created.key, title: task.title });
-      return { jiraIssueId: created.id, jiraIssueKey: created.key, commentId };
+      return { jiraIssueId: created.id, jiraIssueKey: created.key, commentId, serverTimestamp };
     }
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
@@ -327,11 +342,11 @@ export async function deltaPull(
     const existing = localByJiraKey.get(remote.key) ?? localByJiraId.get(remote.id);
 
     if (existing) {
-      // Check if remote is newer
+      // Check if remote is newer than last synced timestamp (echo detection)
       const remoteUpdated = new Date(remote.fields.updated).getTime();
-      const localUpdated = new Date(existing.updated_at).getTime();
+      const syncedAt = existing._syncedAt ? new Date(existing._syncedAt).getTime() : 0;
 
-      if (remoteUpdated > localUpdated) {
+      if (remoteUpdated > syncedAt) {
         const updates = mapToLocal(remote, config);
         // Preserve local-only fields
         delete updates.source;

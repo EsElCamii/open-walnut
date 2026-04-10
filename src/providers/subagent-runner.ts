@@ -144,7 +144,7 @@ interface Semaphore {
 // ── SubagentRunner ──
 
 export class SubagentRunner {
-  readonly runs = new Map<string, AgentRun & { _history?: MessageParam[] }>();
+  readonly runs = new Map<string, AgentRun & { _history?: MessageParam[]; _abortController?: AbortController; _launchPhase?: string }>();
   private semaphore: Semaphore;
 
   constructor(maxConcurrent = 20) {
@@ -173,11 +173,34 @@ export class SubagentRunner {
   }
 
   getAllRuns(): AgentRun[] {
-    return Array.from(this.runs.values()).map(({ _history, ...run }) => run);
+    return Array.from(this.runs.values()).map(({ _history, _abortController, _launchPhase, ...run }) => run);
   }
 
   getRun(runId: string): (AgentRun & { _history?: MessageParam[] }) | undefined {
     return this.runs.get(runId);
+  }
+
+  /** Cancel all running subagent runs for a given task, optionally filtered by agent ID.
+   *  Used to cancel stale triage runs when user resumes a session. */
+  cancelRunsForTask(taskId: string, agentId?: string): number {
+    let cancelled = 0;
+    for (const [, run] of this.runs) {
+      if (run.taskId !== taskId) continue;
+      if (agentId && run.agentId !== agentId) continue;
+      if (run.status !== 'running' && run.status !== 'queued') continue;
+      const ac = (run as any)._abortController as AbortController | undefined;
+      if (ac && !ac.signal.aborted) {
+        ac.abort();
+        cancelled++;
+        log.subagent.info('cancelled run for task', { runId: run.runId, agentId: run.agentId, taskId });
+      }
+    }
+    return cancelled;
+  }
+
+  /** Get the launchPhase for a given run (used by tools.ts for CAS guard). */
+  getLaunchPhase(runId: string): string | undefined {
+    return (this.runs.get(runId) as any)?._launchPhase;
   }
 
   // ── Private ──
@@ -213,7 +236,17 @@ export class SubagentRunner {
     const maxTokens = agentDef.max_tokens ?? subagentConfig?.max_tokens ?? config.agent?.maxTokens;
     const maxToolRounds = agentDef.max_tool_rounds ?? subagentConfig?.max_tool_rounds ?? 10;
 
-    const run: AgentRun & { _history?: MessageParam[] } = {
+    // Capture task phase at launch for CAS guard on update_task
+    let launchPhase: string | undefined;
+    if (data.taskId) {
+      try {
+        const { getTask } = await import('../core/task-manager.js');
+        const taskObj = await getTask(data.taskId);
+        launchPhase = taskObj.phase;
+      } catch { /* non-fatal */ }
+    }
+
+    const run: AgentRun & { _history?: MessageParam[]; _abortController?: AbortController; _launchPhase?: string } = {
       runId,
       agentId,
       task: data.task,
@@ -222,6 +255,8 @@ export class SubagentRunner {
       status: 'queued',
       startedAt: new Date().toISOString(),
       _history: [],
+      _abortController: new AbortController(),
+      _launchPhase: launchPhase,
     };
     this.runs.set(runId, run);
 
@@ -298,7 +333,7 @@ export class SubagentRunner {
   }
 
   private async runEmbedded(
-    run: AgentRun & { _history?: MessageParam[] },
+    run: AgentRun & { _history?: MessageParam[]; _abortController?: AbortController; _launchPhase?: string },
     agentDef: AgentDefinition,
     data: { task: string; taskId?: string; deniedTools?: string[]; context?: string; context_override?: { taskId?: string; sessionId?: string; cwd?: string; host?: string } },
     opts: { model?: string; provider?: string; region?: string; maxTokens?: number; maxToolRounds: number; resume?: boolean },
@@ -322,6 +357,23 @@ export class SubagentRunner {
       log.subagent.info('context loaded', { runId: run.runId, taskId: data.taskId, contextLength: combinedContext.length });
       let systemPrompt = buildSubagentSystemPrompt(agentDef, data.task, combinedContext || undefined);
       const toolSet = await buildSubagentToolSet(agentDef, data.deniedTools);
+
+      // CAS guard: wrap update_task to inject ifPhase from launchPhase.
+      // This prevents stale triage from overwriting phase after user resumes.
+      if (run._launchPhase && TRIAGE_AGENT_IDS.has(run.agentId)) {
+        const updateTaskTool = toolSet.find(t => t.name === 'update_task');
+        if (updateTaskTool) {
+          const originalExecute = updateTaskTool.execute;
+          const launchPhase = run._launchPhase;
+          updateTaskTool.execute = async (params: Record<string, unknown>) => {
+            // Inject ifPhase so updateTask skips phase change if task has moved on
+            if (params.phase !== undefined) {
+              params._ifPhase = launchPhase;
+            }
+            return originalExecute(params);
+          };
+        }
+      }
 
       // Inject per-run notify_main_agent tool (closure-based, concurrency-safe).
       // Only agents with 'notify_main_agent' in allowed_tools get this tool.
@@ -438,8 +490,38 @@ export class SubagentRunner {
           maxTokens: opts.maxTokens,
         },
         maxToolRounds: opts.maxToolRounds,
+        signal: run._abortController?.signal,
         source: 'subagent',
       });
+
+      // Handle abort: mark as error + skip result emission
+      if (result.aborted) {
+        run.status = 'error';
+        run.completedAt = new Date().toISOString();
+        run.error = 'cancelled';
+        run.usage = totalUsage;
+        log.subagent.info('embedded loop cancelled', { runId: run.runId, agentId: run.agentId });
+
+        // Update SessionRecord on cancel
+        try {
+          const { updateSessionRecord } = await import('../core/session-tracker.js');
+          await updateSessionRecord(run.runId, {
+            process_status: 'stopped',
+            activity: undefined,
+            last_status_change: new Date().toISOString(),
+            status_reason: 'user_stopped',
+            status_changed_by: 'subagent-runner',
+          } as any);
+        } catch {}
+
+        bus.emit(EventNames.SESSION_STATUS_CHANGED, {
+          sessionId: run.runId,
+          taskId: data.taskId,
+          process_status: 'stopped',
+        }, ['*'], { source: 'subagent-runner', urgency: 'urgent' });
+
+        return; // Don't emit subagent:result — the run was cancelled
+      }
 
       run.status = 'completed';
       run.completedAt = new Date().toISOString();

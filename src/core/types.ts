@@ -70,6 +70,9 @@ export interface Task {
   last_session_update?: string;
   /** Task-level working directory override. Takes precedence over project default_cwd in session resolution. */
   cwd?: string;
+  /** ISO timestamp — server-side lastModified from last successful push response.
+   *  Used for echo detection on pull. Local-only, never pushed to remote. */
+  _syncedAt?: string;
   /** Plugin-specific extension data. Keys are plugin IDs (e.g. 'ms-todo', 'plugin-a'). */
   ext?: Record<string, unknown>;
 }
@@ -250,6 +253,17 @@ export interface Config {
     /** Maximum number of idle sessions per host before evicting the oldest.
      *  Default: local=30, remote=40. Set to 0 to disable idle limit. */
     max_idle?: number;
+    /** Enable --permission-prompt-tool stdio for local sessions.
+     *  When enabled, Walnut intercepts permission prompts from Claude Code
+     *  (sensitive file writes, AskUserQuestion) and handles them:
+     *  - Bypass mode: auto-approves all requests
+     *  - Other modes: forwards to UI for user decision
+     *  Default: true. */
+    permission_prompt?: boolean;
+    /** Which session modes are available in the mode toggle cycle.
+     *  Default: all four ['default', 'bypass', 'plan', 'accept'].
+     *  Set to e.g. ['bypass', 'plan'] to only cycle between those two. */
+    enabled_modes?: SessionMode[];
   };
   heartbeat?: import('../heartbeat/types.js').HeartbeatConfig;
   tools?: {
@@ -304,7 +318,7 @@ export interface Config {
   };
   /** Speech-to-text configuration for voice input */
   stt?: {
-    engine?: 'sherpa-onnx' | 'openai' | 'whisper-cpp';
+    engine?: 'sherpa-onnx' | 'openai' | 'whisper-cpp' | 'whisper-server';
     /** ISO 639-1 language hint (e.g. zh, en). Empty = auto-detect. */
     language?: string;
     // sherpa-onnx — local (SenseVoice / Whisper / Paraformer / other ONNX models)
@@ -314,11 +328,19 @@ export interface Config {
     openai_api_key?: string;
     openai_base_url?: string;
     openai_model?: string;
-    // whisper.cpp — local CLI
+    // whisper.cpp — local CLI (cold start each call)
     whisper_cpp_path?: string;
     whisper_cpp_model?: string;
     whisper_cpp_vad_model?: string;
     whisper_cpp_prompt?: string;
+    // whisper-server — local HTTP daemon (model stays in memory)
+    whisper_server_path?: string;
+    whisper_server_model?: string;
+    whisper_server_vad_model?: string;
+    whisper_server_prompt?: string;
+    whisper_server_port?: number;
+    /** Idle TTL in minutes — server auto-shuts after inactivity (default: 10) */
+    whisper_server_idle_ttl_minutes?: number;
   };
   /** API keys for remote client authentication (iOS app, etc.) */
   api_keys?: ApiKeyEntry[];

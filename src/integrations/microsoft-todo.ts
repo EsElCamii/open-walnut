@@ -712,7 +712,7 @@ export function mapToLocal(
 
 // -- Push/pull operations --
 
-export async function pushTask(task: Task): Promise<string> {
+export async function pushTask(task: Task): Promise<{ msTaskId: string; serverTimestamp: string }> {
   // Guard: never push tasks whose category is registered to a different source.
   // This prevents ms-todo from creating lists for categories owned by other plugins
   // (e.g. plugin-reserved category lists appearing in MS Todo from non-ms-todo sources).
@@ -737,6 +737,7 @@ export async function pushTask(task: Task): Promise<string> {
   const msBody = mapToRemote(task);
 
   let msTaskId: string;
+  let serverTimestamp: string = new Date().toISOString(); // fallback, overwritten by API response
   let actualListId = listId;
 
   const existingMsTodoId = getMsTodoId(task);
@@ -767,6 +768,7 @@ export async function pushTask(task: Task): Promise<string> {
         msBody,
       );
       msTaskId = created.id;
+      serverTimestamp = created.lastModifiedDateTime;
 
       // Layer 3: track old ID in previous_ids for pull-side dedup
       const prevIds = ((msExt(task) as any)?.previous_ids as string[] ?? []).slice();
@@ -779,13 +781,14 @@ export async function pushTask(task: Task): Promise<string> {
     } else {
       // Same list — update in place
       try {
-        await graphRequest<MSTodoTask>(
+        const patched = await graphRequest<MSTodoTask>(
           token,
           'PATCH',
           `/me/todo/lists/${listId}/tasks/${existingMsTodoId}`,
           msBody,
         );
         msTaskId = existingMsTodoId;
+        serverTimestamp = patched.lastModifiedDateTime;
       } catch {
         // PATCH failed (task not found in list) — try creating fresh
         const created = await graphRequest<MSTodoTask>(
@@ -795,6 +798,7 @@ export async function pushTask(task: Task): Promise<string> {
           msBody,
         );
         msTaskId = created.id;
+        serverTimestamp = created.lastModifiedDateTime;
 
         // Track old ID as previous if we had to re-create
         if (existingMsTodoId !== msTaskId) {
@@ -816,6 +820,7 @@ export async function pushTask(task: Task): Promise<string> {
       msBody,
     );
     msTaskId = created.id;
+    serverTimestamp = created.lastModifiedDateTime;
   }
 
   // Persist list ID change back to local task via ext
@@ -827,7 +832,7 @@ export async function pushTask(task: Task): Promise<string> {
 
   // Subtask checklist sync removed (subtasks are now child tasks)
 
-  return msTaskId;
+  return { msTaskId, serverTimestamp };
 }
 
 export async function pullTasks(
@@ -1021,22 +1026,22 @@ export async function registerDeletedMsIds(task: Task): Promise<void> {
 // -- Auto-push (fire-and-forget with per-task dedup) --
 
 /** Inflight push promises keyed by task ID. Prevents duplicate concurrent pushes. */
-const pushInflight = new Map<string, Promise<string | null>>();
+const msPushInflight = new Map<string, Promise<{ msTaskId: string; serverTimestamp: string } | null>>();
 
 /**
- * Push a single task to Microsoft To-Do. Returns the ms_todo_id on success, null on failure.
+ * Push a single task to Microsoft To-Do. Returns { msTaskId, serverTimestamp } on success, null on failure.
  * Designed for fire-and-forget usage — never throws.
  * Per-task dedup: concurrent calls for the same task reuse the inflight promise.
  */
-export async function autoPushTask(task: Task): Promise<string | null> {
+export async function autoPushTask(task: Task): Promise<{ msTaskId: string; serverTimestamp: string } | null> {
   const key = task.id;
-  const existing = pushInflight.get(key);
+  const existing = msPushInflight.get(key);
   if (existing) return existing;
 
   const promise = pushTask(task)
     .catch(() => null)
-    .finally(() => pushInflight.delete(key));
-  pushInflight.set(key, promise);
+    .finally(() => msPushInflight.delete(key));
+  msPushInflight.set(key, promise);
   return promise;
 }
 
@@ -1064,8 +1069,8 @@ export async function reconcilePulledTasks(
     const existing = localByMsId.get(msTask.id);
     if (existing) {
       const remoteUpdated = new Date(msTask.lastModifiedDateTime).getTime();
-      const localUpdated = new Date(existing.updated_at).getTime();
-      if (remoteUpdated > localUpdated) {
+      const syncedAt = existing._syncedAt ? new Date(existing._syncedAt).getTime() : 0;
+      if (remoteUpdated > syncedAt) {
         const updates = mapToLocal(msTask, list.displayName);
 
         // Checklist-to-subtask sync removed (subtasks are now child tasks)
@@ -1270,12 +1275,12 @@ export async function syncTasks(
     if (task.source !== 'ms-todo') continue;
     if (!getMsTodoId(task)) {
       try {
-        const msId = await pushTask(task);
+        const { msTaskId } = await pushTask(task);
         // Use cached list lookup instead of extra API call
         const taskListName = buildListName(task.category, task.project);
         const listId = listByName.get(taskListName.toLowerCase()) ?? defaultListId;
         await updateLocalTask(task.id, {
-          ext: { 'ms-todo': { id: msId, list_id: listId } },
+          ext: { 'ms-todo': { id: msTaskId, list_id: listId } },
         } as Partial<Task>);
         result.pushed++;
       } catch (err) {

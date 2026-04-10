@@ -2,7 +2,7 @@
  * Jira plugin — two-way sync with Jira Cloud/Server.
  * Wraps the existing jira sync.ts implementation.
  */
-import type { PluginApi, IntegrationSync, RemoteSyncItem } from '../../core/integration-types.js';
+import type { PluginApi, IntegrationSync, PushResult, RemoteSyncItem } from '../../core/integration-types.js';
 import type { Task } from '../../core/types.js';
 
 export default function register(api: PluginApi): void {
@@ -70,6 +70,23 @@ export default function register(api: PluginApi): void {
     async updateDependencies(task: Task) {
       const { autoPushTask } = await import('./sync.js');
       await autoPushTask(task);
+    },
+    async pushTask(task: Task): Promise<PushResult> {
+      const { autoPushTask, isJiraPushSuccess } = await import('./sync.js');
+      const result = await autoPushTask(task);
+      if (isJiraPushSuccess(result)) {
+        return {
+          serverTimestamp: result.serverTimestamp ?? new Date().toISOString(),
+          ext: {
+            jira: {
+              issue_id: result.jiraIssueId,
+              issue_key: result.jiraIssueKey,
+              comment_id: result.commentId,
+            },
+          },
+        };
+      }
+      throw new Error(result.error);
     },
     async associateSubtask(_parent: Task, _child: Task) {
       // Jira: set parent link on child issue (native sub-issue support)

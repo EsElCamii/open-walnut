@@ -2,16 +2,16 @@
  * Microsoft To-Do plugin — two-way sync with MS Graph API.
  * Wraps the existing microsoft-todo.ts implementation.
  */
-import type { PluginApi, IntegrationSync, RemoteSyncItem } from '../../core/integration-types.js';
+import type { PluginApi, IntegrationSync, PushResult, RemoteSyncItem } from '../../core/integration-types.js';
 import type { Task } from '../../core/types.js';
 
 export default function register(api: PluginApi): void {
   const sync: IntegrationSync = {
     async createTask(task: Task) {
       const { autoPushTask } = await import('../microsoft-todo.js');
-      const msId = await autoPushTask(task);
-      if (msId) {
-        return { 'ms-todo': { id: msId, list_id: (task.ext?.['ms-todo'] as Record<string, unknown>)?.list_id } };
+      const result = await autoPushTask(task);
+      if (result) {
+        return { 'ms-todo': { id: result.msTaskId, list_id: (task.ext?.['ms-todo'] as Record<string, unknown>)?.list_id } };
       }
       return null;
     },
@@ -71,6 +71,14 @@ export default function register(api: PluginApi): void {
     async updateDependencies(task: Task) {
       const { autoPushTask } = await import('../microsoft-todo.js');
       await autoPushTask(task);
+    },
+    async pushTask(task: Task): Promise<PushResult> {
+      const { pushTask: msPushTask } = await import('../microsoft-todo.js');
+      const result = await msPushTask(task);
+      return {
+        serverTimestamp: result.serverTimestamp,
+        ext: { 'ms-todo': { id: result.msTaskId, list_id: (task.ext?.['ms-todo'] as Record<string, unknown>)?.list_id } },
+      };
     },
     async associateSubtask(_parent: Task, _child: Task) {
       // MS To-Do: encode Parent: header in child's body (done via full push)

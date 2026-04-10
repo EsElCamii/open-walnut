@@ -47,12 +47,13 @@ function createMsTask(overrides?: Record<string, unknown>) {
 
 describe('reconcilePulledTasks — categoryMismatch fix', () => {
   it('does NOT roll back local project when local is newer than remote', async () => {
-    // Local: project='Walnut', updated 12:00 (NEWER)
+    // Local: project='Walnut', _syncedAt 12:00 (NEWER)
     // Remote: in "Passion / MyBot" list, modified 06:00 (OLDER)
     const localTask = createLocalTask({
       category: 'Passion',
       project: 'Walnut',
       updated_at: '2026-02-25T12:00:00Z',
+      _syncedAt: '2026-02-25T12:00:00Z',
     });
 
     const msTask = createMsTask({
@@ -117,6 +118,7 @@ describe('reconcilePulledTasks — categoryMismatch fix', () => {
       category: 'Passion',
       project: 'Walnut',
       updated_at: '2026-02-25T20:00:00Z', // very recent local change
+      _syncedAt: '2026-02-25T20:00:00Z',
     });
 
     const msTask = createMsTask({

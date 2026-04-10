@@ -27,7 +27,7 @@ import {
   setFocusTier,
   getPinnedTasks,
 } from '../core/task-manager.js';
-import { VALID_PHASES, shouldRollbackToInProgress } from '../core/phase.js';
+import { VALID_PHASES } from '../core/phase.js';
 import { search } from '../core/search.js';
 import {
   listSessions,
@@ -42,8 +42,8 @@ import {
 } from '../core/session-tracker.js';
 import type { SessionLimitResult } from '../core/session-tracker.js';
 import { bus, EventNames } from '../core/event-bus.js';
-import { getConfig, saveConfig } from '../core/config-manager.js';
-import type { SessionRecord, Task, TaskPhase, TaskPriority, TaskSource } from '../core/types.js';
+import { getConfig, updateConfig } from '../core/config-manager.js';
+import type { Config, SessionRecord, Task, TaskPhase, TaskPriority, TaskSource } from '../core/types.js';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
 import { log } from '../logging/index.js';
@@ -730,7 +730,7 @@ For projects (type='project'): set default_host and default_cwd for remote sessi
               remove_depends_on: params.remove_depends_on as string[] | undefined,
               set_depends_on: params.set_depends_on as string[] | undefined,
               cwd: params.cwd as string | undefined,
-            }, { source: 'agent' });
+            }, { source: 'agent', ifPhase: params._ifPhase as TaskPhase | undefined });
             if (params.phase === 'AGENT_COMPLETE') {
               bus.emit(EventNames.TASK_COMPLETED, { task }, ['web-ui'], { source: 'agent' });
             }
@@ -1547,15 +1547,14 @@ defaults (same resolution chain as start_session).`,
           const sessionLabel = record?.title ?? sessionId.slice(0, 16);
           const sRef = sessionRef(sessionId, sessionLabel);
 
-          // Auto-rollback phase if task was in a post-completion state
+          // Unconditional phase transition: session input → IN_PROGRESS
           if (record?.taskId) {
             try {
-              const task = await getTask(record.taskId);
-              if (task && shouldRollbackToInProgress(task.phase)) {
-                await updateTask(record.taskId, { phase: 'IN_PROGRESS' }, { source: 'phase-rollback' });
-                log.agent.info('send_to_session: rolled back phase to IN_PROGRESS', { taskId: record.taskId, oldPhase: task.phase });
-              }
-            } catch { /* best-effort */ }
+              const { applySessionPhase } = await import('../core/phase.js');
+              await applySessionPhase(record.taskId, 'session:input', 'tools.ts:send-to-session', { sessionId });
+            } catch (err) {
+              log.agent.warn('send_to_session: phase update failed', { taskId: record.taskId, error: err instanceof Error ? err.message : String(err) });
+            }
           }
 
           const modeNote = mode ? ` (mode: ${mode})` : '';
@@ -1939,11 +1938,18 @@ defaults (same resolution chain as start_session).`,
     },
     async execute(params) {
       const config = await getConfig();
-      if (params.user_name !== undefined) config.user.name = params.user_name as string;
-      if (params.default_priority !== undefined) config.defaults.priority = params.default_priority as TaskPriority;
-      if (params.default_category !== undefined) config.defaults.category = params.default_category as string;
-      await saveConfig(config);
-      return `Config updated: ${json(config)}`;
+      const partial: Partial<Config> = {};
+      if (params.user_name !== undefined) partial.user = { ...config.user, name: params.user_name as string };
+      if (params.default_priority !== undefined || params.default_category !== undefined) {
+        partial.defaults = {
+          ...config.defaults,
+          ...(params.default_priority !== undefined ? { priority: params.default_priority as TaskPriority } : {}),
+          ...(params.default_category !== undefined ? { category: params.default_category as string } : {}),
+        };
+      }
+      await updateConfig(partial);
+      const updated = await getConfig();
+      return `Config updated: ${json(updated)}`;
     },
   },
 

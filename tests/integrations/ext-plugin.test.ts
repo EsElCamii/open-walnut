@@ -110,7 +110,7 @@ function extPluginTask(overrides?: Partial<ReturnType<typeof createMockTask>>) {
 // ── Tests ──
 
 describe('External plugin registration', () => {
-  it('registers sync with all 16 methods', () => {
+  it('registers sync with all required methods', () => {
     const { api, collected } = extPluginApi();
     register(api);
 

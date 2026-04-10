@@ -41,7 +41,7 @@ beforeEach(() => {
 
 // C1: Unit — Plugin Registration
 describe('C1: MS To-Do plugin registration', () => {
-  it('C1.1: registers sync with all 16 methods', () => {
+  it('C1.1: registers sync with all required methods', () => {
     const { api, collected } = msTodoApi();
     register(api);
 
@@ -50,7 +50,7 @@ describe('C1: MS To-Do plugin registration', () => {
       'createTask', 'deleteTask', 'updateTitle', 'updateDescription',
       'updateSummary', 'updateNote', 'updateConversationLog', 'updatePriority',
       'updatePhase', 'updateDueDate', 'updateStar', 'updateCategory',
-      'updateDependencies', 'associateSubtask', 'disassociateSubtask', 'syncPoll',
+      'updateDependencies', 'pushTask', 'associateSubtask', 'disassociateSubtask', 'syncPoll',
     ];
     for (const m of methods) {
       expect(typeof collected.sync![m]).toBe('function');
@@ -102,7 +102,7 @@ describe('C2: MS To-Do createTask', () => {
   it('C2.1: calls autoPushTask and returns ext data', async () => {
     const { api, collected } = msTodoApi();
     register(api);
-    mockAutoPushTask.mockResolvedValue('ms-task-123');
+    mockAutoPushTask.mockResolvedValue({ msTaskId: 'ms-task-123', serverTimestamp: '2025-01-01T00:00:00Z' });
 
     const task = msTodoTask();
     const result = await collected.sync!.createTask(task);

@@ -3,7 +3,7 @@
  * All IntegrationSync methods are no-ops.
  */
 
-import type { PluginApi, IntegrationSync } from '../../core/integration-types.js';
+import type { PluginApi, IntegrationSync, PushResult } from '../../core/integration-types.js';
 
 const noopSync: IntegrationSync = {
   createTask: async () => null,
@@ -19,6 +19,7 @@ const noopSync: IntegrationSync = {
   updateStar: async () => {},
   updateCategory: async () => {},
   updateDependencies: async () => {},
+  pushTask: async (): Promise<PushResult> => ({ serverTimestamp: new Date().toISOString() }),
   associateSubtask: async () => {},
   disassociateSubtask: async () => {},
   syncPoll: async () => {},

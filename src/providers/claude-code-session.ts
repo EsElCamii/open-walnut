@@ -293,6 +293,11 @@ export class ClaudeCodeSession {
   private _lastPlanWriteContent: string | null = null
   /** True when we've already auto-replied to AskUserQuestion this turn. Reset on new turn. */
   private _askUserIntercepted = false
+  /** Pending permission requests awaiting user decision (non-bypass modes). */
+  private _pendingPermissionRequests = new Map<string, {
+    request_id: string
+    request: { subtype: string; tool_name?: string; input?: Record<string, unknown>; tool_use_id?: string; decision_reason?: string }
+  }>()
   /** Timestamp when spawn() was called — used to measure time-to-init for diagnostics. */
   private _spawnTs = 0
   /** Timestamp of the last message delivery (FIFO write or --resume spawn). */
@@ -361,6 +366,7 @@ export class ClaudeCodeSession {
     this._transport?.deletePipe()
     this._active = false
     this._processStatus = 'stopped'
+    this._pendingPermissionRequests.clear()
   }
 
   get mode(): SessionMode {
@@ -414,6 +420,7 @@ export class ClaudeCodeSession {
     host?: string,
     sshTarget?: SshTarget,
     forkSession?: boolean,
+    permissionPrompt?: boolean,
   ): void {
     const args = ['-p', '--output-format', 'stream-json', '--verbose']
 
@@ -465,6 +472,13 @@ export class ClaudeCodeSession {
 
     // Both local and SSH sessions use stream-json stdin via SessionIO
     args.push('--input-format', 'stream-json')
+
+    // Permission prompt tool: intercepts sensitive-file and AskUserQuestion permission checks.
+    // Only for local sessions — remote sessions can't respond via FIFO.
+    // Controlled by config.session.permission_prompt (default: true).
+    if (!host && permissionPrompt !== false) {
+      args.push('--permission-prompt-tool', 'stdio')
+    }
 
     // Store host key for liveness checks and record persistence
     this._host = host ?? null
@@ -804,6 +818,7 @@ export class ClaudeCodeSession {
     this.stopMonitoring()
     this._transport?.kill()
     this._active = false
+    this._pendingPermissionRequests.clear()
   }
 
   /**
@@ -930,6 +945,7 @@ export class ClaudeCodeSession {
     this._active = false
     this._processStatus = 'stopped'
     this._activity = undefined
+    this._pendingPermissionRequests.clear()
   }
 
   // ── Private ──
@@ -1783,6 +1799,7 @@ export class ClaudeCodeSession {
           this._processStatus = 'stopped'
           this._activity = undefined
           this.stopMonitoring()
+          this._pendingPermissionRequests.clear()
 
           // Clear PID from record to prevent stale PID orphan kills on future PID reuse
           if (this.claudeSessionId) {
@@ -1811,6 +1828,77 @@ export class ClaudeCodeSession {
         break
       }
 
+      // ── Permission prompt tool protocol ──
+      // When --permission-prompt-tool stdio is active, Claude Code sends
+      // control_request events for tool permission checks (sensitive file writes,
+      // AskUserQuestion, etc.). We respond via the FIFO with control_response.
+      //
+      // Wire format (from Claude Code source — controlSchemas.ts):
+      //   Request:  { type: 'control_request', request_id, request: { subtype: 'can_use_tool', ... } }
+      //   Response: { type: 'control_response', response: { subtype: 'success', request_id, response: <PermissionResult> } }
+      //   PermissionResult = { behavior: 'allow', updatedInput } | { behavior: 'deny', message }
+      case 'control_request': {
+        const ctrl = event as unknown as {
+          type: 'control_request'
+          request_id: string
+          request: {
+            subtype: string
+            tool_name?: string
+            input?: Record<string, unknown>
+            tool_use_id?: string
+            decision_reason?: string
+            permission_suggestions?: unknown[]
+          }
+        }
+        const { request_id, request } = ctrl
+        log.session.info('control_request received', {
+          sessionId: this.claudeSessionId,
+          taskId: this.taskId,
+          requestId: request_id,
+          subtype: request.subtype,
+          toolName: request.tool_name,
+          mode: this._mode,
+        })
+
+        if (request.subtype === 'can_use_tool') {
+          if (this._mode === 'bypass') {
+            // Bypass mode: auto-approve everything (sensitive files, AskUserQuestion, etc.)
+            this.respondToControlRequest(request_id, request, true)
+          } else {
+            // Non-bypass modes: emit to UI for user decision.
+            // Store the pending request so the API route can resolve it later.
+            this._pendingPermissionRequests.set(request_id, { request_id, request })
+            log.session.info('control_request pending — waiting for user decision', {
+              sessionId: this.claudeSessionId,
+              taskId: this.taskId,
+              requestId: request_id,
+              toolName: request.tool_name,
+              mode: this._mode,
+            })
+            if (this.claudeSessionId) {
+              bus.emit(EventNames.SESSION_PERMISSION_REQUEST, {
+                sessionId: this.claudeSessionId,
+                taskId: this.taskId,
+                requestId: request_id,
+                toolName: request.tool_name,
+                input: request.input,
+                reason: request.decision_reason,
+              }, ['*'], { source: 'session-runner', urgency: 'urgent' })
+            }
+          }
+        } else {
+          // Send deny for unknown subtypes to prevent Claude Code from blocking forever
+          log.session.warn('unknown control_request subtype — auto-denying to prevent deadlock', {
+            sessionId: this.claudeSessionId,
+            taskId: this.taskId,
+            subtype: request.subtype,
+            requestId: request_id,
+          })
+          this.respondToControlRequest(request_id, request, false, `Unknown control_request subtype: ${request.subtype}`)
+        }
+        break
+      }
+
       default:
         log.session.debug('ignoring unknown stream event type', { taskId: this.taskId, type: (event as { type: string }).type })
         break
@@ -1836,6 +1924,90 @@ export class ClaudeCodeSession {
       ...(this.fromPlanSessionId ? { fromPlanSessionId: this.fromPlanSessionId } : {}),
       ...(this.forkedFromSessionId ? { forkedFromSessionId: this.forkedFromSessionId } : {}),
     }, ['*'], { source: 'session-runner', urgency: 'urgent' })
+  }
+
+  // ── Permission prompt tool helpers ──
+
+  /**
+   * Send a control_response to Claude Code via the FIFO.
+   * @param allow — true to allow, false to deny
+   */
+  private respondToControlRequest(
+    requestId: string,
+    request: { tool_name?: string; input?: Record<string, unknown> },
+    allow: boolean,
+    denyMessage?: string,
+  ): void {
+    const result = allow
+      ? { behavior: 'allow' as const, updatedInput: request.input }
+      : { behavior: 'deny' as const, message: denyMessage ?? 'User denied permission' }
+    // SDKControlResponseSchema wraps ControlResponseSchema: outer `response` is transport,
+    // inner `response` is the permission result. Format mismatch = Claude Code hangs silently.
+    const response = JSON.stringify({
+      type: 'control_response',
+      response: {
+        subtype: 'success',
+        request_id: requestId,
+        response: result,
+      },
+    })
+    log.session.info(`control_request ${allow ? 'approved' : 'denied'}`, {
+      sessionId: this.claudeSessionId,
+      taskId: this.taskId,
+      requestId,
+      toolName: request.tool_name,
+      mode: this._mode,
+    })
+    if (this._transport) {
+      Promise.resolve(this._transport.writeRaw(response)).then((ok) => {
+        if (!ok) {
+          log.session.warn('control_response write failed — session may hang until idle timeout kills it', {
+            sessionId: this.claudeSessionId, taskId: this.taskId, requestId,
+          })
+        }
+      }).catch((err) => {
+        log.session.warn('control_response write error — session may hang until idle timeout kills it', {
+          sessionId: this.claudeSessionId, taskId: this.taskId, requestId,
+          error: err instanceof Error ? err.message : String(err),
+        })
+      })
+    }
+    // Notify UI
+    if (this.claudeSessionId) {
+      bus.emit(EventNames.SESSION_SYSTEM_EVENT, {
+        sessionId: this.claudeSessionId,
+        taskId: this.taskId,
+        variant: 'info' as const,
+        message: `Permission ${allow ? 'granted' : 'denied'}: ${request.tool_name}`,
+      }, ['main-ai'], { source: 'session-runner' })
+    }
+  }
+
+  /**
+   * Resolve a pending permission request from the UI.
+   * Called by the API route when the user clicks allow/deny.
+   */
+  resolvePermissionRequest(requestId: string, allow: boolean, denyMessage?: string): boolean {
+    const pending = this._pendingPermissionRequests.get(requestId)
+    if (!pending) return false
+    this._pendingPermissionRequests.delete(requestId)
+    this.respondToControlRequest(requestId, pending.request, allow, denyMessage)
+    return true
+  }
+
+  /** Get all pending permission requests (for API/UI). */
+  getPendingPermissionRequests(): Array<{
+    requestId: string
+    toolName?: string
+    input?: Record<string, unknown>
+    reason?: string
+  }> {
+    return [...this._pendingPermissionRequests.values()].map(p => ({
+      requestId: p.request_id,
+      toolName: p.request.tool_name,
+      input: p.request.input,
+      reason: p.request.decision_reason,
+    }))
   }
 
   private async persistSessionRecord(claudeSessionId: string, cwd?: string): Promise<void> {
@@ -2503,7 +2675,7 @@ export class SessionRunner {
     // For forks: pass source session ID as resumeSessionId with forkSession=true.
     // Claude Code's --resume + --fork-session creates a new session with full context.
     const resumeId = isFork ? data.forkedFromSessionId : undefined
-    session.send(message, cwd, resumeId, mode, resolvedModel, appendSystemPrompt, data.host, sshTarget, isFork)
+    session.send(message, cwd, resumeId, mode, resolvedModel, appendSystemPrompt, data.host, sshTarget, isFork, config.session?.permission_prompt)
 
     // Record directory usage for the frequent-dirs persistent store (fire-and-forget)
     if (cwd) {
@@ -2734,23 +2906,28 @@ export class SessionRunner {
   private async handleSendSdk(sessionId: string, message: string, mode?: SessionMode, interrupt?: boolean): Promise<void> {
     if (!this.sdkClient) throw new Error('SDK client not configured')
 
-    // Defensive phase rollback — ensure task is IN_PROGRESS when session resumes
+    // Unconditional phase transition: session input → IN_PROGRESS
     try {
       const { getSessionByClaudeId } = await import('../core/session-tracker.js')
       const record = await getSessionByClaudeId(sessionId)
       if (record?.taskId) {
-        const { getTask, updateTask, touchLastSessionUpdate } = await import('../core/task-manager.js')
-        const { shouldRollbackToInProgress } = await import('../core/phase.js')
-        const task = await getTask(record.taskId)
-        if (task && shouldRollbackToInProgress(task.phase)) {
-          await updateTask(record.taskId, { phase: 'IN_PROGRESS' }, { source: 'phase-rollback' })
-          log.session.info('handleSendSdk: rolled back phase to IN_PROGRESS', { taskId: record.taskId, oldPhase: task.phase })
-        }
+        // Cancel stale triage runs for this task — user has resumed, triage analysis is outdated
+        try {
+          const { subagentRunner } = await import('./subagent-runner.js')
+          const cancelled = subagentRunner.cancelRunsForTask(record.taskId, 'turn-complete-triage')
+          if (cancelled > 0) log.session.info('handleSendSdk: cancelled stale triage', { taskId: record.taskId, cancelled })
+        } catch { /* non-fatal */ }
+
+        const { applySessionPhase } = await import('../core/phase.js')
+        await applySessionPhase(record.taskId, 'session:input', 'session.ts:handleSendSdk', { sessionId })
         // Touch last_session_update on resume for "Recent" sidebar sort
+        const { touchLastSessionUpdate } = await import('../core/task-manager.js')
         touchLastSessionUpdate(record.taskId).catch(err =>
           log.session.warn('touchLastSessionUpdate failed', { taskId: record.taskId, error: String(err) }))
       }
-    } catch { /* best-effort — don't block send */ }
+    } catch (err) {
+      log.session.warn('handleSendSdk: phase update failed', { sessionId, error: err instanceof Error ? err.message : String(err) })
+    }
 
     if (interrupt) {
       await this.sdkClient.interrupt({ sessionId })
@@ -2807,21 +2984,24 @@ export class SessionRunner {
       }
     }
 
-    // Defensive phase rollback (best-effort, don't block send).
+    // Unconditional phase transition + session cleanup (best-effort, don't block send).
     try {
       const { getSessionByClaudeId, updateSessionRecord } = await import('../core/session-tracker.js')
       const record = await getSessionByClaudeId(sessionId)
       if (record) {
-        // Phase rollback
+        // Phase sync: session input → IN_PROGRESS
         if (record.taskId) {
-          const { getTask, updateTask, touchLastSessionUpdate } = await import('../core/task-manager.js')
-          const { shouldRollbackToInProgress } = await import('../core/phase.js')
-          const task = await getTask(record.taskId)
-          if (task && shouldRollbackToInProgress(task.phase)) {
-            await updateTask(record.taskId, { phase: 'IN_PROGRESS' }, { source: 'phase-rollback' })
-            log.session.info('handleSend: rolled back phase to IN_PROGRESS', { taskId: record.taskId, oldPhase: task.phase })
-          }
+          // Cancel stale triage runs for this task — user has resumed, triage analysis is outdated
+          try {
+            const { subagentRunner } = await import('./subagent-runner.js')
+            const cancelled = subagentRunner.cancelRunsForTask(record.taskId, 'turn-complete-triage')
+            if (cancelled > 0) log.session.info('handleSend: cancelled stale triage', { taskId: record.taskId, cancelled })
+          } catch { /* non-fatal */ }
+
+          const { applySessionPhase } = await import('../core/phase.js')
+          await applySessionPhase(record.taskId, 'session:input', 'session.ts:handleSend', { sessionId })
           // Touch last_session_update on resume for "Recent" sidebar sort
+          const { touchLastSessionUpdate } = await import('../core/task-manager.js')
           touchLastSessionUpdate(record.taskId).catch(err =>
             log.session.warn('touchLastSessionUpdate failed', { taskId: record.taskId, error: String(err) }))
         }
@@ -3089,13 +3269,15 @@ export class SessionRunner {
           session._testDaemonUrl = this._testDaemonUrl
           this.sessions.set(record.taskId, session)
 
+          // Read config for SSH target resolution and permission_prompt setting
+          const { getConfig } = await import('../core/config-manager.js')
+          const resumeConfig = await getConfig()
+
           // Resolve SSH target if session has a stored host
           let sshTarget: SshTarget | undefined
           if (record.host) {
             try {
-              const { getConfig } = await import('../core/config-manager.js')
-              const config = await getConfig()
-              const hostDef = config.hosts?.[record.host]
+              const hostDef = resumeConfig.hosts?.[record.host]
               if (hostDef) {
                 const hostname = hostDef.hostname ?? (hostDef as Record<string, unknown>).ssh as string | undefined
                 if (hostname) {
@@ -3116,7 +3298,7 @@ export class SessionRunner {
           // mode silently reverting to 'default' on --resume (send() treats undefined as default).
           const resumeMode = resolvedMode ?? mode ?? record.mode
           log.session.info('resuming session via CLI', { sessionId, taskId: record.taskId, messageLength: combined.length, model: resolvedModel, mode: resumeMode })
-          session.send(combined, record.cwd ?? undefined, sessionId, resumeMode, resolvedModel, undefined, record.host ?? undefined, sshTarget)
+          session.send(combined, record.cwd ?? undefined, sessionId, resumeMode, resolvedModel, undefined, record.host ?? undefined, sshTarget, undefined, resumeConfig.session?.permission_prompt)
 
           // Write synthetic user events — send() is sync, _outputFile is set immediately
           for (const wmId of walnutMessageIds) {
@@ -3150,13 +3332,13 @@ export class SessionRunner {
 
       // Resolve SSH target if the session was on a remote host, so --resume
       // spawns on the correct machine (not locally).
+      const { getConfig } = await import('../core/config-manager.js')
+      const resumeConfig2 = await getConfig()
       let resumeSshTarget: SshTarget | undefined
       const resumeHost = targetSession.host
       if (resumeHost) {
         try {
-          const { getConfig } = await import('../core/config-manager.js')
-          const config = await getConfig()
-          const hostDef = config.hosts?.[resumeHost]
+          const hostDef = resumeConfig2.hosts?.[resumeHost]
           if (hostDef) {
             const hostname = hostDef.hostname ?? (hostDef as Record<string, unknown>).ssh as string | undefined
             if (hostname) {
@@ -3172,7 +3354,7 @@ export class SessionRunner {
       // Fall back to targetSession._mode to prevent mode silently reverting to 'default'.
       const existingResumeMode = resolvedMode ?? mode ?? targetSession._mode
       log.session.info('resuming session via CLI (existing target)', { sessionId, taskId: targetSession.taskId, messageLength: combined.length, host: resumeHost, model: resolvedModel, mode: existingResumeMode })
-      targetSession.send(combined, targetSession.cwd ?? undefined, sessionId, existingResumeMode, resolvedModel, undefined, resumeHost ?? undefined, resumeSshTarget)
+      targetSession.send(combined, targetSession.cwd ?? undefined, sessionId, existingResumeMode, resolvedModel, undefined, resumeHost ?? undefined, resumeSshTarget, undefined, resumeConfig2.session?.permission_prompt)
 
       // Write synthetic user events — send() is sync, _outputFile is set immediately
       for (const wmId of walnutMessageIds) {

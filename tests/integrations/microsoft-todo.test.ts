@@ -652,7 +652,7 @@ describe('pushTask', () => {
     const task = makeTask({ title: 'New Task', category: 'personal' });
     const msId = await pushTask(task);
 
-    expect(msId).toBe('new-ms-id');
+    expect(msId.msTaskId).toBe('new-ms-id');
     // Verify 2 HTTP calls were made
     expect(mockHttpsRequest).toHaveBeenCalledTimes(2);
 
@@ -673,7 +673,7 @@ describe('pushTask', () => {
     const task = makeTask({ ms_todo_id: 'existing-ms-id', ms_todo_list: 'list-1', category: 'personal' });
     const msId = await pushTask(task);
 
-    expect(msId).toBe('existing-ms-id');
+    expect(msId.msTaskId).toBe('existing-ms-id');
     const secondCallOptions = mockHttpsRequest.mock.calls[1][0];
     expect(secondCallOptions.method).toBe('PATCH');
     expect(secondCallOptions.path).toContain('existing-ms-id');
@@ -742,7 +742,7 @@ describe('pushTask', () => {
     });
     const msId = await pushTask(task);
 
-    expect(msId).toBe('new-ms-id');
+    expect(msId.msTaskId).toBe('new-ms-id');
     // Task object should be updated with new IDs via ext
     expect(getMsExt(task).id).toBe('new-ms-id');
     expect(getMsExt(task).list_id).toBe('new-list');
@@ -870,7 +870,7 @@ describe('autoPushTask', () => {
     ]);
 
     const result = await autoPushTask(makeTask());
-    expect(result).toBe('push-result-id');
+    expect(result!.msTaskId).toBe('push-result-id');
   });
 
   it('returns null on failure instead of throwing', async () => {
@@ -994,6 +994,7 @@ describe('syncTasks', () => {
       category: 'Tasks',
       project: 'Tasks',
       updated_at: '2024-12-01T00:00:00Z', // newer than remote
+      _syncedAt: '2024-12-01T00:00:00Z',
     });
 
     setupGraphResponses([
@@ -1122,6 +1123,7 @@ describe('deltaPull', () => {
       category: 'Tasks',
       project: 'Tasks',
       updated_at: '2025-01-01T00:00:00Z', // very recent
+      _syncedAt: '2025-01-01T00:00:00Z',
     });
 
     setupGraphResponses([
@@ -1538,7 +1540,7 @@ describe('concurrent resolveListId dedup', () => {
     const task2 = makeTask({ id: 'task-ok', category: 'Personal', project: 'Walnut-Idea' });
     const result = await pushTask(task2);
 
-    expect(result).toBe('ms-task-recovered');
+    expect(result!.msTaskId).toBe('ms-task-recovered');
   });
 
   it('invalidates cache after renameList', async () => {

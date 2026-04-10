@@ -40,6 +40,17 @@ export interface SyncPollContext {
   emit(event: string, data: unknown): void;
 }
 
+// ── PushResult: server-side timestamp for echo detection ──
+
+/** Push response — plugins MUST return server-side timestamp for echo detection. */
+export interface PushResult {
+  /** Server-side last-modified timestamp (ISO string) from the push API response.
+   *  Framework stores this as _syncedAt for echo detection on pull. */
+  serverTimestamp: string;
+  /** Plugin-specific ext data updates (optional). */
+  ext?: Record<string, unknown>;
+}
+
 // ── IntegrationSync: strict plugin sync interface ──
 // Every method is REQUIRED. Plugin maps Walnut's features to platform capabilities.
 // Phase is the only status concept — plugins map 7 phases to whatever the platform supports.
@@ -69,6 +80,12 @@ export interface IntegrationSync {
   // ── Content Validation (optional — reject content before store write) ──
   /** Return error string to reject, null to accept. */
   validateContent?(task: Task, field: string, value: string): string | null;
+
+  // ── Full Push (single-call push with server timestamp for echo detection) ──
+  /** Push all mutable fields to remote. Returns server-side timestamp for echo detection.
+   *  Framework calls this for existing tasks instead of individual update* methods.
+   *  Plugins MUST capture the server's lastModified from the API response. */
+  pushTask(task: Task): Promise<PushResult>;
 
   // ── Pull (periodic sync from remote) ──
   syncPoll(ctx: SyncPollContext): Promise<void>;

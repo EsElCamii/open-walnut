@@ -83,6 +83,7 @@ function makePlugin(overrides: {
       updateStar: vi.fn(),
       updateCategory: vi.fn(),
       updateDependencies: vi.fn(),
+      pushTask: vi.fn().mockResolvedValue({ serverTimestamp: new Date().toISOString() }),
       associateSubtask: vi.fn(),
       disassociateSubtask: vi.fn(),
       syncPoll: vi.fn(),
@@ -255,6 +256,7 @@ describe('SyncReconciler', () => {
       const localTask = makeTask({
         id: 'local-1',
         updated_at: '2025-12-01T00:00:00Z',
+        _syncedAt: '2025-12-01T00:00:00Z',
         ext: { 'test-plugin': { remote_id: 'r1' } },
       });
       const remoteItems = [

@@ -4,7 +4,7 @@ import { withFileLock } from '../utils/file-lock.js';
 import { log } from '../logging/index.js';
 import { generateId, parseGroupFromCategory } from '../utils/format.js';
 import { initDirectories } from './init.js';
-import { getConfig, saveConfig } from './config-manager.js';
+import { getConfig, updateConfig } from './config-manager.js';
 import { bus, EventNames } from './event-bus.js';
 import { VALID_PRIORITIES as VALID_PRIORITIES_ARRAY, type Task, type TaskStore, type TaskStatus, type TaskPhase, type TaskPriority, type TaskSource, type DashboardData } from './types.js';
 import { applyPhase, deriveStatusFromPhase, phaseFromStatus, VALID_PHASES, TERMINAL_PHASES, migratePhase as migratePhaseValue } from './phase.js';
@@ -661,23 +661,50 @@ async function pushToPlugin(
  * from updateTask fire-and-forget), the second caller awaits the first's promise.
  */
 const pushInflight = new Map<string, Promise<SyncResult>>();
+const pushDirty = new Set<string>();
+
+/** Check if a push is currently inflight for a given task ID.
+ *  Used by sync-reconciler and ctx.updateTask to skip pull updates during push. */
+export function isPushInflight(taskId: string): boolean {
+  return pushInflight.has(taskId);
+}
 
 /**
  * Full task push — calls createTask for new tasks or pushes all fields for existing.
  * Replaces the old integration-specific autoPushIfConfigured().
  * Per-task mutex prevents concurrent pushes (Layer 1).
+ *
+ * Trailing-write coalescing: if a push is already inflight, mark the task dirty
+ * instead of dropping the update. When the inflight push completes, if dirty,
+ * re-push once with the latest state. Without this, the inflight push lands with
+ * stale data while local has advanced — the remote timestamp ends up newer than
+ * local updated_at, causing the next pull to overwrite local with stale remote.
  */
 export async function autoPushIfConfigured(task: Task): Promise<SyncResult> {
   if (task.source === 'local') return { success: true };
 
-  // Layer 1: per-task mutex — deduplicate concurrent pushes
+  // If a push is already inflight, mark dirty so the finally block re-pushes
   const existing = pushInflight.get(task.id);
-  if (existing) return existing;
+  if (existing) {
+    pushDirty.add(task.id);
+    return existing;
+  }
 
   const promise = autoPushIfConfiguredImpl(task);
   pushInflight.set(task.id, promise);
   try { return await promise; }
-  finally { pushInflight.delete(task.id); }
+  finally {
+    pushInflight.delete(task.id);
+    // If task was updated while push was inflight, re-push with fresh state
+    if (pushDirty.delete(task.id)) {
+      const freshTask = await getTask(task.id).catch(() => null);
+      if (freshTask) {
+        autoPushIfConfigured(freshTask).catch(err => {
+          log.task.warn('trailing push failed', { taskId: task.id, error: err instanceof Error ? err.message : String(err) });
+        });
+      }
+    }
+  }
 }
 
 async function autoPushIfConfiguredImpl(task: Task): Promise<SyncResult> {
@@ -726,29 +753,57 @@ async function autoPushIfConfiguredImpl(task: Task): Promise<SyncResult> {
     }
   }
 
-  // For existing tasks, push all fields via pushToPlugin (handles sync_error automatically)
-  const results = await Promise.allSettled([
-    pushToPlugin(task, 'updateTitle', task.title),
-    pushToPlugin(task, 'updateDescription', task.description),
-    pushToPlugin(task, 'updatePhase', task.phase),
-    pushToPlugin(task, 'updatePriority', task.priority),
-  ]);
+  // For existing tasks, use plugin's pushTask (full push with server timestamp for echo detection)
+  try {
+    const pushResult = await plugin.sync.pushTask(task);
 
-  // Sync dependencies separately (not in the parallel batch) since it
-  // needs a relationship delta computation against ext plugin relationships.
-  await pushToPlugin(task, 'updateDependencies', task.depends_on ?? []);
+    // Persist ext changes + _syncedAt in a single write
+    await withWriteLock(async () => {
+      const store = await readStore();
+      const found = store.tasks.find(t => t.id === task.id);
+      if (found) {
+        // Store server timestamp for echo detection on pull
+        found._syncedAt = pushResult.serverTimestamp;
+        // Merge ext data if plugin returned any
+        if (pushResult.ext) {
+          found.ext = { ...found.ext, ...pushResult.ext };
+        }
+        // Also persist any ext mutations the plugin made in memory
+        if (task.ext && Object.keys(task.ext).length > 0) {
+          found.ext = { ...found.ext, ...task.ext };
+        }
+        // Clear sync_error on success
+        if (found.sync_error) {
+          found.sync_error = undefined;
+        }
+        // Derive external_url from plugin display metadata if not already set
+        if (!found.external_url && plugin.display?.getExternalUrl) {
+          const url = plugin.display.getExternalUrl(found);
+          if (url) found.external_url = url;
+        }
+        await writeStore(store);
+        bus.emit(EventNames.TASK_UPDATED, { task: found }, ['web-ui'], { source: 'sync' });
+      }
+    });
 
-  // Persist ext changes made by plugin sync methods (e.g. comment_id, comment_hash).
-  // Plugins mutate task.ext in memory during push — this writes those changes to disk.
-  if (task.ext && Object.keys(task.ext).length > 0) {
-    await persistTaskExt(task);
+    return { success: true };
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    log.task.warn('pushTask failed', { taskId: task.id, source: task.source, error: message });
+
+    // Set sync_error
+    await withWriteLock(async () => {
+      const store = await readStore();
+      const found = store.tasks.find(t => t.id === task.id);
+      if (found && found.sync_error !== message) {
+        found.sync_error = message;
+        await writeStore(store);
+        bus.emit(EventNames.TASK_UPDATED, { task: found }, ['web-ui'], { source: 'sync' });
+      }
+    });
+
+    return { success: false, error: message };
   }
-
-  // Check if any push failed (catch both rejected promises and explicit failures)
-  const anyFailed = results.some(r =>
-    r.status === 'rejected' || (r.status === 'fulfilled' && !r.value.success),
-  );
-  return anyFailed ? { success: false, error: 'partial sync failure' } : { success: true };
 }
 
 /**
@@ -1276,7 +1331,7 @@ function migrateTaskSource(
 export async function updateTask(
   idPrefix: string,
   updates: UpdateTaskInput,
-  eventOptions?: { source?: string; extraTargets?: string[] },
+  eventOptions?: { source?: string; extraTargets?: string[]; ifPhase?: TaskPhase },
 ): Promise<{ task: Task }> {
   return withWriteLock(async () => {
   const store = await readStore();
@@ -1336,6 +1391,14 @@ export async function updateTask(
     }
   }
   if (updates.phase !== undefined && VALID_PHASES.has(updates.phase)) {
+    // CAS guard: if caller specified ifPhase, only apply phase change if current phase matches
+    if (eventOptions?.ifPhase && task.phase !== eventOptions.ifPhase) {
+      log.task.warn('ifPhase CAS guard: skipping phase change — task phase has moved on', {
+        taskId: task.id, currentPhase: task.phase, ifPhase: eventOptions.ifPhase, requestedPhase: updates.phase,
+        source: eventOptions?.source,
+      });
+      // Skip phase change but allow other fields to update
+    } else {
     // Terminal phase guard: only human-initiated sources can overwrite COMPLETE/HUMAN_VERIFIED
     const source = eventOptions?.source ?? 'internal';
     const isHumanSource = source === 'api' || source === 'user';
@@ -1346,6 +1409,7 @@ export async function updateTask(
     } else {
       if (updates.phase === 'COMPLETE') guardActiveChildren(store, task);
       applyPhase(task, updates.phase);
+    }
     }
   } else if (updates.status !== undefined) {
     // Legacy: status without phase → derive phase from status
@@ -2068,7 +2132,7 @@ export async function renameCategory(
         if (!freshConfig.local.categories.some(c => c.toLowerCase() === newCategory.toLowerCase())) {
           freshConfig.local.categories.push(newCategory);
         }
-        await saveConfig(freshConfig);
+        await updateConfig({ local: freshConfig.local });
       }
     }
   }

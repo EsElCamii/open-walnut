@@ -687,6 +687,7 @@ describe('autoPushIfConfigured sync_error lifecycle', () => {
       updateStar: vi.fn(),
       updateCategory: vi.fn(),
       updateDependencies: vi.fn().mockResolvedValue(undefined),
+      pushTask: vi.fn().mockResolvedValue({ serverTimestamp: new Date().toISOString() }),
       associateSubtask: vi.fn(),
       disassociateSubtask: vi.fn(),
       syncPoll: vi.fn(),
@@ -731,7 +732,7 @@ describe('autoPushIfConfigured sync_error lifecycle', () => {
 
   it('sets sync_error when a plugin update fails', async () => {
     await registerTestPlugin('test-fail-plugin', {
-      updateTitle: vi.fn().mockRejectedValue(new Error('HTTP 302 redirect')),
+      pushTask: vi.fn().mockRejectedValue(new Error('HTTP 302 redirect')),
     });
 
     const { task } = await addTask({ title: 'Fail sync task', category: 'test', project: 'test' });

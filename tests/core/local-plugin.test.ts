@@ -24,7 +24,7 @@ registerLocal(api);
 // ── Tests ──
 
 describe('Local plugin: registerSync', () => {
-  it('B1: registers sync with all 16 methods', () => {
+  it('B1: registers sync with all required methods', () => {
     expect(collected.sync).not.toBeNull();
     const sync = collected.sync!;
     const expectedMethods = [
@@ -32,13 +32,14 @@ describe('Local plugin: registerSync', () => {
       'updateTitle', 'updateDescription', 'updateSummary', 'updateNote',
       'updateConversationLog', 'updatePriority', 'updatePhase', 'updateDueDate',
       'updateStar', 'updateCategory', 'updateDependencies',
+      'pushTask',
       'associateSubtask', 'disassociateSubtask',
       'syncPoll',
     ];
     for (const method of expectedMethods) {
       expect(typeof (sync as any)[method]).toBe('function');
     }
-    expect(expectedMethods).toHaveLength(16);
+    expect(expectedMethods).toHaveLength(17);
   });
 
   it('B2: every sync method resolves without error', async () => {
