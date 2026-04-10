@@ -13241,7 +13241,8 @@ a.task-kebab-info:hover {
   top: calc(100% + 6px);
   left: 0;
   width: 320px;
-  background: #fff;
+  background: var(--card-bg);
+  color: var(--fg);
   border: 1px solid var(--border);
   border-radius: 10px;
   padding: 10px;
@@ -13250,10 +13251,6 @@ a.task-kebab-info:hover {
   display: flex;
   flex-direction: column;
   gap: 8px;
-}
-
-@media (prefers-color-scheme: dark) {
-  .session-plan-popover { background: #1c1c1e; }
 }
 
 .session-plan-popover-file {
@@ -13294,13 +13291,17 @@ a.task-kebab-info:hover {
   overflow-y: auto;
   font-size: 12px;
   line-height: 1.5;
-  color: var(--fg);
   border-top: 1px solid var(--border);
   border-bottom: 1px solid var(--border);
   padding: 8px 0;
 }
 
-.session-plan-popover-content h1,
+.session-plan-popover-content h1 {
+  font-size: 13px;
+  font-weight: 700;
+  margin: 8px 0 4px;
+}
+
 .session-plan-popover-content h2,
 .session-plan-popover-content h3 {
   font-size: 12px;
@@ -16872,4 +16873,50 @@ a.file-link:hover {
 @keyframes recording-blink {
   0%, 100% { opacity: 0.6; }
   50% { opacity: 0.3; }
+}
+
+/* ===== Audio Error Toast ===== */
+
+.audio-error-toast {
+  position: fixed;
+  bottom: 80px;
+  left: 60px;
+  z-index: 9999;
+  max-width: 360px;
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 10px 12px;
+  background: var(--card-bg);
+  border: 1px solid var(--error);
+  border-radius: var(--radius-md);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.15);
+  animation: audio-toast-in 0.25s ease-out;
+  color: var(--fg-primary);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.audio-error-toast__msg {
+  flex: 1;
+}
+
+.audio-error-toast__close {
+  background: none;
+  border: none;
+  color: var(--fg-muted);
+  cursor: pointer;
+  font-size: 16px;
+  line-height: 1;
+  padding: 0;
+  flex-shrink: 0;
+}
+
+.audio-error-toast__close:hover {
+  color: var(--fg-primary);
+}
+
+@keyframes audio-toast-in {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
 }
