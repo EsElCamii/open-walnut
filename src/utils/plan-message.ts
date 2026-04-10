@@ -51,21 +51,23 @@ export async function readPlanFromSession(planSessionId: string): Promise<{ cont
 
     if (jsonlContent) {
       const lines = jsonlContent.split('\n').filter(Boolean);
+      // Find the LAST slug in JSONL — sessions resumed with a new conversation get a new slug,
+      // and the latest slug corresponds to the active plan file.
+      let lastSlug: string | undefined;
       for (const line of lines) {
         try {
           const parsed = JSON.parse(line);
-          if (parsed.slug) {
-            // Remote: tilde-based path (SSH expands ~); Local: absolute via CLAUDE_HOME
-            const planPath = record.host
-              ? `~/.claude/plans/${parsed.slug}.md`
-              : path.join(CLAUDE_HOME, 'plans', `${parsed.slug}.md`);
-            const planContent = await reader.readFile(planPath);
-            if (planContent?.trim()) return { content: planContent, planFile: planPath };
-            break;
-          }
+          if (parsed.slug) lastSlug = parsed.slug;
         } catch {
           // Skip unparseable lines
         }
+      }
+      if (lastSlug) {
+        const planPath = record.host
+          ? `~/.claude/plans/${lastSlug}.md`
+          : path.join(CLAUDE_HOME, 'plans', `${lastSlug}.md`);
+        const planContent = await reader.readFile(planPath);
+        if (planContent?.trim()) return { content: planContent, planFile: planPath };
       }
     }
   } catch {

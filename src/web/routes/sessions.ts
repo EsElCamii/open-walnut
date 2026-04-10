@@ -9,7 +9,6 @@ import { readSessionHistory, readSingleSubagentHistory, extractPlanContent, rewr
 import { listTasks, getTask, addTask, updateTask } from '../../core/task-manager.js'
 import { getConfig } from '../../core/config-manager.js'
 import { bus, EventNames, eventData } from '../../core/event-bus.js'
-import fs from 'node:fs'
 import fsp from 'node:fs/promises'
 import path from 'path'
 import { isSessionProcessAlive } from '../../utils/session-liveness.js'
@@ -224,13 +223,16 @@ sessionsRouter.get('/list-dirs', async (req: Request, res: Response, next: NextF
 
       const { getDaemonConnection } = await import('../../providers/daemon-connection.js')
       const sshTarget = { hostname, user: hostDef.user, port: hostDef.port }
-      // Race against a timeout to prevent blocking the response for 42+ seconds
-      const rejectAfter = (ms: number, msg: string) =>
-        new Promise<never>((_, reject) => setTimeout(() => reject(new Error(msg)), ms))
+      // Race against a 15s timeout to cap HTTP request wait time.
+      // The failure cache in daemon-connection.ts prevents retries for 60s after a failure.
+      let timeoutId: ReturnType<typeof setTimeout>
+      const timeoutPromise = new Promise<never>((_, reject) => {
+        timeoutId = setTimeout(() => reject(new Error(`Remote connection to ${host} timed out`)), 15_000)
+      })
       const conn = await Promise.race([
         getDaemonConnection(host, sshTarget),
-        rejectAfter(15_000, `Remote connection to ${host} timed out`),
-      ])
+        timeoutPromise,
+      ]).finally(() => clearTimeout(timeoutId!))
 
       // Recursive BFS directory listing via daemon's fs.ls command.
       // The daemon's fs.ls expands ~ to the remote home directory.
@@ -300,20 +302,18 @@ sessionsRouter.get('/list-dirs', async (req: Request, res: Response, next: NextF
       const walkLocal = async (d: string, currentDepth: number) => {
         if (currentDepth > depth || entries.length >= 500) return
         try {
-          const names = await fsp.readdir(d)
-          for (const name of names) {
+          const dirents = await fsp.readdir(d, { withFileTypes: true })
+          for (const dirent of dirents) {
             if (entries.length >= 500) break
             // Skip hidden directories
-            if (name.startsWith('.')) continue
-            const full = path.join(d, name)
-            try {
-              if ((await fsp.stat(full)).isDirectory()) {
-                entries.push(full)
-                if (currentDepth < depth) await walkLocal(full, currentDepth + 1)
-              }
-            } catch { /* skip unreadable */ }
+            if (dirent.name.startsWith('.')) continue
+            if (dirent.isDirectory()) {
+              const full = path.join(d, dirent.name)
+              entries.push(full)
+              if (currentDepth < depth) await walkLocal(full, currentDepth + 1)
+            }
           }
-        } catch { /* dir doesn't exist */ }
+        } catch { /* dir doesn't exist or is unreadable */ }
       }
       await walkLocal(dir, 1)
 
@@ -879,8 +879,15 @@ sessionsRouter.get('/:sessionId/plan', async (req: Request, res: Response, next:
       return
     }
 
-    // If this is an execution session with fromPlanSessionId, follow the link to the source plan session
-    const planSessionId = record.fromPlanSessionId ?? sessionId
+    // Exec sessions can re-enter plan mode via execute-continue, creating their own plan.
+    // When that happens, the session's own plan is newer/fresher and takes priority over
+    // the original source plan (which is now stale). planCompleted alone is sufficient —
+    // planFile may be absent if the plan was only in ExitPlanMode.input.plan (no Write to
+    // ~/.claude/plans/), but readPlanFromSession's JSONL slug and extractPlanContent
+    // strategies can still find it.
+    // See also: POST /execute-continue which uses the same !planCompleted check (~line 1009).
+    const hasOwnPlan = !!record.planCompleted
+    const planSessionId = hasOwnPlan ? sessionId : (record.fromPlanSessionId ?? sessionId)
     const isFollowedLink = planSessionId !== sessionId
 
     // Strategy 1: readPlanFromSession (planFile on disk, or JSONL slug → file)
@@ -947,6 +954,35 @@ sessionsRouter.post('/:sessionId/execute-continue', async (req: Request, res: Re
     log.web.info('execute-continue: resuming plan session with bypass', { sessionId: session.claudeSessionId })
 
     res.json({ status: 'started', sessionId: session.claudeSessionId })
+  } catch (err) {
+    next(err)
+  }
+})
+
+// POST /api/sessions/:sessionId/permission — resolve a pending permission request
+sessionsRouter.post('/:sessionId/permission', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const sessionId = req.params.sessionId as string
+    const { requestId, allow, message: denyMessage } = req.body as {
+      requestId: string
+      allow: boolean
+      message?: string
+    }
+    if (!requestId || typeof allow !== 'boolean') {
+      res.status(400).json({ error: 'requestId (string) and allow (boolean) are required' })
+      return
+    }
+    const session = sessionRunner.findByClaudeId(sessionId)
+    if (!session) {
+      res.status(404).json({ error: 'Live session not found' })
+      return
+    }
+    const resolved = session.resolvePermissionRequest(requestId, allow, denyMessage)
+    if (!resolved) {
+      res.status(404).json({ error: 'Permission request not found or already resolved' })
+      return
+    }
+    res.json({ status: 'resolved', requestId, allow })
   } catch (err) {
     next(err)
   }

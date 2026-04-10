@@ -6599,6 +6599,7 @@ img[data-lightbox-src],
     0 12px 32px rgba(0, 0, 0, 0.08),
     0 32px 80px rgba(0, 0, 0, 0.12);
   background: var(--card-bg);
+  color: var(--fg);
   display: flex;
   flex-direction: column;
   transform: translateZ(0);
@@ -6608,12 +6609,14 @@ img[data-lightbox-src],
 .plan-popup-header {
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  gap: 8px;
   padding: 16px 24px 8px;
   flex-shrink: 0;
 }
 
 .plan-popup-title {
+  flex: 1;
+  min-width: 0;
   font-size: 13px;
   font-weight: 500;
   color: var(--fg-muted);
@@ -6649,6 +6652,27 @@ img[data-lightbox-src],
 .plan-popup-body .markdown-body {
   font-size: 13.5px;
   line-height: 1.7;
+}
+
+.plan-popup-input {
+  flex-shrink: 0;
+  padding: 8px 24px 16px;
+}
+
+.plan-popup-input-field {
+  width: 100%;
+  padding: 8px 12px;
+  font-size: 13px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+  color: var(--fg);
+  outline: none;
+}
+
+.plan-popup-input-field:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 20%, transparent);
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -13231,143 +13255,41 @@ a.task-kebab-info:hover {
 }
 
 /* Plan popover — based on .session-fork-popover */
-.session-plan-popover-wrapper {
-  position: relative;
-  display: inline-flex;
-}
-
-.session-plan-popover {
-  position: absolute;
-  top: calc(100% + 6px);
-  left: 0;
-  width: 320px;
-  background: var(--card-bg);
-  color: var(--fg);
-  border: 1px solid var(--border);
-  border-radius: 10px;
-  padding: 10px;
-  box-shadow: 0 4px 20px rgba(0,0,0,0.15);
-  z-index: 100;
+/* Plan chip modal — extra header controls (reuses plan-popup-overlay/container) */
+.plan-popup-header-actions {
   display: flex;
-  flex-direction: column;
+  align-items: center;
   gap: 8px;
 }
 
-.session-plan-popover-file {
-  display: flex;
+.plan-popup-header-actions .plan-preview-refresh {
+  padding: 4px 8px;
+  font-size: 11px;
+  display: inline-flex;
   align-items: center;
-  gap: 6px;
-  font-size: 11px;
+  gap: 4px;
+  border-radius: 6px;
+  background: var(--bg-tertiary);
   color: var(--fg-muted);
+  border: 1px solid var(--border);
+  cursor: pointer;
 }
 
-.session-plan-popover-file code {
-  font-size: 10px;
-  background: var(--bg-tertiary);
-  padding: 1px 5px;
-  border-radius: 4px;
-  overflow: hidden;
-  text-overflow: ellipsis;
+.plan-popup-header-actions .plan-preview-refresh:hover {
+  background: var(--bg-hover);
+  color: var(--fg);
+}
+
+.plan-popup-header-actions .execute-plan-btn,
+.plan-popup-header-actions .execute-plan-btn-secondary {
+  padding: 4px 12px;
+  font-size: 12px;
   white-space: nowrap;
-  max-width: 200px;
+  border-radius: 6px;
 }
 
-.session-plan-popover-source {
-  font-size: 11px;
-  color: var(--fg-muted);
-}
-
-.session-plan-popover-source a {
-  color: var(--accent);
-  text-decoration: none;
-}
-
-.session-plan-popover-source a:hover {
-  text-decoration: underline;
-}
-
-.session-plan-popover-content {
-  max-height: 300px;
-  overflow-y: auto;
-  font-size: 12px;
-  line-height: 1.5;
-  border-top: 1px solid var(--border);
-  border-bottom: 1px solid var(--border);
-  padding: 8px 0;
-}
-
-.session-plan-popover-content h1 {
-  font-size: 13px;
-  font-weight: 700;
-  margin: 8px 0 4px;
-}
-
-.session-plan-popover-content h2,
-.session-plan-popover-content h3 {
-  font-size: 12px;
-  font-weight: 600;
-  margin: 8px 0 4px;
-}
-
-.session-plan-popover-content h1:first-child,
-.session-plan-popover-content h2:first-child,
-.session-plan-popover-content h3:first-child {
-  margin-top: 0;
-}
-
-.session-plan-popover-content p {
-  margin: 4px 0;
-}
-
-.session-plan-popover-content ul,
-.session-plan-popover-content ol {
-  margin: 4px 0;
-  padding-left: 18px;
-}
-
-.session-plan-popover-content li {
-  margin: 2px 0;
-}
-
-.session-plan-popover-content code {
-  font-size: 11px;
-  background: var(--bg-tertiary);
-  padding: 1px 3px;
-  border-radius: 3px;
-}
-
-.session-plan-popover-content pre {
-  font-size: 11px;
-  background: var(--bg-tertiary);
-  padding: 6px 8px;
-  border-radius: 4px;
-  overflow-x: auto;
-  margin: 4px 0;
-}
-
-.session-plan-popover-actions {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-
-.session-plan-popover .execute-plan-btn,
-.session-plan-popover .execute-plan-btn-secondary {
-  padding: 6px 10px;
-  font-size: 12px;
-  white-space: normal;
-  flex-wrap: wrap;
-}
-
-.session-plan-popover .execute-plan-btn-desc {
-  font-size: 10px;
-  margin-left: 0;
-  width: 100%;
-  opacity: 0.7;
-}
-
-.session-plan-popover .execute-plan-btn-desc {
-  font-size: 10px;
+.plan-popup-header-actions .execute-plan-btn-desc {
+  display: none;
 }
 
 /* Toggled sections when opened via action chip */
