@@ -29,12 +29,28 @@ async function fileExists(p: string): Promise<boolean> {
   }
 }
 
+/** Resolve a binary name to its full path via `which`. Returns null if not found. */
+async function resolveBinary(name: string): Promise<string | null> {
+  // Already an absolute path
+  if (name.startsWith('/')) return (await fileExists(name)) ? name : null;
+  try {
+    const { stdout } = await execFileAsync('which', [name], { timeout: 5000 });
+    const resolved = stdout.trim();
+    return resolved || null;
+  } catch {
+    return null;
+  }
+}
+
 export function createWhisperCppEngine(cfg: WhisperCppConfig): SttEngine {
+  let resolvedBinaryPath: string | null = null;
+
   return {
     name: 'whisper-cpp',
 
     async isAvailable() {
-      if (!(await fileExists(cfg.binaryPath))) {
+      resolvedBinaryPath = await resolveBinary(cfg.binaryPath);
+      if (!resolvedBinaryPath) {
         return { available: false, error: `whisper-cpp binary not found: ${cfg.binaryPath}` };
       }
       if (!(await fileExists(cfg.modelPath))) {
@@ -58,22 +74,25 @@ export function createWhisperCppEngine(cfg: WhisperCppConfig): SttEngine {
           '-m', cfg.modelPath,
           '-f', wavPath,
           '--no-timestamps',
-          // 64 prevents repetition loops (0 = too aggressive, unlimited = loops). Tested on 107-min audio.
           '--max-context', '64',
+          // Whispering-style noise suppression: reduce hallucination on silence/noise
+          '--suppress-nst',
+          '--no-speech-thold', '0.2',
         ];
         if (cfg.vadModelPath) {
           args.push('--vad', '--vad-model', cfg.vadModelPath);
         }
-        if (cfg.prompt) {
-          args.push('--prompt', cfg.prompt);
+        const effectivePrompt = req.prompt || cfg.prompt;
+        if (effectivePrompt) {
+          args.push('--prompt', effectivePrompt);
         }
-        if (req.language) {
-          args.push('-l', req.language);
-        }
+        // whisper-cli defaults to 'en' — pass 'auto' for multilingual auto-detect
+        args.push('-l', req.language || 'auto');
 
-        log.stt.info(`Running whisper-cpp: ${cfg.binaryPath} ${args.join(' ')}`);
+        const bin = resolvedBinaryPath ?? cfg.binaryPath;
+        log.stt.info(`Running whisper-cpp: ${bin} ${args.join(' ')}`);
 
-        const { stdout } = await execFileAsync(cfg.binaryPath, args, {
+        const { stdout } = await execFileAsync(bin, args, {
           timeout: 0,             // No timeout — whisper-cli is RAM-bounded (~115 MB/hr audio), not time-bounded.
           maxBuffer: 50 * 1024 * 1024,
         });

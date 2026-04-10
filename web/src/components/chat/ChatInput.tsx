@@ -488,7 +488,25 @@ export function ChatInput({ onSend, onCommand, onStop, onInterruptSend, onClearQ
           />
         </div>
         <MicButton
-          onTranscribe={(text) => handleChange(value ? value + ' ' + text : text)}
+          onTranscribe={(text) => {
+            // Insert at cursor position (or append if no selection)
+            const el = textareaRef.current;
+            const pos = el?.selectionStart ?? value.length;
+            const before = value.slice(0, pos);
+            const after = value.slice(pos);
+            // Add space separator if inserting between existing text
+            const needSpaceBefore = before.length > 0 && !before.endsWith(' ') && !before.endsWith('\n');
+            const needSpaceAfter = after.length > 0 && !after.startsWith(' ') && !after.startsWith('\n');
+            const inserted = (needSpaceBefore ? ' ' : '') + text + (needSpaceAfter ? ' ' : '');
+            const newValue = before + inserted + after;
+            handleChange(newValue);
+            // Move cursor to end of inserted text
+            const newPos = pos + inserted.length;
+            requestAnimationFrame(() => {
+              el?.setSelectionRange(newPos, newPos);
+              el?.focus();
+            });
+          }}
           disabled={disabled}
         />
         <input

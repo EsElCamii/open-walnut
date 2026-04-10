@@ -27,6 +27,12 @@ export interface UseSpeechToTextReturn {
   error: string | null;
   /** Start or stop recording */
   toggleRecording: () => void;
+  /** Re-transcribe the last recording with a different model (one-shot whisper-cli) */
+  retryWithModel: (model: string) => Promise<void>;
+  /** Debug audio file path from the last transcription (server-side) */
+  lastDebugPath: string | null;
+  /** Whether we have a last recording available for retry */
+  hasLastRecording: boolean;
 }
 
 const isMediaRecorderSupported =
@@ -39,10 +45,14 @@ export function useSpeechToText({ onTranscribe, language }: UseSpeechToTextOptio
   const [isRecording, setIsRecording] = useState(false);
   const [isTranscribing, setIsTranscribing] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [lastDebugPath, setLastDebugPath] = useState<string | null>(null);
+  const [hasLastRecording, setHasLastRecording] = useState(false);
 
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const chunksRef = useRef<Blob[]>([]);
+  // Keep last audio for retry
+  const lastAudioRef = useRef<{ base64: string; format: string } | null>(null);
   // Refs mirror props to avoid stale closures in MediaRecorder.onstop async callback
   const onTranscribeRef = useRef(onTranscribe);
   onTranscribeRef.current = onTranscribe;
@@ -68,7 +78,9 @@ export function useSpeechToText({ onTranscribe, language }: UseSpeechToTextOptio
 
     // Start recording
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: { channelCount: { ideal: 1 }, sampleRate: { ideal: 16000 } },
+      });
       streamRef.current = stream;
 
       // Prefer webm/opus, fall back to whatever is available
@@ -117,7 +129,16 @@ export function useSpeechToText({ onTranscribe, language }: UseSpeechToTextOptio
             : 'webm'; // fallback
 
           log.info('stt', `Sending ${(blob.size / 1024).toFixed(1)}KB ${format} for transcription`);
+
+          // Save for retry
+          lastAudioRef.current = { base64, format };
+          if (isMountedRef.current) setHasLastRecording(true);
+
           const result = await transcribeAudio(base64, format, languageRef.current);
+
+          if (isMountedRef.current && result.debugAudioPath) {
+            setLastDebugPath(result.debugAudioPath);
+          }
 
           if (result.text) {
             if (!isMountedRef.current) return;
@@ -155,11 +176,42 @@ export function useSpeechToText({ onTranscribe, language }: UseSpeechToTextOptio
     }
   }, [stopStream]);
 
+  const retryWithModel = useCallback(async (model: string) => {
+    const last = lastAudioRef.current;
+    if (!last) return;
+
+    setError(null);
+    setIsTranscribing(true);
+    try {
+      log.info('stt', `Retrying transcription with model: ${model}`);
+      const result = await transcribeAudio(last.base64, last.format, languageRef.current, model);
+
+      if (isMountedRef.current && result.debugAudioPath) {
+        setLastDebugPath(result.debugAudioPath);
+      }
+
+      if (result.text && isMountedRef.current) {
+        onTranscribeRef.current(result.text);
+        const preview = result.text.length > 50 ? result.text.slice(0, 50) + '...' : result.text;
+        log.info('stt', `Retry transcribed: "${preview}" (${result.durationMs}ms, model=${model})`);
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      log.error('stt', `Retry failed: ${msg}`);
+      if (isMountedRef.current) setError(msg);
+    } finally {
+      if (isMountedRef.current) setIsTranscribing(false);
+    }
+  }, []);
+
   return {
     isSupported: isMediaRecorderSupported,
     isRecording,
     isTranscribing,
     error,
     toggleRecording,
+    retryWithModel,
+    lastDebugPath,
+    hasLastRecording,
   };
 }

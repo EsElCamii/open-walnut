@@ -176,6 +176,13 @@ export async function seedConfigDefaults(): Promise<void> {
   }
 
   if (needsWrite) {
-    await saveConfig(config);
+    // Use updateConfig to preserve existing keys (like stt) that may already be on disk
+    await updateConfig({
+      agent: config.agent,
+      version: config.version,
+      user: config.user,
+      defaults: config.defaults,
+      provider: config.provider,
+    });
   }
 }

@@ -3,10 +3,12 @@
  */
 
 import express, { Router, type Request, type Response, type NextFunction } from 'express';
-import { unlink, stat } from 'node:fs/promises';
+import { unlink, stat, mkdir, writeFile, readFile, appendFile, readdir, rm } from 'node:fs/promises';
 import { join } from 'node:path';
+import { homedir } from 'node:os';
 import { getConfig, updateConfig } from '../../core/config-manager.js';
-import { transcribeAudio, createEngine } from '../../core/stt/index.js';
+import { transcribeAudio, createEngine, getOrCreateEngine, type SttResult } from '../../core/stt/index.js';
+import { createWhisperCppEngine } from '../../core/stt/engine-whisper-cpp.js';
 import { detectSystem } from '../../core/stt/detect.js';
 import { installViaBrew, downloadGgmlModel, MODEL_CATALOG, VAD_MODEL, getModelDir, SHERPA_MODEL_CATALOG, downloadSherpaModel, getSherpaModelDir, findSherpaModels } from '../../core/stt/setup.js';
 import { log } from '../../logging/index.js';
@@ -17,12 +19,14 @@ const ALLOWED_FORMATS = new Set(['webm', 'wav', 'mp3', 'ogg', 'mp4', 'm4a', 'fla
 
 /**
  * POST /api/stt/transcribe
- * Body: { audio: string (base64), format: string, language?: string }
- * Response: { text: string, durationMs: number }
+ * Body: { audio: string (base64), format: string, language?: string, model?: string }
+ *   model — optional: ggml model filename to use for a one-shot whisper-cli retry
+ *           (bypasses the configured engine, useful for comparing models)
+ * Response: { text: string, durationMs: number, debugAudioPath?: string }
  */
 sttRouter.post('/transcribe', express.json({ limit: '35mb' }), async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const { audio, format, language } = req.body;
+    const { audio, format, language, model } = req.body;
     if (!audio || typeof audio !== 'string') {
       res.status(400).json({ error: 'Missing or invalid "audio" field (base64 string expected)' });
       return;
@@ -44,8 +48,97 @@ sttRouter.post('/transcribe', express.json({ limit: '35mb' }), async (req: Reque
 
     const config = await getConfig();
     const effectiveLanguage = language || config.stt?.language;
-    const result = await transcribeAudio(config, { audio, format, language: effectiveLanguage });
-    res.json(result);
+    const sttReq = { audio, format, language: effectiveLanguage };
+
+    let result: SttResult;
+
+    if (model && typeof model === 'string') {
+      // Retry with a specific model via one-shot whisper-cli (doesn't touch whisper-server daemon)
+      const catalogEntry = MODEL_CATALOG.find(m => m.name === model);
+      if (!catalogEntry) {
+        res.status(404).json({ error: `Unknown model: ${model}` });
+        return;
+      }
+      const modelPath = join(getModelDir(), catalogEntry.filename);
+      try { await stat(modelPath); } catch {
+        res.status(404).json({ error: `Model not downloaded: ${model}` });
+        return;
+      }
+      const cliPath = config.stt?.whisper_cpp_path || 'whisper-cli';
+      const engine = createWhisperCppEngine({
+        binaryPath: cliPath,
+        modelPath,
+        vadModelPath: config.stt?.whisper_cpp_vad_model,
+        prompt: config.stt?.whisper_cpp_prompt,
+      });
+      const { available, error } = await engine.isAvailable();
+      if (!available) {
+        res.status(500).json({ error: `whisper-cli not available: ${error}` });
+        return;
+      }
+      log.stt.info(`Retry transcription with model: ${model} (via whisper-cli)`);
+      result = await engine.transcribe(sttReq);
+    } else {
+      result = await transcribeAudio(config, sttReq);
+    }
+
+    // Save audio + result for debugging truncation issues
+    const debugAudioPath = await saveDebugAudio(audio, format, effectiveLanguage, result).catch(() => undefined);
+
+    res.json({ ...result, debugAudioPath });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ── Vocabulary management ──
+const VOCAB_PATH = join(homedir(), '.open-walnut', 'stt-vocab.txt');
+
+/**
+ * GET /api/stt/vocab
+ * Read the custom vocabulary file.
+ */
+sttRouter.get('/vocab', async (_req: Request, res: Response, next: NextFunction) => {
+  try {
+    let raw = '';
+    try { raw = await readFile(VOCAB_PATH, 'utf-8'); } catch { /* file doesn't exist yet */ }
+    const words = raw.split('\n').map(l => l.trim()).filter(l => l && !l.startsWith('#'));
+    res.json({ words, path: VOCAB_PATH });
+  } catch (err) {
+    next(err);
+  }
+});
+
+/**
+ * POST /api/stt/vocab
+ * Add a word to the vocabulary file.
+ * Body: { word: string }
+ */
+sttRouter.post('/vocab', express.json(), async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { word } = req.body;
+    if (!word || typeof word !== 'string' || !word.trim()) {
+      res.status(400).json({ error: 'Missing "word" field' });
+      return;
+    }
+    const trimmed = word.trim();
+
+    // Read existing file
+    let raw = '';
+    try { raw = await readFile(VOCAB_PATH, 'utf-8'); } catch { /* file doesn't exist yet */ }
+
+    // Check for duplicate
+    const existing = raw.split('\n').map(l => l.trim().toLowerCase());
+    if (existing.includes(trimmed.toLowerCase())) {
+      res.json({ added: false, word: trimmed, reason: 'already exists' });
+      return;
+    }
+
+    // Append (ensure newline before)
+    const prefix = raw.endsWith('\n') || raw === '' ? '' : '\n';
+    await appendFile(VOCAB_PATH, `${prefix}${trimmed}\n`);
+    log.stt.info(`Added vocab word: "${trimmed}"`);
+    res.json({ added: true, word: trimmed });
   } catch (err) {
     next(err);
   }
@@ -58,7 +151,7 @@ sttRouter.post('/transcribe', express.json({ limit: '35mb' }), async (req: Reque
 sttRouter.get('/status', async (_req: Request, res: Response, next: NextFunction) => {
   try {
     const config = await getConfig();
-    const engine = createEngine(config);
+    const engine = getOrCreateEngine(config);
     if (!engine) {
       res.json({ engine: null, available: false, error: 'No STT engine configured' });
       return;
@@ -211,7 +304,7 @@ sttRouter.delete('/models/:name', async (req: Request, res: Response, next: Next
  */
 sttRouter.post('/activate-model', express.json(), async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const { model } = req.body;
+    const { model, engine: reqEngine } = req.body;
     if (!model || typeof model !== 'string') {
       res.status(400).json({ error: 'Missing "model" field' });
       return;
@@ -232,17 +325,31 @@ sttRouter.post('/activate-model', express.json(), async (req: Request, res: Resp
     }
 
     const config = await getConfig();
-    const whisperPath = config.stt?.whisper_cpp_path || 'whisper-cli';
-    await updateConfig({
-      stt: {
-        ...config.stt,
-        engine: 'whisper-cpp',
-        whisper_cpp_path: whisperPath,
-        whisper_cpp_model: modelPath,
-      },
-    });
+    const targetEngine = reqEngine === 'whisper-server' ? 'whisper-server' : 'whisper-cpp';
 
-    log.stt.info(`Activated model: ${model} → ${modelPath}`);
+    if (targetEngine === 'whisper-server') {
+      const serverPath = config.stt?.whisper_server_path || 'whisper-server';
+      await updateConfig({
+        stt: {
+          ...config.stt,
+          engine: 'whisper-server',
+          whisper_server_path: serverPath,
+          whisper_server_model: modelPath,
+        },
+      });
+    } else {
+      const whisperPath = config.stt?.whisper_cpp_path || 'whisper-cli';
+      await updateConfig({
+        stt: {
+          ...config.stt,
+          engine: 'whisper-cpp',
+          whisper_cpp_path: whisperPath,
+          whisper_cpp_model: modelPath,
+        },
+      });
+    }
+
+    log.stt.info(`Activated model: ${model} → ${modelPath} (engine=${targetEngine})`);
     res.json({ activated: model, path: modelPath });
   } catch (err) {
     next(err);
@@ -320,7 +427,6 @@ sttRouter.delete('/sherpa-models/:name', async (req: Request, res: Response, nex
     }
 
     const modelDir = join(getSherpaModelDir(), catalogEntry.dirName);
-    const { rm } = await import('node:fs/promises');
     try {
       await stat(modelDir);
     } catch {
@@ -402,3 +508,58 @@ sttRouter.post('/auto-config', express.json(), async (_req: Request, res: Respon
     next(err);
   }
 });
+
+// ── Debug audio saving ──
+// Saves raw audio + transcription metadata to ~/.open-walnut/stt-debug/
+// for investigating truncation and recognition issues.
+
+const DEBUG_DIR = join(homedir(), '.open-walnut', 'stt-debug');
+const MAX_DEBUG_FILES = 100; // keep last 100 recordings
+
+async function saveDebugAudio(
+  audio: string,
+  format: string,
+  language: string | undefined,
+  result: SttResult,
+): Promise<string> {
+  await mkdir(DEBUG_DIR, { recursive: true });
+
+  const ts = new Date().toISOString().replace(/[:.]/g, '-');
+  const baseName = `${ts}`;
+  const audioPath = join(DEBUG_DIR, `${baseName}.${format}`);
+
+  // Save raw audio
+  await writeFile(audioPath, Buffer.from(audio, 'base64'));
+
+  // Save companion metadata
+  await writeFile(
+    join(DEBUG_DIR, `${baseName}.json`),
+    JSON.stringify({
+      timestamp: new Date().toISOString(),
+      format,
+      language: language || 'auto',
+      audioSizeBytes: Math.round(audio.length * 3 / 4),
+      result,
+    }, null, 2),
+  );
+
+  // Prune old files — keep only the latest MAX_DEBUG_FILES recordings
+  try {
+    const files = await readdir(DEBUG_DIR);
+    const jsonFiles = files.filter(f => f.endsWith('.json')).sort();
+    if (jsonFiles.length > MAX_DEBUG_FILES) {
+      const toDelete = jsonFiles.slice(0, jsonFiles.length - MAX_DEBUG_FILES);
+      for (const jf of toDelete) {
+        const stem = jf.replace('.json', '');
+        const af = files.find(f => f.startsWith(stem) && !f.endsWith('.json'));
+        await unlink(join(DEBUG_DIR, jf)).catch(() => {});
+        if (af) await unlink(join(DEBUG_DIR, af)).catch(() => {});
+      }
+    }
+  } catch {
+    // Pruning is best-effort
+  }
+
+  log.stt.info(`Debug audio saved: ${audioPath}`);
+  return audioPath;
+}

@@ -7,6 +7,8 @@ export interface SttRequest {
   format: string;
   /** ISO 639-1 language hint. Empty/undefined = auto-detect. */
   language?: string;
+  /** Domain vocabulary to bias decoder (e.g. "Kubernetes, TypeScript, Walnut"). */
+  prompt?: string;
 }
 
 export interface SttResult {
@@ -20,4 +22,10 @@ export interface SttEngine {
   isAvailable(): Promise<{ available: boolean; error?: string }>;
   /** Transcribe audio to text */
   transcribe(req: SttRequest): Promise<SttResult>;
+  /**
+   * Gracefully shut down this engine, releasing resources.
+   * For daemon-based engines (whisper-server), this kills the background process.
+   * Optional — engines that hold no persistent resources can omit this.
+   */
+  shutdown?(): void;
 }

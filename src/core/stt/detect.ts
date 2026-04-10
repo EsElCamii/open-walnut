@@ -39,6 +39,7 @@ export interface GgmlModel {
 export interface DetectionResult {
   ffmpeg: DetectionItem;
   whisperCli: DetectionItem;
+  whisperServer: DetectionItem;
   sherpaOnnxNode: DetectionItem;
   homebrew: DetectionItem;
   models: GgmlModel[];
@@ -104,6 +105,23 @@ export async function detectWhisperCli(): Promise<DetectionItem> {
   } catch { /* not found */ }
 
   return { name: 'whisper-cli', found: false };
+}
+
+export async function detectWhisperServer(): Promise<DetectionItem> {
+  const { found, path } = await whichBinary('whisper-server');
+  if (found) {
+    return { name: 'whisper-server', found: true, path };
+  }
+  // Check homebrew path
+  const brewPath = '/opt/homebrew/bin/whisper-server';
+  try {
+    const s = await stat(brewPath);
+    if (s.isFile()) {
+      return { name: 'whisper-server', found: true, path: brewPath };
+    }
+  } catch { /* not found */ }
+
+  return { name: 'whisper-server', found: false };
 }
 
 export async function detectSherpaOnnxNode(): Promise<DetectionItem> {
@@ -219,9 +237,10 @@ export function getRecommendation(result: Pick<DetectionResult, 'ffmpeg' | 'whis
 
 /** Run full system detection */
 export async function detectSystem(): Promise<DetectionResult> {
-  const [ffmpeg, whisperCli, sherpaOnnxNode, homebrew, models, vadModel] = await Promise.all([
+  const [ffmpeg, whisperCli, whisperServer, sherpaOnnxNode, homebrew, models, vadModel] = await Promise.all([
     detectFfmpeg(),
     detectWhisperCli(),
+    detectWhisperServer(),
     detectSherpaOnnxNode(),
     detectHomebrew(),
     findGgmlModels(),
@@ -230,5 +249,5 @@ export async function detectSystem(): Promise<DetectionResult> {
 
   const recommendation = getRecommendation({ ffmpeg, whisperCli, sherpaOnnxNode, homebrew, models });
 
-  return { ffmpeg, whisperCli, sherpaOnnxNode, homebrew, models, vadModel, recommendation };
+  return { ffmpeg, whisperCli, whisperServer, sherpaOnnxNode, homebrew, models, vadModel, recommendation };
 }

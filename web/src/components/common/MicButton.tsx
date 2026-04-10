@@ -2,12 +2,15 @@
  * Microphone button for speech-to-text input.
  *
  * States: idle (gray) → recording (red pulse) → transcribing (spinner)
- * Disabled with tooltip when STT is not configured or engine unavailable.
- * Gracefully hidden when MediaRecorder is not supported.
+ * After transcription, a small ▾ chevron badge appears on the mic button.
+ * Clicking it opens a dropdown with: retry models, vocabulary, copy audio path.
  */
 
+import { useState, useRef, useEffect, useCallback } from 'react';
 import { useSpeechToText } from '@/hooks/useSpeechToText';
 import { useSttStatus } from '@/hooks/useSttStatus';
+import { fetchSttDetection, fetchVocab, addVocabWord, MODEL_CATALOG, type GgmlModel } from '@/api/stt';
+import { log } from '@/utils/log';
 
 interface MicButtonProps {
   /** Called with transcribed text */
@@ -20,24 +23,146 @@ interface MicButtonProps {
   size?: 'sm' | 'md';
 }
 
+const RETRY_DISMISS_MS = 20_000;
+
 export function MicButton({ onTranscribe, language, disabled, size = 'md' }: MicButtonProps) {
-  const { isSupported, isRecording, isTranscribing, error, toggleRecording } = useSpeechToText({
+  const { isSupported, isRecording, isTranscribing, error, toggleRecording, retryWithModel, lastDebugPath, hasLastRecording } = useSpeechToText({
     onTranscribe,
     language,
   });
   const sttStatus = useSttStatus();
+
+  // Dropdown state
+  const [showChevron, setShowChevron] = useState(false);
+  const [dropdownOpen, setDropdownOpen] = useState(false);
+  const [downloadedModels, setDownloadedModels] = useState<GgmlModel[]>([]);
+  const [modelsLoading, setModelsLoading] = useState(false);
+  // Vocab state
+  const [vocabWords, setVocabWords] = useState<string[]>([]);
+  const [vocabInput, setVocabInput] = useState('');
+  const [vocabStatus, setVocabStatus] = useState<string | null>(null);
+  const vocabInputRef = useRef<HTMLInputElement>(null);
+
+  const dismissTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
+  const wrapperRef = useRef<HTMLDivElement>(null);
+
+  // Show chevron after transcription completes
+  const wasTranscribing = useRef(false);
+  useEffect(() => {
+    if (isTranscribing) {
+      wasTranscribing.current = true;
+    } else if (wasTranscribing.current) {
+      wasTranscribing.current = false;
+      if (hasLastRecording) {
+        setShowChevron(true);
+        clearTimeout(dismissTimer.current);
+        dismissTimer.current = setTimeout(() => {
+          setShowChevron(false);
+          setDropdownOpen(false);
+        }, RETRY_DISMISS_MS);
+      }
+    }
+  }, [isTranscribing, hasLastRecording]);
+
+  // Hide on new recording
+  useEffect(() => {
+    if (isRecording) {
+      setShowChevron(false);
+      setDropdownOpen(false);
+      clearTimeout(dismissTimer.current);
+    }
+  }, [isRecording]);
+
+  // Close dropdown on outside click
+  useEffect(() => {
+    if (!dropdownOpen) return;
+    const handler = (e: MouseEvent) => {
+      if (wrapperRef.current && !wrapperRef.current.contains(e.target as Node)) {
+        setDropdownOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, [dropdownOpen]);
+
+  useEffect(() => () => clearTimeout(dismissTimer.current), []);
+
+  const handleChevronClick = useCallback(async (e: React.MouseEvent) => {
+    e.stopPropagation();
+    const opening = !dropdownOpen;
+    setDropdownOpen(opening);
+    if (!opening) return;
+
+    setVocabStatus(null);
+    // Fetch models + vocab in parallel on open
+    const promises: Promise<void>[] = [];
+    if (downloadedModels.length === 0 && !modelsLoading) {
+      setModelsLoading(true);
+      promises.push(
+        fetchSttDetection()
+          .then(det => setDownloadedModels(det.models))
+          .catch(err => log.error('stt', `Failed to fetch models: ${err}`))
+          .finally(() => setModelsLoading(false))
+      );
+    }
+    promises.push(
+      fetchVocab()
+        .then(res => setVocabWords(res.words))
+        .catch(() => {})
+    );
+    await Promise.all(promises);
+  }, [dropdownOpen, downloadedModels.length, modelsLoading]);
+
+  const handleRetryModel = useCallback(async (modelName: string) => {
+    setDropdownOpen(false);
+    clearTimeout(dismissTimer.current);
+    await retryWithModel(modelName);
+    dismissTimer.current = setTimeout(() => setShowChevron(false), RETRY_DISMISS_MS);
+  }, [retryWithModel]);
+
+  const handleCopyPath = useCallback(() => {
+    if (lastDebugPath) {
+      navigator.clipboard.writeText(lastDebugPath).catch(() => {});
+      log.info('stt', `Copied debug audio path: ${lastDebugPath}`);
+    }
+    setDropdownOpen(false);
+  }, [lastDebugPath]);
+
+  const handleAddVocab = useCallback(async () => {
+    const w = vocabInput.trim();
+    if (!w) return;
+    // Check client-side duplicate
+    if (vocabWords.some(v => v.toLowerCase() === w.toLowerCase())) {
+      setVocabStatus(`"${w}" already exists`);
+      setVocabInput('');
+      setTimeout(() => setVocabStatus(null), 2000);
+      return;
+    }
+    try {
+      const res = await addVocabWord(w);
+      if (res.added) {
+        setVocabWords(prev => [...prev, w]);
+        setVocabStatus(`Added "${w}"`);
+      } else {
+        setVocabStatus(`"${w}" already exists`);
+      }
+      setVocabInput('');
+      setTimeout(() => setVocabStatus(null), 2000);
+    } catch (err) {
+      setVocabStatus(`Error: ${err}`);
+    }
+  }, [vocabInput, vocabWords]);
 
   if (!isSupported) return null;
 
   const sttUnavailable = !sttStatus.isLoading && (!sttStatus.isConfigured || !sttStatus.isAvailable);
   const isDisabled = disabled || isTranscribing || sttUnavailable;
 
-  const className = [
+  const btnClass = [
     'btn mic-btn',
     size === 'sm' && 'mic-btn-sm',
     isRecording && 'mic-recording',
     isTranscribing && 'mic-transcribing',
-    sttUnavailable && 'mic-disabled',
   ].filter(Boolean).join(' ');
 
   const title = sttUnavailable
@@ -50,27 +175,114 @@ export function MicButton({ onTranscribe, language, disabled, size = 'md' }: Mic
           ? 'Stop recording'
           : 'Voice input';
 
+  const modelDisplayName = (m: GgmlModel) => {
+    const cat = MODEL_CATALOG.find(c => c.filename === m.name || c.name === m.name);
+    return cat?.displayName ?? m.name.replace('ggml-', '').replace('.bin', '');
+  };
+
   return (
-    <button
-      className={className}
-      onClick={toggleRecording}
-      type="button"
-      disabled={isDisabled}
-      aria-label={title}
-      title={title}
-    >
-      {isTranscribing ? (
-        <svg className="mic-spinner" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-          <circle cx="12" cy="12" r="10" strokeDasharray="60" strokeDashoffset="20" />
-        </svg>
-      ) : (
-        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-          <rect x="9" y="1" width="6" height="12" rx="3" />
-          <path d="M19 10v2a7 7 0 01-14 0v-2" />
-          <line x1="12" y1="19" x2="12" y2="23" />
-          <line x1="8" y1="23" x2="16" y2="23" />
-        </svg>
+    <div className="mic-btn-wrapper" ref={wrapperRef}>
+      <button
+        className={btnClass}
+        onClick={toggleRecording}
+        type="button"
+        disabled={isDisabled}
+        aria-label={title}
+        title={title}
+      >
+        {isTranscribing ? (
+          <svg className="mic-spinner" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+            <circle cx="12" cy="12" r="10" strokeDasharray="60" strokeDashoffset="20" />
+          </svg>
+        ) : (
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <rect x="9" y="1" width="6" height="12" rx="3" />
+            <path d="M19 10v2a7 7 0 01-14 0v-2" />
+            <line x1="12" y1="19" x2="12" y2="23" />
+            <line x1="8" y1="23" x2="16" y2="23" />
+          </svg>
+        )}
+      </button>
+      {/* Chevron badge — appears after transcription (outside button to avoid nested interactive elements) */}
+      {showChevron && !isRecording && !isTranscribing && (
+        <span
+          className="mic-chevron-badge"
+          onClick={handleChevronClick}
+          role="button"
+          tabIndex={0}
+          title="Retry, vocabulary, or copy audio"
+        >
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round">
+            <polyline points="6 9 12 15 18 9" />
+          </svg>
+        </span>
       )}
-    </button>
+
+      {/* Dropdown */}
+      {dropdownOpen && (
+        <div className="mic-retry-dropdown">
+          {/* Model retry */}
+          <div className="mic-retry-header">Retry with model</div>
+          {modelsLoading && <div className="mic-retry-item mic-retry-loading">Loading...</div>}
+          {downloadedModels.map(m => {
+            const name = MODEL_CATALOG.find(c => c.filename === m.name)?.name ?? m.name;
+            return (
+              <button key={m.name} className="mic-retry-item" onClick={() => handleRetryModel(name)} type="button">
+                <span className="mic-retry-model-name">{modelDisplayName(m)}</span>
+                <span className="mic-retry-model-size">{(m.sizeBytes / 1e9).toFixed(1)}G</span>
+              </button>
+            );
+          })}
+          {!modelsLoading && downloadedModels.length === 0 && (
+            <div className="mic-retry-item mic-retry-empty">No models downloaded</div>
+          )}
+
+          {/* Vocabulary */}
+          <div className="mic-retry-divider" />
+          <div className="mic-retry-header">Vocabulary</div>
+          {vocabWords.length > 0 && (
+            <div className="mic-vocab-tags">
+              {vocabWords.map(w => (
+                <span key={w} className="mic-vocab-tag">{w}</span>
+              ))}
+            </div>
+          )}
+          <div className="mic-vocab-input-row">
+            <input
+              ref={vocabInputRef}
+              className="mic-vocab-input"
+              type="text"
+              placeholder="Add word..."
+              value={vocabInput}
+              onChange={e => setVocabInput(e.target.value)}
+              onKeyDown={e => {
+                if (e.key === 'Enter') { e.preventDefault(); handleAddVocab(); }
+                if (e.key === 'Escape') { setDropdownOpen(false); }
+              }}
+            />
+            <button
+              className="btn mic-vocab-add-btn"
+              onClick={handleAddVocab}
+              type="button"
+              disabled={!vocabInput.trim()}
+            >
+              +
+            </button>
+          </div>
+          {vocabStatus && <div className="mic-vocab-status">{vocabStatus}</div>}
+
+          {/* Copy path */}
+          {lastDebugPath && (
+            <>
+              <div className="mic-retry-divider" />
+              <button className="mic-retry-item" onClick={handleCopyPath} type="button">
+                <span>Copy audio path</span>
+                <span className="mic-retry-model-size">📋</span>
+              </button>
+            </>
+          )}
+        </div>
+      )}
+    </div>
   );
 }
