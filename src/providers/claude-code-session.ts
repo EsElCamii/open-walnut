@@ -1683,17 +1683,31 @@ export class ClaudeCodeSession {
       }
 
       case 'result': {
-        // Guard against duplicate result events. Daemon resume can replay old JSONL lines
-        // (e.g., if the daemon re-reads from file start), and without this check the old
-        // result would emit a second SESSION_RESULT, causing duplicate responses in the UI.
-        if (this._turnResultEmitted) {
-          log.session.debug('ignoring duplicate result event (already emitted for this turn)', {
-            sessionId: this.claudeSessionId, taskId: this.taskId,
-          })
-          break
-        }
-
         const result = event as StreamResultEvent
+
+        // Guard against duplicate/replayed result events (daemon resume can replay
+        // old JSONL lines). Use cost comparison: a real new result always has higher
+        // cumulative cost. This correctly allows post-compaction results through
+        // (compaction continues the turn, increasing cost) while blocking true
+        // replays (identical cost = same data re-read from JSONL).
+        if (this._turnResultEmitted) {
+          const costIncreased = result.total_cost_usd !== undefined
+            && this._lastResultCost !== undefined
+            && result.total_cost_usd > this._lastResultCost
+          if (!costIncreased) {
+            log.session.debug('ignoring duplicate result event (cost unchanged)', {
+              sessionId: this.claudeSessionId, taskId: this.taskId,
+              cost: result.total_cost_usd, prevCost: this._lastResultCost,
+            })
+            break
+          }
+          // Cost increased → real result (e.g., post-compaction continuation)
+          log.session.info('accepting result after compaction (cost increased)', {
+            sessionId: this.claudeSessionId, taskId: this.taskId,
+            cost: result.total_cost_usd, prevCost: this._lastResultCost,
+          })
+          this._turnResultEmitted = false
+        }
 
         // Detect stale/replayed result events for remote sessions.
         // If the cumulative cost is identical to the previous turn's cost, the CLI
