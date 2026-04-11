@@ -1,7 +1,5 @@
 /**
- * web_search tool — search the web using Brave Search API or Perplexity.
- *
- * Simplified port from moltbot: Brave Search (primary), Perplexity (alternative).
+ * web_search tool — search the web using Tavily, Brave Search, or Perplexity.
  */
 import type { ToolDefinition } from '../tools.js';
 import { getConfig } from '../../core/config-manager.js';
@@ -20,6 +18,7 @@ import {
 } from './web-shared.js';
 
 const BRAVE_SEARCH_ENDPOINT = 'https://api.search.brave.com/res/v1/web/search';
+const TAVILY_SEARCH_ENDPOINT = 'https://api.tavily.com/search';
 const DEFAULT_SEARCH_COUNT = 5;
 const MAX_SEARCH_COUNT = 10;
 
@@ -41,6 +40,19 @@ type BraveSearchResponse = {
   };
 };
 
+type TavilySearchResult = {
+  title?: string;
+  url?: string;
+  content?: string;
+  score?: number;
+  published_date?: string;
+};
+
+type TavilySearchResponse = {
+  query?: string;
+  results?: TavilySearchResult[];
+};
+
 type PerplexitySearchResponse = {
   choices?: Array<{
     message?: {
@@ -50,7 +62,7 @@ type PerplexitySearchResponse = {
   citations?: string[];
 };
 
-function resolveSearchApiKey(
+function resolveBraveApiKey(
   searchConfig?: Record<string, unknown>,
 ): string | undefined {
   const fromConfig =
@@ -69,6 +81,19 @@ function resolvePerplexityApiKey(
       ? searchConfig.perplexity_api_key.trim()
       : '';
   const fromEnv = (process.env.PERPLEXITY_API_KEY ?? '').trim();
+  return fromConfig || fromEnv || undefined;
+}
+
+// Brave and Tavily are mutually exclusive — they share tools.web_search.api_key in config.
+// Perplexity has its own perplexity_api_key since it can coexist as an alternative.
+function resolveTavilyApiKey(
+  searchConfig?: Record<string, unknown>,
+): string | undefined {
+  const fromConfig =
+    searchConfig && typeof searchConfig.api_key === 'string'
+      ? searchConfig.api_key.trim()
+      : '';
+  const fromEnv = (process.env.TAVILY_API_KEY ?? '').trim();
   return fromConfig || fromEnv || undefined;
 }
 
@@ -149,6 +174,61 @@ async function runBraveSearch(params: {
   return payload;
 }
 
+async function runTavilySearch(params: {
+  query: string;
+  count: number;
+  apiKey: string;
+  timeoutSeconds: number;
+  cacheTtlMs: number;
+}): Promise<Record<string, unknown>> {
+  const cacheKey = normalizeCacheKey(`tavily:${params.query}:${params.count}`);
+  const cached = readCache(SEARCH_CACHE, cacheKey);
+  if (cached) {
+    return { ...cached.value, cached: true };
+  }
+
+  const start = Date.now();
+
+  const res = await fetch(TAVILY_SEARCH_ENDPOINT, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      api_key: params.apiKey,
+      query: params.query,
+      max_results: params.count,
+      // Tavily can return an AI-synthesized answer; disabled to keep results consistent with Brave/Perplexity format
+      include_answer: false,
+    }),
+    signal: withTimeout(undefined, params.timeoutSeconds * 1000),
+  });
+
+  if (!res.ok) {
+    const detail = await readResponseText(res);
+    throw new Error(`Tavily Search API error (${res.status}): ${detail || res.statusText}`);
+  }
+
+  const data = (await res.json()) as TavilySearchResponse;
+  const results = Array.isArray(data.results) ? data.results : [];
+  const mapped = results.map((entry) => ({
+    title: entry.title ?? '',
+    url: entry.url ?? '',
+    description: entry.content ?? '',
+    published: entry.published_date || undefined,
+    siteName: resolveSiteName(entry.url),
+    score: entry.score,
+  }));
+
+  const payload: Record<string, unknown> = {
+    query: params.query,
+    provider: 'tavily',
+    count: mapped.length,
+    tookMs: Date.now() - start,
+    results: mapped,
+  };
+  writeCache(SEARCH_CACHE, cacheKey, payload, params.cacheTtlMs);
+  return payload;
+}
+
 async function runPerplexitySearch(params: {
   query: string;
   apiKey: string;
@@ -203,7 +283,7 @@ async function runPerplexitySearch(params: {
 export const webSearchTool: ToolDefinition = {
   name: 'web_search',
   description:
-    'Search the web using Brave Search API (or Perplexity as alternative). Returns titles, URLs, descriptions, and ages for fast research. Requires a Brave API key in config or BRAVE_API_KEY env var.',
+    'Search the web using Tavily, Brave Search, or Perplexity. Returns titles, URLs, descriptions for fast research. Provider and API key configured in settings.',
   input_schema: {
     type: 'object',
     properties: {
@@ -238,9 +318,10 @@ export const webSearchTool: ToolDefinition = {
       const config = await getConfig();
       const searchConfig = config.tools?.web_search;
 
-      const provider = (searchConfig?.provider as string)?.toLowerCase() === 'perplexity'
-        ? 'perplexity'
-        : 'brave';
+      const providerRaw = ((searchConfig?.provider as string) ?? '').toLowerCase();
+      const provider = providerRaw === 'perplexity' ? 'perplexity'
+        : providerRaw === 'brave' ? 'brave'
+        : 'tavily';
 
       const timeoutSeconds = resolveTimeoutSeconds(
         searchConfig?.timeout,
@@ -265,18 +346,33 @@ export const webSearchTool: ToolDefinition = {
         return JSON.stringify(result, null, 2);
       }
 
-      // Brave Search (default)
-      const apiKey = resolveSearchApiKey(searchConfig);
+      if (provider === 'brave') {
+        const apiKey = resolveBraveApiKey(searchConfig);
+        if (!apiKey) {
+          return JSON.stringify({
+            error: 'missing_brave_api_key',
+            message:
+              'web_search needs a Brave Search API key. Set BRAVE_API_KEY env var, or configure tools.web_search.api_key in settings.',
+          }, null, 2);
+        }
+        const result = await runBraveSearch({
+          query, count, apiKey, timeoutSeconds, cacheTtlMs, country, freshness,
+        });
+        return JSON.stringify(result, null, 2);
+      }
+
+      // Tavily Search (default)
+      const apiKey = resolveTavilyApiKey(searchConfig);
       if (!apiKey) {
         return JSON.stringify({
-          error: 'missing_brave_api_key',
+          error: 'missing_tavily_api_key',
           message:
-            'web_search needs a Brave Search API key. Set BRAVE_API_KEY env var, or configure tools.web_search.api_key in config.',
+            'web_search (tavily) needs an API key. Configure tools.web_search.api_key in settings, or set TAVILY_API_KEY env var.',
         }, null, 2);
       }
 
-      const result = await runBraveSearch({
-        query, count, apiKey, timeoutSeconds, cacheTtlMs, country, freshness,
+      const result = await runTavilySearch({
+        query, count, apiKey, timeoutSeconds, cacheTtlMs,
       });
       return JSON.stringify(result, null, 2);
     } catch (err) {
@@ -289,4 +385,4 @@ export const webSearchTool: ToolDefinition = {
 };
 
 /** Exported for testing */
-export const __testing = { SEARCH_CACHE, runBraveSearch, runPerplexitySearch } as const;
+export const __testing = { SEARCH_CACHE, runBraveSearch, runTavilySearch, runPerplexitySearch } as const;

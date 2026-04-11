@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import fs from 'node:fs/promises';
+import path from 'node:path';
 import { createMockConstants } from '../../helpers/mock-constants.js';
 
 vi.mock('../../../src/constants.js', () => createMockConstants());
@@ -366,16 +367,16 @@ describe('web_search tool', () => {
   });
 
   it('returns error when no API key is configured', async () => {
-    // Ensure no env var
-    const origKey = process.env.BRAVE_API_KEY;
-    delete process.env.BRAVE_API_KEY;
+    // Default provider is now tavily, so missing key error is for tavily
+    const origKey = process.env.TAVILY_API_KEY;
+    delete process.env.TAVILY_API_KEY;
 
     const result = await webSearchTool.execute({ query: 'test query' });
     const parsed = JSON.parse(result);
-    expect(parsed.error).toBe('missing_brave_api_key');
-    expect(parsed.message).toContain('Brave Search API key');
+    expect(parsed.error).toBe('missing_tavily_api_key');
+    expect(parsed.message).toContain('tavily');
 
-    if (origKey) process.env.BRAVE_API_KEY = origKey;
+    if (origKey) process.env.TAVILY_API_KEY = origKey;
   });
 
   it('returns empty query error', async () => {
@@ -385,6 +386,9 @@ describe('web_search tool', () => {
   });
 
   it('searches with Brave API and returns results', async () => {
+    // Write config to select brave provider (default is now tavily)
+    await fs.mkdir(tmpDir, { recursive: true });
+    await fs.writeFile(path.join(tmpDir, 'config.yaml'), 'tools:\n  web_search:\n    provider: brave\n');
     const origKey = process.env.BRAVE_API_KEY;
     process.env.BRAVE_API_KEY = 'test-brave-key';
 
@@ -432,6 +436,8 @@ describe('web_search tool', () => {
   });
 
   it('uses cache on second search call', async () => {
+    await fs.mkdir(tmpDir, { recursive: true });
+    await fs.writeFile(path.join(tmpDir, 'config.yaml'), 'tools:\n  web_search:\n    provider: brave\n');
     const origKey = process.env.BRAVE_API_KEY;
     process.env.BRAVE_API_KEY = 'test-brave-key';
 
@@ -463,6 +469,8 @@ describe('web_search tool', () => {
   });
 
   it('returns error for Brave API failure', async () => {
+    await fs.mkdir(tmpDir, { recursive: true });
+    await fs.writeFile(path.join(tmpDir, 'config.yaml'), 'tools:\n  web_search:\n    provider: brave\n');
     const origKey = process.env.BRAVE_API_KEY;
     process.env.BRAVE_API_KEY = 'test-brave-key';
 

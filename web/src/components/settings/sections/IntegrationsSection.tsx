@@ -20,7 +20,7 @@ export function IntegrationsSection({ config, onSave }: Props) {
   const [slackChannel, setSlackChannel] = useState(config.tools?.slack?.default_channel ?? '');
 
   // Web Search
-  const [searchProvider, setSearchProvider] = useState(config.tools?.web_search?.provider ?? '');
+  const [searchProvider, setSearchProvider] = useState(config.tools?.web_search?.provider || 'tavily');
   const [searchApiKey, setSearchApiKey] = useState(config.tools?.web_search?.api_key ?? '');
   const [perplexityKey, setPerplexityKey] = useState(config.tools?.web_search?.perplexity_api_key ?? '');
 
@@ -34,7 +34,7 @@ export function IntegrationsSection({ config, onSave }: Props) {
     setMsTodoClientId((ms.client_id as string) ?? '');
     setSlackToken(config.tools?.slack?.bot_token ?? '');
     setSlackChannel(config.tools?.slack?.default_channel ?? '');
-    setSearchProvider(config.tools?.web_search?.provider ?? '');
+    setSearchProvider(config.tools?.web_search?.provider || 'tavily');
     setSearchApiKey(config.tools?.web_search?.api_key ?? '');
     setPerplexityKey(config.tools?.web_search?.perplexity_api_key ?? '');
     setTtsProvider(config.tools?.tts?.provider ?? '');
@@ -130,19 +130,23 @@ export function IntegrationsSection({ config, onSave }: Props) {
           <div className="form-group">
             <label htmlFor="ws-provider">Provider</label>
             <select id="ws-provider" value={searchProvider} onChange={(e) => setSearchProvider(e.target.value)}>
-              <option value="">Default</option>
               <option value="tavily">Tavily</option>
+              <option value="brave">Brave</option>
               <option value="perplexity">Perplexity</option>
             </select>
           </div>
-          <div className="form-group">
-            <label htmlFor="ws-apikey">API Key</label>
-            <SecretInput id="ws-apikey" value={searchApiKey} onChange={setSearchApiKey} placeholder="Tavily API key" />
-          </div>
-          <div className="form-group">
-            <label htmlFor="ws-perplexity">Perplexity API Key</label>
-            <SecretInput id="ws-perplexity" value={perplexityKey} onChange={setPerplexityKey} placeholder="Perplexity API key" />
-          </div>
+          {searchProvider !== 'perplexity' && (
+            <div className="form-group">
+              <label htmlFor="ws-apikey">API Key</label>
+              <SecretInput id="ws-apikey" value={searchApiKey} onChange={setSearchApiKey} placeholder={searchProvider === 'brave' ? 'Brave Search API key' : 'Tavily API key'} />
+            </div>
+          )}
+          {searchProvider === 'perplexity' && (
+            <div className="form-group">
+              <label htmlFor="ws-perplexity">Perplexity API Key</label>
+              <SecretInput id="ws-perplexity" value={perplexityKey} onChange={setPerplexityKey} placeholder="Perplexity API key" />
+            </div>
+          )}
         </div>
       </details>
 
