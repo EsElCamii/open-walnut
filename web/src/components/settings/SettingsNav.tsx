@@ -10,6 +10,7 @@ const NAV_ITEMS: NavItem[] = [
   { id: 'integrations', label: 'Integrations' },
   { id: 'search', label: 'Search' },
   { id: 'stt', label: 'Speech-to-Text' },
+  { id: 'audio-capture', label: 'Audio Capture' },
   { id: 'heartbeat', label: 'Heartbeat' },
   { id: 'remote-hosts', label: 'Remote Hosts' },
   { id: 'advanced', label: 'Advanced' },

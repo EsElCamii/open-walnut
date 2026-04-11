@@ -175,6 +175,14 @@ export function Sidebar({ open, collapsed, onToggleCollapse }: SidebarProps) {
         </button>
       </div>
 
+      {/* Audio error toast */}
+      {audio.lastError && (
+        <div className="audio-error-toast">
+          <span className="audio-error-toast__msg">{audio.lastError}</span>
+          <button className="audio-error-toast__close" onClick={audio.clearError} aria-label="Dismiss">&times;</button>
+        </div>
+      )}
+
       <div className="sidebar-stats">
         <div className="sidebar-stat">
           <span>Tasks</span>

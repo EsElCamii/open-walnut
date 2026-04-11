@@ -109,6 +109,7 @@ let cronServiceInstance: CronService | null = null
 let healthMonitor: SessionHealthMonitor | null = null
 let sessionReaper: SessionReaper | null = null
 let heartbeatHandle: HeartbeatRunnerHandle | null = null
+let recordingReaperHandle: { stop: () => void } | null = null
 let memoryWatcherHandle: { stop: () => void } | null = null
 let gitAutoCommitHandle: { stop: () => void; health: GitAutoCommitHealth } | null = null
 
@@ -476,6 +477,20 @@ export async function startServer(options: ServerOptions = {}): Promise<HttpServ
   // -- Push notification service --
   initPushNotifications()
 
+  // -- Audio transcription service (auto-transcribes recorded chunks via STT) --
+  {
+    const { initAudioTranscriber } = await import('../core/audio-transcriber.js')
+    initAudioTranscriber()
+  }
+
+  // -- Resume audio recording if it was active before restart --
+  {
+    const { audioCaptureService } = await import('../core/audio-capture.js')
+    audioCaptureService.resume().catch((err) => {
+      log.web.warn('audio recording resume failed', { error: err instanceof Error ? err.message : String(err) })
+    })
+  }
+
   // -- Startup timing: track each phase to diagnose slow startups --
   const startupT0 = Date.now()
   const startupPhase = (name: string) => {
@@ -644,6 +659,13 @@ export async function startServer(options: ServerOptions = {}): Promise<HttpServ
   // -- Start session reaper (periodic cleanup of high-volume triage session records) --
   sessionReaper = new SessionReaper()
   sessionReaper.start()
+
+  // -- Start recording reaper (periodic cleanup of old audio recordings) --
+  {
+    const { recordingReaper } = await import('../core/recording-reaper.js')
+    recordingReaper.start()
+    recordingReaperHandle = recordingReaper
+  }
 
   // -- Wire bus subscriber to push events to WS clients --
   bus.subscribe('web-ui', (event) => {
@@ -1022,6 +1044,9 @@ export async function startServer(options: ServerOptions = {}): Promise<HttpServ
         return
       }
 
+      // Team mode: intermediate results should not trigger AGENT_COMPLETE or triage.
+      const teamActive = (event.data as Record<string, unknown>)?.teamActive === true
+
       try {
         // Session record update is handled by session-runner (claude-code-session.ts)
         // which correctly sets idle vs stopped based on FIFO process liveness.
@@ -1033,22 +1058,34 @@ export async function startServer(options: ServerOptions = {}): Promise<HttpServ
         //   1. Task phase reaches COMPLETE (user sets via PhasePicker)
         //   2. process_status transitions to 'error' (handled above in isError branch)
 
-        // Unconditional phase transition: session result → AGENT_COMPLETE
-        try {
-          const { applySessionPhase } = await import('../core/phase.js')
-          await applySessionPhase(taskId, 'session:result', 'server.ts:session-result', { sessionId })
-        } catch (err) {
-          log.web.warn('failed to apply session:result phase', { taskId, error: String(err) })
+        // Phase transition: session result → AGENT_COMPLETE.
+        // Skip when teamActive — the lead session is still coordinating in-process
+        // teammates (Claude Code team mode). Intermediate results should NOT move
+        // the task to AGENT_COMPLETE or trigger triage. The final result (after
+        // TeamDelete) will go through the normal path.
+        if (!teamActive) {
+          try {
+            const { applySessionPhase } = await import('../core/phase.js')
+            await applySessionPhase(taskId, 'session:result', 'server.ts:session-result', { sessionId })
+          } catch (err) {
+            log.web.warn('failed to apply session:result phase', { taskId, error: String(err) })
+          }
+        } else {
+          log.web.info('team active — skipping AGENT_COMPLETE phase transition', { sessionId, taskId })
         }
 
         // Triage dispatch is now handled by SessionHookDispatcher
         // (onTurnComplete hook) — no hardcoded triage here.
+        // When teamActive, dispatcher also skips onTurnComplete (see dispatcher.ts).
       } catch (err) {
         log.web.error('session result processing failed', { sessionId, taskId, error: err instanceof Error ? err.message : String(err) })
       }
-      // Emit session:ended so the Sessions page refreshes
-      log.web.info('session ended event emitted', { sessionId, taskId })
-      bus.emit(EventNames.SESSION_ENDED, { sessionId, taskId }, ['web-ui'], { source: 'session-result' })
+      // Emit session:ended so the Sessions page refreshes.
+      // Skip when teamActive — session is still coordinating teammates.
+      if (!teamActive) {
+        log.web.info('session ended event emitted', { sessionId, taskId })
+        bus.emit(EventNames.SESSION_ENDED, { sessionId, taskId }, ['web-ui'], { source: 'session-result' })
+      }
       return
     }
 
@@ -1388,8 +1425,10 @@ export async function startServer(options: ServerOptions = {}): Promise<HttpServ
     log.web.error(msg, meta)
     console.error(`[${new Date().toISOString()}] ${msg}`, JSON.stringify(meta))
   }
-  process.on('SIGTERM', () => { exitLog('SIGTERM (killed by another process)'); process.exit(143) })
-  process.on('SIGHUP', () => { exitLog('SIGHUP (terminal closed or parent died)'); process.exit(129) })
+  // SIGTERM/SIGHUP: log but do NOT process.exit() — let web.ts's handler call stopServer() first.
+  // If no handler catches it (e.g. running from tests), the default signal behavior terminates anyway.
+  process.on('SIGTERM', () => { exitLog('SIGTERM (killed by another process)') })
+  process.on('SIGHUP', () => { exitLog('SIGHUP (terminal closed or parent died)') })
   process.on('uncaughtException', (err) => { exitLog('uncaughtException', err); process.exit(1) })
   process.on('unhandledRejection', (reason) => { exitLog('unhandledRejection', reason) })
   process.on('beforeExit', (code) => { exitLog(`beforeExit code=${code}`) })
@@ -1871,6 +1910,21 @@ export async function stopServer(): Promise<void> {
       setSessionHookDispatcher(null)
     }
   } catch {}
+  if (recordingReaperHandle) {
+    recordingReaperHandle.stop()
+    recordingReaperHandle = null
+  }
+  // Save current audio recording chunk before shutdown (prevents data loss on restart)
+  try {
+    const { audioCaptureService } = await import('../core/audio-capture.js')
+    if (audioCaptureService.getStatus().recording) {
+      log.web.info('saving audio recording before shutdown')
+      await audioCaptureService.stop()
+    }
+  } catch (err) {
+    log.web.warn('audio capture shutdown failed', { error: err instanceof Error ? err.message : String(err) })
+  }
+
   subagentRunner.destroy()
   // Always detach — sessions are detached child processes and must survive
   // server shutdown. Never kill session PIDs from stopServer().

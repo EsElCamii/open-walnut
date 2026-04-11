@@ -316,6 +316,17 @@ export interface Config {
     /** How many session panels to show side-by-side: '1', '2', or 'auto' (breakpoint-driven). */
     session_panels?: '1' | '2' | 'auto';
   };
+  /** Audio capture configuration (system audio recording) */
+  audio?: {
+    /** Bundle IDs of apps to exclude from recording (e.g. 'com.spotify.client') */
+    exclude_apps?: string[];
+    /** How often to refresh the app list during recording, in seconds (default: 60) */
+    refresh_interval_sec?: number;
+    /** Delete WAV after successful transcription. Default: true */
+    delete_after_transcription?: boolean;
+    /** Auto-delete recordings older than N days. 0 = keep forever. Default: 7 */
+    retention_days?: number;
+  };
   /** Speech-to-text configuration for voice input */
   stt?: {
     engine?: 'sherpa-onnx' | 'openai' | 'whisper-cpp' | 'whisper-server';

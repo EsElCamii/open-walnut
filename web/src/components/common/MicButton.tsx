@@ -23,7 +23,7 @@ interface MicButtonProps {
   size?: 'sm' | 'md';
 }
 
-const RETRY_DISMISS_MS = 20_000;
+const RETRY_DISMISS_MS = 10_000;
 
 export function MicButton({ onTranscribe, language, disabled, size = 'md' }: MicButtonProps) {
   const { isSupported, isRecording, isTranscribing, error, toggleRecording, retryWithModel, lastDebugPath, hasLastRecording } = useSpeechToText({

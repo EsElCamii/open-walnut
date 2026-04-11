@@ -340,6 +340,14 @@ export interface AudioErrorEvent {
   error: string;
 }
 
+export interface AudioTranscriptionCompleteEvent {
+  recordingId: string;
+  chunkIndex: number;
+  filePath: string;
+  text: string;
+  durationMs: number;
+}
+
 // ── Master type map: EventName → Payload ──
 
 export interface EventPayloadMap {
@@ -403,6 +411,7 @@ export interface EventPayloadMap {
   'audio:stopped': AudioStoppedEvent;
   'audio:chunk-saved': AudioChunkSavedEvent;
   'audio:error': AudioErrorEvent;
+  'audio:transcription-complete': AudioTranscriptionCompleteEvent;
 
   'cron:job-added': CronJobEvent;
   'cron:job-updated': CronJobEvent;

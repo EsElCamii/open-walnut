@@ -35,10 +35,11 @@ import { HeartbeatSection } from '@/components/settings/sections/HeartbeatSectio
 import { RemoteHostsSection } from '@/components/settings/sections/RemoteHostsSection';
 import { AdvancedSection } from '@/components/settings/sections/AdvancedSection';
 import { SttSection } from '@/components/settings/sections/SttSection';
+import { AudioCaptureSection } from '@/components/settings/sections/AudioCaptureSection';
 
 const SECTION_IDS = [
   'providers', 'general', 'sessions',
-  'integrations', 'search', 'stt', 'heartbeat', 'remote-hosts', 'advanced',
+  'integrations', 'search', 'stt', 'audio-capture', 'heartbeat', 'remote-hosts', 'advanced',
 ];
 
 export function SettingsPage() {
@@ -119,6 +120,7 @@ export function SettingsPage() {
           <SectionErrorBoundary name="Integrations"><IntegrationsSection config={config} onSave={saveSection} /></SectionErrorBoundary>
           <SectionErrorBoundary name="Search"><SearchSection config={config} onSave={saveSection} /></SectionErrorBoundary>
           <SectionErrorBoundary name="Speech-to-Text"><SttSection config={config} onSave={saveSection} onReload={reload} /></SectionErrorBoundary>
+          <SectionErrorBoundary name="Audio Capture"><AudioCaptureSection config={config} onSave={saveSection} /></SectionErrorBoundary>
           <SectionErrorBoundary name="Heartbeat"><HeartbeatSection config={config} onSave={saveSection} /></SectionErrorBoundary>
           <SectionErrorBoundary name="Remote Hosts"><RemoteHostsSection config={config} onSave={saveSection} /></SectionErrorBoundary>
           <SectionErrorBoundary name="Advanced"><AdvancedSection config={config} onSave={saveSection} /></SectionErrorBoundary>

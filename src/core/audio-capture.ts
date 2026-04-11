@@ -9,9 +9,14 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { createRequire } from 'node:module'
 import { randomBytes } from 'node:crypto'
-import { RECORDINGS_DIR } from '../constants.js'
+import { RECORDINGS_DIR, WALNUT_HOME } from '../constants.js'
 import { bus, EventNames } from './event-bus.js'
+import { getConfig } from './config-manager.js'
 import { log } from '../logging/index.js'
+
+// Persistent state file — if this file exists, recording should be active.
+// Written on start(), deleted on stop(). Server reads it on startup to auto-resume.
+const RECORDING_STATE_FILE = path.join(WALNUT_HOME, 'recording-state.json')
 
 // Native addons (.node files) can only be loaded via require(), not ESM import().
 // Since tsup bundles as ESM, we create a require function for loading the native addon.
@@ -52,13 +57,19 @@ export interface RecordingChunkMeta {
   chunkIndex: number
   date: string
   time: string
-  filePath: string
+  filePath: string | null
   duration: number
   size: number
   source: AudioSource
   apps: string[]
   sampleRate: number
   channels: number
+  /** Transcription text (populated after STT processes the chunk) */
+  transcription?: string
+  /** Transcription duration in ms */
+  transcriptionDurationMs?: number
+  /** True when WAV was deleted after transcription */
+  audioDeleted?: boolean
 }
 
 export interface RecordingListEntry {
@@ -75,6 +86,7 @@ export interface RecordingListEntry {
 const DEFAULT_CHUNK_MINUTES = 10
 const DEFAULT_SAMPLE_RATE = 48000
 const DEFAULT_CHANNELS = 1
+const DEFAULT_REFRESH_INTERVAL_SEC = 60
 const WAV_FORMAT_PCM = 1
 
 // ── Service ──
@@ -90,8 +102,15 @@ class AudioCaptureService {
   private chunkStartedAt: number = 0
   private chunkIndex = 0
   private chunkTimer: ReturnType<typeof setTimeout> | null = null
+  private watchdogTimer: ReturnType<typeof setTimeout> | null = null
+  private receivedAnyAudio = false
   private audioBuffers: Buffer[] = []
   private totalSamples = 0
+  private nonSilentSamples = 0 // samples with amplitude > silence threshold
+  private levelLogTimer: ReturnType<typeof setInterval> | null = null
+  private refreshTimer: ReturnType<typeof setInterval> | null = null
+  private excludeApps: string[] = []
+  private refreshIntervalSec = DEFAULT_REFRESH_INTERVAL_SEC
   private sampleRate = DEFAULT_SAMPLE_RATE
   private channels: 1 | 2 = DEFAULT_CHANNELS
   private chunkMinutes = DEFAULT_CHUNK_MINUTES
@@ -187,8 +206,15 @@ class AudioCaptureService {
     // Set up audio event handler
     this.capture.on('audio', (sample: { data: Buffer; sampleRate: number; channels: number }) => {
       if (!this.recording) return
-      this.audioBuffers.push(Buffer.from(sample.data))
-      this.totalSamples += sample.data.length / (4 * this.channels) // float32 = 4 bytes per sample per channel
+      this.receivedAnyAudio = true
+      const buf = Buffer.from(sample.data)
+      this.audioBuffers.push(buf)
+      const sampleCount = buf.length / (4 * this.channels) // float32 = 4 bytes per sample per channel
+      this.totalSamples += sampleCount
+      // Count non-silent samples (amplitude > -60 dB ≈ 0.001)
+      for (let i = 0; i < buf.length; i += 4) {
+        if (Math.abs(buf.readFloatLE(i)) > 0.001) this.nonSilentSamples++
+      }
     })
 
     this.capture.on('error', (err: Error) => {
@@ -204,7 +230,17 @@ class AudioCaptureService {
       }
     })
 
-    // Start capture — use high-level startCapture for per-app, captureDisplay for all system audio
+    // Load exclude list from config
+    try {
+      const cfg = await getConfig()
+      this.excludeApps = cfg.audio?.exclude_apps ?? []
+      this.refreshIntervalSec = cfg.audio?.refresh_interval_sec ?? DEFAULT_REFRESH_INTERVAL_SEC
+    } catch {
+      this.excludeApps = []
+      this.refreshIntervalSec = DEFAULT_REFRESH_INTERVAL_SEC
+    }
+
+    // Start capture
     const captureOpts = {
       sampleRate: this.sampleRate,
       channels: this.channels,
@@ -212,10 +248,13 @@ class AudioCaptureService {
     }
     try {
       if (options.source === 'system' && this.apps.length > 0) {
-        // Per-app: use startCapture with smart app lookup
+        // Explicit app list from caller — use startCapture with smart app lookup
         this.capture.startCapture(this.apps[0], captureOpts)
+      } else if (options.source === 'system' && this.excludeApps.length > 0) {
+        // Per-app filtering: capture all apps minus exclude list
+        this.startFilteredCapture(captureOpts)
       } else {
-        // All system audio: capture the first display
+        // No exclude list — capture all system audio via display
         const displays = this.capture.getDisplays()
         if (displays.length === 0) throw new Error('No displays found')
         this.capture.captureDisplay(displays[0].displayId, captureOpts)
@@ -226,11 +265,48 @@ class AudioCaptureService {
     }
 
     this.recording = true
+    this.receivedAnyAudio = false
+
+    // Watchdog: if no audio data received within 5 seconds, stop with error
+    this.watchdogTimer = setTimeout(() => {
+      if (this.recording && !this.receivedAnyAudio) {
+        const msg = 'No audio data received. Screen Recording permission may not be fully granted. Go to System Settings → Privacy & Security → Screen & System Audio Recording, enable access for your terminal app, then restart it.'
+        log.audio.error('watchdog: no audio data received', { recordingId: this.recordingId })
+        bus.emit(EventNames.AUDIO_ERROR, {
+          recordingId: this.recordingId ?? undefined,
+          error: msg,
+        }, ['*'], { source: 'audio-capture' })
+        this.stop().catch(() => { /* cleanup */ })
+      }
+    }, 5000)
+
+    // Periodic audio level logging (every 30s) — helps diagnose silence issues
+    this.levelLogTimer = setInterval(() => {
+      if (!this.recording) return
+      const pct = this.totalSamples > 0 ? (this.nonSilentSamples / this.totalSamples * 100).toFixed(1) : '0.0'
+      const elapsed = ((Date.now() - this.startedAt) / 1000).toFixed(0)
+      log.audio.info('audio level check', {
+        recordingId: this.recordingId,
+        elapsed: `${elapsed}s`,
+        nonSilentPercent: `${pct}%`,
+        totalSamples: this.totalSamples,
+        bufferedBytes: this.audioBuffers.reduce((s, b) => s + b.length, 0),
+      })
+    }, 30_000)
 
     // Set up auto-chunk timer for continuous mode
     if (this.mode === 'continuous') {
       this.scheduleChunkTimer()
     }
+
+    // Set up app refresh timer — periodically re-scan running apps and restart capture
+    // to pick up newly launched apps and drop closed ones
+    if (options.source === 'system' && this.excludeApps.length > 0 && this.refreshIntervalSec > 0) {
+      this.scheduleRefreshTimer()
+    }
+
+    // Persist recording state so server restart can auto-resume
+    this.saveState(options)
 
     log.audio.info('recording started', {
       recordingId: this.recordingId,
@@ -271,6 +347,7 @@ class AudioCaptureService {
     const chunks = this.chunkIndex
 
     this.cleanup()
+    this.clearState()
 
     log.audio.info('recording stopped', { recordingId, chunks, totalDuration })
 
@@ -315,20 +392,24 @@ class AudioCaptureService {
       const entries: RecordingListEntry[] = []
       for (const date of dates) {
         const dateDir = path.join(RECORDINGS_DIR, date)
+        // Use .json metadata files as primary key (WAV may have been deleted after transcription)
         const files = fs.readdirSync(dateDir)
-          .filter(f => f.endsWith('.wav'))
+          .filter(f => f.endsWith('.json'))
           .sort()
           .reverse()
           .map(f => {
-            const stat = fs.statSync(path.join(dateDir, f))
-            const metaFile = path.join(dateDir, f.replace('.wav', '.json'))
             let meta: RecordingChunkMeta | undefined
             try {
-              if (fs.existsSync(metaFile)) {
-                meta = JSON.parse(fs.readFileSync(metaFile, 'utf-8'))
-              }
+              meta = JSON.parse(fs.readFileSync(path.join(dateDir, f), 'utf-8'))
             } catch { /* ignore */ }
-            return { name: f, size: stat.size, meta }
+            const wavName = f.replace('.json', '.wav')
+            const wavPath = path.join(dateDir, wavName)
+            const wavExists = fs.existsSync(wavPath)
+            return {
+              name: wavName,
+              size: wavExists ? fs.statSync(wavPath).size : 0,
+              meta,
+            }
           })
         if (files.length > 0) {
           entries.push({ date, files })
@@ -343,6 +424,108 @@ class AudioCaptureService {
 
   // ── Private ──
 
+  /**
+   * Get running apps filtered by exclude list.
+   * Returns app info objects for all apps NOT in the exclude list.
+   */
+  private getFilteredApps(): Array<{ processId: number; bundleIdentifier: string; applicationName: string }> {
+    const allApps = this.capture.getAudioApps()
+    if (this.excludeApps.length === 0) return allApps
+    const excludeSet = new Set(this.excludeApps.map(id => id.toLowerCase()))
+    return allApps.filter((app: { bundleIdentifier: string; applicationName: string }) =>
+      !excludeSet.has(app.bundleIdentifier.toLowerCase()) &&
+      !excludeSet.has(app.applicationName.toLowerCase())
+    )
+  }
+
+  /**
+   * Start capture using captureMultipleApps with filtered app list.
+   * Falls back to captureDisplay if no apps remain after filtering.
+   */
+  private startFilteredCapture(captureOpts: { sampleRate: number; channels: number; format: 'float32' }): void {
+    const filtered = this.getFilteredApps()
+
+    if (filtered.length === 0) {
+      // All apps excluded — fallback to captureDisplay (safety net)
+      log.audio.warn('all apps excluded by filter, falling back to captureDisplay')
+      const displays = this.capture.getDisplays()
+      if (displays.length === 0) throw new Error('No displays found')
+      this.capture.captureDisplay(displays[0].displayId, captureOpts)
+      return
+    }
+
+    log.audio.info('starting filtered capture', {
+      totalApps: filtered.length + this.excludeApps.length,
+      excluded: this.excludeApps,
+      capturing: filtered.length,
+    })
+
+    this.capture.captureMultipleApps(filtered, {
+      ...captureOpts,
+      allowPartial: true,
+    })
+  }
+
+  /**
+   * Periodically refresh running app list and restart capture to pick up new apps.
+   * Saves current chunk before restart to avoid data loss.
+   */
+  private scheduleRefreshTimer(): void {
+    if (this.refreshTimer) clearInterval(this.refreshTimer)
+    this.refreshTimer = setInterval(async () => {
+      if (!this.recording || !this.capture) return
+      try {
+        const { AudioCapture } = require('screencapturekit-audio-capture')
+
+        // Save current chunk before restarting
+        await this.saveCurrentChunk()
+        this.chunkStartedAt = Date.now()
+        this.audioBuffers = []
+        this.totalSamples = 0
+        this.nonSilentSamples = 0
+
+        // Stop current capture
+        try { this.capture.stopCapture() } catch { /* already stopped */ }
+        try { this.capture.dispose() } catch { /* ignore */ }
+
+        // Create new capture instance and re-attach handlers
+        this.capture = new AudioCapture()
+        this.capture.on('audio', (sample: { data: Buffer; sampleRate: number; channels: number }) => {
+          if (!this.recording) return
+          this.receivedAnyAudio = true
+          const buf = Buffer.from(sample.data)
+          this.audioBuffers.push(buf)
+          const sampleCount = buf.length / (4 * this.channels)
+          this.totalSamples += sampleCount
+          for (let i = 0; i < buf.length; i += 4) {
+            if (Math.abs(buf.readFloatLE(i)) > 0.001) this.nonSilentSamples++
+          }
+        })
+        this.capture.on('error', (err: Error) => {
+          log.audio.error('capture error after refresh', { error: err.message })
+        })
+
+        // Reload exclude list in case config changed
+        try {
+          const cfg = await getConfig()
+          this.excludeApps = cfg.audio?.exclude_apps ?? []
+        } catch { /* keep existing list */ }
+
+        // Restart with filtered apps
+        const captureOpts = {
+          sampleRate: this.sampleRate,
+          channels: this.channels,
+          format: 'float32' as const,
+        }
+        this.startFilteredCapture(captureOpts)
+
+        log.audio.info('app list refreshed', { recordingId: this.recordingId })
+      } catch (err) {
+        log.audio.error('app refresh failed', { error: (err as Error).message })
+      }
+    }, this.refreshIntervalSec * 1000)
+  }
+
   private scheduleChunkTimer(): void {
     if (this.chunkTimer) clearTimeout(this.chunkTimer)
     this.chunkTimer = setTimeout(async () => {
@@ -352,6 +535,7 @@ class AudioCaptureService {
         this.chunkStartedAt = Date.now()
         this.audioBuffers = []
         this.totalSamples = 0
+        this.nonSilentSamples = 0
         this.scheduleChunkTimer()
       } catch (err) {
         log.audio.error('auto-chunk failed', { error: (err as Error).message })
@@ -456,6 +640,18 @@ class AudioCaptureService {
       clearTimeout(this.chunkTimer)
       this.chunkTimer = null
     }
+    if (this.watchdogTimer) {
+      clearTimeout(this.watchdogTimer)
+      this.watchdogTimer = null
+    }
+    if (this.levelLogTimer) {
+      clearInterval(this.levelLogTimer)
+      this.levelLogTimer = null
+    }
+    if (this.refreshTimer) {
+      clearInterval(this.refreshTimer)
+      this.refreshTimer = null
+    }
     if (this.capture) {
       try { this.capture.dispose() } catch { /* ignore */ }
       this.capture = null
@@ -465,8 +661,10 @@ class AudioCaptureService {
     this.source = null
     this.mode = null
     this.apps = []
+    this.excludeApps = []
     this.audioBuffers = []
     this.totalSamples = 0
+    this.nonSilentSamples = 0
     this.startedAt = 0
     this.chunkStartedAt = 0
     this.chunkIndex = 0
@@ -482,6 +680,39 @@ class AudioCaptureService {
 
   private formatTime(d: Date): string {
     return `${String(d.getHours()).padStart(2, '0')}-${String(d.getMinutes()).padStart(2, '0')}-${String(d.getSeconds()).padStart(2, '0')}`
+  }
+
+  // ── State persistence (survive server restart) ──
+
+  private saveState(options: RecordingOptions): void {
+    try {
+      fs.writeFileSync(RECORDING_STATE_FILE, JSON.stringify(options))
+    } catch (err) {
+      log.audio.warn('failed to save recording state', { error: (err as Error).message })
+    }
+  }
+
+  private clearState(): void {
+    try {
+      fs.unlinkSync(RECORDING_STATE_FILE)
+    } catch { /* file may not exist */ }
+  }
+
+  /**
+   * Resume recording if it was active before server restart.
+   * Called once during server startup.
+   */
+  async resume(): Promise<void> {
+    try {
+      if (!fs.existsSync(RECORDING_STATE_FILE)) return
+      const raw = fs.readFileSync(RECORDING_STATE_FILE, 'utf-8')
+      const options: RecordingOptions = JSON.parse(raw)
+      log.audio.info('resuming recording after server restart', { options })
+      await this.start(options)
+    } catch (err) {
+      log.audio.warn('failed to resume recording', { error: (err as Error).message })
+      this.clearState() // don't retry on next restart
+    }
   }
 }
 

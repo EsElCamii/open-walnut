@@ -54,6 +54,7 @@ export const EventNames = {
   SESSION_MESSAGE_QUEUED: 'session:message-queued',
   SESSION_SYSTEM_EVENT: 'session:system-event',
   SESSION_USAGE_UPDATE: 'session:usage-update',
+  SESSION_PERMISSION_REQUEST: 'session:permission-request',
 
   // Team events (Claude Code Teams — parallel agents)
   SESSION_TEAM_INFO: 'session:team-info',
@@ -97,6 +98,7 @@ export const EventNames = {
   AUDIO_STOPPED: 'audio:stopped',
   AUDIO_CHUNK_SAVED: 'audio:chunk-saved',
   AUDIO_ERROR: 'audio:error',
+  AUDIO_TRANSCRIPTION_COMPLETE: 'audio:transcription-complete',
 
   // System health events
   SYSTEM_HEALTH: 'system:health',

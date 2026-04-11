@@ -24,8 +24,10 @@ export function useAudioCapture() {
     currentChunkIndex: 0,
   });
   const [loading, setLoading] = useState(false);
+  const [lastError, setLastError] = useState<string | null>(null);
   const durationTimer = useRef<ReturnType<typeof setInterval> | null>(null);
   const startTime = useRef<number | null>(null);
+  const errorTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Check availability on mount
   useEffect(() => {
@@ -93,9 +95,21 @@ export function useAudioCapture() {
     setState(s => ({ ...s, currentChunkIndex: d.chunkIndex }));
   });
 
+  useEvent('audio:transcription-complete', (data: unknown) => {
+    const d = data as { recordingId: string; chunkIndex: number; text: string; durationMs: number };
+    log.info('audio', 'transcription complete', { recordingId: d.recordingId, chunkIndex: d.chunkIndex, textLength: d.text.length, durationMs: d.durationMs });
+  });
+
   useEvent('audio:error', (data: unknown) => {
     const d = data as { error: string };
     log.error('audio', 'capture error via WS', { error: d.error });
+    // Show error to user, auto-clear after 6s
+    const msg = d.error.includes('connection being interrupted')
+      ? 'Screen Recording permission required. Grant access in System Settings → Privacy & Security → Screen & System Audio Recording, then restart your terminal.'
+      : `Recording failed: ${d.error}`;
+    setLastError(msg);
+    if (errorTimer.current) clearTimeout(errorTimer.current);
+    errorTimer.current = setTimeout(() => setLastError(null), 8000);
     // Reset to idle state — the backend auto-stops on stream error
     setState(s => ({
       ...s,
@@ -134,7 +148,11 @@ export function useAudioCapture() {
         await audioApi.startRecording({ source: 'system', mode: 'continuous' });
       }
     } catch (err) {
-      log.error('audio', 'toggle failed', { error: (err as Error).message });
+      const msg = (err as Error).message;
+      log.error('audio', 'toggle failed', { error: msg });
+      setLastError(`Recording failed: ${msg}`);
+      if (errorTimer.current) clearTimeout(errorTimer.current);
+      errorTimer.current = setTimeout(() => setLastError(null), 8000);
     } finally {
       setLoading(false);
     }
@@ -164,9 +182,16 @@ export function useAudioCapture() {
     }
   }, []);
 
+  const clearError = useCallback(() => {
+    setLastError(null);
+    if (errorTimer.current) { clearTimeout(errorTimer.current); errorTimer.current = null; }
+  }, []);
+
   return {
     ...state,
     loading,
+    lastError,
+    clearError,
     toggleRecording,
     startRecording,
     stopRecording,
