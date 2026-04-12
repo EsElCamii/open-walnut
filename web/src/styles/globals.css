@@ -7749,7 +7749,7 @@ img[data-lightbox-src],
   display: flex;
   align-items: flex-start;
   gap: 4px;
-  padding: 4px 6px;
+  padding: 4px 6px 4px 22px;
   border-bottom: 1px solid var(--border);
   cursor: pointer;
   transition: background 0.15s;
@@ -7790,14 +7790,14 @@ img[data-lightbox-src],
 
 /* Unified collapse/expand chevron — used at category, project, and parent-task levels */
 .collapse-chevron {
-  --chevron-size: 20px;
+  --chevron-size: 18px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
   flex-shrink: 0;
   width: var(--chevron-size);
   height: var(--chevron-size);
-  font-size: 12px;
+  font-size: 10px;
   color: var(--fg-muted);
   background: none;
   border: none;
@@ -7807,6 +7807,13 @@ img[data-lightbox-src],
   padding: 0;
   line-height: 1;
 }
+/* Task-item chevrons: absolute-position inside left padding to save space */
+.todo-panel-item > .collapse-chevron {
+  position: absolute;
+  left: 2px;
+  top: 4px;
+  z-index: 1;
+}
 .collapse-chevron:hover {
   color: var(--fg);
   background: var(--hover-bg, rgba(0,0,0,0.04));
@@ -7814,11 +7821,7 @@ img[data-lightbox-src],
 .collapse-chevron.expanded {
   transform: rotate(90deg);
 }
-.collapse-chevron-spacer {
-  display: inline-block;
-  width: var(--chevron-size, 20px);
-  flex-shrink: 0;
-}
+/* collapse-chevron-spacer removed — chevron is now absolutely positioned in padding area */
 .task-children-badge {
   font-size: 10px;
   color: var(--accent);

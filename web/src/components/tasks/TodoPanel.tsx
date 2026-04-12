@@ -407,10 +407,8 @@ function SortableTaskItem({ task, isFocused, isRecentlyDone, depth = 0, childCou
       {...activeAttributes}
       {...activeListeners}
     >
-      {/* ── Layout: [chevron slot] [content with attention dot on right] ── */}
-
-      {/* — chevron slot: fixed-width for tree indentation (VS Code style) — */}
-      {childCount > 0 ? (
+      {/* Chevron — absolutely positioned in left padding area (only for parent tasks) */}
+      {childCount > 0 && (
         <button
           className={`collapse-chevron${isExpanded ? ' expanded' : ''}`}
           title={isExpanded ? 'Collapse child tasks' : `Expand ${childCount} child task(s)`}
@@ -418,8 +416,6 @@ function SortableTaskItem({ task, isFocused, isRecentlyDone, depth = 0, childCou
         >
           {CHEVRON_ICON}
         </button>
-      ) : (
-        <span className="collapse-chevron-spacer" />
       )}
 
       {/* — content area: single-line [phase] [title] [badges] [⋮] — */}
