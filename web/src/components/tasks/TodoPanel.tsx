@@ -414,8 +414,8 @@ function SortableTaskItem({ task, isFocused, isRecentlyDone, depth = 0, childCou
         <span className="task-attention-dot" title="Needs your attention" />
       )}
 
-      {/* — chevron: only shown when task has children (no spacer for leaf tasks) — */}
-      {childCount > 0 && (
+      {/* — chevron slot: fixed-width for tree indentation (VS Code style) — */}
+      {childCount > 0 ? (
         <button
           className={`collapse-chevron${isExpanded ? ' expanded' : ''}`}
           title={isExpanded ? 'Collapse child tasks' : `Expand ${childCount} child task(s)`}
@@ -423,6 +423,8 @@ function SortableTaskItem({ task, isFocused, isRecentlyDone, depth = 0, childCou
         >
           {CHEVRON_ICON}
         </button>
+      ) : (
+        <span className="collapse-chevron-spacer" />
       )}
 
       {/* — content area: single-line [phase] [title] [badges] [⋮] — */}
@@ -1224,46 +1226,26 @@ function TaskDetailPane({ task, allTasks, onClose, onOpenSession, onOpenTriageFo
 const RECENT_VISIBLE_MAX = 3;
 const CARD_HEIGHT_PX = 30; // ~28px min-height + 2px gap
 
-// ── RecentCard — recent-activity task card (no drag, has pin button) ──
-
 interface RecentCardProps {
   task: Task;
   isFocused: boolean;
   onClick?: (task: Task) => void;
   onPinTask?: (taskId: string) => void;
+  onUnpinTask?: (taskId: string) => void;
+  isPinned?: boolean;
+  pinnedTier?: FocusTier;
+  onSetPriority?: (id: string, priority: string) => void;
+  onSetDate?: (id: string, date: string | null) => void;
+  onStar?: (id: string) => void;
+  onSetTier?: (id: string, tier: FocusTier) => void;
+  onExpandDetail?: (task: Task) => void;
+  onClearFocus?: () => void;
+  onOpenSession?: (sessionId: string) => void;
 }
 
-function RecentCard({ task, isFocused, onClick, onPinTask }: RecentCardProps) {
-  const needsAttention = task.phase === 'AGENT_COMPLETE' || task.phase === 'AWAIT_HUMAN_ACTION';
-  const phaseLabel = PHASE_LABEL[task.phase] ?? task.phase;
-  const ago = timeAgo(task.last_session_update ?? task.created_at);
+// ── SortableRecentCard — draggable recent-activity card with kebab menu ──
 
-  return (
-    <div
-      className={`todo-pinned-card${isFocused ? ' todo-pinned-card-active' : ''}${needsAttention ? ' todo-pinned-card-attention' : ''}`}
-      onClick={() => onClick?.(task)}
-      role="button"
-      tabIndex={0}
-      onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onClick?.(task); } }}
-    >
-      <span className="todo-pinned-title" title={task.title}>{task.title}</span>
-      <span className={`todo-pinned-phase${needsAttention ? ' todo-pinned-phase-attention' : ''}`} title={phaseLabel} />
-      {ago && <span className="todo-recent-ago" title={task.last_session_update}>{ago}</span>}
-      <button
-        className="todo-recent-pin"
-        onClick={(e) => { e.stopPropagation(); onPinTask?.(task.id); }}
-        title="Pin"
-        aria-label="Pin task"
-      >
-        {'\uD83D\uDCCC'}
-      </button>
-    </div>
-  );
-}
-
-// ── SortableRecentCard — draggable wrapper around RecentCard for cross-section DnD ──
-
-function SortableRecentCard({ task, isFocused, onClick, onPinTask }: RecentCardProps) {
+function SortableRecentCard({ task, isFocused, onClick, onPinTask, onUnpinTask, isPinned, pinnedTier, onSetPriority, onSetDate, onStar, onSetTier, onExpandDetail, onClearFocus, onOpenSession }: RecentCardProps) {
   const {
     attributes,
     listeners,
@@ -1297,14 +1279,22 @@ function SortableRecentCard({ task, isFocused, onClick, onPinTask }: RecentCardP
       <span className="todo-pinned-title" title={task.title}>{task.title}</span>
       <span className={`todo-pinned-phase${needsAttention ? ' todo-pinned-phase-attention' : ''}`} title={phaseLabel} />
       {ago && <span className="todo-recent-ago" title={task.last_session_update}>{ago}</span>}
-      <button
-        className="todo-recent-pin"
-        onClick={(e) => { e.stopPropagation(); onPinTask?.(task.id); }}
-        title="Pin"
-        aria-label="Pin task"
-      >
-        {'\uD83D\uDCCC'}
-      </button>
+      <TaskKebabMenu
+        task={task}
+        isFocused={isFocused}
+        isPinned={!!isPinned}
+        pinnedTier={pinnedTier}
+        isDone={task.phase === 'COMPLETE'}
+        onExpandDetail={onExpandDetail}
+        onClearFocus={onClearFocus}
+        onSetPriority={onSetPriority}
+        onSetDate={onSetDate}
+        onStar={onStar}
+        onPinTask={onPinTask}
+        onUnpinTask={onUnpinTask}
+        onSetTier={onSetTier}
+        onOpenSession={onOpenSession}
+      />
     </div>
   );
 }
@@ -2942,6 +2932,16 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
                         isFocused={focusedTaskId === task.id}
                         onClick={handlePinnedCardClick}
                         onPinTask={onPinTask}
+                        onUnpinTask={onUnpinTask}
+                        isPinned={pinnedTaskIds?.has(task.id)}
+                        pinnedTier={getTier(task.id)}
+                        onSetPriority={onSetPriority}
+                        onSetDate={onSetDate}
+                        onStar={onStar}
+                        onSetTier={onSetTier}
+                        onExpandDetail={handleExpandDetail}
+                        onClearFocus={onClearFocus}
+                        onOpenSession={onOpenSession}
                       />
                     ))}
                   </div>
