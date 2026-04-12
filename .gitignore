@@ -5,6 +5,7 @@ dist/
 coverage/
 *.png
 !docs/*.png
+!web/public/*.png
 .playwright-mcp/
 
 # Auto Claude data directory
