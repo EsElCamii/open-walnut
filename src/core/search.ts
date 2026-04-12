@@ -462,54 +462,56 @@ export async function search(
   // Load tasks once — shared by BM25, vector search, and child expansion
   const tasks = types.includes('task') ? await listTasks() : [];
 
-  // ── keyword-only mode ──
-  if (mode === 'keyword') {
-    const bm25Results: SearchResult[] = [];
-    if (types.includes('task')) bm25Results.push(...bm25ScoreTasks(tasks, normalizedQuery));
-    if (types.includes('memory')) bm25Results.push(...await bm25ScoreMemory(normalizedQuery, limit, options.category));
-    bm25Results.sort((a, b) => b.score - a.score);
-    return expandChildTasks(bm25Results.slice(0, limit), tasks);
+  // ── Task search via BM25 (unchanged) ──
+  const taskResults: SearchResult[] = [];
+  if (types.includes('task')) {
+    taskResults.push(...bm25ScoreTasks(tasks, normalizedQuery));
+
+    // If hybrid or semantic mode, also run vector search for tasks
+    if (mode !== 'keyword') {
+      const queryVec = await embedQuery(normalizedQuery);
+      if (queryVec) {
+        const vecTaskResults = await vectorSearchAll(queryVec, normalizedQuery, tasks, ['task'], limit, mode === 'semantic' ? 0.5 : 0.3);
+        if (vecTaskResults.length > 0 && taskResults.length > 0) {
+          const fused = normalizedFuse(taskResults, vecTaskResults, 0.4);
+          taskResults.length = 0;
+          taskResults.push(...fused);
+        } else if (vecTaskResults.length > 0) {
+          taskResults.push(...vecTaskResults);
+        }
+      }
+    }
   }
 
-  // ── semantic-only mode ──
-  if (mode === 'semantic') {
-    const queryVec = await embedQuery(normalizedQuery);
-    if (!queryVec) return [];
-    const vecResults = await vectorSearchAll(queryVec, normalizedQuery, tasks, types, limit, 0.5);
-    vecResults.sort((a, b) => b.score - a.score);
-    return expandChildTasks(vecResults.slice(0, limit), tasks);
+  // ── Memory search via QMD (replaces old BM25 + vector pipeline for memory) ──
+  const memoryResults: SearchResult[] = [];
+  if (types.includes('memory')) {
+    try {
+      const { memoryNotesSearch } = await import('./memory-search.js');
+      const qmdResults = await memoryNotesSearch(normalizedQuery, undefined, limit);
+      for (const r of qmdResults) {
+        memoryResults.push({
+          type: 'memory',
+          title: r.title,
+          snippet: r.snippet,
+          path: r.filepath,
+          score: r.finalScore,
+          matchField: 'content',
+        });
+      }
+    } catch (err) {
+      // QMD unavailable — fall back to legacy BM25 memory search
+      log.web.debug('search: QMD memory search failed, falling back to BM25', {
+        error: err instanceof Error ? err.message : String(err),
+      });
+      memoryResults.push(...await bm25ScoreMemory(normalizedQuery, limit, options.category));
+    }
   }
 
-  // ── hybrid mode: run BM25 and vector in parallel ──
-  const vecMinCosine = 0.3;
-  const vecTopK = Math.max(limit * 3, 200);
-
-  // Start BM25 and embedding concurrently
-  const bm25Promise = (async () => {
-    const results: SearchResult[] = [];
-    if (types.includes('task')) results.push(...bm25ScoreTasks(tasks, normalizedQuery));
-    if (types.includes('memory')) results.push(...await bm25ScoreMemory(normalizedQuery, limit, options.category));
-    return results;
-  })();
-
-  const vectorPromise = (async () => {
-    const queryVec = await embedQuery(normalizedQuery);
-    if (!queryVec) return [];
-    return vectorSearchAll(queryVec, normalizedQuery, tasks, types, vecTopK, vecMinCosine);
-  })();
-
-  const [bm25Results, vectorResults] = await Promise.all([bm25Promise, vectorPromise]);
-
-  if (vectorResults.length === 0) {
-    // No vector results (Ollama unavailable or empty index) — fall back to BM25
-    bm25Results.sort((a, b) => b.score - a.score);
-    return expandChildTasks(bm25Results.slice(0, limit), tasks);
-  }
-
-  // RRF fusion
-  bm25Results.sort((a, b) => b.score - a.score);
-  const fused = normalizedFuse(bm25Results, vectorResults, 0.4);
-  return expandChildTasks(fused.slice(0, limit), tasks);
+  // ── Merge task + memory results ──
+  const allResults = [...taskResults, ...memoryResults];
+  allResults.sort((a, b) => b.score - a.score);
+  return expandChildTasks(allResults.slice(0, limit), tasks);
 }
 
 /**

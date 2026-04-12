@@ -1,4 +1,7 @@
 /**
+ * @deprecated Pure math utilities for cosine similarity — superseded by QMD's built-in vector search.
+ * Still used by the legacy task vector search path (vectorSearchAll in search.ts).
+ *
  * Pure math utilities for cosine similarity on Float32Array vectors.
  * No external dependencies.
  */

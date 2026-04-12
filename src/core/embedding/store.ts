@@ -1,4 +1,7 @@
 /**
+ * @deprecated Embedding store — superseded by QMD's built-in vector storage for memory/notes.
+ * Task embedding storage is still active. Chunk embedding functions are deprecated.
+ *
  * Embedding store — SQLite BLOB read/write for task and chunk embeddings.
  * Uses the same memory-index.sqlite database as FTS5.
  */

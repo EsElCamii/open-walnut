@@ -1,4 +1,8 @@
 /**
+ * @deprecated Embedding pipeline — superseded by QMD's built-in embedding for memory/notes search.
+ * Task embedding reconciliation is still active (tasks use separate Ollama-based vectors).
+ * Memory chunk embedding (reconcileChunkEmbeddings) is no longer needed for search — QMD handles it.
+ *
  * Embedding pipeline — reconciliation on startup + incremental embedding on task/memory changes.
  */
 

@@ -1,3 +1,8 @@
+/**
+ * @deprecated Memory indexing via FTS5 — superseded by QMD hybrid search (qmd-store.ts).
+ * Kept for backward compatibility with the legacy `search` tool fallback path.
+ * New code should use memory-search.ts (QMD-backed) instead of searchIndex().
+ */
 import Database, { type Database as DatabaseType } from 'better-sqlite3';
 import fs from 'node:fs';
 import path from 'node:path';

@@ -1,4 +1,8 @@
 /**
+ * @deprecated Ollama embedding client — superseded by QMD's built-in embedding (qmd-store.ts).
+ * Kept for backward compatibility with the legacy search fallback and task embedding pipeline.
+ * New memory/notes search should use memory-search.ts (QMD-backed) instead.
+ *
  * Ollama embedding client — calls local Ollama HTTP API for BGE-M3 embeddings.
  * Zero npm dependencies (pure fetch).
  */

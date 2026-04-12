@@ -9,10 +9,11 @@ import { getDailyLogsWithinBudget } from '../core/daily-log.js';
 import { getMemoryFile } from '../core/memory-file.js';
 import { getAllProjectSummaries } from '../core/project-memory.js';
 import { getCompactionSummary } from '../core/chat-history.js';
+import { getWorkingMemory, isWorkingMemoryEmpty } from '../core/working-memory.js';
 import { buildAgentsSection } from './subagent-context.js';
 import { listRepoSummaries } from './tools/files/repos-handler.js';
 import { getAllRepoMemorySummaries } from '../core/repo-memory.js';
-import { NOTES_DIR, TASKS_FILE } from '../constants.js';
+import { NOTES_DIR, TASKS_FILE, MEMORY_INDEX_FILE } from '../constants.js';
 import type { Task } from '../core/types.js';
 
 /**
@@ -73,7 +74,7 @@ export function getNotesContext(): string {
 /**
  * Build the memory context section from daily logs, global memory, and project summaries.
  */
-export function buildMemoryContext(budget: number = 20000): string {
+export function buildMemoryContext(budget: number = 8000): string {
   // Phase 0: task inventory
   const taskCategories = buildTaskCategoriesSection();
 
@@ -110,6 +111,16 @@ export function buildMemoryContext(budget: number = 20000): string {
     ? `\n\n## Notes vault guide\n${notesContext}`
     : '';
 
+  // Memory index (wiki directory awareness)
+  let indexSection = '';
+  try {
+    if (fs.existsSync(MEMORY_INDEX_FILE)) {
+      const indexContent = fs.readFileSync(MEMORY_INDEX_FILE, 'utf-8');
+      const truncated = indexContent.length > 4000 ? indexContent.slice(0, 4000) + '\n...' : indexContent;
+      indexSection = `\n\n## Memory index\n${truncated}`;
+    }
+  } catch { /* non-critical */ }
+
   return `## Task Categories & Projects
 ${taskCategories}
 
@@ -117,10 +128,12 @@ ${taskCategories}
 ${globalMemoryResult?.content ?? '(No global memory yet.)'}
 
 ## Your projects
-${projectLines}${repoSection}${notesSection}
+${projectLines}${repoSection}${notesSection}${indexSection}
 
 ## Recent activity
-${dailyLogs || '(No recent activity.)'}`;
+${dailyLogs || '(No recent activity.)'}
+
+Use \`memory_notes_search\` for semantic search across all memory and notes. Use \`memory_get\` to read full documents.`;
 }
 
 /**
@@ -268,18 +281,28 @@ export async function buildSystemPrompt(): Promise<string> {
   const syncSection = await buildSyncSection();
   const agentsSection = await buildAgentsSection();
 
-  // Load compaction summary from persisted chat history (if any)
-  let compactionSection = '';
+  // Load working memory (real-time scratchpad) — prefer over compaction summary
+  let contextSection = '';
   try {
-    const summary = await getCompactionSummary();
-    if (summary) {
-      compactionSection = `\n\n## Earlier conversation context\n${summary}`;
+    const workingMemory = getWorkingMemory();
+    if (workingMemory && !isWorkingMemoryEmpty(workingMemory)) {
+      contextSection = `\n\n## Working memory (real-time notes)\n${workingMemory}`;
     }
-  } catch {
-    // Chat history file may not exist yet — that's fine
+  } catch { /* non-critical */ }
+
+  // Fallback: compaction summary (if no working memory)
+  if (!contextSection) {
+    try {
+      const summary = await getCompactionSummary();
+      if (summary) {
+        contextSection = `\n\n## Earlier conversation context\n${summary}`;
+      }
+    } catch {
+      // Chat history file may not exist yet — that's fine
+    }
   }
 
-  return `${roleSection}${syncSection}${skillsSection ? `\n\n${skillsSection}` : ''}${agentsSection ? `\n\n${agentsSection}` : ''}${compactionSection}
+  return `${roleSection}${syncSection}${skillsSection ? `\n\n${skillsSection}` : ''}${agentsSection ? `\n\n${agentsSection}` : ''}${contextSection}
 
 ${buildMemoryContext()}`;
 }
