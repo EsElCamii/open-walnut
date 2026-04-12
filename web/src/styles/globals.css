@@ -7872,10 +7872,8 @@ img[data-lightbox-src],
 /* Attention dot — absolutely positioned in todo-panel-item's left padding area.
    Always before chevron and phase icon; doesn't add width to the flow. */
 .task-attention-dot {
-  position: absolute;
-  left: 8px;
-  top: 50%;
-  transform: translateY(-50%);
+  display: inline-block;
+  flex-shrink: 0;
   width: 7px;
   height: 7px;
   border-radius: 50%;

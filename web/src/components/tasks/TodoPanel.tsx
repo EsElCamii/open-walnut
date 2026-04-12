@@ -407,12 +407,7 @@ function SortableTaskItem({ task, isFocused, isRecentlyDone, depth = 0, childCou
       {...activeAttributes}
       {...activeListeners}
     >
-      {/* ── Layout: [attention dot (absolute)] [chevron if children] [content] ── */}
-
-      {/* Attention dot — absolutely positioned in left padding area */}
-      {task.needs_attention && !isDone && (
-        <span className="task-attention-dot" title="Needs your attention" />
-      )}
+      {/* ── Layout: [chevron slot] [content with attention dot on right] ── */}
 
       {/* — chevron slot: fixed-width for tree indentation (VS Code style) — */}
       {childCount > 0 ? (
@@ -496,6 +491,9 @@ function SortableTaskItem({ task, isFocused, isRecentlyDone, depth = 0, childCou
           )}
           {!!childCount && (
             <span className="task-children-badge">{childCount} sub</span>
+          )}
+          {task.needs_attention && !isDone && (
+            <span className="task-attention-dot" title="Needs your attention" />
           )}
           {isDone && task.completed_at && (
             <span className="task-completed-time">{timeAgo(task.completed_at)}</span>
