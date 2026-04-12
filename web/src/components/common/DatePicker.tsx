@@ -21,15 +21,30 @@ export function parseDateLocal(iso: string): Date {
   return new Date(y, m - 1, d);
 }
 
-// Quick-pick relative offsets. dayLevel=true → store as YYYY-MM-DD (not full ISO).
-const QUICK_PILLS: { label: string; ms: number; dayLevel?: boolean }[] = [
+// Time-level quick pills (relative to now)
+const TIME_PILLS: { label: string; ms: number }[] = [
   { label: '30m', ms: 30 * 60_000 },
   { label: '2h',  ms: 2 * 3_600_000 },
   { label: '4h',  ms: 4 * 3_600_000 },
   { label: '8h',  ms: 8 * 3_600_000 },
-  { label: '1d',  ms: 24 * 3_600_000, dayLevel: true },
-  { label: '1w',  ms: 7 * 24 * 3_600_000, dayLevel: true },
 ];
+
+// Day-of-week abbreviations (0=Sun … 6=Sat)
+const DOW = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+
+/** Build 7 day-of-week pills starting from tomorrow (+1d … +7d). */
+function buildDayPills(): { label: string; date: string }[] {
+  const now = new Date();
+  const pills: { label: string; date: string }[] = [];
+  for (let i = 1; i <= 7; i++) {
+    const d = new Date(now.getFullYear(), now.getMonth(), now.getDate() + i);
+    const y = d.getFullYear();
+    const m = String(d.getMonth() + 1).padStart(2, '0');
+    const day = String(d.getDate()).padStart(2, '0');
+    pills.push({ label: DOW[d.getDay()], date: `${y}-${m}-${day}` });
+  }
+  return pills;
+}
 
 /** Format a due_date value for display. */
 export function formatDateDisplay(iso: string | undefined | null): string {
@@ -90,35 +105,40 @@ function DatePickerContent({ date, onChange }: Pick<DatePickerProps, 'date' | 'o
     return `${y}-${m}-${day}`;
   })() : '';
 
-  const handleQuickPick = (ms: number, dayLevel?: boolean) => {
-    const target = new Date(Date.now() + ms);
-    if (dayLevel) {
-      // Day-level: YYYY-MM-DD only
-      const y = target.getFullYear();
-      const m = String(target.getMonth() + 1).padStart(2, '0');
-      const d = String(target.getDate()).padStart(2, '0');
-      onChange(`${y}-${m}-${d}`);
-    } else {
-      // Time-level: full ISO datetime
-      onChange(target.toISOString());
-    }
+  const handleTimePick = (ms: number) => {
+    onChange(new Date(Date.now() + ms).toISOString());
   };
 
   const handleCalendarChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const val = e.target.value;
     if (!val) { onChange(null); return; }
-    // Day-level: YYYY-MM-DD only
     onChange(val);
   };
 
+  const dayPills = buildDayPills();
+
   return (
     <div className="dp-content">
+      {/* Time-level pills: 30m, 2h, 4h, 8h */}
       <div className="dp-pills">
-        {QUICK_PILLS.map((p) => (
+        {TIME_PILLS.map((p) => (
           <button
             key={p.label}
             className="dp-pill"
-            onClick={(e) => { e.stopPropagation(); handleQuickPick(p.ms, p.dayLevel); }}
+            onClick={(e) => { e.stopPropagation(); handleTimePick(p.ms); }}
+          >
+            {p.label}
+          </button>
+        ))}
+      </div>
+      {/* Day-of-week pills: Mon … Sun (tomorrow → +7d) */}
+      <div className="dp-pills">
+        {dayPills.map((p) => (
+          <button
+            key={p.date}
+            className="dp-pill"
+            onClick={(e) => { e.stopPropagation(); onChange(p.date); }}
+            title={p.date}
           >
             {p.label}
           </button>

@@ -205,6 +205,7 @@ const noAnimateAfterDrag: AnimateLayoutChanges = (args) => {
 interface SortableTaskItemProps {
   task: Task;
   isFocused: boolean;
+  isDetailOpen?: boolean;
   isRecentlyDone?: boolean;
   depth?: number;               // Nesting depth (0 = top-level, 1 = child, 2 = grandchild, etc.)
   childCount?: number;
@@ -232,7 +233,7 @@ interface SortableTaskItemProps {
   searchSemanticScore?: number; // Normalized semantic contribution [0,1]
 }
 
-function SortableTaskItem({ task, isFocused, isRecentlyDone, depth = 0, childCount, isExpanded, onToggleExpand, onClick, onSetPhase, onStar, onSetPriority, onUpdateTitle, onOpenSession, openSessionIds, onExpandDetail, onClearFocus, onPinTask, onUnpinTask, onSetTier, onSetDate, isPinned, pinnedTier, searchContext, searchMatchField, searchScore, searchKeywordScore, searchSemanticScore }: SortableTaskItemProps) {
+function SortableTaskItem({ task, isFocused, isDetailOpen, isRecentlyDone, depth = 0, childCount, isExpanded, onToggleExpand, onClick, onSetPhase, onStar, onSetPriority, onUpdateTitle, onOpenSession, openSessionIds, onExpandDetail, onClearFocus, onPinTask, onUnpinTask, onSetTier, onSetDate, isPinned, pinnedTier, searchContext, searchMatchField, searchScore, searchKeywordScore, searchSemanticScore }: SortableTaskItemProps) {
   const hookPhases = usePhaseHooks();
   const {
     attributes,
@@ -494,6 +495,7 @@ function SortableTaskItem({ task, isFocused, isRecentlyDone, depth = 0, childCou
           <TaskKebabMenu
             task={task}
             isFocused={isFocused}
+            isDetailOpen={isDetailOpen}
             isPinned={!!isPinned}
             pinnedTier={pinnedTier}
             isDone={isDone}
@@ -666,10 +668,30 @@ function persistDateFilter(v: DateFilter) {
   try { localStorage.setItem(LS_DATE_FILTER_KEY, v); } catch { /* ignore */ }
 }
 
-/** Match task against dateFilter. Uses time-level precision for "now". */
-function matchesDateFilter(task: Task, filter: DateFilter): boolean {
+/**
+ * Resolve effective due_date for a task: if the task has no due_date,
+ * walk up the parent chain and inherit the first ancestor's due_date.
+ */
+function getEffectiveDueDate(task: Task, allTasks: Task[]): string | undefined {
+  if (task.due_date) return task.due_date;
+  if (!task.parent_task_id) return undefined;
+  // Walk up parent chain (max 10 depth to avoid infinite loops)
+  let current: Task | undefined = task;
+  for (let i = 0; i < 10 && current?.parent_task_id; i++) {
+    const parent = allTasks.find(t => t.id.startsWith(current!.parent_task_id!));
+    if (!parent) break;
+    if (parent.due_date) return parent.due_date;
+    current = parent;
+  }
+  return undefined;
+}
+
+/** Match task against dateFilter. Uses time-level precision for "now".
+ *  Child tasks inherit parent's due_date for filtering if they have none. */
+function matchesDateFilter(task: Task, filter: DateFilter, allTasks: Task[]): boolean {
   if (!filter) return true; // "All"
-  const dueMs = task.due_date ? parseDateLocal(task.due_date).getTime() : null;
+  const effectiveDue = getEffectiveDueDate(task, allTasks);
+  const dueMs = effectiveDue ? parseDateLocal(effectiveDue).getTime() : null;
   const now = Date.now();
   switch (filter) {
     case 'now':
@@ -678,7 +700,7 @@ function matchesDateFilter(task: Task, filter: DateFilter): boolean {
     case 'overdue': {
       if (!dueMs) return false;
       // Time-level dates: overdue if past now; Day-level: overdue if before start of today
-      if (task.due_date!.includes('T')) return dueMs < now;
+      if (effectiveDue!.includes('T')) return dueMs < now;
       const todayStart = new Date();
       todayStart.setHours(0, 0, 0, 0);
       return dueMs < todayStart.getTime();
@@ -686,6 +708,7 @@ function matchesDateFilter(task: Task, filter: DateFilter): boolean {
     case 'this-week':
       return !dueMs || dueMs <= now + 7 * 86_400_000;
     case 'no-date':
+      // no-date means the task itself has no date (not inherited)
       return !task.due_date;
     default:
       return true;
@@ -1219,6 +1242,7 @@ const CARD_HEIGHT_PX = 30; // ~28px min-height + 2px gap
 interface RecentCardProps {
   task: Task;
   isFocused: boolean;
+  isDetailOpen?: boolean;
   onClick?: (task: Task) => void;
   onPinTask?: (taskId: string) => void;
   onUnpinTask?: (taskId: string) => void;
@@ -1237,7 +1261,7 @@ interface RecentCardProps {
 
 // ── SortableRecentCard — draggable recent-activity card with kebab menu ──
 
-function SortableRecentCard({ task, isFocused, onClick, onPinTask, onUnpinTask, isPinned, pinnedTier, onSetPriority, onSetDate, onStar, onSetTier, onExpandDetail, onClearFocus, onOpenSession, onSetPhase, onUpdateTitle }: RecentCardProps) {
+function SortableRecentCard({ task, isFocused, isDetailOpen, onClick, onPinTask, onUnpinTask, isPinned, pinnedTier, onSetPriority, onSetDate, onStar, onSetTier, onExpandDetail, onClearFocus, onOpenSession, onSetPhase, onUpdateTitle }: RecentCardProps) {
   const {
     attributes,
     listeners,
@@ -1321,12 +1345,8 @@ function SortableRecentCard({ task, isFocused, onClick, onPinTask, onUnpinTask, 
 
   const handleTitleClick = useCallback((e: React.MouseEvent) => {
     if (!onUpdateTitle) return;
-    e.stopPropagation();
-    e.preventDefault();
-    titleClickedRef.current = true;
     clickPosRef.current = { x: e.clientX, y: e.clientY };
     setIsEditing(true);
-    requestAnimationFrame(() => { titleClickedRef.current = false; });
   }, [onUpdateTitle]);
 
   const needsAttention = task.phase === 'AGENT_COMPLETE' || task.phase === 'AWAIT_HUMAN_ACTION';
@@ -1344,8 +1364,8 @@ function SortableRecentCard({ task, isFocused, onClick, onPinTask, onUnpinTask, 
       style={style}
       className={`todo-pinned-card${isFocused ? ' todo-pinned-card-active' : ''}${needsAttention ? ' todo-pinned-card-attention' : ''}`}
       onClick={(e) => {
-        if (isEditing || titleClickedRef.current) return;
-        if ((e.target as HTMLElement).closest('.todo-pinned-title, .pinned-phase-picker')) return;
+        if (isEditing) return;
+        if ((e.target as HTMLElement).closest('.pinned-phase-picker')) return;
         onClick?.(task);
       }}
       role="button"
@@ -1361,13 +1381,14 @@ function SortableRecentCard({ task, isFocused, onClick, onPinTask, onUnpinTask, 
             e.stopPropagation();
             if (!phaseMenuOpen && phaseWrapperRef.current) {
               const rect = phaseWrapperRef.current.getBoundingClientRect();
-              const spaceBelow = window.innerHeight - rect.bottom;
+              const menuWidth = 300;
               const menuHeight = 170;
-              if (spaceBelow < menuHeight) {
-                setPhaseMenuPos({ top: rect.top - menuHeight - 2, left: rect.left });
-              } else {
-                setPhaseMenuPos({ top: rect.bottom + 2, left: rect.left });
-              }
+              let top = rect.bottom + 2;
+              let left = rect.left;
+              if (window.innerHeight - rect.bottom < menuHeight) top = rect.top - menuHeight - 2;
+              if (left + menuWidth > window.innerWidth) left = window.innerWidth - menuWidth - 8;
+              if (left < 8) left = 8;
+              setPhaseMenuPos({ top, left });
             }
             setPhaseMenuOpen(!phaseMenuOpen);
           }}
@@ -1421,6 +1442,7 @@ function SortableRecentCard({ task, isFocused, onClick, onPinTask, onUnpinTask, 
       <TaskKebabMenu
         task={task}
         isFocused={isFocused}
+        isDetailOpen={isDetailOpen}
         isPinned={!!isPinned}
         pinnedTier={pinnedTier}
         isDone={task.phase === 'COMPLETE'}
@@ -2160,7 +2182,8 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
       if (tagFilter && (!t.tags || !t.tags.includes(tagFilter))) return false;
 
       // Date filter (skip for completed tasks — they don't need date filtering)
-      if (dateFilter && t.status !== 'done' && !matchesDateFilter(t, dateFilter)) return false;
+      // Child tasks inherit parent's due_date if they have none.
+      if (dateFilter && t.status !== 'done' && !matchesDateFilter(t, dateFilter, tasks)) return false;
 
       // Starred tab: show starred tasks + tasks in favorited categories/projects
       // Also include children of starred parents (handles prefix parent_task_id)
@@ -2999,7 +3022,7 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
                         <div className="todo-pinned-list-scroll" style={focusTasksDisplay.length > tierLimits.focus ? { maxHeight: tierLimits.focus * CARD_HEIGHT_PX } : undefined}>
                           <TierDropZone id="focus-drop-zone" isEmpty={focusTasksDisplay.length === 0}>
                             {focusTasksDisplay.map((task) => (
-                              <SortableTierCard key={task.id} task={task} tier="focus" isFocused={focusedTaskId === task.id} onClick={handlePinnedCardClick} onSetTier={onSetTier} onUnpinTask={onUnpinTask} onPinTask={onPinTask} onSetPriority={onSetPriority} onSetDate={onSetDate} onStar={onStar} onExpandDetail={handleExpandDetail} onClearFocus={onClearFocus} onOpenSession={onOpenSession} onSetPhase={onSetPhase ?? ((id) => onComplete(id))} onUpdateTitle={onUpdate ? handleUpdateTitle : undefined} />
+                              <SortableTierCard key={task.id} task={task} tier="focus" isFocused={focusedTaskId === task.id} isDetailOpen={focusedTaskId === task.id && !suppressDetail} onClick={handlePinnedCardClick} onSetTier={onSetTier} onUnpinTask={onUnpinTask} onPinTask={onPinTask} onSetPriority={onSetPriority} onSetDate={onSetDate} onStar={onStar} onExpandDetail={handleExpandDetail} onClearFocus={onClearFocus} onOpenSession={onOpenSession} onSetPhase={onSetPhase ?? ((id) => onComplete(id))} onUpdateTitle={onUpdate ? handleUpdateTitle : undefined} />
                             ))}
                           </TierDropZone>
                         </div>
@@ -3020,7 +3043,7 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
                         <div className="todo-pinned-list-scroll" style={nextTasksDisplay.length > tierLimits.next ? { maxHeight: tierLimits.next * CARD_HEIGHT_PX } : undefined}>
                           <TierDropZone id="next-drop-zone" isEmpty={nextTasksDisplay.length === 0}>
                             {nextTasksDisplay.map((task) => (
-                              <SortableTierCard key={task.id} task={task} tier="next" isFocused={focusedTaskId === task.id} onClick={handlePinnedCardClick} onSetTier={onSetTier} onUnpinTask={onUnpinTask} onPinTask={onPinTask} onSetPriority={onSetPriority} onSetDate={onSetDate} onStar={onStar} onExpandDetail={handleExpandDetail} onClearFocus={onClearFocus} onOpenSession={onOpenSession} onSetPhase={onSetPhase ?? ((id) => onComplete(id))} onUpdateTitle={onUpdate ? handleUpdateTitle : undefined} />
+                              <SortableTierCard key={task.id} task={task} tier="next" isFocused={focusedTaskId === task.id} isDetailOpen={focusedTaskId === task.id && !suppressDetail} onClick={handlePinnedCardClick} onSetTier={onSetTier} onUnpinTask={onUnpinTask} onPinTask={onPinTask} onSetPriority={onSetPriority} onSetDate={onSetDate} onStar={onStar} onExpandDetail={handleExpandDetail} onClearFocus={onClearFocus} onOpenSession={onOpenSession} onSetPhase={onSetPhase ?? ((id) => onComplete(id))} onUpdateTitle={onUpdate ? handleUpdateTitle : undefined} />
                             ))}
                           </TierDropZone>
                         </div>
@@ -3041,7 +3064,7 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
                         <SortableContext items={satelliteIds_arr} strategy={verticalListSortingStrategy}>
                           <div className="todo-pinned-list todo-pinned-list-scroll" style={satelliteTasksDisplay.length > tierLimits.satellite ? { maxHeight: tierLimits.satellite * CARD_HEIGHT_PX } : undefined}>
                             {satelliteTasksDisplay.map((task) => (
-                              <SortableTierCard key={task.id} task={task} tier="satellite" isFocused={focusedTaskId === task.id} onClick={handlePinnedCardClick} onSetTier={onSetTier} onUnpinTask={onUnpinTask} onPinTask={onPinTask} onSetPriority={onSetPriority} onSetDate={onSetDate} onStar={onStar} onExpandDetail={handleExpandDetail} onClearFocus={onClearFocus} onOpenSession={onOpenSession} onSetPhase={onSetPhase ?? ((id) => onComplete(id))} onUpdateTitle={onUpdate ? handleUpdateTitle : undefined} />
+                              <SortableTierCard key={task.id} task={task} tier="satellite" isFocused={focusedTaskId === task.id} isDetailOpen={focusedTaskId === task.id && !suppressDetail} onClick={handlePinnedCardClick} onSetTier={onSetTier} onUnpinTask={onUnpinTask} onPinTask={onPinTask} onSetPriority={onSetPriority} onSetDate={onSetDate} onStar={onStar} onExpandDetail={handleExpandDetail} onClearFocus={onClearFocus} onOpenSession={onOpenSession} onSetPhase={onSetPhase ?? ((id) => onComplete(id))} onUpdateTitle={onUpdate ? handleUpdateTitle : undefined} />
                             ))}
                           </div>
                         </SortableContext>
@@ -3069,6 +3092,7 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
                         key={task.id}
                         task={task}
                         isFocused={focusedTaskId === task.id}
+                        isDetailOpen={focusedTaskId === task.id && !suppressDetail}
                         onClick={handlePinnedCardClick}
                         onPinTask={onPinTask}
                         onUnpinTask={onUnpinTask}
@@ -3181,6 +3205,7 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
                     key={task.id}
                     task={task}
                     isFocused={focusedTaskId === task.id}
+                    isDetailOpen={focusedTaskId === task.id && !suppressDetail}
                     isRecentlyDone={recentlyCompletedRef.current.has(task.id)}
                     depth={depthMap.get(task.id) ?? 0}
                     childCount={searchChildCount.get(task.id)}
