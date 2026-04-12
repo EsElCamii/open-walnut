@@ -133,8 +133,7 @@ const PHASE_LABEL: Record<string, string> = {
 
 const PHASE_ORDER: string[] = [
   'TODO', 'IN_PROGRESS', 'AGENT_COMPLETE', 'AWAIT_HUMAN_ACTION',
-  'HUMAN_VERIFIED', 'POST_WORK_COMPLETED',
-  'PEER_CODE_REVIEW', 'RELEASE_IN_PIPELINE', 'COMPLETE',
+  'HUMAN_VERIFIED', 'POST_WORK_COMPLETED', 'COMPLETE',
 ];
 
 const PRIORITY_ICON: Record<string, string> = {
@@ -436,10 +435,11 @@ function SortableTaskItem({ task, isFocused, isRecentlyDone, depth = 0, childCou
             </button>
             {phaseMenuOpen && (
               <div className="phase-picker-menu">
-                {PHASE_ORDER.map((phase) => (
+                {PHASE_ORDER.map((phase, i) => (
                   <button
                     key={phase}
                     className={`phase-picker-item${task.phase === phase ? ' active' : ''}`}
+                    style={i === PHASE_ORDER.length - 1 && PHASE_ORDER.length % 2 === 1 ? { gridColumn: '1 / -1' } : undefined}
                     onClick={(e) => {
                       e.stopPropagation();
                       if (task.phase !== phase) onSetPhase(task.id, phase);

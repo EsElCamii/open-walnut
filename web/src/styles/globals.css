@@ -708,16 +708,18 @@ input:focus, textarea:focus, select:focus {
   border: 1px solid var(--border-strong);
   border-radius: var(--radius-sm);
   box-shadow: var(--card-shadow-hover);
-  min-width: 210px;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 2px;
   padding: 4px;
+  white-space: nowrap;
 }
 .phase-picker-item {
   display: flex;
   align-items: center;
-  gap: 8px;
-  width: 100%;
-  padding: 6px 10px;
-  font-size: 13px;
+  gap: 4px;
+  padding: 5px 8px;
+  font-size: 11px;
   border: none;
   background: none;
   color: var(--fg);
@@ -727,8 +729,8 @@ input:focus, textarea:focus, select:focus {
 }
 .phase-picker-item:hover { background: var(--accent-subtle); }
 .phase-picker-item.active { font-weight: 600; }
-.phase-picker-icon { width: 18px; text-align: center; font-size: 14px; }
-.phase-picker-check { margin-left: auto; color: var(--accent); font-size: 12px; }
+.phase-picker-icon { width: 16px; text-align: center; font-size: 13px; flex-shrink: 0; }
+.phase-picker-check { margin-left: 2px; color: var(--accent); font-size: 10px; }
 .phase-hook-indicator { margin-left: 4px; font-size: 11px; opacity: 0.7; cursor: help; }
 
 /* Priority picker dropdown */
