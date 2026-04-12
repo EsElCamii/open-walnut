@@ -9,6 +9,13 @@ import { bus } from '../event-bus.js';
 import { log } from '../../logging/index.js';
 import type { SessionHookDefinition, OnTurnCompletePayload, OnTurnErrorPayload, OnMessageSendPayload } from './types.js';
 
+// ── Triage dedup state ──
+// Prevents burst triage dispatches when daemon replays old JSONL events after
+// server restart (same session:result emitted N times in milliseconds).
+// Key: "sessionId:taskId", Value: last dispatch timestamp.
+const triageLastDispatch = new Map<string, number>();
+const TRIAGE_COOLDOWN_MS = 5_000; // 5 seconds — normal triage cycle takes 10-30s
+
 /**
  * turn-complete-triage: Dispatches a triage subagent on turn completion.
  * Hook: onTurnComplete. Replaces the hardcoded triage block in server.ts.
@@ -27,6 +34,29 @@ export const turnCompleteTriageHook: SessionHookDefinition = {
 
     // Skip triage for embedded subagent sessions (provider='embedded').
     if (p.session?.provider === 'embedded') return;
+
+    // Cooldown: prevent burst dispatches from replayed events after server restart.
+    // The daemon may replay N result events in milliseconds — without this guard,
+    // each one spawns a full triage subagent (get_task + update_task + notify_main_agent).
+    const dedupKey = `${p.sessionId}:${p.taskId}`;
+    const now = Date.now();
+
+    // Prune stale entries to prevent unbounded growth
+    if (triageLastDispatch.size > 100) {
+      for (const [k, ts] of triageLastDispatch) {
+        if (now - ts > TRIAGE_COOLDOWN_MS) triageLastDispatch.delete(k);
+      }
+    }
+
+    const lastAt = triageLastDispatch.get(dedupKey);
+    if (lastAt && now - lastAt < TRIAGE_COOLDOWN_MS) {
+      log.session.warn('turn-complete-triage: skipped — cooldown', {
+        taskId: p.taskId, sessionId: p.sessionId,
+        msSinceLast: now - lastAt,
+      });
+      return;
+    }
+    triageLastDispatch.set(dedupKey, now);
 
     try {
       const { DEFAULT_TRIAGE_AGENT_ID } = await import('../agent-registry.js');

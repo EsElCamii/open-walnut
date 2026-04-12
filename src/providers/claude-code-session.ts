@@ -289,6 +289,17 @@ export class ClaudeCodeSession {
   planFile: string | null = null
   /** True when ExitPlanMode tool_use is detected in the JSONL stream */
   planCompleted = false
+  /** True when TeamCreate tool_use detected; cleared on TeamDelete, process exit,
+   *  or team-idle timeout. While active, intermediate `result` events suppress
+   *  idle/AGENT_COMPLETE/triage because the lead is polling for teammate results. */
+  private _teamActive = false
+  /** Public getter for health monitor — skip idle timeout while team is active. */
+  get teamActive(): boolean { return this._teamActive }
+  /** Timer that auto-clears _teamActive if no new JSONL events arrive after the
+   *  last result event. Prevents sessions from being stuck as "running" forever
+   *  when Claude Code never calls TeamDelete (common in -p mode). */
+  private _teamIdleTimer: ReturnType<typeof setTimeout> | null = null
+  private static readonly TEAM_IDLE_TIMEOUT_MS = 120_000 // 2 min
   /** Plan content captured from the most recent Write to ~/.claude/plans/ */
   private _lastPlanWriteContent: string | null = null
   /** True when we've already auto-replied to AskUserQuestion this turn. Reset on new turn. */
@@ -1192,6 +1203,11 @@ export class ClaudeCodeSession {
     // Clear stall diagnostic timer — we're receiving output, session is responsive
     this._lastJsonlEventTs = Date.now()
     this.clearStallDiagTimer()
+    // Reset team-idle timer on any new JSONL event — the team is still active.
+    if (this._teamIdleTimer) {
+      clearTimeout(this._teamIdleTimer)
+      this._teamIdleTimer = null
+    }
 
     if (!this._firstLineSeen) {
       this._firstLineSeen = true
@@ -1225,9 +1241,19 @@ export class ClaudeCodeSession {
       case 'system': {
         const sys = event as unknown as Record<string, unknown>
 
-        // ── Init handling (first time only) ──
+        // ── Init handling ──
         // compact_boundary also carries session_id — guard with subtype check
         if (sys.session_id && (sys.subtype === 'init' || !this.claudeSessionId)) {
+          // A new init means Claude Code started a new API turn. Reset the dedup
+          // guard so the subsequent result event can emit normally. This handles
+          // auto-continuation (compaction, multi-turn agent loops) where Claude Code
+          // starts a new turn without any user message (no writeMessage() call).
+          if (this._turnResultEmitted) {
+            log.session.info('new init after result — resetting turnResultEmitted', {
+              sessionId: this.claudeSessionId, taskId: this.taskId,
+            })
+            this._turnResultEmitted = false
+          }
           const newId = sys.session_id as string
           const expectedId = this._expectedSessionId
           const oldSessionId = this.claudeSessionId
@@ -1454,6 +1480,24 @@ export class ClaudeCodeSession {
             if (block.id && block.input) {
               const imgPath = extractImageFilePathFromInput(block.input as Record<string, unknown>)
               if (imgPath) this._toolInputFilePaths.set(block.id, imgPath)
+            }
+
+            // Team mode detection — TeamCreate/TeamDelete tool_use.
+            // While team is active, intermediate `result` events suppress idle/AGENT_COMPLETE/triage
+            // because the lead session is polling for in-process teammate results (print.ts poll loop).
+            if (block.name === 'TeamCreate') {
+              this._teamActive = true
+              log.session.info('team created — entering team mode', {
+                sessionId: this.claudeSessionId, taskId: this.taskId,
+                teamName: (block.input as Record<string, unknown>)?.name,
+              })
+            }
+            if (block.name === 'TeamDelete') {
+              this._teamActive = false
+              if (this._teamIdleTimer) { clearTimeout(this._teamIdleTimer); this._teamIdleTimer = null }
+              log.session.info('team deleted — exiting team mode', {
+                sessionId: this.claudeSessionId, taskId: this.taskId,
+              })
             }
 
             // Capture plan file path and content (Claude writes plan to ~/.claude/plans/{slug}.md)
@@ -1686,27 +1730,29 @@ export class ClaudeCodeSession {
         const result = event as StreamResultEvent
 
         // Guard against duplicate/replayed result events (daemon resume can replay
-        // old JSONL lines). Use cost comparison: a real new result always has higher
-        // cumulative cost. This correctly allows post-compaction results through
-        // (compaction continues the turn, increasing cost) while blocking true
-        // replays (identical cost = same data re-read from JSONL).
+        // old JSONL lines). The init-reset above handles auto-continuation turns;
+        // this guard catches pure replays where no new init was emitted.
         if (this._turnResultEmitted) {
-          const costIncreased = result.total_cost_usd !== undefined
-            && this._lastResultCost !== undefined
-            && result.total_cost_usd > this._lastResultCost
-          if (!costIncreased) {
-            log.session.debug('ignoring duplicate result event (cost unchanged)', {
-              sessionId: this.claudeSessionId, taskId: this.taskId,
-              cost: result.total_cost_usd, prevCost: this._lastResultCost,
-            })
-            break
-          }
-          // Cost increased → real result (e.g., post-compaction continuation)
-          log.session.info('accepting result after compaction (cost increased)', {
+          log.session.debug('ignoring duplicate result event (no init since last result)', {
             sessionId: this.claudeSessionId, taskId: this.taskId,
-            cost: result.total_cost_usd, prevCost: this._lastResultCost,
           })
-          this._turnResultEmitted = false
+          break
+        }
+
+        // Guard against replayed results for sessions already marked as complete.
+        // After server restart, attachToExisting() sets resultEmitted=true for sessions
+        // whose task is past IN_PROGRESS. But the daemon may replay the entire JSONL
+        // history — each replayed init resets _turnResultEmitted, letting old results
+        // through. Without this guard, N replayed turns = N SESSION_RESULT events = N
+        // triage dispatches = wasted tokens. resultEmitted is only reset to false by
+        // writeMessage() when a new user message is sent, so this guard only blocks
+        // replays, never legitimate new results.
+        if (this.resultEmitted) {
+          log.session.debug('suppressing replayed result (session already complete)', {
+            sessionId: this.claudeSessionId, taskId: this.taskId,
+          })
+          this._turnResultEmitted = true
+          break
         }
 
         // Detect stale/replayed result events for remote sessions.
@@ -1787,8 +1833,16 @@ export class ClaudeCodeSession {
           // stream-json FIFO mode: process is still alive between turns.
           // Works for both local and remote sessions now that remote uses hasPipe
           // for the liveness signal instead of local PID checks.
-          this._processStatus = 'idle'  // Turn done, process alive, waiting for next writeMessage()
-          this._activity = undefined
+          if (this._teamActive) {
+            // Team subagents still working — lead is in poll loop (print.ts while(true))
+            // waiting for teammate inbox messages. Keep 'running' so health monitor
+            // doesn't mistake the poll sleep for an idle session.
+            this._processStatus = 'running'
+            this._activity = 'Team subagents working'
+          } else {
+            this._processStatus = 'idle'  // Turn done, process alive, waiting for next writeMessage()
+            this._activity = undefined
+          }
           this.resultEmitted = false  // Ready for next turn
         } else if (this._transport?.isRemote && !result.is_error) {
           // Remote daemon session: process exited (hasPipe was cleared by daemon exit
@@ -1812,6 +1866,8 @@ export class ClaudeCodeSession {
           this._active = false
           this._processStatus = 'stopped'
           this._activity = undefined
+          this._teamActive = false  // Safety: clear team flag on process exit
+          if (this._teamIdleTimer) { clearTimeout(this._teamIdleTimer); this._teamIdleTimer = null }
           this.stopMonitoring()
           this._pendingPermissionRequests.clear()
 
@@ -1826,18 +1882,64 @@ export class ClaudeCodeSession {
           }
         }
 
-        this.emitStatusChanged('AGENT_COMPLETE')
-
         this._turnResultEmitted = true
-        log.session.info('session result emitted', { sessionId: this.claudeSessionId, taskId: this.taskId, resultLength: resultText?.length ?? 0 })
-        bus.emit(EventNames.SESSION_RESULT, {
-          sessionId: this.claudeSessionId,
-          taskId: this.taskId,
-          result: resultText,
-          totalCost: result.total_cost_usd,
-          duration: result.duration_ms,
-          isError: result.is_error ?? false,
-        }, ['main-ai', 'session-runner'], { source: 'session-runner' })
+
+        if (this._teamActive) {
+          // Team subagents still working — this is an intermediate result from
+          // the lead session (e.g. "Team is up. 5 reviewers working...").
+          // Suppress AGENT_COMPLETE phase and triage; keep task at IN_PROGRESS.
+          log.session.info('team active — intermediate result, staying IN_PROGRESS', {
+            sessionId: this.claudeSessionId, taskId: this.taskId, resultLength: resultText?.length ?? 0,
+          })
+          this.emitStatusChanged('IN_PROGRESS')
+          bus.emit(EventNames.SESSION_RESULT, {
+            sessionId: this.claudeSessionId,
+            taskId: this.taskId,
+            result: resultText,
+            totalCost: result.total_cost_usd,
+            duration: result.duration_ms,
+            isError: result.is_error ?? false,
+            teamActive: true,
+          }, ['main-ai', 'session-runner'], { source: 'session-runner' })
+
+          // Start team-idle timer: if no new JSONL events arrive within 2 min,
+          // assume the team is done (Claude Code often skips TeamDelete in -p mode).
+          // The timer auto-clears _teamActive so normal idle/triage kicks in.
+          if (this._teamIdleTimer) clearTimeout(this._teamIdleTimer)
+          this._teamIdleTimer = setTimeout(() => {
+            if (this._teamActive) {
+              log.session.info('team-idle timeout — auto-clearing _teamActive', {
+                sessionId: this.claudeSessionId, taskId: this.taskId,
+              })
+              this._teamActive = false
+              this._teamIdleTimer = null
+              // Now trigger the idle/AGENT_COMPLETE transition that was suppressed.
+              // The process should still be alive in the poll loop.
+              this._processStatus = 'idle'
+              this._activity = undefined
+              this.emitStatusChanged('AGENT_COMPLETE')
+              bus.emit(EventNames.SESSION_RESULT, {
+                sessionId: this.claudeSessionId,
+                taskId: this.taskId,
+                result: resultText,
+                totalCost: result.total_cost_usd,
+                duration: result.duration_ms,
+                isError: false,
+              }, ['main-ai', 'session-runner'], { source: 'session-runner' })
+            }
+          }, ClaudeCodeSession.TEAM_IDLE_TIMEOUT_MS)
+        } else {
+          this.emitStatusChanged('AGENT_COMPLETE')
+          log.session.info('session result emitted', { sessionId: this.claudeSessionId, taskId: this.taskId, resultLength: resultText?.length ?? 0 })
+          bus.emit(EventNames.SESSION_RESULT, {
+            sessionId: this.claudeSessionId,
+            taskId: this.taskId,
+            result: resultText,
+            totalCost: result.total_cost_usd,
+            duration: result.duration_ms,
+            isError: result.is_error ?? false,
+          }, ['main-ai', 'session-runner'], { source: 'session-runner' })
+        }
 
         break
       }
@@ -2430,6 +2532,12 @@ export class SessionRunner {
     const session = this.findSessionByClaudeId(claudeSessionId)
     if (!session) return undefined
     return { lastClaudeOutputAt: session.lastClaudeOutputAt, lastMessageDeliveryAt: session.lastMessageDeliveryAt }
+  }
+
+  /** Check if a session is in team mode (teammates still active). Used by health monitor. */
+  isTeamActive(claudeSessionId: string): boolean {
+    const session = this.findSessionByClaudeId(claudeSessionId)
+    return session?.teamActive ?? false
   }
 
   /**
