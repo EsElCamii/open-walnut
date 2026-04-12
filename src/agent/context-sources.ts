@@ -30,6 +30,7 @@ const DEFAULT_BUDGETS: Record<ContextSourceId, number> = {
   main_global_memory: 2000,
   main_daily_log: 3000,
   journal_recent: 4000,
+  working_memory: 4000,
 };
 
 // Auto-inferred sources — always loaded when taskId is present
@@ -185,6 +186,14 @@ async function loadJournalRecent(budget: number): Promise<string> {
 
 // ── XML tag names for each source ──
 
+/** Load current working memory (real-time scratchpad). */
+async function loadWorkingMemory(budget: number): Promise<string> {
+  const { getWorkingMemory, isWorkingMemoryEmpty } = await import('../core/working-memory.js');
+  const content = getWorkingMemory();
+  if (!content || isWorkingMemoryEmpty(content)) return '(no working memory yet)';
+  return truncateToTokenBudget(content, budget);
+}
+
 /** Load General agent's global memory (read-only, for non-General console agents). */
 async function loadMainGlobalMemory(budget: number): Promise<string> {
   const { getMemoryFile } = await import('../core/memory-file.js');
@@ -214,6 +223,7 @@ const SOURCE_XML_TAGS: Record<ContextSourceId, string> = {
   main_global_memory: 'main_global_memory',
   main_daily_log: 'main_daily_log',
   journal_recent: 'recent_journal',
+  working_memory: 'working_memory',
 };
 
 // ── Main entry point ──
@@ -323,6 +333,9 @@ export async function loadContextSources(
         break;
       case 'journal_recent':
         promise = loadJournalRecent(budget);
+        break;
+      case 'working_memory':
+        promise = loadWorkingMemory(budget);
         break;
       default:
         continue;

@@ -15,6 +15,7 @@ import type { ChatHistoryStore, ChatEntry, DisplayMessage } from './types.js';
 import { CHAT_HISTORY_FILE, chatHistoryFile } from '../constants.js';
 import { readJsonFile, writeJsonFile } from '../utils/fs.js';
 import { estimateMessagesTokens, estimateFullPayload, compactDailyLog, formatDateKey } from './daily-log.js';
+import { getWorkingMemory, isWorkingMemoryEmpty, truncateWorkingMemoryForCompact, snapshotWorkingMemory } from './working-memory.js';
 import { log } from '../logging/index.js';
 import fsp from 'node:fs/promises';
 import { compressForApi, MAX_BASE64_BYTES } from '../utils/image-compress.js';
@@ -1068,14 +1069,25 @@ export interface CompactionResult {
  */
 export const MEMORY_FLUSH_MESSAGE = `Pre-compaction memory flush.
 
-The conversation is about to be compacted. Persist important knowledge using the \`memory\` tool:
+Persist knowledge using the \`memory\` tool. Write as a butler's journal —
+record what matters for RECALL, not for git log.
 
-1. Daily log: Write a concise summary of what was discussed and accomplished. Include the current time. Keep it brief — max 500 characters. Bullet points are fine. Capture key outcomes, decisions, and next steps.
-2. Project memory: Update relevant project memories with decisions and technical details.
-3. Global memory: Update with any new user preferences or broadly-applicable facts.
+## Daily log — what to write (append, max 800 chars)
 
-Focus on knowledge that would be LOST if only a summary remained. Don't repeat
-what's already in memory. Keep each write concise. If nothing new to store, just say "Nothing to persist."`;
+- **User requests**: their words, not paraphrased. Task names + IDs, not commits
+- **Decisions & why**: important choices and reasoning
+- **Struggles**: what blocked, how resolved, root causes, user corrections
+- **Events**: personal matters, noteworthy non-task events, new patterns
+- **Open threads**: unresolved questions, pending items
+
+DO NOT: commit SHAs, file line counts, bundle sizes, deploy status tables,
+implementation details (those → project memory).
+
+Think: "What would I need to recall 2 weeks from now?"
+
+## Project memory — update with technical decisions
+## Global memory — update with any new user preferences
+If nothing new → "Nothing to persist."`;
 
 /**
  * Minimum number of AI entries required before running memory flush.
@@ -1213,9 +1225,21 @@ export async function compact(
     });
   }
 
+  // ── Try working memory as compaction summary (saves an LLM call) ──
+  const workingMemoryContent = getWorkingMemory();
+  const useWorkingMemory = workingMemoryContent != null && !isWorkingMemoryEmpty(workingMemoryContent);
+
+  if (useWorkingMemory) {
+    log.agent.info('compaction: using working memory as summary (skipping summarizer)');
+    // Snapshot working memory to compaction archive
+    snapshotWorkingMemory();
+  }
+
   const [summary] = await Promise.all([
-    // Summarizer: passes full history as MessageParam[] for cache reuse
-    summarizer(instruction, aiMsgs),
+    // Summarizer: skip if working memory is available
+    useWorkingMemory
+      ? Promise.resolve(truncateWorkingMemoryForCompact(workingMemoryContent))
+      : summarizer(instruction, aiMsgs),
     // Memory flusher: runs in parallel if eligible, errors don't block summarizer
     shouldFlush
       ? memoryFlusher(aiMsgs)

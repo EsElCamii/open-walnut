@@ -28,6 +28,11 @@ import { validateAgentId } from '../../constants.js'
 import { enqueueAgentTurn } from '../agent-turn-queue.js'
 import { triggerBackgroundCompaction } from '../background-compaction.js'
 import {
+  shouldUpdateWorkingMemory,
+  executeWorkingMemoryUpdate,
+  trackToolCall as trackWmToolCall,
+} from '../../agent/working-memory-updater.js'
+import {
   hasPendingQuestion,
   submitTextAnswer,
   submitAnswers,
@@ -831,6 +836,7 @@ export function registerChatRpc(): void {
           },
           onToolCall: (toolName, input, toolUseId) => {
             toolsUsedInTurn.add(toolName)
+            trackWmToolCall()
             broadcastEvent(EventNames.AGENT_TOOL_CALL, { toolName, input, toolUseId, agentId })
           },
           onToolResult: (toolName, result, toolUseId) => {
@@ -957,6 +963,22 @@ export function registerChatRpc(): void {
           autoAppendConversationLog(taskContext.id, message, result.response, [...toolsUsedInTurn]).catch((err) => {
             log.web.warn('autoAppendConversationLog failed', { taskId: taskContext.id, error: err instanceof Error ? err.message : String(err) })
           })
+        }
+
+        // Trigger working memory update if thresholds are met (fire-and-forget).
+        // Uses the token breakdown from the agent loop to check triggers.
+        if (result.tokenBreakdown && agentId === 'general') {
+          const currentTokens = result.tokenBreakdown.total
+          if (shouldUpdateWorkingMemory(currentTokens)) {
+            executeWorkingMemoryUpdate(
+              async (prompt) => {
+                // TODO: Full forked agent implementation requires isolated agent turn infrastructure.
+                // For now, log the trigger — the prompt is ready for when forked turns are available.
+                log.agent.info('Working memory update triggered (forked execution pending)', { tokens: currentTokens })
+              },
+              currentTokens,
+            ).catch(() => { /* non-critical */ })
+          }
         }
 
         // Trigger background compaction outside the turn queue.

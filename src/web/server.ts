@@ -111,6 +111,7 @@ let sessionReaper: SessionReaper | null = null
 let heartbeatHandle: HeartbeatRunnerHandle | null = null
 let recordingReaperHandle: { stop: () => void } | null = null
 let memoryWatcherHandle: { stop: () => void } | null = null
+let qmdWatcherHandle: { stop: () => void } | null = null
 let gitAutoCommitHandle: { stop: () => void; health: GitAutoCommitHealth } | null = null
 
 // ── Git auto-commit health state ──
@@ -631,6 +632,16 @@ export async function startServer(options: ServerOptions = {}): Promise<HttpServ
   // -- Prune old usage records --
   try { usageTracker.prune() } catch (e) { log.usage.warn('usage prune failed', { error: String(e) }) }
 
+  // -- Ensure working memory file exists --
+  try {
+    const { ensureWorkingMemory } = await import('../core/working-memory.js')
+    ensureWorkingMemory()
+  } catch (err) {
+    log.memory.warn('working memory init failed', {
+      error: err instanceof Error ? err.message : String(err),
+    })
+  }
+
   // -- Start memory file watcher (FTS5 reindex + chunk embedding on .md changes) --
   try {
     const { startMemoryWatcher } = await import('../core/memory-watcher.js')
@@ -641,6 +652,24 @@ export async function startServer(options: ServerOptions = {}): Promise<HttpServ
     log.memory.info('memory watcher started')
   } catch (err) {
     log.memory.warn('memory watcher startup failed', {
+      error: err instanceof Error ? err.message : String(err),
+    })
+  }
+
+  // -- QMD hybrid search stores (runs alongside legacy watcher) --
+  try {
+    const { initQmdStores } = await import('../core/qmd-store.js')
+    const { startQmdWatcher } = await import('../core/qmd-watcher.js')
+    // Non-blocking: init stores in background (update + embed can be slow)
+    initQmdStores().catch(err => {
+      log.memory.warn('QMD store init failed', {
+        error: err instanceof Error ? err.message : String(err),
+      })
+    })
+    qmdWatcherHandle = startQmdWatcher()
+    log.memory.info('QMD watcher started')
+  } catch (err) {
+    log.memory.warn('QMD startup failed', {
       error: err instanceof Error ? err.message : String(err),
     })
   }
@@ -2018,6 +2047,14 @@ export async function stopServer(): Promise<void> {
     memoryWatcherHandle.stop()
     memoryWatcherHandle = null
   }
+  if (qmdWatcherHandle) {
+    qmdWatcherHandle.stop()
+    qmdWatcherHandle = null
+  }
+  // Close QMD stores (non-blocking — best-effort)
+  import('../core/qmd-store.js')
+    .then(({ closeQmdStores }) => closeQmdStores())
+    .catch(() => {})
   if (gitAutoCommitHandle) {
     gitAutoCommitHandle.stop()
     gitAutoCommitHandle = null

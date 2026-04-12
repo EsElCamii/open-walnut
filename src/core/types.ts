@@ -99,7 +99,8 @@ export type ContextSourceId =
   | 'task_details' | 'project_memory' | 'project_task_list'
   | 'global_memory' | 'daily_log' | 'session_history' | 'conversation_log'
   | 'main_global_memory' | 'main_daily_log'
-  | 'journal_recent';
+  | 'journal_recent'
+  | 'working_memory';
 
 export interface ContextSourceConfig {
   id: ContextSourceId;
