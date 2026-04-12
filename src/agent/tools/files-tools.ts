@@ -145,6 +145,8 @@ IMPORTANT: You must read a file before editing or writing to it. The system trac
 Special sources (use these URIs instead of raw file paths):
   notes/global           — The Notes panel on the home page: user's personal scratchpad
                            with todos, checklists, task-refs, and links (WYSIWYG markdown).
+  notes/instructions     — Vault instructions injected into all Claude Code sessions.
+                           Reads AGENTS.md. Writes sync to both AGENTS.md + CLAUDE.md.
   notes/{name}           — Named note document (e.g. notes/recipes, notes/reading-list).
   memory/global          — Agent's curated knowledge & user preferences (MEMORY.md).
                            Updated by the agent as it learns across sessions.
@@ -256,7 +258,7 @@ For memory sources: append auto-prepends timestamp heading.
 content_hash (from files_read) required for overwrite on memory/notes sources — prevents stale writes.
 NOTE: memory/main/* sources are READ-ONLY and cannot be written to.
 
-Sources: notes/global, notes/{name}, memory/global, memory/project/{path},
+Sources: notes/global, notes/instructions, notes/{name}, memory/global, memory/project/{path},
 memory/daily[/YYYY-MM-DD], memory/repo/{slug}, repos/{name}, /absolute/path — see files_read for full descriptions.`,
   input_schema: {
     type: 'object',
@@ -365,7 +367,7 @@ IMPORTANT: For file sources (/absolute/path), you MUST read the file first with 
 
 content_hash (from files_read) required for memory/notes sources — prevents stale edits.
 
-Sources: notes/global, notes/{name}, memory/global, memory/project/{path},
+Sources: notes/global, notes/instructions, notes/{name}, memory/global, memory/project/{path},
 memory/daily[/YYYY-MM-DD], memory/repo/{slug}, repos/{name}, /absolute/path — see files_read for full descriptions.`,
   input_schema: {
     type: 'object',

@@ -68,6 +68,8 @@ export function createMockConstants(prefix = 'walnut-test') {
     FREQUENT_DIRS_FILE: path.join(tmpBase, 'frequent-directories.json'),
     NOTES_DIR: path.join(tmpBase, 'notes'),
     GLOBAL_NOTES_FILE: path.join(tmpBase, 'notes', 'global-notes.md'),
+    NOTES_AGENTS_FILE: path.join(tmpBase, 'notes', 'AGENTS.md'),
+    NOTES_CLAUDE_FILE: path.join(tmpBase, 'notes', 'CLAUDE.md'),
     REPOSITORIES_DIR: path.join(tmpBase, 'repositories'),
     REPOS_MEMORY_DIR: path.join(tmpBase, 'memory', 'repos'),
     TIMELINE_DIR: path.join(tmpBase, 'timeline'),

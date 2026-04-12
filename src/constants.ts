@@ -190,6 +190,10 @@ export const FREQUENT_DIRS_FILE = path.join(WALNUT_HOME, 'frequent-directories.j
 export const NOTES_DIR = path.join(WALNUT_HOME, 'notes');
 /** Reserved filename inside NOTES_DIR — consumers listing NOTES_DIR must exclude it */
 export const GLOBAL_NOTES_FILE = path.join(NOTES_DIR, 'global-notes.md');
+/** Primary instructions file — Walnut injects into all session contexts */
+export const NOTES_AGENTS_FILE = path.join(NOTES_DIR, 'AGENTS.md');
+/** Mirror of AGENTS.md — Claude Code discovers this natively when CWD is NOTES_DIR */
+export const NOTES_CLAUDE_FILE = path.join(NOTES_DIR, 'CLAUDE.md');
 export const REPOSITORIES_DIR = path.join(WALNUT_HOME, 'repositories');
 export const REPOS_MEMORY_DIR = path.join(MEMORY_DIR, 'repos');
 export const TIMELINE_DIR = path.join(WALNUT_HOME, 'timeline');

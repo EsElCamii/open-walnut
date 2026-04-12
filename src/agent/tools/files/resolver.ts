@@ -15,6 +15,7 @@ import {
   DAILY_DIR,
   GLOBAL_NOTES_FILE,
   NOTES_DIR,
+  NOTES_AGENTS_FILE,
   REPOSITORIES_DIR,
   agentMemoryDir,
   agentDailyDir,
@@ -186,6 +187,16 @@ export function resolveSource(source: string, agentId?: string): ResolvedSource 
     };
   }
 
+  // notes/instructions → AGENTS.md (primary). Writes/edits also mirror to CLAUDE.md — see NotesHandler.
+  if (source === 'notes/instructions') {
+    return {
+      type: 'notes',
+      filePath: NOTES_AGENTS_FILE,
+      source,
+      variant: 'instructions',
+    };
+  }
+
   if (source === 'notes') {
     // List mode
     return {
@@ -235,6 +246,6 @@ export function resolveSource(source: string, agentId?: string): ResolvedSource 
   }
 
   throw new Error(
-    `Invalid source "${source}". Expected: /absolute/path, memory/global, memory/project/{path}, memory/daily[/YYYY-MM-DD], memory/main/global, memory/main/daily[/YYYY-MM-DD], memory/repo[/{slug}], notes/global, notes/{name}, repos/, or repos/{name}.`,
+    `Invalid source "${source}". Expected: /absolute/path, memory/global, memory/project/{path}, memory/daily[/YYYY-MM-DD], memory/main/global, memory/main/daily[/YYYY-MM-DD], memory/repo[/{slug}], notes/global, notes/instructions, notes/{name}, repos/, or repos/{name}.`,
   );
 }

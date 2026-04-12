@@ -1,13 +1,14 @@
 /**
- * NotesHandler — handles notes/global and notes/{name} sources.
+ * NotesHandler — handles notes/global, notes/instructions, and notes/{name} sources.
  *
- * notes/global → GLOBAL_NOTES_FILE (~/.open-walnut/notes/global-notes.md)
- * notes/{name} → ~/.open-walnut/notes/{name}.md
+ * notes/global        → GLOBAL_NOTES_FILE (~/.open-walnut/notes/global-notes.md)
+ * notes/instructions  → AGENTS.md (read) + CLAUDE.md mirror (write/edit)
+ * notes/{name}        → ~/.open-walnut/notes/{name}.md
  */
 import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
-import { GLOBAL_NOTES_FILE, NOTES_DIR } from '../../../constants.js';
+import { GLOBAL_NOTES_FILE, NOTES_DIR, NOTES_CLAUDE_FILE, NOTES_AGENTS_FILE } from '../../../constants.js';
 import {
   readFileWithMeta,
   writeFileChecked,
@@ -35,6 +36,10 @@ export const notesHandler: FileHandler = {
       await fsp.mkdir(path.dirname(resolved.filePath), { recursive: true });
       await fsp.appendFile(resolved.filePath, content, 'utf-8');
       const updated = await fsp.readFile(resolved.filePath, 'utf-8');
+
+      // Mirror to CLAUDE.md for instructions variant
+      if (resolved.variant === 'instructions') await mirrorToClaude(updated);
+
       return {
         status: 'appended',
         content_hash: computeContentHash(updated),
@@ -58,6 +63,10 @@ export const notesHandler: FileHandler = {
     const result = await writeFileChecked(resolved.filePath, content, {
       expectedHash: opts?.contentHash,
     });
+
+    // Mirror to CLAUDE.md for instructions variant
+    if (resolved.variant === 'instructions') await mirrorToClaude(content);
+
     return { status: opts?.contentHash ? 'updated' : 'created', content_hash: result.contentHash };
   },
 
@@ -73,6 +82,26 @@ export const notesHandler: FileHandler = {
       expectedHash: opts.contentHash,
       replaceAll: opts?.replaceAll,
     });
+
+    // Mirror edit to CLAUDE.md for instructions variant (best-effort)
+    if (resolved.variant === 'instructions') {
+      try {
+        const claudeContent = await fsp.readFile(NOTES_CLAUDE_FILE, 'utf-8');
+        if (claudeContent.includes(oldContent)) {
+          const updated = opts?.replaceAll
+            ? claudeContent.split(oldContent).join(newContent)
+            : claudeContent.replace(oldContent, newContent);
+          await fsp.writeFile(NOTES_CLAUDE_FILE, updated, 'utf-8');
+        } else {
+          // CLAUDE.md diverged — re-sync from AGENTS.md
+          const agentsContent = await fsp.readFile(resolved.filePath, 'utf-8');
+          await fsp.writeFile(NOTES_CLAUDE_FILE, agentsContent, 'utf-8');
+        }
+      } catch {
+        // Best-effort: CLAUDE.md may not exist yet
+      }
+    }
+
     return {
       status: newContent ? 'updated' : 'deleted',
       replacements: result.replacements,
@@ -97,12 +126,27 @@ export const notesHandler: FileHandler = {
       // global-notes.md doesn't exist yet
     }
 
+    // Include instructions entry if AGENTS.md exists
+    try {
+      const agentsStat = fs.statSync(NOTES_AGENTS_FILE);
+      items.push({
+        source: 'notes/instructions',
+        name: 'Instructions',
+        description: 'Agent instructions injected into all sessions (dual-writes to AGENTS.md + CLAUDE.md)',
+        size: agentsStat.size,
+        modified: agentsStat.mtime.toISOString(),
+      });
+    } catch {
+      // AGENTS.md doesn't exist yet
+    }
+
     // List named notes from NOTES_DIR
     try {
-      // Exclude global-notes.md — it's listed as the synthetic "notes/global" entry above
+      // Exclude synthetic entries: global-notes.md is "notes/global", AGENTS.md + CLAUDE.md are "notes/instructions"
       const globalBase = path.basename(GLOBAL_NOTES_FILE);
+      const excluded = new Set([globalBase, 'AGENTS.md', 'CLAUDE.md']);
       const files = fs.readdirSync(NOTES_DIR)
-        .filter((f) => f.endsWith('.md') && f !== globalBase)
+        .filter((f) => f.endsWith('.md') && !excluded.has(f))
         .sort();
       for (const f of files) {
         const name = f.replace('.md', '');
@@ -121,3 +165,17 @@ export const notesHandler: FileHandler = {
     return items;
   },
 };
+
+/**
+ * Mirror content to CLAUDE.md (best-effort).
+ * CLAUDE.md is the Claude Code native project instructions file, kept in sync
+ * so sessions with CWD=notes/ automatically pick up instructions.
+ */
+async function mirrorToClaude(content: string): Promise<void> {
+  try {
+    await fsp.mkdir(path.dirname(NOTES_CLAUDE_FILE), { recursive: true });
+    await fsp.writeFile(NOTES_CLAUDE_FILE, content, 'utf-8');
+  } catch {
+    // Best-effort — AGENTS.md is the source of truth
+  }
+}
