@@ -22,6 +22,8 @@ export interface ResolvedSource {
   variant?: string;
   /** Extra parsed info (e.g. project_path, date). */
   meta?: Record<string, string>;
+  /** Agent ID that owns this source (undefined or 'general' = General agent). */
+  agentId?: string;
 }
 
 // ── Read result ──

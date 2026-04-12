@@ -15,6 +15,10 @@ export function SessionsSection({ config, onSave }: Props) {
   const [idleTimeout, setIdleTimeout] = useState<number | undefined>(config.session?.idle_timeout_minutes ?? 30);
   const [maxIdle, setMaxIdle] = useState<number | undefined>(config.session?.max_idle);
   const [sessionLimits, setSessionLimits] = useState<Record<string, string | number>>(config.session_limits ?? {});
+  const [permissionPrompt, setPermissionPrompt] = useState(config.session?.permission_prompt ?? true);
+  const ALL_MODES = ['default', 'bypass', 'plan', 'accept'] as const;
+  const DEFAULT_MODES = ['bypass', 'plan'];
+  const [enabledModes, setEnabledModes] = useState<string[]>(config.session?.enabled_modes ?? DEFAULT_MODES);
   const [sdkEnabled, setSdkEnabled] = useState(config.session_server?.enabled ?? false);
   const [sdkPort, setSdkPort] = useState<number | undefined>(config.session_server?.port ?? 7890);
 
@@ -23,6 +27,8 @@ export function SessionsSection({ config, onSave }: Props) {
     setIdleTimeout(config.session?.idle_timeout_minutes ?? 30);
     setMaxIdle(config.session?.max_idle);
     setSessionLimits(config.session_limits ?? {});
+    setPermissionPrompt(config.session?.permission_prompt ?? true);
+    setEnabledModes(config.session?.enabled_modes ?? ['bypass', 'plan']);
     setSdkEnabled(config.session_server?.enabled ?? false);
     setSdkPort(config.session_server?.port ?? 7890);
   }, [config]);
@@ -39,6 +45,8 @@ export function SessionsSection({ config, onSave }: Props) {
       session: {
         idle_timeout_minutes: idleTimeout,
         max_idle: maxIdle,
+        permission_prompt: permissionPrompt,
+        enabled_modes: enabledModes,
       },
       session_limits: limits,
       session_server: {
@@ -99,6 +107,50 @@ export function SessionsSection({ config, onSave }: Props) {
           />
         </div>
       </div>
+
+      <div className="form-group">
+        <ToggleSwitch
+          id="permission-prompt"
+          checked={permissionPrompt}
+          onChange={setPermissionPrompt}
+          label="Permission Prompt Interception"
+        />
+        <p className="text-sm text-muted" style={{ marginTop: 2 }}>
+          Intercept sensitive-file and permission prompts from Claude Code.
+          In bypass mode, requests are auto-approved. In other modes, prompts are forwarded to the UI.
+        </p>
+      </div>
+
+      <div className="form-group">
+        <label>Enabled Session Modes</label>
+        <p className="text-sm text-muted" style={{ margin: '-4px 0 6px' }}>
+          Which modes appear in the session mode toggle cycle. At least one must be selected.
+        </p>
+        <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap' }}>
+          {ALL_MODES.map(mode => {
+            const icons: Record<string, string> = { default: '\u2699\uFE0F', bypass: '\u26A1', plan: '\uD83D\uDCCB', accept: '\u2705' };
+            const labels: Record<string, string> = { default: 'Default', bypass: 'Bypass', plan: 'Plan', accept: 'Accept' };
+            const checked = enabledModes.includes(mode);
+            return (
+              <label key={mode} style={{ display: 'flex', alignItems: 'center', gap: 4, cursor: 'pointer', fontSize: 13 }}>
+                <input
+                  type="checkbox"
+                  checked={checked}
+                  onChange={() => {
+                    if (checked && enabledModes.length <= 1) return; // keep at least one
+                    setEnabledModes(prev =>
+                      checked ? prev.filter(m => m !== mode) : [...prev, mode]
+                    );
+                  }}
+                />
+                {icons[mode]} {labels[mode]}
+              </label>
+            );
+          })}
+        </div>
+      </div>
+
+      <div className="settings-divider" />
 
       <div className="form-group">
         <label>Session Limits (per host)</label>

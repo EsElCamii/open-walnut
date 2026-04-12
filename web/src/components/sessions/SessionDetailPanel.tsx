@@ -18,6 +18,7 @@ import { PlanContentContext } from '@/contexts/PlanContentContext';
 import type { SessionRecord, TaskPhase } from '@/types/session';
 import { useEnabledModes } from '@/hooks/useEnabledModes';
 import { timeAgo } from '@/utils/time';
+import { wsClient } from '@/api/ws';
 import { ICON_CLIPBOARD, ICON_LIGHTNING, ICON_WARNING } from '@/components/common/Icons';
 import { renderMarkdownWithRefs } from '@/utils/markdown';
 
@@ -46,7 +47,7 @@ function PlanPopoverContent({ content, cwd }: { content: string; cwd?: string })
   const html = useMemo(() => renderMarkdownWithRefs(content, cwd), [content, cwd]);
   return (
     <div
-      className="session-plan-popover-content markdown-body"
+      className="markdown-body"
       dangerouslySetInnerHTML={{ __html: html }}
     />
   );
@@ -166,19 +167,6 @@ export function SessionDetailPanel({ session, taskTitle, summary, onTitleChanged
   const [planPopoverOpen, setPlanPopoverOpen] = useState(false);
   const [notesOpen, setNotesOpen] = useState(false);
   const [messagesOpen, setMessagesOpen] = useState(false);
-  const planPopoverRef = useRef<HTMLDivElement>(null);
-
-  // Close plan popover on outside click
-  useEffect(() => {
-    if (!planPopoverOpen) return;
-    const handleClick = (e: MouseEvent) => {
-      if (planPopoverRef.current && !planPopoverRef.current.contains(e.target as Node)) {
-        setPlanPopoverOpen(false);
-      }
-    };
-    document.addEventListener('mousedown', handleClick);
-    return () => document.removeEventListener('mousedown', handleClick);
-  }, [planPopoverOpen]);
 
   // Fetch messages for the UserMessagesSummary
   const sessionId_ = session?.claudeSessionId || '';
@@ -191,6 +179,30 @@ export function SessionDetailPanel({ session, taskTitle, summary, onTitleChanged
   // so without this the Plan chip would be hidden during active planning.
   const shouldFetchPlan = hasPlan || isFromPlan || session?.mode === 'plan';
   const { plan, loading: planLoading, refresh: planRefresh } = useSessionPlan(sessionId_ || undefined, shouldFetchPlan);
+
+  // Auto-refresh plan content when modal opens
+  useEffect(() => {
+    if (planPopoverOpen && shouldFetchPlan) {
+      planRefresh();
+    }
+  }, [planPopoverOpen, shouldFetchPlan, planRefresh]);
+
+  // Close plan modal on Escape
+  useEffect(() => {
+    if (!planPopoverOpen) return;
+    const handleKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setPlanPopoverOpen(false);
+    };
+    document.addEventListener('keydown', handleKey);
+    return () => document.removeEventListener('keydown', handleKey);
+  }, [planPopoverOpen]);
+
+  // Listen for PlanCard expand → open the same plan modal
+  useEffect(() => {
+    const handler = () => setPlanPopoverOpen(true);
+    window.addEventListener('open-plan-modal', handler);
+    return () => window.removeEventListener('open-plan-modal', handler);
+  }, []);
 
   // Real-time model + context window usage
   const liveUsage = useSessionUsage(sessionId_ || null);
@@ -444,7 +456,7 @@ export function SessionDetailPanel({ session, taskTitle, summary, onTitleChanged
                 {restartBusy ? 'Restarting...' : 'Restart'}
               </button>
             )}
-            {ps === 'stopped' && !session.archived && (
+            {(ps === 'stopped' || ps === 'error') && !session.archived && (
               <button
                 className="btn btn-sm"
                 style={{ fontSize: '0.7rem', padding: '1px 6px', opacity: 0.7 }}
@@ -469,7 +481,7 @@ export function SessionDetailPanel({ session, taskTitle, summary, onTitleChanged
           {/* Action chips row: Plan / Notes / Messages */}
           <div className="session-meta-row-2">
             {(shouldFetchPlan || showExecuteButtons) && (
-              <div className="session-plan-popover-wrapper" ref={planPopoverRef}>
+              <>
                 <button
                   className={`session-action-chip${planPopoverOpen ? ' session-action-chip-active' : ''}`}
                   onClick={() => setPlanPopoverOpen(o => !o)}
@@ -478,71 +490,78 @@ export function SessionDetailPanel({ session, taskTitle, summary, onTitleChanged
                   Plan {planPopoverOpen ? '\u25B4' : '\u25BE'}
                 </button>
                 {planPopoverOpen && (
-                  <div className="session-plan-popover" onMouseDown={e => e.stopPropagation()}>
-                    {plan && (
-                      <>
-                        <div className="session-plan-popover-file">
-                          <code title={plan.planFile || ''}>{plan.planFile?.split('/').pop() ?? 'plan.md'}</code>
+                  <div className="plan-popup-overlay" onClick={() => setPlanPopoverOpen(false)}>
+                    <div className="plan-popup-container" onClick={e => e.stopPropagation()}>
+                      <div className="plan-popup-header">
+                        <span className="plan-popup-title">
+                          {plan?.planFile?.split('/').pop() ?? 'Plan'}
+                          {isFromPlan && plan?.sourceSessionId && (
+                            <span style={{ marginLeft: '8px', fontSize: '11px', fontWeight: 400, color: 'var(--fg-muted)' }}>
+                              from{' '}
+                              <a
+                                href={`/sessions?id=${plan.sourceSessionId}`}
+                                style={{ color: 'var(--accent)' }}
+                                onClick={(e) => { e.preventDefault(); navigate(`/sessions?id=${plan.sourceSessionId}`); setPlanPopoverOpen(false); }}
+                              >
+                                {plan.sourceSessionId.slice(0, 12)}...
+                              </a>
+                            </span>
+                          )}
+                        </span>
+                        <div className="plan-popup-header-actions">
+                          {showExecuteButtons && (
+                            <>
+                              <button className="execute-plan-btn" onClick={handleExecuteContinue} disabled={executing}>
+                                {executing ? 'Starting\u2026' : '\u25B6 Execute'}
+                              </button>
+                              <button className="execute-plan-btn-secondary" onClick={handleClearContextExecute} disabled={executing}>
+                                Clear Context & Execute
+                              </button>
+                            </>
+                          )}
+                          {executeStarted && <span style={{ fontSize: '11px', color: '#0d9488' }}>Started</span>}
+                          {executeError && <span style={{ fontSize: '11px', color: 'var(--error)' }}>{executeError}</span>}
                           <button
-                            className="task-action-btn plan-preview-refresh"
+                            className="plan-preview-refresh"
                             onClick={async (e) => { e.stopPropagation(); await planRefresh(); }}
                             title="Refresh plan content"
-                            style={{ marginLeft: 'auto' }}
                           >
                             <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round">
                               <path d="M1.5 8a6.5 6.5 0 0111.3-4.4"/><polyline points="13 1 13 4.5 9.5 4.5"/>
                               <path d="M14.5 8a6.5 6.5 0 01-11.3 4.4"/><polyline points="3 15 3 11.5 6.5 11.5"/>
                             </svg>
+                            {' '}Refresh
                           </button>
                         </div>
-                        {isFromPlan && plan.sourceSessionId && (
-                          <div className="session-plan-popover-source">
-                            from session{' '}
-                            <a
-                              href={`/sessions?id=${plan.sourceSessionId}`}
-                              onClick={(e) => { e.preventDefault(); navigate(`/sessions?id=${plan.sourceSessionId}`); setPlanPopoverOpen(false); }}
-                            >
-                              {plan.sourceSessionId.slice(0, 12)}...
-                            </a>
-                          </div>
+                        <button className="plan-popup-close" onClick={() => setPlanPopoverOpen(false)} aria-label="Close">&times;</button>
+                      </div>
+                      <div className="plan-popup-body">
+                        {planLoading && !plan && (
+                          <div style={{ fontSize: '12px', color: 'var(--fg-muted)', padding: '20px 0', textAlign: 'center' }}>Loading plan...</div>
                         )}
-                        {plan.content && (
+                        {plan?.content && (
                           <PlanPopoverContent content={plan.content} cwd={session?.cwd} />
                         )}
-                      </>
-                    )}
-                    {planLoading && !plan && (
-                      <div style={{ fontSize: '11px', color: 'var(--fg-muted)' }}>Loading plan...</div>
-                    )}
-                    {showExecuteButtons && (
-                      <div className="session-plan-popover-actions">
-                        <button
-                          className="execute-plan-btn"
-                          onClick={handleExecuteContinue}
-                          disabled={executing}
-                        >
-                          {executing ? 'Starting\u2026' : '\u25B6 Execute'}
-                          <span className="execute-plan-btn-desc">Resume with full permissions</span>
-                        </button>
-                        <button
-                          className="execute-plan-btn-secondary"
-                          onClick={handleClearContextExecute}
-                          disabled={executing}
-                        >
-                          Clear Context & Execute
-                          <span className="execute-plan-btn-desc">Fresh session with plan injected</span>
-                        </button>
                       </div>
-                    )}
-                    {executeStarted && (
-                      <div style={{ fontSize: '11px', color: '#0d9488' }}>Execution started.</div>
-                    )}
-                    {executeError && (
-                      <div style={{ fontSize: '11px', color: 'var(--error)' }}>{executeError}</div>
-                    )}
+                      <div className="plan-popup-input">
+                        <input
+                          className="plan-popup-input-field"
+                          placeholder="Send a message while viewing plan..."
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
+                              const val = (e.target as HTMLInputElement).value.trim();
+                              if (val) {
+                                wsClient.sendRpc('session:send', { sessionId, message: val }).catch(() => {});
+                                (e.target as HTMLInputElement).value = '';
+                              }
+                            }
+                          }}
+                        />
+                      </div>
+                    </div>
                   </div>
                 )}
-              </div>
+              </>
             )}
             <button
               className={`session-action-chip${notesOpen ? ' session-action-chip-active' : ''}`}

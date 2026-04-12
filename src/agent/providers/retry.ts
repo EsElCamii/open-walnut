@@ -4,7 +4,7 @@
  * Aggressive retry on 429 (rate limit) and 529/503 (overloaded/unavailable).
  * Exponential backoff with jitter. Respects retry-after headers.
  */
-import { RateLimitError, APIError } from '@anthropic-ai/sdk';
+import { RateLimitError, APIError, APIConnectionError } from '@anthropic-ai/sdk';
 import type { ContentBlock, UsageStats } from './types.js';
 
 // Retry config
@@ -16,6 +16,8 @@ export const JITTER_FACTOR = 0.3;
 export function isRetryableError(err: unknown): boolean {
   if (err instanceof RateLimitError) return true;
   if (err instanceof APIError && (err.status === 529 || err.status === 503)) return true;
+  // Network-level errors (DNS failure, TCP reset, etc.) — transient, safe to retry.
+  if (err instanceof APIConnectionError) return true;
   // Stream ended prematurely — transient API/network issue, safe to retry.
   if (err instanceof Error && err.message?.includes('stream ended without producing')) return true;
   return false;

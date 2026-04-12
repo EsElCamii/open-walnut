@@ -528,6 +528,7 @@ const KNOWN_NON_PLUGIN_KEYS = new Set([
   'version', 'user', 'defaults', 'provider', 'agent', 'local',
   'favorites', 'ordering', 'session_server', 'hosts', 'session_limits', 'session',
   'heartbeat', 'tools', 'search', 'git_versioning', 'session_hooks', 'plugins', 'focus_bar',
+  'stt', 'tts', 'api_keys', 'push_tokens',
 ]);
 
 /**

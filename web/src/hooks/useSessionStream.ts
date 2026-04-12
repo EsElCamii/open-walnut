@@ -35,7 +35,15 @@ export interface StreamingSystemBlock {
   detail?: string;
 }
 
-export type StreamingBlock = StreamingTextBlock | StreamingToolCallBlock | StreamingSystemBlock;
+export interface StreamingPermissionBlock {
+  type: 'permission';
+  requestId: string;
+  toolName: string;
+  input?: Record<string, unknown>;
+  reason?: string;
+}
+
+export type StreamingBlock = StreamingTextBlock | StreamingToolCallBlock | StreamingSystemBlock | StreamingPermissionBlock;
 
 interface StreamSnapshot {
   blocks: StreamingBlock[];
@@ -64,6 +72,7 @@ export function useSessionStream(sessionId: string | null): UseSessionStreamRetu
   const [isStreaming, setIsStreaming] = useState(false);
   const streamBuffer = useRef('');
   const activeSessionId = useRef<string | null>(null);
+  const seenPermissionIds = useRef(new Set<string>());
   const resubscribePending = useRef(false);
   const safetyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -322,6 +331,21 @@ export function useSessionStream(sessionId: string | null): UseSessionStreamRetu
     setBlocks((prev) => [...prev, { type: 'system', variant, message, detail } as StreamingSystemBlock]);
   });
 
+  // Handle permission request events (control_request from Claude Code)
+  useEvent('session:permission-request', (data) => {
+    const { sessionId: sid, requestId, toolName, input, reason } = data as {
+      sessionId: string; requestId: string; toolName: string;
+      input?: Record<string, unknown>; reason?: string;
+    };
+    if (!sessionId || sid !== sessionId) return;
+    if (seenPermissionIds.current.has(requestId)) return; // dedup
+    seenPermissionIds.current.add(requestId);
+
+    flushPendingTextRaf();
+    streamBuffer.current = '';
+    setBlocks(prev => [...prev, { type: 'permission', requestId, toolName, input, reason }]);
+  });
+
   // Handle session result (streaming done)
   useEvent('session:result', (data) => {
     const { sessionId: sid } = data as { sessionId: string };
@@ -367,6 +391,7 @@ export function useSessionStream(sessionId: string | null): UseSessionStreamRetu
       return false;
     });
     streamBuffer.current = '';
+    seenPermissionIds.current.clear();
     // Sync-clear global cache so switching away and back doesn't restore stale blocks
     if (activeSessionId.current) clearStreamState(activeSessionId.current);
   }, [flushPendingTextRaf]);

@@ -326,6 +326,13 @@ export class RemoteSessionManager implements SessionManager {
     return true // Optimistic — actual delivery status comes via daemon events
   }
 
+  writeRaw(_json: string): boolean {
+    // TODO: Remote permission-prompt-tool support requires daemon protocol extension.
+    // For now, remote sessions don't support --permission-prompt-tool stdio.
+    log.session.debug('RemoteSessionManager: writeRaw not supported (remote sessions)')
+    return false
+  }
+
   writeSyntheticUserEvent(_message: string, _walnutMessageId: string): void {
     // No-op for remote sessions.
     // Synthetic user events were only written to the local mirror file for chat history replay.

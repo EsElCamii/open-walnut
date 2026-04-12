@@ -24,7 +24,8 @@ import { processAndSaveImages, buildImageAnnotation } from './images.js'
 import type { ImagePayload } from './images.js'
 import { truncateToTokenBudget } from '../../utils/token-truncate.js'
 import { log } from '../../logging/index.js'
-import { enqueueMainAgentTurn } from '../agent-turn-queue.js'
+import { validateAgentId } from '../../constants.js'
+import { enqueueAgentTurn } from '../agent-turn-queue.js'
 import { triggerBackgroundCompaction } from '../background-compaction.js'
 import {
   hasPendingQuestion,
@@ -123,6 +124,8 @@ interface ChatPayload {
   source?: string
   mode?: 'execution' | 'plan'
   planModeFirst?: boolean
+  /** Console agent ID — defaults to 'general'. */
+  agentId?: string
 }
 
 // ── Plan Mode prompt injection ──
@@ -616,8 +619,19 @@ function replaceImagesWithPaths(
   })
 }
 
-/** Per-client abort controllers — keyed by WebSocket so each client can only stop its own turn. */
-const activeAbortControllers = new Map<WebSocket, AbortController>()
+/** Per-client, per-agent abort controllers — keyed by `{wsId}:{agentId}`. */
+const activeAbortControllers = new Map<string, AbortController>()
+/** Auto-incrementing ID for WebSocket clients (used in abort controller keys). */
+let nextWsId = 1
+const wsIdMap = new WeakMap<WebSocket, number>()
+function getWsId(ws: WebSocket): number {
+  let id = wsIdMap.get(ws)
+  if (id === undefined) { id = nextWsId++; wsIdMap.set(ws, id) }
+  return id
+}
+function abortKey(ws: WebSocket, agentId: string): string {
+  return `${getWsId(ws)}:${agentId}`
+}
 
 /**
  * Register the "chat" and "chat:stop" RPC methods on the WebSocket handler.
@@ -625,45 +639,51 @@ const activeAbortControllers = new Map<WebSocket, AbortController>()
  */
 export function registerChatRpc(): void {
   // Register stop method — aborts the calling client's active agent turn
-  registerMethod('chat:stop', async (_payload: unknown, client: WebSocket) => {
-    activeAbortControllers.get(client)?.abort()
-    cancelQuestion() // Also cancel any pending ask_question tool
+  registerMethod('chat:stop', async (payload: unknown, client: WebSocket) => {
+    const { agentId: stopAgentId } = (payload ?? {}) as { agentId?: string }
+    const effectiveAgentId = stopAgentId ? validateAgentId(stopAgentId) : 'general'
+    activeAbortControllers.get(abortKey(client, effectiveAgentId))?.abort()
+    cancelQuestion(effectiveAgentId) // Also cancel any pending ask_question tool
   })
 
   // Answer structured questions from the QuestionCard UI
   registerMethod('chat:answer-question', async (payload: unknown) => {
-    const { answers } = payload as { answers: Record<string, string> }
-    if (!hasPendingQuestion()) {
-      log.web.warn('chat:answer-question received but no pending question')
+    const { answers, agentId: ansAgentId } = payload as { answers: Record<string, string>; agentId?: string }
+    const effectiveAgentId = ansAgentId ? validateAgentId(ansAgentId) : 'general'
+    if (!hasPendingQuestion(effectiveAgentId)) {
+      log.web.warn('chat:answer-question received but no pending question', { agentId: effectiveAgentId })
       return
     }
-    log.web.info('chat:answer-question received', { answerCount: Object.keys(answers).length })
+    log.web.info('chat:answer-question received', { answerCount: Object.keys(answers).length, agentId: effectiveAgentId })
     // Persist user's answers as a UI-only chat entry
     const answerLines = Object.entries(answers).map(([k, v]) => `${k}: ${v}`).join('\n')
-    await chatHistory.addNotification({ role: 'user', content: answerLines })
+    await chatHistory.addNotification({ role: 'user', content: answerLines, agentId: effectiveAgentId })
     broadcastEvent(EventNames.CHAT_HISTORY_UPDATED, {
       entry: { role: 'user', content: answerLines, source: 'question-answer' },
+      agentId: effectiveAgentId,
     })
-    submitAnswers(answers)
+    submitAnswers(answers, effectiveAgentId)
   })
 
   registerMethod('chat', async (payload: unknown, client: WebSocket) => {
-    const { message, taskContext, images, source: payloadSource, mode, planModeFirst } = payload as ChatPayload
+    const { message, taskContext, images, source: payloadSource, mode, planModeFirst, agentId: payloadAgentId } = payload as ChatPayload
+    const agentId = payloadAgentId ? validateAgentId(payloadAgentId) : 'general'
     const chatSource = payloadSource === 'quick-start' ? 'quick-start' as const : undefined
-    log.web.info('chat message received', { taskId: taskContext?.id, messageLength: message.length, imageCount: images?.length ?? 0, source: payloadSource ?? 'chat' })
+    log.web.info('chat message received', { taskId: taskContext?.id, messageLength: message.length, imageCount: images?.length ?? 0, source: payloadSource ?? 'chat', agentId })
 
-    // ── Intercept: if the agent is waiting for a question answer, route here ──
+    // ── Intercept: if this agent is waiting for a question answer, route here ──
     // The agent loop is blocked on ask_question tool. We must NOT enqueue a new
     // turn (that would deadlock — current turn holds the single slot).
     // Instead, resolve the pending question directly.
-    if (hasPendingQuestion()) {
-      log.web.info('routing chat message to pending ask_question', { messageLength: message.length })
+    if (hasPendingQuestion(agentId)) {
+      log.web.info('routing chat message to pending ask_question', { messageLength: message.length, agentId })
       // Persist the user's answer as a UI-only entry so it appears in chat history
-      await chatHistory.addNotification({ role: 'user', content: message })
+      await chatHistory.addNotification({ role: 'user', content: message, agentId })
       broadcastEvent(EventNames.CHAT_HISTORY_UPDATED, {
         entry: { role: 'user', content: message, source: 'question-answer' },
+        agentId,
       })
-      submitTextAnswer(message)
+      submitTextAnswer(message, agentId)
       return
     }
 
@@ -671,9 +691,10 @@ export function registerChatRpc(): void {
     // This avoids holding the queue while doing disk I/O for image uploads.
 
     // Enrich task context with full content + hash dedup; fall back to truncated prefix on error
+    // Task context is General-only — non-General agents are conversational, no task routing
     let contextPrefix = ''
     let contextHashes: Record<string, string> | undefined
-    if (taskContext) {
+    if (taskContext && agentId === 'general') {
       try {
         const enriched = await enrichTaskContext(taskContext)
         contextPrefix = enriched.prefix
@@ -697,22 +718,49 @@ export function registerChatRpc(): void {
       }
     }
 
-    // Enqueue the main agent turn — serialized with cron and triage turns
-    log.web.info('enqueueing agent turn', { taskId: taskContext?.id, source: 'chat' })
-    await enqueueMainAgentTurn('chat', async () => {
+    // Enqueue turn for this agent — per-agent queue, no cross-agent blocking
+    log.web.info('enqueueing agent turn', { taskId: taskContext?.id, source: 'chat', agentId })
+    await enqueueAgentTurn(agentId, 'chat', async () => {
       // Lazy import to avoid loading the agent at server startup
       const { runAgentLoop } = await import('../../agent/loop.js')
 
-      // Create abort controller for this client's turn
+      // Create abort controller for this client + agent combo
       const abortController = new AbortController()
-      activeAbortControllers.set(client, abortController)
+      const aKey = abortKey(client, agentId)
+      activeAbortControllers.set(aKey, abortController)
+
+      // Resolve console agent definition + build system/tools for non-General agents
+      let agentSystem: string | undefined
+      let agentTools: import('../../agent/tools.js').ToolDefinition[] | undefined
+      if (agentId !== 'general') {
+        const { getConsoleAgent } = await import('../../core/agent-registry.js')
+        const { buildSubagentToolSet } = await import('../../agent/subagent-context.js')
+        const { loadContextSources } = await import('../../agent/context-sources.js')
+        const agentDef = await getConsoleAgent(agentId)
+        if (!agentDef) {
+          throw new Error(`Console agent '${agentId}' not found`)
+        }
+        // Build system prompt: agent's own prompt + context sources + date/time
+        const now = new Date()
+        const dateStr = now.toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })
+        const timeStr = now.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' })
+        const contextXml = await loadContextSources(agentDef, {})
+        const sections = [
+          agentDef.system_prompt ?? `You are ${agentDef.name}.`,
+          `\nCurrent date/time: ${dateStr}, ${timeStr}`,
+        ]
+        if (contextXml) sections.push('\n' + contextXml)
+        agentSystem = sections.join('\n')
+        // Build filtered tool set (respects allowed_tools / denied_tools)
+        agentTools = await buildSubagentToolSet(agentDef)
+      }
 
       // Load existing history from disk (inside queue = reads fresh state)
-      const history = await chatHistory.getApiMessages()
+      const history = await chatHistory.getApiMessages(agentId)
       log.agent.info('agent loop starting', { taskId: taskContext?.id, source: 'chat', historyLength: history.length })
 
-      // Drain any pending cron notifications (queued by next-cycle jobs)
-      const pendingCron = drainPendingCronNotifications()
+      // Drain any pending cron notifications (General only — cron is General's domain)
+      const pendingCron = agentId === 'general' ? drainPendingCronNotifications() : []
       let cronPrefix = ''
       if (pendingCron.length > 0) {
         const lines = ['[Pending Cron Notifications — These scheduled jobs fired while you were away. Process them as appropriate.]']
@@ -755,11 +803,11 @@ export function registerChatRpc(): void {
       // Ensures the message survives page refresh during processing (~5ms write).
       // `history` was captured BEFORE this write, so no duplication in the API call. ──
       const turnId = crypto.randomUUID()
-      const userContentForPersist = savedImages.length > 0 && Array.isArray(userContent)
+      const userContentForPersist: string | unknown[] = savedImages.length > 0 && Array.isArray(userContent)
         ? (replaceImagesWithPaths(
             [{ role: 'user', content: userContent } as MessageParam],
             savedImages,
-          )[0] as { content: unknown }).content
+          )[0] as { content: unknown[] }).content
         : userContent
       await chatHistory.addUserMessage(userContentForPersist, {
         displayText: message,
@@ -767,25 +815,26 @@ export function registerChatRpc(): void {
         ...(contextHashes && { contextHashes }),
         ...(taskContext?.id && { taskId: taskContext.id }),
         ...(chatSource && { source: chatSource }),
+        agentId,
       })
 
       try {
         const result = await runAgentLoop(userContent, history, {
           onTextDelta: (delta) => {
-            broadcastEvent(EventNames.AGENT_TEXT_DELTA, { delta })
+            broadcastEvent(EventNames.AGENT_TEXT_DELTA, { delta, agentId })
           },
           onToolActivity: (activity) => {
-            broadcastEvent(EventNames.AGENT_TOOL_ACTIVITY, activity)
+            broadcastEvent(EventNames.AGENT_TOOL_ACTIVITY, { ...activity, agentId })
           },
           onThinking: (text) => {
-            broadcastEvent(EventNames.AGENT_THINKING, { text })
+            broadcastEvent(EventNames.AGENT_THINKING, { text, agentId })
           },
           onToolCall: (toolName, input, toolUseId) => {
             toolsUsedInTurn.add(toolName)
-            broadcastEvent(EventNames.AGENT_TOOL_CALL, { toolName, input, toolUseId })
+            broadcastEvent(EventNames.AGENT_TOOL_CALL, { toolName, input, toolUseId, agentId })
           },
           onToolResult: (toolName, result, toolUseId) => {
-            broadcastEvent(EventNames.AGENT_TOOL_RESULT, { toolName, result, toolUseId })
+            broadcastEvent(EventNames.AGENT_TOOL_RESULT, { toolName, result, toolUseId, agentId })
           },
           onUsage: (usage) => {
             bus.emit('agent:usage', { usage }, ['web-ui'], { source: 'agent' })
@@ -805,9 +854,14 @@ export function registerChatRpc(): void {
         // Note: onText is intentionally not provided — agent:response is sent once
         // at the end of the turn (not per text block) so isStreaming stays true
         // for the full loop duration, keeping the Stop button visible.
-        }, { signal: abortController.signal, source: 'chat' })
+        }, {
+          signal: abortController.signal,
+          source: agentId === 'general' ? 'chat' : `chat:${agentId}`,
+          ...(agentSystem && { system: agentSystem }),
+          ...(agentTools && { tools: agentTools }),
+        })
 
-        activeAbortControllers.delete(client)
+        activeAbortControllers.delete(aKey)
 
         // Handle aborted turn: persist partial response but skip compaction.
         // User message is already on disk (eagerly persisted above).
@@ -839,16 +893,16 @@ export function registerChatRpc(): void {
           }
           if (cleaned.length > 0) {
             const persistMsgs = replaceImagesWithPaths(cleaned, savedImages)
-            await chatHistory.addAIMessages(persistMsgs, { ...(chatSource && { source: chatSource }) })
+            await chatHistory.addAIMessages(persistMsgs, { ...(chatSource && { source: chatSource }), agentId })
           }
           // Even if cleaned is empty, user message is safe on disk ✅
-          // Auto-append to conversation_log for aborted turns
-          if (taskContext?.id) {
+          // Auto-append to conversation_log for aborted turns (General only)
+          if (taskContext?.id && agentId === 'general') {
             autoAppendConversationLog(taskContext.id, message, result.response || '[Aborted]', [...toolsUsedInTurn]).catch((err) => {
               log.web.warn('autoAppendConversationLog failed (aborted)', { taskId: taskContext.id, error: err instanceof Error ? err.message : String(err) })
             })
           }
-          broadcastEvent(EventNames.AGENT_RESPONSE, { text: result.response, aborted: true })
+          broadcastEvent(EventNames.AGENT_RESPONSE, { text: result.response, aborted: true, agentId })
           return
         }
 
@@ -870,6 +924,7 @@ export function registerChatRpc(): void {
         await chatHistory.addAIMessages(persistMsgs, {
           ...(taskContext?.id && { taskId: taskContext.id }),
           ...(chatSource && { source: chatSource }),
+          agentId,
         })
         log.agent.info('agent response persisted', { taskId: taskContext?.id, messageCount: newApiMsgs.length })
 
@@ -880,7 +935,7 @@ export function registerChatRpc(): void {
           const { getConfig } = await import('../../core/config-manager.js')
           const config = await getConfig()
           const contextWindow = getContextWindowSize(config.agent?.main_model)
-          const compacted = !!(await chatHistory.getCompactionSummary())
+          const compacted = !!(await chatHistory.getCompactionSummary(agentId))
           stats = {
             apiMessageCount: result.messages.filter((m: { compacted?: boolean }) => !m.compacted).length,
             estimatedTokens: result.tokenBreakdown.messages,
@@ -894,11 +949,11 @@ export function registerChatRpc(): void {
 
         // Signal turn complete to the client (resets isStreaming).
         // This resolves the RPC immediately — compaction runs separately below.
-        broadcastEvent(EventNames.AGENT_RESPONSE, { text: resolvedText, ...(stats ? { stats } : {}) })
-        log.web.info('chat turn completed', { taskId: taskContext?.id, durationMs: Date.now() - turnStartMs })
+        broadcastEvent(EventNames.AGENT_RESPONSE, { text: resolvedText, ...(stats ? { stats } : {}), agentId })
+        log.web.info('chat turn completed', { taskId: taskContext?.id, durationMs: Date.now() - turnStartMs, agentId })
 
-        // Auto-append to conversation_log if a task was focused
-        if (taskContext?.id) {
+        // Auto-append to conversation_log if a task was focused (General only)
+        if (taskContext?.id && agentId === 'general') {
           autoAppendConversationLog(taskContext.id, message, result.response, [...toolsUsedInTurn]).catch((err) => {
             log.web.warn('autoAppendConversationLog failed', { taskId: taskContext.id, error: err instanceof Error ? err.message : String(err) })
           })
@@ -906,29 +961,31 @@ export function registerChatRpc(): void {
 
         // Trigger background compaction outside the turn queue.
         // This fires and forgets — the user can send more messages immediately.
-        triggerBackgroundCompaction('chat')
+        triggerBackgroundCompaction('chat', { agentId })
       } catch (err) {
-        activeAbortControllers.delete(client)
+        activeAbortControllers.delete(aKey)
         const errMsg = err instanceof Error ? err.message : String(err)
-        log.web.error('chat turn error', { taskId: taskContext?.id, source: 'chat', error: errMsg })
+        log.web.error('chat turn error', { taskId: taskContext?.id, source: 'chat', error: errMsg, agentId })
 
         // User message already on disk (eagerly persisted). Only add synthetic error response.
         await chatHistory.addAIMessages(
           [
             { role: 'assistant', content: [{ type: 'text', text: `[Error: ${errMsg}]` }] },
           ] as MessageParam[],
+          { agentId },
         )
         await chatHistory.addNotification({
           role: 'assistant', content: `Error: ${errMsg}`,
           source: 'agent-error', notification: true,
+          agentId,
         })
 
-        // Auto-append to conversation_log for error turns
-        if (taskContext?.id) {
+        // Auto-append to conversation_log for error turns (General only)
+        if (taskContext?.id && agentId === 'general') {
           autoAppendConversationLog(taskContext.id, message, `[Error: ${errMsg}]`, [...toolsUsedInTurn]).catch(() => { /* non-critical */ })
         }
 
-        broadcastEvent(EventNames.AGENT_ERROR, { error: errMsg })
+        broadcastEvent(EventNames.AGENT_ERROR, { error: errMsg, agentId })
       }
     })
   })

@@ -4,7 +4,7 @@
  */
 import fs from 'node:fs';
 import path from 'node:path';
-import { DAILY_DIR } from '../../../constants.js';
+import { DAILY_DIR, agentDailyDir } from '../../../constants.js';
 import { readFileWithMeta, writeFileChecked, editFileContent } from '../../../utils/file-ops.js';
 import { appendProjectMemory, ensureProjectDir, getAllProjectSummaries } from '../../../core/project-memory.js';
 import { appendRepoMemory, ensureRepoMemoryDir, getAllRepoMemorySummaries } from '../../../core/repo-memory.js';
@@ -16,7 +16,7 @@ export const memoryHandler: FileHandler = {
   async read(resolved, opts) {
     // Ensure file exists for global memory
     if (resolved.variant === 'global') {
-      ensureMemoryFile();
+      ensureMemoryFile(resolved.agentId);
     }
 
     const meta = await readFileWithMeta(resolved.filePath, opts);
@@ -29,6 +29,11 @@ export const memoryHandler: FileHandler = {
   },
 
   async write(resolved, content, opts) {
+    // main-* variants are read-only
+    if (resolved.variant === 'main-global' || resolved.variant === 'main-daily') {
+      throw new Error('Main agent memory/daily is read-only. Write to memory/global or memory/daily instead (your own agent storage).');
+    }
+
     const mode = opts?.mode ?? 'overwrite';
 
     if (mode === 'append') {
@@ -48,7 +53,7 @@ export const memoryHandler: FileHandler = {
       ensureRepoMemoryDir(resolved.meta.slug);
     }
     if (resolved.variant === 'global') {
-      ensureMemoryFile();
+      ensureMemoryFile(resolved.agentId);
     }
 
     const result = await writeFileChecked(resolved.filePath, content, {
@@ -58,6 +63,10 @@ export const memoryHandler: FileHandler = {
   },
 
   async edit(resolved, oldContent, newContent, opts) {
+    // main-* variants are read-only
+    if (resolved.variant === 'main-global' || resolved.variant === 'main-daily') {
+      throw new Error('Main agent memory/daily is read-only. Edit memory/global or memory/daily instead (your own agent storage).');
+    }
     if (!opts?.contentHash) {
       throw new Error('content_hash is required for editing memory sources. Read first with files_read.');
     }
@@ -99,15 +108,16 @@ export const memoryHandler: FileHandler = {
 
     // memory/daily (used from files_list prefix="memory/daily")
     // List all daily log files, most recent first
+    const dailyDir = resolved.agentId ? agentDailyDir(resolved.agentId) : DAILY_DIR;
     const items: FilesListItem[] = [];
     try {
-      const files = fs.readdirSync(DAILY_DIR)
+      const files = fs.readdirSync(dailyDir)
         .filter((f) => f.endsWith('.md') && !f.endsWith('.bak.md'))
         .sort()
         .reverse();
       for (const f of files) {
         const date = f.replace('.md', '');
-        const stat = fs.statSync(path.join(DAILY_DIR, f));
+        const stat = fs.statSync(path.join(dailyDir, f));
         items.push({
           source: `memory/daily/${date}`,
           name: date,
@@ -116,7 +126,7 @@ export const memoryHandler: FileHandler = {
         });
       }
     } catch {
-      // DAILY_DIR doesn't exist yet
+      // dailyDir doesn't exist yet
     }
     return items;
   },
@@ -131,7 +141,7 @@ function handleMemoryAppend(resolved: ResolvedSource, content: string): FilesWri
 
   if (resolved.variant === 'daily') {
     const projectPath = resolved.meta?.projectPath;
-    appendDailyLog(content, 'agent', projectPath);
+    appendDailyLog(content, 'agent', projectPath, resolved.agentId);
     writtenTo.push('daily');
 
     if (projectPath) {
@@ -154,7 +164,7 @@ function handleMemoryAppend(resolved: ResolvedSource, content: string): FilesWri
     }
 
     // Write to both project memory and daily log
-    appendDailyLog(content, 'agent', projectPath);
+    appendDailyLog(content, 'agent', projectPath, resolved.agentId);
     writtenTo.push('daily');
 
     const result = appendProjectMemory(projectPath, content, 'agent');

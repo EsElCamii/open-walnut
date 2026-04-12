@@ -1799,7 +1799,7 @@ defaults (same resolution chain as start_session).`,
           if (!session) return `Error: Session not found: ${sessionId}`;
 
           if (archived) {
-            if (session.process_status !== 'stopped') {
+            if (session.process_status !== 'stopped' && session.process_status !== 'error') {
               return `Error: Stop session before archiving. Session ${sessionId} process is still alive (${session.process_status}).`;
             }
             await updateSessionRecord(sessionId, {

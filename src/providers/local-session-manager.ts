@@ -159,6 +159,10 @@ export class LocalSessionManager implements SessionManager {
     return await this.io.write(message)
   }
 
+  async writeRaw(json: string): Promise<boolean> {
+    return await this.io.writeRaw(json)
+  }
+
   writeSyntheticUserEvent(message: string, walnutMessageId: string): void {
     const outputFile = this._outputFile
     if (!outputFile) return

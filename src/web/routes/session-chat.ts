@@ -14,7 +14,7 @@ import { sessionStreamBuffer } from '../session-stream-buffer.js'
 import { saveImageToDisk } from './images.js'
 import { log } from '../../logging/index.js'
 import { sessionRunner } from '../../providers/claude-code-session.js'
-import { readTeamConfig, findTeammateJsonlPaths, writeToInbox, extractTeamsFromLeadJsonl, findSubagentJsonlByPrompt, getLeadSessionJsonlPath, findAllSubagentJsonlsForAgent } from '../../core/team-reader.js'
+import { readTeamConfig, findTeammateJsonlPaths, writeToInbox, extractTeamsFromLeadJsonl, findSubagentJsonlByPrompt, getLeadSessionJsonlPath, findAllSubagentJsonlsForAgent, readTeamConfigRemote, extractTeamsFromLeadJsonlRemote, readRemoteSubagentJsonls } from '../../core/team-reader.js'
 import { ActiveTabPoller, readFullFile, parseJsonlLines } from '../../providers/subagent-poller.js'
 import { broadcastEvent } from '../ws/handler.js'
 
@@ -217,6 +217,44 @@ export function registerSessionChatRpc(): void {
       return { teamName: null, members: [] }
     }
 
+    const record = await getSessionByClaudeId(sessionId)
+    const isRemote = !!record?.host
+
+    // ── Remote session: read team config/JSONL from remote host ──
+    if (isRemote && record.host) {
+      // Try reading team config from remote
+      const config = await readTeamConfigRemote(teamName, record.host)
+      if (config) {
+        const members = config.members.map(m => ({
+          name: m.name,
+          agentType: m.agentType,
+          model: m.model,
+          isLead: m.agentId === config.leadAgentId,
+          backendType: m.backendType,
+        }))
+        return { teamName, members }
+      }
+
+      // Fallback: config deleted — extract from remote lead JSONL
+      const teams = await extractTeamsFromLeadJsonlRemote(sessionId, record.host)
+      const agents = teams.get(teamName)
+      if (agents && agents.length > 0) {
+        const members = agents.map(a => ({
+          name: a.name,
+          agentType: a.agentType,
+          model: a.model,
+          isLead: false,
+          backendType: undefined,
+        }))
+        log.web.info('team-info remote fallback: extracted from lead JSONL', { teamName, host: record.host, memberCount: members.length })
+        return { teamName, members }
+      }
+
+      return { teamName, members: [] }
+    }
+
+    // ── Local session: read from local filesystem ──
+
     // Try reading team config from disk first
     const config = readTeamConfig(teamName)
     if (config) {
@@ -231,7 +269,6 @@ export function registerSessionChatRpc(): void {
     }
 
     // Fallback: config deleted by TeamDelete — extract from lead session JSONL
-    const record = await getSessionByClaudeId(sessionId)
     if (!record?.cwd) {
       return { teamName, members: [] }
     }
@@ -269,9 +306,60 @@ export function registerSessionChatRpc(): void {
     const agentName = data.agentName
     const teamName = data.teamName
 
-    // Get session record for cwd
+    // Get session record for cwd and host
     const record = await getSessionByClaudeId(sessionId)
     const cwd = record?.cwd
+    const isRemote = !!record?.host
+
+    // ── Remote session: read subagent files via DaemonFileReader ──
+    if (isRemote && record.host && cwd) {
+      // Get team info (for prompt matching)
+      let fullPrompt: string | undefined
+      const remoteConfig = await readTeamConfigRemote(teamName, record.host)
+      if (!remoteConfig) {
+        // Config deleted — extract from lead JSONL
+        const teams = await extractTeamsFromLeadJsonlRemote(sessionId, record.host)
+        const agents = teams.get(teamName)
+        const agent = agents?.find(a => a.name === agentName)
+        fullPrompt = agent?.fullPrompt
+      }
+
+      // Read all subagent files from remote and match
+      const { matched, all } = await readRemoteSubagentJsonls(
+        sessionId, record.host, cwd, agentName, fullPrompt,
+      )
+
+      if (matched.size === 0) {
+        log.web.info('team-agent-subscribe remote: no matched files', {
+          agentName, host: record.host, totalFiles: all.size,
+        })
+        return { events: [], error: 'JSONL file not found for agent on remote host' }
+      }
+
+      // Parse all matched files into events
+      const allEvents: ReturnType<typeof parseJsonlLines> = []
+      for (const [filename, content] of matched) {
+        const lines = content.split('\n').filter(Boolean)
+        const parsed = parseJsonlLines(lines)
+        allEvents.push(...parsed)
+      }
+
+      log.web.info('team-agent-subscribe remote: loaded', {
+        agentName, host: record.host, matchedFiles: matched.size, eventCount: allEvents.length,
+      })
+
+      // Start remote polling for this agent
+      startRemoteTeamAgentPolling(sessionId, agentName, {
+        host: record.host,
+        cwd,
+        fullPrompt,
+        lastEventCount: allEvents.length,
+      })
+
+      return { events: allEvents }
+    }
+
+    // ── Local session: read from local filesystem ──
 
     let jsonlPath: string | null = null
 
@@ -407,6 +495,12 @@ function stopTeamAgentPolling(sessionId: string): void {
     poller.destroy()
     teamPollers.delete(sessionId)
   }
+  // Also stop remote pollers
+  const remoteTimer = remotePollers.get(sessionId)
+  if (remoteTimer) {
+    clearInterval(remoteTimer)
+    remotePollers.delete(sessionId)
+  }
 }
 
 /** Cleanup pollers when session ends. Called from server.ts session:result handler. */
@@ -416,4 +510,80 @@ export function cleanupTeamPoller(sessionId: string): void {
     poller.destroy()
     teamPollers.delete(sessionId)
   }
+  const remoteTimer = remotePollers.get(sessionId)
+  if (remoteTimer) {
+    clearInterval(remoteTimer)
+    remotePollers.delete(sessionId)
+  }
+}
+
+// ── Remote Team Agent Polling ──
+// For remote sessions, periodically re-read subagent files via DaemonFileReader
+// and push new events to the frontend.
+
+const REMOTE_POLL_MS = 5000  // 5s interval for remote (more expensive than local)
+const remotePollers = new Map<string, ReturnType<typeof setInterval>>()
+/** Tracks event count per agent for diffing */
+const remotePollerState = new Map<string, { agentName: string; lastEventCount: number; host: string; cwd: string; fullPrompt?: string }>()
+
+function startRemoteTeamAgentPolling(sessionId: string, agentName: string, opts: {
+  host: string;
+  cwd: string;
+  fullPrompt?: string;
+  lastEventCount: number;
+}): void {
+  // Clear existing timer if switching agents
+  const existing = remotePollers.get(sessionId)
+  if (existing) clearInterval(existing)
+
+  remotePollerState.set(sessionId, {
+    agentName,
+    lastEventCount: opts.lastEventCount,
+    host: opts.host,
+    cwd: opts.cwd,
+    fullPrompt: opts.fullPrompt,
+  })
+
+  const timer = setInterval(async () => {
+    const state = remotePollerState.get(sessionId)
+    if (!state) return
+
+    try {
+      const { matched } = await readRemoteSubagentJsonls(
+        sessionId, state.host, state.cwd, state.agentName, state.fullPrompt,
+      )
+
+      if (matched.size === 0) return
+
+      // Parse all matched content
+      const allEvents: ReturnType<typeof parseJsonlLines> = []
+      for (const [, content] of matched) {
+        const lines = content.split('\n').filter(Boolean)
+        allEvents.push(...parseJsonlLines(lines))
+      }
+
+      // Only send delta (new events since last poll)
+      if (allEvents.length > state.lastEventCount) {
+        const newEvents = allEvents.slice(state.lastEventCount)
+        state.lastEventCount = allEvents.length
+
+        broadcastEvent('session:team-agent-delta', {
+          sessionId,
+          agentName: state.agentName,
+          events: newEvents,
+        })
+      }
+    } catch (err) {
+      log.web.debug('remote team poll failed', {
+        sessionId, agentName: state.agentName,
+        error: err instanceof Error ? err.message : String(err),
+      })
+    }
+  }, REMOTE_POLL_MS)
+
+  remotePollers.set(sessionId, timer)
+
+  log.web.info('remote team agent polling started', {
+    sessionId, agentName, host: opts.host, intervalMs: REMOTE_POLL_MS,
+  })
 }

@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
-import { DAILY_DIR } from '../constants.js';
+import { DAILY_DIR, agentDailyDir } from '../constants.js';
 import { getTokenizer } from '@anthropic-ai/tokenizer';
 import { computeContentHash } from '../utils/file-ops.js';
 import sizeOf from 'image-size';
@@ -168,11 +168,12 @@ export function estimateFullPayload(opts: {
  * Append an entry to today's daily log file.
  * Creates the file with YAML frontmatter if it doesn't exist yet.
  */
-export function appendDailyLog(content: string, source?: string, projectPath?: string): void {
-  fs.mkdirSync(DAILY_DIR, { recursive: true });
+export function appendDailyLog(content: string, source?: string, projectPath?: string, agentId?: string): void {
+  const dir = agentDailyDir(agentId);
+  fs.mkdirSync(dir, { recursive: true });
 
   const dateKey = formatDateKey();
-  const filePath = path.join(DAILY_DIR, `${dateKey}.md`);
+  const filePath = path.join(dir, `${dateKey}.md`);
 
   if (!fs.existsSync(filePath)) {
     fs.writeFileSync(filePath, `---\nname: '${dateKey}'\ndescription: ''\n---\n\n`, 'utf-8');
@@ -199,9 +200,10 @@ export interface DailyLogResult {
  * Read the daily log for a given date (default: today).
  * Returns content + contentHash for stale-check support.
  */
-export function getDailyLog(date?: string): DailyLogResult | null {
+export function getDailyLog(date?: string, agentId?: string): DailyLogResult | null {
   const dateKey = date ?? formatDateKey();
-  const filePath = path.join(DAILY_DIR, `${dateKey}.md`);
+  const dir = agentDailyDir(agentId);
+  const filePath = path.join(dir, `${dateKey}.md`);
   try {
     const content = fs.readFileSync(filePath, 'utf-8');
     return { content, contentHash: computeContentHash(content) };
@@ -213,15 +215,15 @@ export function getDailyLog(date?: string): DailyLogResult | null {
 /**
  * Resolve a date to the absolute file path of its daily log.
  */
-export function resolveDailyLogPath(date?: string): string {
+export function resolveDailyLogPath(date?: string, agentId?: string): string {
   const dateKey = date ?? formatDateKey();
-  return path.join(DAILY_DIR, `${dateKey}.md`);
+  return path.join(agentDailyDir(agentId), `${dateKey}.md`);
 }
 
 /**
  * Get recent daily logs, iterating backward from today.
  */
-export function getRecentDailyLogs(days: number): Array<{ date: string; content: string }> {
+export function getRecentDailyLogs(days: number, agentId?: string): Array<{ date: string; content: string }> {
   const results: Array<{ date: string; content: string }> = [];
   const now = new Date();
 
@@ -229,7 +231,7 @@ export function getRecentDailyLogs(days: number): Array<{ date: string; content:
     const d = new Date(now);
     d.setDate(d.getDate() - i);
     const dateKey = formatDateKey(d);
-    const result = getDailyLog(dateKey);
+    const result = getDailyLog(dateKey, agentId);
     if (result) {
       results.push({ date: dateKey, content: result.content });
     }
@@ -314,7 +316,7 @@ export function truncateDailyLogToFit(content: string, tokenBudget: number): str
  * instead of returning empty. This guarantees the agent always has some
  * recent context.
  */
-export function getDailyLogsWithinBudget(tokenBudget: number): string {
+export function getDailyLogsWithinBudget(tokenBudget: number, agentId?: string): string {
   const parts: string[] = [];
   let tokensUsed = 0;
   const now = new Date();
@@ -324,7 +326,7 @@ export function getDailyLogsWithinBudget(tokenBudget: number): string {
     const d = new Date(now);
     d.setDate(d.getDate() - i);
     const dateKey = formatDateKey(d);
-    const result = getDailyLog(dateKey);
+    const result = getDailyLog(dateKey, agentId);
     if (!result) continue;
 
     const tokens = estimateTokens(result.content);

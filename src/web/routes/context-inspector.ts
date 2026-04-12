@@ -4,6 +4,7 @@
  */
 
 import { Router, type Request, type Response, type NextFunction } from 'express'
+import { validateAgentId } from '../../constants.js'
 import { getConfig } from '../../core/config-manager.js'
 import { DEFAULT_MODEL } from '../../agent/model.js'
 import { DEFAULT_MAX_TOKENS } from '../../agent/providers/defaults.js'
@@ -17,10 +18,78 @@ import { getToolSchemas } from '../../agent/tools.js'
 
 export const contextInspectorRouter = Router()
 
-// GET /api/context
-contextInspectorRouter.get('/', async (_req: Request, res: Response, next: NextFunction) => {
+const DAILY_LOG_HALF_BUDGET = 5000
+
+// GET /api/context?agentId=general
+contextInspectorRouter.get('/', async (req: Request, res: Response, next: NextFunction) => {
   try {
+    const rawAgentId = (req.query.agentId as string) || undefined
+    const agentId = rawAgentId ? validateAgentId(rawAgentId) : undefined
     const config = await getConfig()
+
+    // Non-General console agent — simplified context view
+    if (agentId && agentId !== 'general') {
+      const { getConsoleAgent } = await import('../../core/agent-registry.js')
+      const { buildSubagentToolSet } = await import('../../agent/subagent-context.js')
+      const { loadContextSources } = await import('../../agent/context-sources.js')
+      const agentDef = await getConsoleAgent(agentId)
+      if (!agentDef) {
+        res.status(404).json({ error: `Console agent '${agentId}' not found` })
+        return
+      }
+
+      const systemPrompt = agentDef.system_prompt ?? `You are ${agentDef.name}.`
+      const contextXml = await loadContextSources(agentDef, {})
+      const fullSystem = contextXml ? systemPrompt + '\n\n' + contextXml : systemPrompt
+      const agentTools = await buildSubagentToolSet(agentDef)
+      const apiMessages = await getModelContext(agentId)
+      const compactionContent = await getCompactionSummary(agentId).catch(() => null) ?? ''
+      // Separate memory/daily for agent vs main, shown as distinct sections
+      const ownMemory = getMemoryFile(agentId)?.content ?? ''
+      const mainMemory = getMemoryFile(undefined)?.content ?? ''
+      const ownDaily = getDailyLogsWithinBudget(DAILY_LOG_HALF_BUDGET, agentId)
+      const mainDaily = getDailyLogsWithinBudget(DAILY_LOG_HALF_BUDGET, undefined)
+
+      const systemTokens = estimateTokens(fullSystem)
+      const toolsTokens = estimateTokens(JSON.stringify(agentTools))
+      const messagesTokens = estimateMessagesTokens(apiMessages)
+      const compactionTokens = estimateTokens(compactionContent)
+      const ownMemoryTokens = estimateTokens(ownMemory)
+      const mainMemoryTokens = estimateTokens(mainMemory)
+      const ownDailyTokens = estimateTokens(ownDaily)
+      const mainDailyTokens = estimateTokens(mainDaily)
+      const totalTokens = systemTokens + toolsTokens + messagesTokens
+
+      res.json({
+        sections: {
+          modelConfig: {
+            content: { model: config.agent?.main_model ?? DEFAULT_MODEL, agent: agentDef.name },
+            tokens: 0,
+          },
+          roleAndRules: {
+            content: fullSystem,
+            tokens: systemTokens,
+          },
+          skills: { content: '', tokens: 0 },
+          compactionSummary: { content: compactionContent, tokens: compactionTokens },
+          taskCategories: { content: '', tokens: 0 },
+          agentMemory: { content: ownMemory || '(no agent memory yet)', tokens: ownMemoryTokens },
+          mainAgentMemory: { content: mainMemory || '(no main memory)', tokens: mainMemoryTokens },
+          agentDailyLogs: { content: ownDaily || '(no agent daily logs)', tokens: ownDailyTokens },
+          mainAgentDailyLogs: { content: mainDaily || '(no main daily logs)', tokens: mainDailyTokens },
+          globalMemory: { content: '', tokens: 0 },
+          projectSummaries: { content: '', tokens: 0, count: 0 },
+          notesContext: { content: '', tokens: 0 },
+          dailyLogs: { content: '', tokens: 0 },
+          tools: { content: agentTools, tokens: toolsTokens, count: agentTools.length },
+          apiMessages: { content: apiMessages, tokens: messagesTokens, count: apiMessages.length },
+        },
+        totalTokens,
+      })
+      return
+    }
+
+    // General agent — full context view
     const name = config.user.name ?? 'the user'
 
     // Gather each section independently

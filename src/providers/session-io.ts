@@ -27,6 +27,12 @@ export interface SessionIO {
   write(message: string): Promise<boolean>
 
   /**
+   * Write a raw JSON string to the session's stdin FIFO (no wrapping).
+   * Used for control_response messages (permission-prompt-tool protocol).
+   */
+  writeRaw(json: string): Promise<boolean>
+
+  /**
    * Start tailing the JSONL output file, calling onLine for each new line.
    * @param fromOffset — byte offset to start reading from (0 = replay all)
    */
@@ -216,6 +222,63 @@ export class LocalIO implements SessionIO {
           messageLength: message.length,
           error: err instanceof Error ? err.message : String(err),
           code,
+        })
+        this.pipePath = null
+      }
+      return false
+    }
+  }
+
+  /**
+   * Write raw JSON to the FIFO without wrapping in { type: 'user', message }.
+   * Used for control_response messages (--permission-prompt-tool stdio protocol).
+   */
+  async writeRaw(json: string): Promise<boolean> {
+    if (!this.pipePath) {
+      log.session.debug('LocalIO writeRaw skipped: no pipe', { jsonLength: json.length })
+      return false
+    }
+    const buf = Buffer.from(json + '\n')
+    try {
+      // O_NONBLOCK prevents event-loop deadlock: without it, opening a FIFO with O_WRONLY
+      // blocks until a reader is attached. If Claude Code isn't draining the pipe, Node.js hangs.
+      const fd = fs.openSync(this.pipePath, fs.constants.O_WRONLY | fs.constants.O_NONBLOCK)
+      try {
+        let offset = 0
+        const deadline = Date.now() + 10_000
+        while (offset < buf.length) {
+          try {
+            const written = fs.writeSync(fd, buf, offset)
+            if (written === 0) break
+            offset += written
+          } catch (err: any) {
+            if (err.code === 'EAGAIN' && Date.now() < deadline) {
+              await new Promise(r => setTimeout(r, 50))
+              continue
+            }
+            throw err
+          }
+        }
+        if (offset < buf.length) {
+          log.session.warn('LocalIO writeRaw: incomplete after timeout', {
+            pipePath: this.pipePath, written: offset, total: buf.length,
+          })
+          return false
+        }
+      } finally {
+        fs.closeSync(fd)
+      }
+      log.session.debug('LocalIO writeRaw ok', { pipePath: this.pipePath, jsonLength: json.length })
+      return true
+    } catch (err) {
+      const code = err && typeof err === 'object' && 'code' in err
+        ? (err as { code: string }).code : undefined
+      if (code === 'ENXIO' || code === 'EAGAIN') {
+        log.session.debug('LocalIO writeRaw: pipe not ready', { pipePath: this.pipePath, code })
+      } else {
+        log.session.warn('LocalIO writeRaw failed — pipe broken, clearing', {
+          pipePath: this.pipePath, jsonLength: json.length,
+          error: err instanceof Error ? err.message : String(err), code,
         })
         this.pipePath = null
       }

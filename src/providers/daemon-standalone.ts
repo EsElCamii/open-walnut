@@ -214,11 +214,13 @@ function shellQuote(s: string): string {
  */
 function buildSpawnPreamble(): string {
   return [
-    'export PATH="$HOME/.local/bin:$HOME/.npm-global/bin:$PATH"',
+    // Source RC files FIRST, then add our paths — RC files may hard-reset PATH
+    // (e.g. zsh `export PATH=; path=(...)`) which would clobber earlier prepends.
     'case "$SHELL" in'
       + ' */zsh) [ -f "$HOME/.zshrc" ] && . "$HOME/.zshrc" >/dev/null 2>&1 ;;'
       + ' */bash) [ -f "$HOME/.bashrc" ] && . "$HOME/.bashrc" >/dev/null 2>&1 ;;'
       + ' esac',
+    'export PATH="$HOME/.local/bin:$HOME/.npm-global/bin:$PATH"',
     'node -v >/dev/null 2>&1 || {'
       + ' if [ -s "$HOME/.nvm/nvm.sh" ]; then'
       + '   . "$HOME/.nvm/nvm.sh" >/dev/null 2>&1;'

@@ -36,10 +36,17 @@ export interface ContextInspectorResponse {
     dailyLogs: ContextSection;
     tools: ContextSection<ToolSchema[]>;
     apiMessages: ContextSection<ApiMessage[]>;
+    // Non-General agent split sections
+    agentMemory?: ContextSection;
+    mainAgentMemory?: ContextSection;
+    agentDailyLogs?: ContextSection;
+    mainAgentDailyLogs?: ContextSection;
   };
   totalTokens: number;
 }
 
-export async function fetchAgentContext(): Promise<ContextInspectorResponse> {
-  return apiGet<ContextInspectorResponse>('/api/context');
+export async function fetchAgentContext(agentId?: string): Promise<ContextInspectorResponse> {
+  const params: Record<string, string> = {};
+  if (agentId) params.agentId = agentId;
+  return apiGet<ContextInspectorResponse>('/api/context', params);
 }

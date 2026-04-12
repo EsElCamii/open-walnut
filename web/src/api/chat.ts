@@ -107,11 +107,13 @@ export interface ChatHistoryResponse {
 export async function fetchChatHistory(
   page = 1,
   pageSize = 100,
+  agentId?: string,
 ): Promise<ChatHistoryResponse> {
   const params: Record<string, string> = {
     page: String(page),
     pageSize: String(pageSize),
   };
+  if (agentId) params.agentId = agentId;
   return apiGet<ChatHistoryResponse>('/api/chat/history', params);
 }
 
@@ -123,18 +125,22 @@ export interface TriageHistoryResponse {
 export async function fetchTriageHistory(
   limit = 50,
   taskId?: string,
+  agentId?: string,
 ): Promise<TriageHistoryResponse> {
   const params: Record<string, string> = { limit: String(limit) };
   if (taskId) params.taskId = taskId;
+  if (agentId) params.agentId = agentId;
   return apiGet<TriageHistoryResponse>('/api/chat/triage', params);
 }
 
-export async function clearChatHistory(): Promise<void> {
-  await apiPost('/api/chat/clear');
+export async function clearChatHistory(agentId?: string): Promise<void> {
+  const params = agentId ? `?agentId=${agentId}` : '';
+  await apiPost(`/api/chat/clear${params}`);
 }
 
-export async function compactChatHistory(): Promise<void> {
-  await apiPost('/api/chat/compact');
+export async function compactChatHistory(agentId?: string): Promise<void> {
+  const params = agentId ? `?agentId=${agentId}` : '';
+  await apiPost(`/api/chat/compact${params}`);
 }
 
 export interface ChatStats {
@@ -148,6 +154,8 @@ export interface ChatStats {
   contextWindow?: number;
 }
 
-export async function fetchChatStats(): Promise<ChatStats> {
-  return apiGet<ChatStats>('/api/chat/stats');
+export async function fetchChatStats(agentId?: string): Promise<ChatStats> {
+  const params: Record<string, string> = {};
+  if (agentId) params.agentId = agentId;
+  return apiGet<ChatStats>('/api/chat/stats', params);
 }

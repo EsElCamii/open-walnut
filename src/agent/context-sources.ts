@@ -27,6 +27,8 @@ const DEFAULT_BUDGETS: Record<ContextSourceId, number> = {
   daily_log: 3000,
   session_history: 4000,
   conversation_log: 1000,
+  main_global_memory: 2000,
+  main_daily_log: 3000,
 };
 
 // Auto-inferred sources — always loaded when taskId is present
@@ -92,16 +94,16 @@ async function loadProjectTaskList(task: Task, budget: number): Promise<string> 
   return truncateToTokenBudget(lines.join('\n'), budget);
 }
 
-async function loadGlobalMemory(budget: number): Promise<string> {
+async function loadGlobalMemory(budget: number, agentId?: string): Promise<string> {
   const { getMemoryFile } = await import('../core/memory-file.js');
-  const result = getMemoryFile();
+  const result = getMemoryFile(agentId);
   if (!result) return '(no global memory yet)';
   return truncateToTokenBudget(result.content, budget);
 }
 
-async function loadDailyLog(budget: number): Promise<string> {
+async function loadDailyLog(budget: number, agentId?: string): Promise<string> {
   const { getDailyLogsWithinBudget } = await import('../core/daily-log.js');
-  const logs = getDailyLogsWithinBudget(budget);
+  const logs = getDailyLogsWithinBudget(budget, agentId);
   if (!logs) return '(no daily logs)';
   return logs; // getDailyLogsWithinBudget already handles budget
 }
@@ -151,6 +153,24 @@ async function loadConversationLog(task: Task, budget: number): Promise<string> 
 
 // ── XML tag names for each source ──
 
+/** Load General agent's global memory (read-only, for non-General console agents). */
+async function loadMainGlobalMemory(budget: number): Promise<string> {
+  const { getMemoryFile } = await import('../core/memory-file.js');
+  // Explicitly pass undefined (= General) to always read General's memory
+  const result = getMemoryFile(undefined);
+  if (!result) return '(no main global memory yet)';
+  return truncateToTokenBudget(result.content, budget);
+}
+
+/** Load General agent's daily logs (read-only, for non-General console agents). */
+async function loadMainDailyLog(budget: number): Promise<string> {
+  const { getDailyLogsWithinBudget } = await import('../core/daily-log.js');
+  // Explicitly pass undefined (= General) to always read General's daily logs
+  const logs = getDailyLogsWithinBudget(budget, undefined);
+  if (!logs) return '(no main daily logs)';
+  return logs;
+}
+
 const SOURCE_XML_TAGS: Record<ContextSourceId, string> = {
   task_details: 'task_context',
   project_memory: 'project_memory',
@@ -159,6 +179,8 @@ const SOURCE_XML_TAGS: Record<ContextSourceId, string> = {
   daily_log: 'daily_log',
   session_history: 'session_history',
   conversation_log: 'conversation_log',
+  main_global_memory: 'main_global_memory',
+  main_daily_log: 'main_daily_log',
 };
 
 // ── Main entry point ──
@@ -186,28 +208,33 @@ export async function loadContextSources(
 ): Promise<string> {
   const { taskId, sessionId, cwd, host } = input;
 
-  // No taskId → no context sources to load
-  if (!taskId) return '';
+  // Console agents may have context_sources without a taskId (e.g. global_memory, daily_log).
+  // Only skip if there's no taskId AND no agent-level context sources configured.
+  const hasAgentSources = agentDef.context_sources && agentDef.context_sources.length > 0;
+  if (!taskId && !hasAgentSources) return '';
 
-  // Resolve the task
-  let task: Task;
-  try {
-    const { getTask } = await import('../core/task-manager.js');
-    task = await getTask(taskId);
-  } catch (err) {
-    log.subagent.warn('context-sources: failed to resolve task', {
-      taskId,
-      error: err instanceof Error ? err.message : String(err),
-    });
-    return '';
+  // Resolve the task (if taskId provided)
+  let task: Task | null = null;
+  if (taskId) {
+    try {
+      const { getTask } = await import('../core/task-manager.js');
+      task = await getTask(taskId);
+    } catch (err) {
+      log.subagent.warn('context-sources: failed to resolve task', {
+        taskId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
   }
 
   // Build the set of sources to load
   const enabledSources = new Map<ContextSourceId, number>();
 
-  // Auto-inferred sources
-  for (const sourceId of AUTO_SOURCES) {
-    enabledSources.set(sourceId, DEFAULT_BUDGETS[sourceId]);
+  // Auto-inferred sources (only when task is available)
+  if (task) {
+    for (const sourceId of AUTO_SOURCES) {
+      enabledSources.set(sourceId, DEFAULT_BUDGETS[sourceId]);
+    }
   }
 
   // Agent-configured sources
@@ -227,19 +254,22 @@ export async function loadContextSources(
 
     switch (sourceId) {
       case 'task_details':
+        if (!task) continue;
         promise = loadTaskDetails(task, budget);
         break;
       case 'project_memory':
+        if (!task) continue;
         promise = loadProjectMemory(task, budget);
         break;
       case 'project_task_list':
+        if (!task) continue;
         promise = loadProjectTaskList(task, budget);
         break;
       case 'global_memory':
-        promise = loadGlobalMemory(budget);
+        promise = loadGlobalMemory(budget, agentDef.id);
         break;
       case 'daily_log':
-        promise = loadDailyLog(budget);
+        promise = loadDailyLog(budget, agentDef.id);
         break;
       case 'session_history':
         if (!sessionId) {
@@ -249,7 +279,14 @@ export async function loadContextSources(
         }
         break;
       case 'conversation_log':
+        if (!task) continue;
         promise = loadConversationLog(task, budget);
+        break;
+      case 'main_global_memory':
+        promise = loadMainGlobalMemory(budget);
+        break;
+      case 'main_daily_log':
+        promise = loadMainDailyLog(budget);
         break;
       default:
         continue;

@@ -152,6 +152,10 @@ Special sources (use these URIs instead of raw file paths):
                            (e.g. memory/project/work/api, memory/project/passion/walnut).
   memory/daily           — Today's activity log (timestamped entries from all sessions).
   memory/daily/YYYY-MM-DD — Specific day's log (e.g. memory/daily/2026-03-25).
+  memory/main/global     — Main (Walnut) agent's MEMORY.md (READ-ONLY).
+                           Use to check what the main agent knows.
+  memory/main/daily      — Main agent's today's activity log (READ-ONLY).
+  memory/main/daily/YYYY-MM-DD — Main agent's specific day's log (READ-ONLY).
   memory/repo            — List all repository environment memories.
   memory/repo/{slug}     — Environment learnings for a specific repository (build quirks,
                            conventions, structure, known issues). Auto-injected into sessions.
@@ -193,9 +197,10 @@ For PDFs: use pages parameter (e.g. "1-5", "3", "10-20") to extract specific pag
   async execute(params): Promise<ToolResultContent> {
     const source = params.source as string;
     if (!source) return 'Error: source is required.';
+    const agentId = params._agentId as string | undefined;
 
     try {
-      const resolved = resolveSource(source);
+      const resolved = resolveSource(source, agentId);
       const handler = getHandler(resolved.type);
       const result = await handler.read(resolved, {
         offset: params.offset as number | undefined,
@@ -249,6 +254,7 @@ IMPORTANT: For file sources (/absolute/path), you MUST read the file first with 
 Mode 'overwrite' replaces entire content (default). Mode 'append' adds to end.
 For memory sources: append auto-prepends timestamp heading.
 content_hash (from files_read) required for overwrite on memory/notes sources — prevents stale writes.
+NOTE: memory/main/* sources are READ-ONLY and cannot be written to.
 
 Sources: notes/global, notes/{name}, memory/global, memory/project/{path},
 memory/daily[/YYYY-MM-DD], memory/repo/{slug}, repos/{name}, /absolute/path — see files_read for full descriptions.`,
@@ -281,9 +287,10 @@ memory/daily[/YYYY-MM-DD], memory/repo/{slug}, repos/{name}, /absolute/path — 
     const content = params.content as string;
     if (!source) return 'Error: source is required.';
     if (content == null) return 'Error: content is required.';
+    const agentId = params._agentId as string | undefined;
 
     try {
-      const resolved = resolveSource(source);
+      const resolved = resolveSource(source, agentId);
 
       // ── readFileState check for file sources ──
       if (resolved.type === 'file') {
@@ -393,9 +400,10 @@ memory/daily[/YYYY-MM-DD], memory/repo/{slug}, repos/{name}, /absolute/path — 
     const newContent = (params.new_content as string) ?? '';
     if (!source) return 'Error: source is required.';
     if (!oldContent) return 'Error: old_content is required.';
+    const agentId = params._agentId as string | undefined;
 
     try {
-      const resolved = resolveSource(source);
+      const resolved = resolveSource(source, agentId);
 
       // ── readFileState check for file sources ──
       if (resolved.type === 'file') {
@@ -471,9 +479,10 @@ export const filesListTool: ToolDefinition = {
   async execute(params): Promise<ToolResultContent> {
     const prefix = params.prefix as string;
     if (!prefix) return 'Error: prefix is required.';
+    const agentId = params._agentId as string | undefined;
 
     try {
-      const resolved = resolveSource(prefix);
+      const resolved = resolveSource(prefix, agentId);
       const handler = getHandler(resolved.type);
       const items = await handler.list(resolved);
 

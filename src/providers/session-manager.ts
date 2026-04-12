@@ -145,6 +145,12 @@ export interface SessionManager {
   writeMessage(message: string): Promise<boolean> | boolean
 
   /**
+   * Write raw JSON to the FIFO (no stream-json wrapping).
+   * Used for control_response messages (--permission-prompt-tool stdio protocol).
+   */
+  writeRaw(json: string): Promise<boolean> | boolean
+
+  /**
    * Write a synthetic user event to the output file (for dedup).
    * Claude CLI doesn't echo user messages — this fills the gap.
    */

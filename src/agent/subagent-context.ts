@@ -79,12 +79,29 @@ export async function buildSubagentToolSet(
   const config = await getConfig();
   const globalDenied = config.agent?.subagent?.denied_tools ?? [];
 
+  const agentId = agentDef.id;
+
+  /** Wrap files_* tools to inject _agentId so they write to agent-specific dirs. */
+  function injectAgentId(filtered: ToolDefinition[]): ToolDefinition[] {
+    if (!agentId || agentId === 'general') return filtered;
+    return filtered.map((t) => {
+      if (t.name.startsWith('files_')) {
+        return {
+          ...t,
+          execute: (params: Record<string, unknown>) => t.execute({ ...params, _agentId: agentId }),
+        };
+      }
+      return t;
+    });
+  }
+
   if (agentDef.allowed_tools && agentDef.allowed_tools.length > 0) {
     // Whitelist mode: only explicitly allowed tools (still filter out always-denied)
     const allowed = new Set(agentDef.allowed_tools);
-    return tools.filter(
+    const filtered = tools.filter(
       (t) => allowed.has(t.name) && !ALWAYS_DENIED_TOOLS.includes(t.name),
     );
+    return injectAgentId(filtered);
   }
 
   // Denylist mode: start with all tools, subtract denied sets
@@ -95,7 +112,7 @@ export async function buildSubagentToolSet(
     ...globalDenied,
   ]);
 
-  return tools.filter((t) => !denied.has(t.name));
+  return injectAgentId(tools.filter((t) => !denied.has(t.name)));
 }
 
 /**

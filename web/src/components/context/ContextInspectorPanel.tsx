@@ -96,9 +96,23 @@ export function ContextInspectorPanel({ data, loading, error, onRefresh }: Conte
           <ContextMarkdown content={sections.taskCategories.content} fallback="(No active tasks)" />
         </ContextSection>
 
-        <ContextSection title="Global Memory" tokens={sections.globalMemory.tokens}>
-          <ContextMarkdown content={sections.globalMemory.content} fallback="(Empty)" />
-        </ContextSection>
+        {/* Non-General agents: show split memory sections */}
+        {sections.agentMemory && (
+          <ContextSection title="Agent Memory" tokens={sections.agentMemory.tokens}>
+            <ContextMarkdown content={sections.agentMemory.content} fallback="(No agent memory yet)" />
+          </ContextSection>
+        )}
+        {sections.mainAgentMemory && (
+          <ContextSection title="Main Agent Memory (read-only)" tokens={sections.mainAgentMemory.tokens}>
+            <ContextMarkdown content={sections.mainAgentMemory.content} fallback="(Empty)" />
+          </ContextSection>
+        )}
+        {/* General agent: single global memory section */}
+        {!sections.agentMemory && (
+          <ContextSection title="Global Memory" tokens={sections.globalMemory.tokens}>
+            <ContextMarkdown content={sections.globalMemory.content} fallback="(Empty)" />
+          </ContextSection>
+        )}
 
         <ContextSection
           title="Project Summaries"
@@ -112,9 +126,23 @@ export function ContextInspectorPanel({ data, loading, error, onRefresh }: Conte
           <ContextMarkdown content={sections.notesContext.content} fallback="(No notes/AGENTS.md)" />
         </ContextSection>
 
-        <ContextSection title="Daily Logs" tokens={sections.dailyLogs.tokens}>
-          <ContextMarkdown content={sections.dailyLogs.content} fallback="(No recent activity)" />
-        </ContextSection>
+        {/* Non-General agents: show split daily log sections */}
+        {sections.agentDailyLogs && (
+          <ContextSection title="Agent Daily Logs" tokens={sections.agentDailyLogs.tokens}>
+            <ContextMarkdown content={sections.agentDailyLogs.content} fallback="(No agent activity)" />
+          </ContextSection>
+        )}
+        {sections.mainAgentDailyLogs && (
+          <ContextSection title="Main Agent Daily Logs (read-only)" tokens={sections.mainAgentDailyLogs.tokens}>
+            <ContextMarkdown content={sections.mainAgentDailyLogs.content} fallback="(No recent activity)" />
+          </ContextSection>
+        )}
+        {/* General agent: single daily logs section */}
+        {!sections.agentDailyLogs && (
+          <ContextSection title="Daily Logs" tokens={sections.dailyLogs.tokens}>
+            <ContextMarkdown content={sections.dailyLogs.content} fallback="(No recent activity)" />
+          </ContextSection>
+        )}
 
         <ContextSection title="Tools" tokens={sections.tools.tokens} count={sections.tools.count}>
           <div className="context-tools-list">

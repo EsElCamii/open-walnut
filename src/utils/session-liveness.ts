@@ -16,6 +16,10 @@ export async function isSessionProcessAlive(session: SessionRecord): Promise<boo
   // Embedded/SDK: managed by their respective providers, not by PID
   if (session.provider === 'embedded' || session.provider === 'sdk') return true
 
+  // If the session was already marked stopped (e.g. by health monitor idle timeout),
+  // it's definitively dead — no need to probe PIDs or daemon connections.
+  if (session.process_status === 'stopped' || session.process_status === 'error') return false
+
   // Prefer the registry — the active SessionManager knows the truth
   if (session.claudeSessionId) {
     const { getRegisteredSessionManager } = await import('../providers/session-manager.js')

@@ -99,7 +99,8 @@ export interface CacheConfig {
 
 export type ContextSourceId =
   | 'task_details' | 'project_memory' | 'project_task_list'
-  | 'global_memory' | 'daily_log' | 'session_history' | 'conversation_log';
+  | 'global_memory' | 'daily_log' | 'session_history' | 'conversation_log'
+  | 'main_global_memory' | 'main_daily_log';
 
 export interface ContextSourceConfig {
   id: ContextSourceId;
@@ -137,6 +138,8 @@ export interface AgentDefinition {
   stateful?: AgentStatefulConfig;
   /** Selective list of skill directory names to inject into this agent's prompt. */
   skills?: string[];
+  /** True for agents that appear in the main chat console (AgentSwitcher). */
+  console?: boolean;
   source: 'builtin' | 'config';
   /** True when a config entry overrides (shadows) a builtin agent with the same ID. */
   overrides_builtin?: boolean;

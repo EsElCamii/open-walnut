@@ -2,7 +2,6 @@
  * Memory routes — list and read memory/knowledge files.
  */
 
-import fs from 'node:fs'
 import fsp from 'node:fs/promises'
 import path from 'node:path'
 import { Router, type Request, type Response, type NextFunction } from 'express'

@@ -10,6 +10,7 @@ import { LoadingSpinner } from '../common/LoadingSpinner';
 import { Lightbox } from '../common/Lightbox';
 import type { SessionHistoryMessage } from '@/types/session';
 import type { ImageAttachment } from '@/api/chat';
+import { respondToPermission } from '@/api/sessions';
 import { renderMarkdownWithRefs, findImagePaths, resolveImagePath } from '@/utils/markdown';
 import { log } from '@/utils/log';
 
@@ -209,8 +210,62 @@ function StreamingTextBlock({ content, sessionCwd, onTaskClick, onSessionClick, 
   );
 }
 
+/** Inline permission request card — Allow/Deny buttons for sensitive operations */
+function PermissionRequestCard({ sessionId, requestId, toolName, input, reason }: {
+  sessionId: string; requestId: string; toolName: string;
+  input?: Record<string, unknown>; reason?: string;
+}) {
+  const [status, setStatus] = useState<'pending' | 'loading' | 'allowed' | 'denied'>('pending');
+  const [inputExpanded, setInputExpanded] = useState(false);
+
+  const handleResponse = async (allow: boolean) => {
+    setStatus('loading');
+    try {
+      await respondToPermission(sessionId, requestId, allow);
+      setStatus(allow ? 'allowed' : 'denied');
+    } catch {
+      setStatus('pending'); // revert on error
+    }
+  };
+
+  const inputPreview = input ? JSON.stringify(input, null, 2) : null;
+
+  return (
+    <div className={`permission-request-card permission-request-card--${status}`}>
+      <div className="permission-request-header">
+        <span className="permission-request-icon">{status === 'allowed' ? '\u2713' : status === 'denied' ? '\u2717' : '\u26A0\uFE0F'}</span>
+        <span className="permission-request-tool">{toolName}</span>
+        {reason && <span className="permission-request-reason">{reason}</span>}
+      </div>
+      {inputPreview && (
+        <div className="permission-request-input">
+          <button className="permission-request-input-toggle" onClick={() => setInputExpanded(p => !p)}>
+            {inputExpanded ? '\u25BC' : '\u25B6'} Input
+          </button>
+          {inputExpanded && <pre className="permission-request-input-preview">{inputPreview}</pre>}
+        </div>
+      )}
+      {status === 'pending' && (
+        <div className="permission-request-actions">
+          <button className="permission-request-btn permission-request-btn--allow" onClick={() => handleResponse(true)}>Allow</button>
+          <button className="permission-request-btn permission-request-btn--deny" onClick={() => handleResponse(false)}>Deny</button>
+        </div>
+      )}
+      {status === 'loading' && (
+        <div className="permission-request-resolved">Sending...</div>
+      )}
+      {status === 'allowed' && (
+        <div className="permission-request-resolved permission-request-resolved--allowed">Allowed</div>
+      )}
+      {status === 'denied' && (
+        <div className="permission-request-resolved permission-request-resolved--denied">Denied</div>
+      )}
+    </div>
+  );
+}
+
 /** Render a single streaming block */
-const StreamingBlockView = memo(function StreamingBlockView({ block, sessionCwd, onTaskClick, onSessionClick, onFileOpen }: { block: StreamingBlock; sessionCwd?: string; onTaskClick?: (taskId: string) => void; onSessionClick?: (sessionId: string) => void; onFileOpen?: (path: string, line?: number) => void }) {
+const StreamingBlockView = memo(function StreamingBlockView({ block, sessionId, sessionCwd, onTaskClick, onSessionClick, onFileOpen }: { block: StreamingBlock; sessionId: string; sessionCwd?: string; onTaskClick?: (taskId: string) => void; onSessionClick?: (sessionId: string) => void; onFileOpen?: (path: string, line?: number) => void }) {
   if (block.type === 'text') {
     return <StreamingTextBlock content={block.content} sessionCwd={sessionCwd} onTaskClick={onTaskClick} onSessionClick={onSessionClick} onFileOpen={onFileOpen} />;
   }
@@ -224,6 +279,18 @@ const StreamingBlockView = memo(function StreamingBlockView({ block, sessionCwd,
         <span className="session-system-text">{block.message}</span>
         {block.detail && <span className="session-system-detail">{block.detail}</span>}
       </div>
+    );
+  }
+
+  if (block.type === 'permission') {
+    return (
+      <PermissionRequestCard
+        sessionId={sessionId}
+        requestId={block.requestId}
+        toolName={block.toolName}
+        input={block.input}
+        reason={block.reason}
+      />
     );
   }
 
@@ -262,13 +329,14 @@ const StreamingBlockView = memo(function StreamingBlockView({ block, sessionCwd,
 interface StreamingTaskGroupProps {
   taskBlock: StreamingBlock & { type: 'tool_call' };
   childBlocks: StreamingBlock[];
+  sessionId: string;
   sessionCwd?: string;
   onTaskClick?: (taskId: string) => void;
   onSessionClick?: (sessionId: string) => void;
   onFileOpen?: (path: string, line?: number) => void;
 }
 
-function StreamingTaskGroup({ taskBlock, childBlocks, sessionCwd, onTaskClick, onSessionClick, onFileOpen }: StreamingTaskGroupProps) {
+function StreamingTaskGroup({ taskBlock, childBlocks, sessionId, sessionCwd, onTaskClick, onSessionClick, onFileOpen }: StreamingTaskGroupProps) {
   const [open, setOpen] = useState(true); // Default open during streaming
   const description = typeof taskBlock.input?.description === 'string'
     ? taskBlock.input.description
@@ -298,7 +366,7 @@ function StreamingTaskGroup({ taskBlock, childBlocks, sessionCwd, onTaskClick, o
       {open && (
         <div className="task-group-body">
           {childBlocks.map((child, ci) => (
-            <StreamingBlockView key={ci} block={child} sessionCwd={sessionCwd} onTaskClick={onTaskClick} onSessionClick={onSessionClick} onFileOpen={onFileOpen} />
+            <StreamingBlockView key={ci} block={child} sessionId={sessionId} sessionCwd={sessionCwd} onTaskClick={onTaskClick} onSessionClick={onSessionClick} onFileOpen={onFileOpen} />
           ))}
           {childBlocks.length === 0 && !isDone && (
             <div className="task-group-empty">Working...</div>
@@ -1158,6 +1226,7 @@ export const SessionChatHistory = memo(function SessionChatHistory({ sessionId, 
                         <StreamingTaskGroup
                           taskBlock={grouped.taskBlock}
                           childBlocks={grouped.childBlocks}
+                          sessionId={sessionId}
                           sessionCwd={sessionCwd}
                           onTaskClick={onTaskClick}
                           onSessionClick={onSessionClick}
@@ -1183,7 +1252,7 @@ export const SessionChatHistory = memo(function SessionChatHistory({ sessionId, 
                       </div>
                     )}
                     <div className={isFirst ? 'session-msg-content' : ''}>
-                      <StreamingBlockView block={item.block} sessionCwd={sessionCwd} onTaskClick={onTaskClick} onSessionClick={onSessionClick} onFileOpen={onFileOpen} />
+                      <StreamingBlockView block={item.block} sessionId={sessionId} sessionCwd={sessionCwd} onTaskClick={onTaskClick} onSessionClick={onSessionClick} onFileOpen={onFileOpen} />
                     </div>
                   </div>
                 );

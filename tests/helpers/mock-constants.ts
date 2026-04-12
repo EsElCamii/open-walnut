@@ -43,6 +43,18 @@ export function createMockConstants(prefix = 'walnut-test') {
     CLAUDE_SKILLS_DIR: path.join(tmpBase, '.claude', 'skills'),
     SKILL_SETTINGS_FILE: path.join(tmpBase, 'skill-settings.json'),
     CHAT_HISTORY_FILE: path.join(tmpBase, 'chat-history.json'),
+    chatHistoryFile: (agentId?: string) => {
+      if (!agentId || agentId === 'general') return path.join(tmpBase, 'chat-history.json');
+      return path.join(tmpBase, `chat-history-${agentId}.json`);
+    },
+    agentMemoryDir: (agentId?: string) => {
+      if (!agentId || agentId === 'general') return tmpBase;
+      return path.join(tmpBase, 'memory', 'agents', agentId);
+    },
+    agentDailyDir: (agentId?: string) => {
+      if (!agentId || agentId === 'general') return path.join(tmpBase, 'memory', 'daily');
+      return path.join(tmpBase, 'memory', 'agents', agentId, 'daily');
+    },
     CRON_FILE: path.join(tmpBase, 'cron-jobs.json'),
     PLUGIN_A_SYNC_FILE: path.join(tmpBase, 'sync', 'plugin-a-sync.json'),
     USAGE_DB_FILE: path.join(tmpBase, 'usage.sqlite'),

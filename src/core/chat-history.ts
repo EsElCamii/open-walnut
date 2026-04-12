@@ -12,7 +12,7 @@
 import type { MessageParam } from '../agent/model.js';
 import { getContextThreshold } from '../agent/model.js';
 import type { ChatHistoryStore, ChatEntry, DisplayMessage } from './types.js';
-import { CHAT_HISTORY_FILE } from '../constants.js';
+import { CHAT_HISTORY_FILE, chatHistoryFile } from '../constants.js';
 import { readJsonFile, writeJsonFile } from '../utils/fs.js';
 import { estimateMessagesTokens, estimateFullPayload, compactDailyLog, formatDateKey } from './daily-log.js';
 import { log } from '../logging/index.js';
@@ -63,18 +63,23 @@ export function findTurnBoundaryIndex(aiEntries: ChatEntry[], turnsToKeep: numbe
 }
 
 // ── Write lock: serializes all read-modify-write operations ──
-// Without this, concurrent callers (chat, cron, session triage, compaction) can
-// read the same snapshot, modify independently, and overwrite each other's writes.
-let writeLock: Promise<void> = Promise.resolve();
+// Per-agent write locks: each console agent has its own promise chain so that
+// General's writes don't block Inner Space (and vice versa).
+const writeLocks = new Map<string, Promise<void>>();
+
+function getWriteLock(agentId: string): Promise<void> {
+  return writeLocks.get(agentId) ?? Promise.resolve();
+}
 
 /**
  * Serialize a read-modify-write operation on the chat history store.
  * All public write functions must go through this to prevent data loss.
+ * Each agentId gets its own lock chain.
  */
-function withWriteLock<T>(fn: () => Promise<T>): Promise<T> {
-  const prev = writeLock;
+function withWriteLock<T>(fn: () => Promise<T>, agentId = 'general'): Promise<T> {
+  const prev = getWriteLock(agentId);
   let resolve: () => void;
-  writeLock = new Promise<void>((r) => { resolve = r; });
+  writeLocks.set(agentId, new Promise<void>((r) => { resolve = r; }));
   return prev.then(fn).finally(() => resolve!());
 }
 
@@ -140,13 +145,14 @@ function migrateV1toV2(store: ChatHistoryStore): ChatHistoryStore {
   };
 }
 
-async function readStore(): Promise<ChatHistoryStore> {
-  const raw = await readJsonFile<ChatHistoryStore>(CHAT_HISTORY_FILE, freshStore());
+async function readStore(agentId?: string): Promise<ChatHistoryStore> {
+  const filePath = chatHistoryFile(agentId);
+  const raw = await readJsonFile<ChatHistoryStore>(filePath, freshStore());
 
   // Migrate v1 → v2
   if (raw.version === 1 || (!raw.entries && (raw.apiMessages || raw.displayMessages))) {
     const migrated = migrateV1toV2(raw);
-    await writeStore(migrated);
+    await writeStore(migrated, agentId);
     return migrated;
   }
 
@@ -187,20 +193,20 @@ async function readStore(): Promise<ChatHistoryStore> {
   }
   if (orphanCleaned) {
     log.agent.info('Cleaned orphan tool_result entries from chat history');
-    await writeStore(raw);
+    await writeStore(raw, agentId);
   }
 
   return raw;
 }
 
-async function writeStore(store: ChatHistoryStore): Promise<void> {
+async function writeStore(store: ChatHistoryStore, agentId?: string): Promise<void> {
   store.lastUpdated = new Date().toISOString();
   // Clean v1 fields from v2 stores
   if (store.version === 2) {
     delete store.apiMessages;
     delete store.displayMessages;
   }
-  await writeJsonFile(CHAT_HISTORY_FILE, store);
+  await writeJsonFile(chatHistoryFile(agentId), store);
 }
 
 // ── Public API: reading ──
@@ -209,8 +215,8 @@ async function writeStore(store: ChatHistoryStore): Promise<void> {
  * Get the current API-format messages for the agent loop.
  * Filters to non-compacted AI entries and returns as MessageParam[].
  */
-export async function getApiMessages(): Promise<MessageParam[]> {
-  return getModelContext();
+export async function getApiMessages(agentId?: string): Promise<MessageParam[]> {
+  return getModelContext(agentId);
 }
 
 /**
@@ -220,8 +226,8 @@ export async function getApiMessages(): Promise<MessageParam[]> {
  * Defense layer: strip any user message whose tool_result blocks have
  * no matching tool_use in the preceding assistant message.
  */
-export async function getModelContext(): Promise<MessageParam[]> {
-  const store = await readStore();
+export async function getModelContext(agentId?: string): Promise<MessageParam[]> {
+  const store = await readStore(agentId);
   const raw = (store.entries ?? [])
     .filter((e) => e.tag === 'ai' && !e.compacted)
     .map((e) => ({ role: e.role, content: e.content }) as MessageParam);
@@ -353,15 +359,15 @@ export async function hydrateImagePaths(msgs: MessageParam[]): Promise<MessagePa
 /**
  * Get the compaction summary (or null if no compaction has occurred).
  */
-export async function getCompactionSummary(): Promise<string | null> {
-  const store = await readStore();
+export async function getCompactionSummary(agentId?: string): Promise<string | null> {
+  const store = await readStore(agentId);
   return store.compactionSummary;
 }
 
 /** Get file mtime as cache key — single syscall, avoids parsing the full file. */
-export async function getLastUpdated(): Promise<string> {
+export async function getLastUpdated(agentId?: string): Promise<string> {
   try {
-    const stat = await fsp.stat(CHAT_HISTORY_FILE);
+    const stat = await fsp.stat(chatHistoryFile(agentId));
     return stat.mtimeMs.toString();
   } catch {
     return '';
@@ -412,8 +418,9 @@ export interface PaginatedEntries {
 export async function getDisplayEntries(
   page = 1,
   pageSize = 100,
+  agentId?: string,
 ): Promise<PaginatedEntries> {
-  const store = await readStore();
+  const store = await readStore(agentId);
   const allEntries = store.entries ?? [];
 
   // Build an index of logical message positions
@@ -500,8 +507,8 @@ function entryToDisplayMessage(entry: ChatEntry): DisplayMessage {
  * Merges hashes across entries — for each key, the latest entry's hash wins.
  * Used by enrichTaskContext to determine which content fields changed.
  */
-export async function getLastContextHashes(): Promise<Record<string, string>> {
-  const store = await readStore();
+export async function getLastContextHashes(agentId?: string): Promise<Record<string, string>> {
+  const store = await readStore(agentId);
   const entries = store.entries ?? [];
   const merged: Record<string, string> = {};
 
@@ -527,11 +534,12 @@ export async function getLastContextHashes(): Promise<Record<string, string>> {
  */
 export async function addAIMessages(
   msgs: MessageParam[],
-  options?: { displayText?: string; source?: ChatEntry['source']; contextHashes?: Record<string, string>; taskId?: string },
+  options?: { displayText?: string; source?: ChatEntry['source']; contextHashes?: Record<string, string>; taskId?: string; agentId?: string },
 ): Promise<void> {
   if (msgs.length === 0) return;
+  const aid = options?.agentId;
   return withWriteLock(async () => {
-    const store = await readStore();
+    const store = await readStore(aid);
     const now = new Date().toISOString();
     let displayTextAttached = false;
 
@@ -571,9 +579,9 @@ export async function addAIMessages(
       }
       store.entries!.push(entry);
     }
-    await writeStore(store);
-    log.agent.info('AI messages persisted', { count: msgs.length });
-  });
+    await writeStore(store, aid);
+    log.agent.info('AI messages persisted', { count: msgs.length, agentId: aid });
+  }, aid);
 }
 
 /**
@@ -590,10 +598,12 @@ export async function addUserMessage(
     taskId?: string;
     source?: ChatEntry['source'];
     turnId?: string;
+    agentId?: string;
   },
 ): Promise<void> {
+  const aid = options?.agentId;
   return withWriteLock(async () => {
-    const store = await readStore();
+    const store = await readStore(aid);
     const entry: ChatEntry = {
       tag: 'ai',
       role: 'user',
@@ -606,9 +616,9 @@ export async function addUserMessage(
     if (options?.source) entry.source = options.source;
     if (options?.turnId) entry.turnId = options.turnId;
     store.entries!.push(entry);
-    await writeStore(store);
-    log.agent.info('User message eagerly persisted', { turnId: options?.turnId });
-  });
+    await writeStore(store, aid);
+    log.agent.info('User message eagerly persisted', { turnId: options?.turnId, agentId: aid });
+  }, aid);
 }
 
 /**
@@ -617,9 +627,9 @@ export async function addUserMessage(
  * add a recovery notification so the user knows to resend.
  * Call once at server startup.
  */
-export async function recoverOrphanedUserMessage(): Promise<void> {
+export async function recoverOrphanedUserMessage(agentId?: string): Promise<void> {
   return withWriteLock(async () => {
-    const store = await readStore();
+    const store = await readStore(agentId);
     const entries = store.entries ?? [];
 
     // Find the last AI-tagged entry (skip trailing UI notifications)
@@ -646,8 +656,8 @@ export async function recoverOrphanedUserMessage(): Promise<void> {
       source: 'agent-error',
       notification: true,
     });
-    await writeStore(store);
-  });
+    await writeStore(store, agentId);
+  }, agentId);
 }
 
 /**
@@ -662,9 +672,11 @@ export async function addNotification(msg: {
   notification?: boolean;
   taskId?: string;
   sessionId?: string;
+  agentId?: string;
 }): Promise<void> {
+  const aid = msg.agentId;
   return withWriteLock(async () => {
-    const store = await readStore();
+    const store = await readStore(aid);
     const entry: ChatEntry = {
       tag: 'ui',
       role: msg.role,
@@ -677,9 +689,9 @@ export async function addNotification(msg: {
     };
     if (msg.sessionId) entry.sessionId = msg.sessionId;
     store.entries!.push(entry);
-    await writeStore(store);
-    log.agent.debug('chat notification added', { source: msg.source, role: msg.role });
-  });
+    await writeStore(store, aid);
+    log.agent.debug('chat notification added', { source: msg.source, role: msg.role, agentId: aid });
+  }, aid);
 }
 
 /**
@@ -692,8 +704,9 @@ export async function addNotification(msg: {
 export async function getTriageEntries(
   limit = 50,
   taskId?: string,
+  agentId?: string,
 ): Promise<{ entries: ChatEntry[]; total: number }> {
-  const store = await readStore();
+  const store = await readStore(agentId);
   const allEntries = store.entries ?? [];
 
   let triage = allEntries.filter(
@@ -822,10 +835,10 @@ export async function addTurn(
 /**
  * Clear all chat history.
  */
-export async function clear(): Promise<void> {
+export async function clear(agentId?: string): Promise<void> {
   return withWriteLock(async () => {
-    await writeStore(freshStore());
-  });
+    await writeStore(freshStore(), agentId);
+  }, agentId);
 }
 
 // ── Compaction ──
@@ -837,8 +850,8 @@ export async function clear(): Promise<void> {
  * Threshold is 80% of the model's context window (200K default, 1M for `[1m]` models).
  * Reads `agent.main_model` from config to detect the window size.
  */
-export async function needsCompaction(): Promise<boolean> {
-  const modelMsgs = await getModelContext();
+export async function needsCompaction(agentId?: string): Promise<boolean> {
+  const modelMsgs = await getModelContext(agentId);
 
   // Read model from config to compute context-aware threshold
   let threshold: number;
@@ -1151,8 +1164,9 @@ function slimContent(content: unknown, stripImageData = false): unknown {
 export async function compact(
   summarizer: (instruction: string, history: MessageParam[]) => Promise<string>,
   memoryFlusher?: (messages: MessageParam[]) => Promise<void>,
+  agentId?: string,
 ): Promise<CompactionResult | null> {
-  let store = await readStore();
+  let store = await readStore(agentId);
   let entries = store.entries ?? [];
 
   // Get non-compacted AI entries for compaction consideration
@@ -1218,7 +1232,7 @@ export async function compact(
   return withWriteLock(async () => {
     // Re-read store to pick up any concurrent writes during the LLM calls.
     // Recompute boundary on fresh data to avoid stale-index mismatches.
-    store = await readStore();
+    store = await readStore(agentId);
     entries = store.entries ?? [];
     aiEntries = entries.filter((e) => e.tag === 'ai' && !e.compacted);
     const freshBoundaryIdx = findTurnBoundaryIndex(aiEntries, RECENT_TURNS_TO_KEEP);
@@ -1228,7 +1242,7 @@ export async function compact(
     if (freshBoundaryIdx === null) {
       store.compactionSummary = summary;
       store.compactionCount++;
-      await writeStore(store);
+      await writeStore(store, agentId);
       return { summary };
     }
 
@@ -1251,11 +1265,12 @@ export async function compact(
 
     store.compactionSummary = summary;
     store.compactionCount++;
-    await writeStore(store);
+    await writeStore(store, agentId);
 
     log.agent.info('compaction complete', {
       compactionNumber: store.compactionCount,
       summaryLength: summary.length,
+      agentId,
     });
 
     // Fire-and-forget: compact today's daily log if it's oversized.
@@ -1275,5 +1290,5 @@ export async function compact(
     });
 
     return { summary };
-  });
+  }, agentId);
 }

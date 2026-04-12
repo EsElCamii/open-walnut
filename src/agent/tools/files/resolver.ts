@@ -16,15 +16,22 @@ import {
   GLOBAL_NOTES_FILE,
   NOTES_DIR,
   REPOSITORIES_DIR,
+  agentMemoryDir,
+  agentDailyDir,
 } from '../../../constants.js';
 import { formatDateKey } from '../../../core/daily-log.js';
 import type { ResolvedSource } from './types.js';
 
 /**
  * Resolve a source URI to an absolute file path + handler type.
+ * When agentId is set and not 'general', memory/global and memory/daily
+ * resolve to the agent's own directories instead of the General agent's.
  * Throws on invalid source patterns.
  */
-export function resolveSource(source: string): ResolvedSource {
+export function resolveSource(source: string, agentId?: string): ResolvedSource {
+  // Normalise: treat undefined/'general' identically (General agent path)
+  const effectiveAgentId = agentId && agentId !== 'general' ? agentId : undefined;
+
   // ── Absolute path → FileHandler ──
   if (source.startsWith('/')) {
     return { type: 'file', filePath: source, source };
@@ -32,11 +39,15 @@ export function resolveSource(source: string): ResolvedSource {
 
   // ── memory/* → MemoryHandler ──
   if (source === 'memory/global') {
+    const filePath = effectiveAgentId
+      ? path.join(agentMemoryDir(effectiveAgentId), 'MEMORY.md')
+      : MEMORY_FILE;
     return {
       type: 'memory',
-      filePath: MEMORY_FILE,
+      filePath,
       source,
       variant: 'global',
+      agentId: effectiveAgentId,
     };
   }
 
@@ -70,12 +81,14 @@ export function resolveSource(source: string): ResolvedSource {
   if (source === 'memory/daily') {
     // Default to today
     const dateKey = formatDateKey();
+    const dailyDir = effectiveAgentId ? agentDailyDir(effectiveAgentId) : DAILY_DIR;
     return {
       type: 'memory',
-      filePath: path.join(DAILY_DIR, `${dateKey}.md`),
+      filePath: path.join(dailyDir, `${dateKey}.md`),
       source,
       variant: 'daily',
       meta: { date: dateKey },
+      agentId: effectiveAgentId,
     };
   }
 
@@ -88,11 +101,52 @@ export function resolveSource(source: string): ResolvedSource {
     if (isNaN(parsed.getTime())) {
       throw new Error(`Invalid date in source "${source}": "${date}" is not a valid date.`);
     }
+    const dailyDir = effectiveAgentId ? agentDailyDir(effectiveAgentId) : DAILY_DIR;
+    return {
+      type: 'memory',
+      filePath: path.join(dailyDir, `${date}.md`),
+      source,
+      variant: 'daily',
+      meta: { date },
+      agentId: effectiveAgentId,
+    };
+  }
+
+  // ── memory/main/* → Main (General) agent memory/daily, always read-only ──
+  if (source === 'memory/main/global') {
+    return {
+      type: 'memory',
+      filePath: MEMORY_FILE,
+      source,
+      variant: 'main-global',
+    };
+  }
+
+  if (source === 'memory/main/daily') {
+    const dateKey = formatDateKey();
+    return {
+      type: 'memory',
+      filePath: path.join(DAILY_DIR, `${dateKey}.md`),
+      source,
+      variant: 'main-daily',
+      meta: { date: dateKey },
+    };
+  }
+
+  if (source.startsWith('memory/main/daily/')) {
+    const date = source.slice('memory/main/daily/'.length);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+      throw new Error(`Invalid date format in source "${source}". Expected YYYY-MM-DD.`);
+    }
+    const parsed = new Date(date + 'T00:00:00Z');
+    if (isNaN(parsed.getTime())) {
+      throw new Error(`Invalid date in source "${source}": "${date}" is not a valid date.`);
+    }
     return {
       type: 'memory',
       filePath: path.join(DAILY_DIR, `${date}.md`),
       source,
-      variant: 'daily',
+      variant: 'main-daily',
       meta: { date },
     };
   }
@@ -181,6 +235,6 @@ export function resolveSource(source: string): ResolvedSource {
   }
 
   throw new Error(
-    `Invalid source "${source}". Expected: /absolute/path, memory/global, memory/project/{path}, memory/daily[/YYYY-MM-DD], memory/repo[/{slug}], notes/global, notes/{name}, repos/, or repos/{name}.`,
+    `Invalid source "${source}". Expected: /absolute/path, memory/global, memory/project/{path}, memory/daily[/YYYY-MM-DD], memory/main/global, memory/main/daily[/YYYY-MM-DD], memory/repo[/{slug}], notes/global, notes/{name}, repos/, or repos/{name}.`,
   );
 }

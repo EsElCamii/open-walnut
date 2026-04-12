@@ -309,6 +309,14 @@ export class SessionHookDispatcher {
       }
 
       case EventNames.SESSION_RESULT: {
+        // Skip hooks entirely when team subagents are still active.
+        // The lead session emits intermediate `result` events while polling for
+        // teammate messages — these should NOT trigger triage (onTurnComplete).
+        if (data.teamActive) {
+          log.session.info('SESSION_RESULT skipped — teamActive', { sessionId });
+          break;
+        }
+
         const isError = data.isError as boolean | undefined;
         const state = this.getOrCreateState(sessionId);
 

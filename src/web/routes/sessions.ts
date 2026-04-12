@@ -629,14 +629,14 @@ sessionsRouter.patch('/:sessionId', async (req: Request, res: Response, next: Ne
 
     const sessionId = String(req.params.sessionId)
 
-    // Archive/unarchive: validate session is stopped before archiving
+    // Archive/unarchive: validate session is in a terminal state before archiving
     if (archived === true) {
       const existing = await getSessionByClaudeId(sessionId)
       if (!existing) {
         res.status(404).json({ error: 'session not found' })
         return
       }
-      if (existing.process_status !== 'stopped') {
+      if (existing.process_status !== 'stopped' && existing.process_status !== 'error') {
         res.status(400).json({ error: 'Stop session before archiving' })
         return
       }

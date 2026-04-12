@@ -603,7 +603,7 @@ export function TaskDetailPage() {
                   {record?.process_status && (
                     <span className="text-xs text-muted">{record.process_status}</span>
                   )}
-                  {record?.process_status === 'stopped' && (
+                  {(record?.process_status === 'stopped' || record?.process_status === 'error') && (
                     <button
                       className="btn btn-sm"
                       style={{ fontSize: '0.7rem', padding: '1px 6px', opacity: 0.7 }}

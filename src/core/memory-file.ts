@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { log } from '../logging/index.js';
-import { MEMORY_FILE } from '../constants.js';
+import { MEMORY_FILE, agentMemoryDir } from '../constants.js';
 import { computeContentHash, editFileContent, writeFileChecked } from '../utils/file-ops.js';
 
 const DEFAULT_TEMPLATE = `---
@@ -16,13 +16,20 @@ export interface MemoryFileResult {
   contentHash: string;
 }
 
+/** Resolve the MEMORY.md path for a console agent. */
+function resolveMemoryPath(agentId?: string): string {
+  if (!agentId || agentId === 'general') return MEMORY_FILE;
+  return path.join(agentMemoryDir(agentId), 'MEMORY.md');
+}
+
 /**
- * Read the global MEMORY.md file.
+ * Read the global MEMORY.md file (or an agent-specific one).
  * Returns content + contentHash for stale-check support.
  */
-export function getMemoryFile(): MemoryFileResult | null {
+export function getMemoryFile(agentId?: string): MemoryFileResult | null {
+  const filePath = resolveMemoryPath(agentId);
   try {
-    const content = fs.readFileSync(MEMORY_FILE, 'utf-8');
+    const content = fs.readFileSync(filePath, 'utf-8');
     return { content, contentHash: computeContentHash(content) };
   } catch (err) {
     log.memory.debug('memory-file: MEMORY.md not found or unreadable', {
@@ -39,9 +46,11 @@ export function getMemoryFile(): MemoryFileResult | null {
 export async function updateMemoryFile(
   content: string,
   expectedHash?: string,
+  agentId?: string,
 ): Promise<{ contentHash: string }> {
-  fs.mkdirSync(path.dirname(MEMORY_FILE), { recursive: true });
-  const result = await writeFileChecked(MEMORY_FILE, content, {
+  const filePath = resolveMemoryPath(agentId);
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  const result = await writeFileChecked(filePath, content, {
     expectedHash,
   });
   return { contentHash: result.contentHash };
@@ -56,8 +65,10 @@ export async function editMemoryFile(
   newContent: string,
   expectedHash: string,
   replaceAll?: boolean,
+  agentId?: string,
 ): Promise<{ replacements: number; contentHash: string }> {
-  return editFileContent(MEMORY_FILE, oldContent, newContent, {
+  const filePath = resolveMemoryPath(agentId);
+  return editFileContent(filePath, oldContent, newContent, {
     expectedHash,
     replaceAll,
   });
@@ -66,8 +77,9 @@ export async function editMemoryFile(
 /**
  * Create MEMORY.md with a default template if it doesn't exist.
  */
-export function ensureMemoryFile(): void {
-  if (fs.existsSync(MEMORY_FILE)) return;
-  fs.mkdirSync(path.dirname(MEMORY_FILE), { recursive: true });
-  fs.writeFileSync(MEMORY_FILE, DEFAULT_TEMPLATE, 'utf-8');
+export function ensureMemoryFile(agentId?: string): void {
+  const filePath = resolveMemoryPath(agentId);
+  if (fs.existsSync(filePath)) return;
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  fs.writeFileSync(filePath, DEFAULT_TEMPLATE, 'utf-8');
 }

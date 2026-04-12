@@ -7,7 +7,7 @@
  * Priority: config > builtin (later source wins on ID conflict).
  */
 
-import { getConfig, saveConfig, DEFAULT_AVAILABLE_MODELS, _resetWriteLockForTest } from './config-manager.js';
+import { getConfig, updateConfig, DEFAULT_AVAILABLE_MODELS, _resetWriteLockForTest } from './config-manager.js';
 import { ensureProjectDir } from './project-memory.js';
 import type { AgentDefinition } from './types.js';
 import { log } from '../logging/index.js';
@@ -16,9 +16,45 @@ import { log } from '../logging/index.js';
 
 const BUILTIN_GENERAL: AgentDefinition = {
   id: 'general',
-  name: 'General Agent',
-  description: 'General-purpose subagent for ad-hoc tasks. No tool restrictions.',
+  name: 'Walnut',
+  description: 'Your personal butler — tasks, sessions, memory, and everything else.',
   runner: 'embedded',
+  console: true,
+  source: 'builtin',
+};
+
+const BUILTIN_INNER_SPACE: AgentDefinition = {
+  id: 'inner',
+  name: 'Inner Space',
+  description: 'Reflective companion for personal thinking, journaling, and self-exploration. No task management.',
+  runner: 'embedded',
+  console: true,
+  system_prompt: `You are Inner Space — a reflective, warm companion for personal thinking and self-exploration.
+
+Your role:
+- Listen deeply, ask thoughtful follow-up questions, reflect back patterns you notice
+- Help the user think through feelings, ideas, decisions, and life directions
+- Be genuine, concise, and direct — not therapist-formal, but a trusted friend
+- Remember past conversations through your memory — reference them naturally
+- Write in the user's preferred language (match whatever they use)
+
+You do NOT:
+- Manage tasks, start sessions, or interact with external systems
+- Give generic advice — always ground responses in what the user has shared
+- Use emojis unless the user does first
+
+When writing to memory, focus on emotional patterns, recurring themes, personal goals, and relationship dynamics — the things that make this person who they are.`,
+  denied_tools: [
+    'start_session', 'send_to_session', 'stop_session',
+    'exec', 'create_task', 'update_task', 'delete_task',
+    'create_subtask', 'delete_subtask',
+  ],
+  context_sources: [
+    { id: 'global_memory', enabled: true },
+    { id: 'daily_log', enabled: true },
+    { id: 'main_global_memory', enabled: true },
+    { id: 'main_daily_log', enabled: true },
+  ],
   source: 'builtin',
 };
 
@@ -325,7 +361,7 @@ Message: "Layout is done, go back to the previous bug"
 };
 
 /** All built-in agents. */
-const BUILTIN_AGENTS = [BUILTIN_GENERAL, BUILTIN_TURN_COMPLETE_TRIAGE, BUILTIN_MESSAGE_SEND_TRIAGE];
+const BUILTIN_AGENTS = [BUILTIN_GENERAL, BUILTIN_INNER_SPACE, BUILTIN_TURN_COMPLETE_TRIAGE, BUILTIN_MESSAGE_SEND_TRIAGE];
 
 /** Set of builtin agent IDs for quick lookup. */
 const BUILTIN_ID_SET = new Set(BUILTIN_AGENTS.map(a => a.id));
@@ -338,6 +374,26 @@ export const DEFAULT_TRIAGE_AGENT_ID = BUILTIN_TURN_COMPLETE_TRIAGE.id;
 
 /** The default message-send triage agent ID. Can be overridden via config.agent.message_send_triage_agent. */
 export const DEFAULT_MESSAGE_SEND_TRIAGE_AGENT_ID = BUILTIN_MESSAGE_SEND_TRIAGE.id;
+
+/**
+ * Get all console agents (agents that appear in the main chat AgentSwitcher).
+ * Returns builtin console agents + config-defined console agents, merged by priority.
+ */
+export async function getConsoleAgents(): Promise<AgentDefinition[]> {
+  const all = await getAllAgents();
+  return all.filter((a) => a.console);
+}
+
+/**
+ * Get a console agent by ID. Returns undefined if not found or not a console agent.
+ */
+export async function getConsoleAgent(id: string): Promise<AgentDefinition | undefined> {
+  const agent = await getAgent(id);
+  if (!agent) return undefined;
+  // General is always a console agent even if console flag is missing (backward compat)
+  if (agent.id === 'general') return agent;
+  return agent.console ? agent : undefined;
+}
 
 /**
  * Get all agent definitions, merged by priority (config > builtin).
@@ -415,7 +471,7 @@ export async function createAgent(
   const configAgents = config.agent?.agents ?? [];
   const { ...defWithoutSource } = definition;
   configAgents.push(defWithoutSource);
-  await saveConfig({ ...config, agent: { ...config.agent, agents: configAgents } });
+  await updateConfig({ agent: { ...config.agent, agents: configAgents } });
 
   const agent: AgentDefinition = { ...definition, source: 'config' };
 
@@ -449,7 +505,7 @@ export async function updateAgent(
   if (configIdx !== -1) {
     const merged = { ...configAgents[configIdx], ...updates };
     configAgents[configIdx] = merged;
-    await saveConfig({ ...config, agent: { ...config.agent, agents: configAgents } });
+    await updateConfig({ agent: { ...config.agent, agents: configAgents } });
 
     // Auto-create memory directory if stateful config changed (best-effort)
     if (updates.stateful?.memory_project) {
@@ -471,7 +527,7 @@ export async function updateAgent(
     const { source: _source, ...builtinFields } = builtin;
     const overrideEntry = { ...builtinFields, ...updates };
     configAgents.push(overrideEntry);
-    await saveConfig({ ...config, agent: { ...config.agent, agents: configAgents } });
+    await updateConfig({ agent: { ...config.agent, agents: configAgents } });
 
     if (overrideEntry.stateful?.memory_project) {
       try { ensureProjectDir(overrideEntry.stateful.memory_project); } catch { /* best-effort */ }
@@ -492,7 +548,7 @@ export async function deleteAgent(id: string): Promise<void> {
   const idx = configAgents.findIndex((a) => a.id === id);
   if (idx !== -1) {
     configAgents.splice(idx, 1);
-    await saveConfig({ ...config, agent: { ...config.agent, agents: configAgents } });
+    await updateConfig({ agent: { ...config.agent, agents: configAgents } });
     log.subagent.info('agent deleted', { id });
     return;
   }

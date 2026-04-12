@@ -8,6 +8,7 @@
  */
 
 import { Router, type Request, type Response, type NextFunction } from 'express'
+import { validateAgentId } from '../../constants.js'
 import * as chatHistory from '../../core/chat-history.js'
 import { estimateMessagesTokens, estimateFullPayload } from '../../core/daily-log.js'
 import { getContextWindowSize } from '../../agent/model.js'
@@ -16,51 +17,77 @@ import { isCompactionInProgress, triggerBackgroundCompaction } from '../backgrou
 
 export const chatHistoryRouter = Router()
 
-// Module-level cache for stats endpoint — avoids rebuilding system prompt + tool schemas.
+// Per-agent cache for stats endpoint — avoids rebuilding system prompt + tool schemas.
 // Invalidated automatically when file mtime changes (any chat history write).
-let cachedStats: { apiMessageCount: number; estimatedTokens: number; systemTokens: number; toolsTokens: number; estimatedTotalTokens: number; compacted: boolean; contextWindow: number } | null = null
-let cachedMtime: string | null = null
+const cachedStatsMap = new Map<string, { apiMessageCount: number; estimatedTokens: number; systemTokens: number; toolsTokens: number; estimatedTotalTokens: number; compacted: boolean; contextWindow: number }>()
+const cachedMtimeMap = new Map<string, string>()
 
-// GET /api/chat/history?page=1&pageSize=100
+// GET /api/chat/history?page=1&pageSize=100&agentId=general
 chatHistoryRouter.get('/history', async (req: Request, res: Response, next: NextFunction) => {
   try {
     const page = req.query.page ? parseInt(req.query.page as string, 10) : 1
     const pageSize = req.query.pageSize ? parseInt(req.query.pageSize as string, 10) : 100
-    const result = await chatHistory.getDisplayEntries(page, pageSize)
+    const rawAgentId = (req.query.agentId as string) || undefined
+    const agentId = rawAgentId ? validateAgentId(rawAgentId) : undefined
+    const result = await chatHistory.getDisplayEntries(page, pageSize, agentId)
     res.json(result)
   } catch (err) {
     next(err)
   }
 })
 
-// GET /api/chat/stats — real conversation size (cached between turns)
-chatHistoryRouter.get('/stats', async (_req: Request, res: Response, next: NextFunction) => {
+// GET /api/chat/stats?agentId=general — real conversation size (cached between turns)
+chatHistoryRouter.get('/stats', async (req: Request, res: Response, next: NextFunction) => {
   try {
+    const rawAgentId = (req.query.agentId as string) || undefined
+    const agentId = rawAgentId ? validateAgentId(rawAgentId) : undefined
+    const cacheKey = agentId || 'general'
+
     // Check if cached stats are still valid (chat history hasn't changed)
-    const lastUpdated = await chatHistory.getLastUpdated()
+    const lastUpdated = await chatHistory.getLastUpdated(agentId)
+    const cachedStats = cachedStatsMap.get(cacheKey)
+    const cachedMtime = cachedMtimeMap.get(cacheKey)
     if (cachedStats && cachedMtime === lastUpdated) {
       res.json(cachedStats)
       return
     }
 
     // Full computation (first call or after new messages/compaction)
-    const modelContext = await chatHistory.getModelContext()
+    const modelContext = await chatHistory.getModelContext(agentId)
     const messageTokens = estimateMessagesTokens(modelContext)
-    const summary = await chatHistory.getCompactionSummary()
+    const summary = await chatHistory.getCompactionSummary(agentId)
 
     // Compute full payload estimate (system + tools + messages)
     let systemTokens = 0
     let toolsTokens = 0
-    try {
-      const { buildSystemPrompt } = await import('../../agent/context.js')
-      const { getToolSchemas } = await import('../../agent/tools.js')
-      const systemPrompt = await buildSystemPrompt()
-      const tools = getToolSchemas()
-      const breakdown = estimateFullPayload({ system: systemPrompt, tools, messages: modelContext })
-      systemTokens = breakdown.system
-      toolsTokens = breakdown.tools
-    } catch (err) {
-      log.web.warn('chat stats: full payload estimation failed', { error: String(err) })
+    if (!agentId || agentId === 'general') {
+      // General agent: use full system prompt + tools
+      try {
+        const { buildSystemPrompt } = await import('../../agent/context.js')
+        const { getToolSchemas } = await import('../../agent/tools.js')
+        const systemPrompt = await buildSystemPrompt()
+        const tools = getToolSchemas()
+        const breakdown = estimateFullPayload({ system: systemPrompt, tools, messages: modelContext })
+        systemTokens = breakdown.system
+        toolsTokens = breakdown.tools
+      } catch (err) {
+        log.web.warn('chat stats: full payload estimation failed', { error: String(err) })
+      }
+    } else {
+      // Non-General: estimate from agent def system prompt + filtered tools
+      try {
+        const { getConsoleAgent } = await import('../../core/agent-registry.js')
+        const { buildSubagentToolSet } = await import('../../agent/subagent-context.js')
+        const { estimateTokens } = await import('../../core/daily-log.js')
+        const agentDef = await getConsoleAgent(agentId)
+        if (agentDef) {
+          systemTokens = estimateTokens(agentDef.system_prompt ?? '')
+          const agentTools = await buildSubagentToolSet(agentDef)
+          toolsTokens = estimateTokens(JSON.stringify(agentTools))
+        }
+      } catch (err) {
+        log.web.warn('chat stats: agent payload estimation failed', { agentId, error: String(err) })
+      }
     }
 
     // Read model from config for context window detection
@@ -84,8 +111,8 @@ chatHistoryRouter.get('/stats', async (_req: Request, res: Response, next: NextF
     }
 
     // Cache for subsequent calls
-    cachedStats = result
-    cachedMtime = lastUpdated
+    cachedStatsMap.set(cacheKey, result)
+    cachedMtimeMap.set(cacheKey, lastUpdated)
 
     res.json(result)
   } catch (err) {
@@ -98,31 +125,37 @@ chatHistoryRouter.get('/triage', async (req: Request, res: Response, next: NextF
   try {
     const limit = req.query.limit ? parseInt(req.query.limit as string, 10) : 50
     const taskId = req.query.taskId as string | undefined
-    const result = await chatHistory.getTriageEntries(limit, taskId)
+    const rawAgentId = (req.query.agentId as string) || undefined
+    const agentId = rawAgentId ? validateAgentId(rawAgentId) : undefined
+    const result = await chatHistory.getTriageEntries(limit, taskId, agentId)
     res.json(result)
   } catch (err) {
     next(err)
   }
 })
 
-// POST /api/chat/clear
-chatHistoryRouter.post('/clear', async (_req: Request, res: Response, next: NextFunction) => {
+// POST /api/chat/clear?agentId=general
+chatHistoryRouter.post('/clear', async (req: Request, res: Response, next: NextFunction) => {
   try {
-    await chatHistory.clear()
+    const rawAgentId = (req.query.agentId as string) || undefined
+    const agentId = rawAgentId ? validateAgentId(rawAgentId) : undefined
+    await chatHistory.clear(agentId)
     res.json({ ok: true })
   } catch (err) {
     next(err)
   }
 })
 
-// POST /api/chat/compact — fire-and-forget background compaction
-chatHistoryRouter.post('/compact', async (_req: Request, res: Response, next: NextFunction) => {
+// POST /api/chat/compact?agentId=general — fire-and-forget background compaction
+chatHistoryRouter.post('/compact', async (req: Request, res: Response, next: NextFunction) => {
   try {
-    if (isCompactionInProgress()) {
+    const rawAgentId = (req.query.agentId as string) || undefined
+    const agentId = rawAgentId ? validateAgentId(rawAgentId) : undefined
+    if (isCompactionInProgress(agentId)) {
       res.json({ ok: true, alreadyRunning: true })
       return
     }
-    triggerBackgroundCompaction('rest-api', { force: true })
+    triggerBackgroundCompaction('rest-api', { force: true, agentId })
     res.json({ ok: true, async: true })
   } catch (err) {
     next(err)

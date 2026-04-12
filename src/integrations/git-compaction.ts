@@ -1,0 +1,361 @@
+/**
+ * Git history tiered compaction for Walnut's git-sync.
+ *
+ * git-sync auto-commits every 30s, causing .git/ to balloon over time.
+ * This module compacts old history using a tiered strategy:
+ *   - < 7 days:  keep every commit
+ *   - 7–30 days: keep 1 per day (last commit of the day)
+ *   - > 30 days: keep 1 per week (last commit of the ISO week)
+ *
+ * Safety: backup branch created before any mutation, atomic swap via
+ * git update-ref, state journal for crash recovery.
+ */
+
+import { execSync } from 'node:child_process';
+import fs from 'node:fs';
+import path from 'node:path';
+import { WALNUT_HOME } from '../constants.js';
+import { git, gitSafe, setCompactionInProgress, clearStaleLock } from './git-sync.js';
+
+// ---------------------------------------------------------------------------
+// Types
+// ---------------------------------------------------------------------------
+
+export interface CompactionResult {
+  skipped?: boolean;
+  before: number;
+  after: number;
+  error?: string;
+}
+
+interface Commit {
+  hash: string;
+  date: string;   // ISO-8601
+  subject: string;
+}
+
+interface CompactionState {
+  phase: 'building' | 'verified' | 'swapped' | 'cleaning';
+  backup: string;
+  startedAt: string;
+}
+
+// ---------------------------------------------------------------------------
+// State journal — crash recovery
+// ---------------------------------------------------------------------------
+
+function statePath(repoDir: string): string {
+  return path.join(repoDir, '.git', 'compaction-state.json');
+}
+
+function writeState(repoDir: string, state: CompactionState): void {
+  fs.writeFileSync(statePath(repoDir), JSON.stringify(state), 'utf-8');
+}
+
+function readState(repoDir: string): CompactionState | null {
+  try {
+    return JSON.parse(fs.readFileSync(statePath(repoDir), 'utf-8'));
+  } catch {
+    return null;
+  }
+}
+
+function removeState(repoDir: string): void {
+  try { fs.unlinkSync(statePath(repoDir)); } catch {}
+}
+
+// ---------------------------------------------------------------------------
+// ISO week helper
+// ---------------------------------------------------------------------------
+
+function isoWeek(dateStr: string): string {
+  const d = new Date(dateStr);
+  // Algorithm: https://en.wikipedia.org/wiki/ISO_week_date
+  const jan4 = new Date(d.getFullYear(), 0, 4);
+  const dayOfYear = Math.floor((d.getTime() - new Date(d.getFullYear(), 0, 1).getTime()) / 86400000) + 1;
+  const dayOfWeek = d.getDay() || 7; // Mon=1 .. Sun=7
+  const weekNum = Math.floor((dayOfYear - dayOfWeek + 10) / 7);
+  if (weekNum < 1) {
+    // Last week of previous year
+    return `${d.getFullYear() - 1}-W52`;
+  }
+  return `${d.getFullYear()}-W${String(weekNum).padStart(2, '0')}`;
+}
+
+// ---------------------------------------------------------------------------
+// Tiered commit selection
+// ---------------------------------------------------------------------------
+
+export function selectCommits(
+  commits: Commit[],
+  config: { recentDays: number; dailyDays: number },
+): Commit[] {
+  const now = Date.now();
+  const DAY = 86_400_000;
+  const recent: Commit[] = [];
+
+  // Maps keep insertion order — since commits are chronological,
+  // later (newer) commits overwrite earlier ones, so the last value per key
+  // is the last commit of that day/week.
+  const dailyBuckets = new Map<string, Commit>();
+  const weeklyBuckets = new Map<string, Commit>();
+
+  for (const c of commits) {
+    const ageDays = (now - new Date(c.date).getTime()) / DAY;
+
+    if (ageDays < config.recentDays) {
+      recent.push(c);
+    } else if (ageDays < config.dailyDays) {
+      dailyBuckets.set(c.date.slice(0, 10), c);
+    } else {
+      weeklyBuckets.set(isoWeek(c.date), c);
+    }
+  }
+
+  // Merge: weekly (oldest) → daily → recent (newest) — all chronological
+  return [
+    ...weeklyBuckets.values(),
+    ...dailyBuckets.values(),
+    ...recent,
+  ];
+}
+
+// ---------------------------------------------------------------------------
+// Parse git log output
+// ---------------------------------------------------------------------------
+
+function parseGitLog(raw: string): Commit[] {
+  if (!raw.trim()) return [];
+  return raw.split('\n').map((line) => {
+    // Format: <hash> <ISO-date> <subject...>
+    const spaceIdx1 = line.indexOf(' ');
+    const spaceIdx2 = line.indexOf(' ', spaceIdx1 + 1);
+    return {
+      hash: line.slice(0, spaceIdx1),
+      date: line.slice(spaceIdx1 + 1, spaceIdx2),
+      subject: line.slice(spaceIdx2 + 1),
+    };
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Core compaction
+// ---------------------------------------------------------------------------
+
+/**
+ * Run tiered history compaction on a git repo.
+ * @param repoDir - path to the git working directory (defaults to WALNUT_HOME)
+ */
+export function compactGitHistory(repoDir = WALNUT_HOME): CompactionResult {
+  const opts = { cwd: repoDir };
+
+  // 0. Ensure we're on main and working tree is clean
+  const branch = gitSafe('rev-parse --abbrev-ref HEAD', opts);
+  if (branch !== 'main') {
+    git('checkout main', opts);
+  }
+
+  // 1. Collect all commits (oldest first)
+  const logRaw = git('log --format="%H %aI %s" --reverse', opts);
+  const commits = parseGitLog(logRaw);
+
+  if (commits.length < 50) {
+    return { skipped: true, before: commits.length, after: commits.length };
+  }
+
+  // 2. Select commits to keep
+  const selected = selectCommits(commits, { recentDays: 7, dailyDays: 30 });
+
+  if (selected.length >= commits.length * 0.9) {
+    // Less than 10% reduction — not worth it
+    return { skipped: true, before: commits.length, after: selected.length };
+  }
+
+  // 3. Create backup branch
+  const backupName = `backup-${new Date().toISOString().slice(0, 10).replace(/-/g, '')}`;
+  gitSafe(`branch -D ${backupName}`, opts); // remove old backup with same name
+  git(`branch ${backupName}`, opts);
+  writeState(repoDir, { phase: 'building', backup: backupName, startedAt: new Date().toISOString() });
+
+  try {
+    // 4. Build compacted branch (orphan)
+    git('checkout --orphan compaction-wip', opts);
+    // Clean the index (orphan branch starts with all files staged)
+    gitSafe('rm -rf .', opts);
+
+    for (const commit of selected) {
+      // Clear working tree then restore from commit's tree.
+      // checkout <hash> -- . is additive (doesn't delete missing files),
+      // so we must rm first to handle deleted files correctly.
+      gitSafe('rm -rf .', opts);
+      git(`checkout ${commit.hash} -- .`, opts);
+      git('add -A', opts);
+
+      // Commit with the original timestamp preserved
+      const safeSubject = commit.subject.replace(/"/g, '\\"');
+      const message = commit === selected[0] && selected.length < commits.length
+        ? `compacted: ${safeSubject}`
+        : safeSubject;
+
+      git(`commit --allow-empty -m "${message}"`, {
+        ...opts,
+        env: {
+          GIT_AUTHOR_DATE: commit.date,
+          GIT_COMMITTER_DATE: commit.date,
+        },
+      });
+    }
+
+    // 5. Verify: final tree of compaction-wip must match main exactly
+    writeState(repoDir, { phase: 'verified', backup: backupName, startedAt: new Date().toISOString() });
+    const diff = gitSafe('diff compaction-wip main', opts);
+    if (diff && diff.length > 0) {
+      // MISMATCH — abort
+      git('checkout main', opts);
+      gitSafe('branch -D compaction-wip', opts);
+      removeState(repoDir);
+      return { before: commits.length, after: commits.length, error: 'verification failed: trees differ' };
+    }
+
+    // 6. Atomic swap: point main at compaction-wip HEAD
+    const newHead = git('rev-parse compaction-wip', opts);
+    git(`update-ref refs/heads/main ${newHead}`, opts);
+    git('checkout main', opts);
+    gitSafe('branch -D compaction-wip', opts);
+    writeState(repoDir, { phase: 'swapped', backup: backupName, startedAt: new Date().toISOString() });
+
+    // 7. Cleanup (non-fatal)
+    writeState(repoDir, { phase: 'cleaning', backup: backupName, startedAt: new Date().toISOString() });
+    try {
+      git('reflog expire --expire=now --all', opts);
+      git('gc --prune=now', opts);
+    } catch {
+      // gc failure is non-fatal
+    }
+
+    // 8. Delete old backup branches (keep latest 2)
+    deleteOldBackups(repoDir, 2);
+
+    removeState(repoDir);
+    return { before: commits.length, after: selected.length };
+
+  } catch (err) {
+    // Any failure: restore main from backup
+    const currentBranch = gitSafe('rev-parse --abbrev-ref HEAD', opts);
+    if (currentBranch !== 'main') {
+      gitSafe('checkout main', opts);
+    }
+    // If main is gone (shouldn't happen since we use update-ref), restore from backup
+    const mainExists = gitSafe('rev-parse --verify main', opts);
+    if (!mainExists) {
+      gitSafe(`branch main ${backupName}`, opts);
+      gitSafe('checkout main', opts);
+    }
+    gitSafe('branch -D compaction-wip', opts);
+    removeState(repoDir);
+    throw err;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Cleanup old backup branches
+// ---------------------------------------------------------------------------
+
+function deleteOldBackups(repoDir: string, keepCount: number): void {
+  const opts = { cwd: repoDir };
+  const branches = gitSafe('branch --list backup-*', opts);
+  if (!branches) return;
+
+  const backupBranches = branches
+    .split('\n')
+    .map((b) => b.trim())
+    .filter((b) => b.startsWith('backup-'))
+    .sort(); // chronological since names are date-based
+
+  // Delete all but the latest `keepCount`
+  const toDelete = backupBranches.slice(0, -keepCount);
+  for (const b of toDelete) {
+    gitSafe(`branch -D ${b}`, opts);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Crash recovery — call on startup
+// ---------------------------------------------------------------------------
+
+export function recoverFromCrashedCompaction(repoDir = WALNUT_HOME): void {
+  const state = readState(repoDir);
+  if (!state) return;
+
+  const opts = { cwd: repoDir };
+
+  try {
+    switch (state.phase) {
+      case 'building':
+      case 'verified':
+        // main is untouched — just clean up temp branch
+        gitSafe('checkout main', opts);
+        gitSafe('branch -D compaction-wip', opts);
+        break;
+      case 'swapped':
+      case 'cleaning':
+        // swap succeeded — just need gc cleanup
+        gitSafe('checkout main', opts);
+        gitSafe('branch -D compaction-wip', opts);
+        gitSafe('reflog expire --expire=now --all', opts);
+        gitSafe('gc --prune=now', opts);
+        break;
+    }
+  } catch {
+    // Recovery itself should never throw
+  }
+
+  removeState(repoDir);
+}
+
+// ---------------------------------------------------------------------------
+// Scheduled compaction — check if due
+// ---------------------------------------------------------------------------
+
+const LAST_COMPACTION_FILE = '.last-compaction';
+const COMPACTION_INTERVAL_DAYS = 7;
+
+export function isCompactionDue(repoDir = WALNUT_HOME): boolean {
+  const filePath = path.join(repoDir, LAST_COMPACTION_FILE);
+  try {
+    const content = fs.readFileSync(filePath, 'utf-8').trim();
+    const lastDate = new Date(content);
+    const daysSince = (Date.now() - lastDate.getTime()) / 86_400_000;
+    return daysSince >= COMPACTION_INTERVAL_DAYS;
+  } catch {
+    // File doesn't exist — never compacted
+    return true;
+  }
+}
+
+export function markCompactionDone(repoDir = WALNUT_HOME): void {
+  fs.writeFileSync(
+    path.join(repoDir, LAST_COMPACTION_FILE),
+    new Date().toISOString(),
+    'utf-8',
+  );
+}
+
+/**
+ * Run compaction if due, with full safety (lock coordination with git-sync).
+ */
+export function runScheduledCompaction(repoDir = WALNUT_HOME): CompactionResult | null {
+  if (!isCompactionDue(repoDir)) return null;
+
+  setCompactionInProgress(true);
+  try {
+    clearStaleLock();
+    const result = compactGitHistory(repoDir);
+    if (!result.skipped && !result.error) {
+      markCompactionDone(repoDir);
+    }
+    return result;
+  } finally {
+    setCompactionInProgress(false);
+  }
+}

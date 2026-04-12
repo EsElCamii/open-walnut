@@ -6,7 +6,6 @@ import {
 } from '@/utils/markdown';
 import { useEntityClickHandler } from '@/hooks/useEntityClickHandler';
 import { useLivePlanContent } from '@/contexts/PlanContentContext';
-import { PlanPopup } from './PlanPopup';
 import { fetchSubagentHistory } from '@/api/sessions';
 import { getSubagentCache, setSubagentCache } from '@/cache/session-cache';
 import { log } from '@/utils/log';
@@ -194,11 +193,11 @@ export function PlanCard({ content }: { content: string }) {
   const livePlan = useLivePlanContent();
   const displayContent = livePlan ?? content;
   const [open, setOpen] = useState(true);
-  const [showPopup, setShowPopup] = useState(false);
   const html = useMemo(() => renderMarkdownWithRefs(displayContent), [displayContent]);
 
   const handleExpandClick = useCallback(() => {
-    setShowPopup(true);
+    // Open the unified plan modal (listened by SessionPanel / SessionDetailPanel)
+    window.dispatchEvent(new CustomEvent('open-plan-modal'));
   }, []);
 
   return (
@@ -230,7 +229,6 @@ export function PlanCard({ content }: { content: string }) {
           />
         </div>
       )}
-      {showPopup && <PlanPopup content={displayContent} onClose={() => setShowPopup(false)} />}
     </div>
   );
 }

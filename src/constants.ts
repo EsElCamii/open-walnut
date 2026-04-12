@@ -112,6 +112,47 @@ export const DAILY_DIR = path.join(MEMORY_DIR, 'daily');
 export const MEMORY_FILE = path.join(WALNUT_HOME, 'MEMORY.md');
 export const PROJECTS_MEMORY_DIR = path.join(MEMORY_DIR, 'projects');
 export const CHAT_HISTORY_FILE = path.join(WALNUT_HOME, 'chat-history.json');
+
+/**
+ * Validate an agentId from user input to prevent path traversal.
+ * Throws if the value is not a safe alphanumeric-dash-underscore string.
+ */
+export function validateAgentId(agentId: string): string {
+  if (!/^[a-z0-9_-]{1,64}$/i.test(agentId)) {
+    throw new Error(`Invalid agentId: ${JSON.stringify(agentId)}`);
+  }
+  return agentId;
+}
+
+/**
+ * Resolve chat history file path for a console agent.
+ * General ('general' or undefined) → chat-history.json (zero migration).
+ * Others → chat-history-{agentId}.json.
+ */
+export function chatHistoryFile(agentId?: string): string {
+  if (!agentId || agentId === 'general') return CHAT_HISTORY_FILE;
+  return path.join(WALNUT_HOME, `chat-history-${agentId}.json`);
+}
+
+/**
+ * Resolve the memory directory for a console agent.
+ * General → MEMORY_DIR (existing path, zero migration).
+ * Others → MEMORY_DIR/agents/{agentId}/.
+ */
+export function agentMemoryDir(agentId?: string): string {
+  if (!agentId || agentId === 'general') return WALNUT_HOME;
+  return path.join(MEMORY_DIR, 'agents', agentId);
+}
+
+/**
+ * Resolve the daily log directory for a console agent.
+ * General → DAILY_DIR (existing path, zero migration).
+ * Others → MEMORY_DIR/agents/{agentId}/daily/.
+ */
+export function agentDailyDir(agentId?: string): string {
+  if (!agentId || agentId === 'general') return DAILY_DIR;
+  return path.join(MEMORY_DIR, 'agents', agentId, 'daily');
+}
 export const GLOBAL_SKILLS_DIR = path.join(WALNUT_HOME, 'skills');
 export const SKILL_SETTINGS_FILE = path.join(WALNUT_HOME, 'skill-settings.json');
 export const CLAUDE_SKILLS_DIR = path.join(CLAUDE_HOME, 'skills');

@@ -13,29 +13,30 @@ import { EventNames } from '../core/event-bus.js'
 import { createCompactionCallbacks, buildCompactionDivider } from './routes/chat.js'
 import { log } from '../logging/index.js'
 
-let compactionInProgress = false
+/** Per-agent compaction tracking — each agent can compact independently. */
+const compactingAgents = new Set<string>()
 
-export function isCompactionInProgress(): boolean {
-  return compactionInProgress
+export function isCompactionInProgress(agentId = 'general'): boolean {
+  return compactingAgents.has(agentId)
 }
 
-export function triggerBackgroundCompaction(source: string, options?: { force?: boolean }): void {
-  if (compactionInProgress) return
+export function triggerBackgroundCompaction(source: string, options?: { force?: boolean; agentId?: string }): void {
+  const agentId = options?.agentId ?? 'general'
+  if (compactingAgents.has(agentId)) return
 
   // Claim the slot immediately (synchronous — no yield between check and set)
-  // to prevent TOCTOU race across the async gap below.
-  compactionInProgress = true
+  compactingAgents.add(agentId)
 
   void (async () => {
     try {
-      if (!options?.force && !await chatHistory.needsCompaction()) return
+      if (!options?.force && !await chatHistory.needsCompaction(agentId)) return
 
-      log.agent.info('background compaction starting', { source })
-      const oldMsgCount = (await chatHistory.getModelContext()).length
-      broadcastEvent(EventNames.CHAT_COMPACTING, {})
+      log.agent.info('background compaction starting', { source, agentId })
+      const oldMsgCount = (await chatHistory.getModelContext(agentId)).length
+      broadcastEvent(EventNames.CHAT_COMPACTING, { agentId })
 
       const { summarizer, memoryFlusher } = await createCompactionCallbacks({ trackUsage: true })
-      const result = await chatHistory.compact(summarizer, memoryFlusher)
+      const result = await chatHistory.compact(summarizer, memoryFlusher, agentId)
 
       if (result) {
         const divider = buildCompactionDivider(oldMsgCount, result)
@@ -44,21 +45,23 @@ export function triggerBackgroundCompaction(source: string, options?: { force?: 
           content: divider,
           source: 'compaction',
           notification: true,
+          agentId,
         })
-        broadcastEvent(EventNames.CHAT_COMPACTED, { divider })
-        log.agent.info('background compaction complete', { source, oldMsgCount })
+        broadcastEvent(EventNames.CHAT_COMPACTED, { divider, agentId })
+        log.agent.info('background compaction complete', { source, agentId, oldMsgCount })
       } else {
-        broadcastEvent(EventNames.CHAT_COMPACTED, {})
-        log.agent.info('background compaction skipped (no result)', { source })
+        broadcastEvent(EventNames.CHAT_COMPACTED, { agentId })
+        log.agent.info('background compaction skipped (no result)', { source, agentId })
       }
     } catch (err) {
-      broadcastEvent(EventNames.CHAT_COMPACTED, {})   // clear UI spinner on error
+      broadcastEvent(EventNames.CHAT_COMPACTED, { agentId })   // clear UI spinner on error
       log.agent.warn('background compaction failed', {
         source,
+        agentId,
         error: err instanceof Error ? err.message : String(err),
       })
     } finally {
-      compactionInProgress = false
+      compactingAgents.delete(agentId)
     }
   })()
 }

@@ -55,8 +55,14 @@ export async function runWeb(options: {
 
   // Keep the process alive — the server runs until SIGINT/SIGTERM
   const shutdown = async () => {
-    const { stopServer } = await import('../web/server.js')
-    await stopServer()
+    // Safety timeout: force-exit if stopServer hangs (e.g. audio save stuck)
+    const bail = setTimeout(() => process.exit(1), 4000)
+    try {
+      const { stopServer } = await import('../web/server.js')
+      await stopServer()
+    } finally {
+      clearTimeout(bail)
+    }
     process.exit(0)
   }
 

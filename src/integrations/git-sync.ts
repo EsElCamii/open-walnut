@@ -14,18 +14,25 @@ export interface SyncStatus {
 const LOCAL_TIMEOUT = 30_000;
 const NETWORK_TIMEOUT = 15_000;
 
-function git(args: string, timeout = LOCAL_TIMEOUT): string {
+/** Flag set by git-compaction to pause auto-commits during compaction. */
+export let compactionInProgress = false;
+export function setCompactionInProgress(v: boolean): void {
+  compactionInProgress = v;
+}
+
+export function git(args: string, options?: { cwd?: string; timeout?: number; env?: Record<string, string> }): string {
   return execSync(`git ${args}`, {
-    cwd: WALNUT_HOME,
-    timeout,
+    cwd: options?.cwd ?? WALNUT_HOME,
+    timeout: options?.timeout ?? LOCAL_TIMEOUT,
     encoding: 'utf-8',
     stdio: ['pipe', 'pipe', 'pipe'],
+    env: options?.env ? { ...process.env, ...options.env } : undefined,
   }).trim();
 }
 
-function gitSafe(args: string, timeout = LOCAL_TIMEOUT): string | null {
+export function gitSafe(args: string, options?: { cwd?: string; timeout?: number; env?: Record<string, string> }): string | null {
   try {
-    return git(args, timeout);
+    return git(args, options);
   } catch {
     return null;
   }
@@ -140,7 +147,7 @@ export function sync(): { pulled: number; pushed: number; conflicts: number } {
   // Pull with rebase if remote is configured
   if (hasRemote()) {
     const branch = getBranch();
-    const pullResult = gitSafe(`pull --rebase origin ${branch}`, NETWORK_TIMEOUT);
+    const pullResult = gitSafe(`pull --rebase origin ${branch}`, { timeout: NETWORK_TIMEOUT });
     if (pullResult === null) {
       // Check for rebase conflict
       const status = gitSafe('status --porcelain');
@@ -148,14 +155,14 @@ export function sync(): { pulled: number; pushed: number; conflicts: number } {
         conflicts = 1;
         // Abort rebase and accept theirs for tasks.json
         gitSafe('rebase --abort');
-        gitSafe(`pull -X theirs origin ${branch}`, NETWORK_TIMEOUT);
+        gitSafe(`pull -X theirs origin ${branch}`, { timeout: NETWORK_TIMEOUT });
       }
     } else if (pullResult.includes('Updating') || pullResult.includes('Fast-forward')) {
       pulled = 1;
     }
 
     // Push
-    const pushResult = gitSafe(`push origin ${branch}`, NETWORK_TIMEOUT);
+    const pushResult = gitSafe(`push origin ${branch}`, { timeout: NETWORK_TIMEOUT });
     if (pushResult === null) {
       pushed = 0; // push failed
     }
@@ -197,7 +204,7 @@ export async function gitPullWalnut(): Promise<void> {
  * The lock file format varies by git version (binary index copy, sometimes with PID).
  * We use pure age-based removal (default 60s) since any normal git op finishes quickly.
  */
-function clearStaleLock(maxAgeMs = 60_000): boolean {
+export function clearStaleLock(maxAgeMs = 60_000): boolean {
   const lockPath = path.join(WALNUT_HOME, '.git', 'index.lock');
   try {
     const stat = fs.statSync(lockPath);
@@ -228,6 +235,7 @@ export function isLockContention(err: unknown): boolean {
  * run git ops against the same repo, e.g. orphaned server processes).
  */
 export function commitIfDirty(): boolean {
+  if (compactionInProgress) return false;
   clearStaleLock();
   const status = gitSafe('status --porcelain');
   if (!status || status.trim().length === 0) return false;

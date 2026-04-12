@@ -1,46 +1,31 @@
 /**
- * Task Phase + Session Status Lifecycle
- * ======================================
+ * Task Phase — Unconditional State Machine + applySessionPhase()
+ * ==============================================================
  *
- * Task and Session use aligned status names. Session work_status is a subset of Task phase.
+ * Two-layer phase management (K8s-style push + reconcile):
+ *
+ * Layer 1: Push (ms-level, reliable with retry)
+ *   session:result  → AGENT_COMPLETE      unconditional
+ *   session:input   → IN_PROGRESS         unconditional
+ *   session:error   → AWAIT_HUMAN_ACTION  unconditional
+ *   triage-sync     → AWAIT_HUMAN_ACTION  only when === AGENT_COMPLETE
+ *
+ *   All go through applySessionPhase() — unified retry + logging + error handling.
+ *
+ * Layer 2: Reconciler (30s, catches rare failures)
+ *   Health monitor derives expected phase from session facts.
+ *   Only Rule A: all primary sessions dead + task IN_PROGRESS → AWAIT_HUMAN_ACTION.
+ *   No Rule B: never infer phase from session status (could propagate stale data).
+ *
+ * Terminal phases: COMPLETE, HUMAN_VERIFIED — system never overwrites these.
  *
  * Task Phases (9):
  *   TODO → IN_PROGRESS → AGENT_COMPLETE → AWAIT_HUMAN_ACTION
  *        → HUMAN_VERIFIED → POST_WORK_COMPLETED
  *        → PEER_CODE_REVIEW → RELEASE_IN_PIPELINE → COMPLETE
- *
- * Session Work Status (5, subset of task phases):
- *   in_progress | agent_complete | await_human_action | completed | error
- *
- *
- * Automatic transitions (code-driven, plan/exec identical):
- * ─────────────────────────────────────────────────────────
- *
- *   Session starts        → task: TODO → IN_PROGRESS           [claude-code-session.ts]
- *   Session succeeds      → task: ≤IN_PROGRESS → AGENT_COMPLETE [server.ts auto-progress]
- *   Session resumes       → task: ≥AGENT_COMPLETE → IN_PROGRESS [rollback on send_to_session]
- *
- *
- * Triage agent (exactly 2 outcomes):
- * ────────────────────────────────────
- *
- *   AGENT_COMPLETE ──► send_to_session    → IN_PROGRESS        (continue work)
- *                  └─► AWAIT_HUMAN_ACTION + needs_attention     (default: wait for human)
- *
- *   AGENT_COMPLETE is transient — triage runs immediately after session completion.
- *   After triage, task is always IN_PROGRESS or AWAIT_HUMAN_ACTION.
- *
- *
- * Human actions:
- * ──────────────
- *
- *   AWAIT_HUMAN_ACTION → COMPLETE    (only humans can set COMPLETE)
- *   Any phase → any phase            (via UI phase picker)
- *
- *
- * Invariant: auto-progression only moves phase FORWARD, never backward.
  */
 
+import { log } from '../logging/index.js'
 import type { TaskPhase, TaskStatus, Task } from './types.js';
 
 // ── Phase → Status (9 → 3) ──
@@ -81,6 +66,12 @@ export const PHASE_ORDER: TaskPhase[] = [
 
 export const VALID_PHASES = new Set<string>(PHASE_ORDER);
 
+/** Phases that only humans can set — system never overwrites.
+ *  HUMAN_VERIFIED is terminal because it represents explicit human approval.
+ *  If the system could overwrite it (e.g. session:input → IN_PROGRESS),
+ *  auto-push workflows would lose the signal that a human already verified. */
+export const TERMINAL_PHASES = new Set<TaskPhase>(['COMPLETE', 'HUMAN_VERIFIED']);
+
 // ── Core functions ──
 
 /** Derive the 3-state status from a 9-state phase. */
@@ -112,36 +103,6 @@ export function applyPhase(task: Task, phase: TaskPhase): void {
   }
 }
 
-// ── Auto-progression on session completion ──
-
-/**
- * Compute the new task phase after a session completes.
- * Returns the new phase, or null if no change is needed.
- *
- * Rules:
- *   - Success + phase ≤ IN_PROGRESS → AGENT_COMPLETE (plan/exec identical)
- *   - Success + phase ≥ AGENT_COMPLETE → no change (don't regress)
- *   - Error → no change
- *
- * This is a pure function — no side effects.
- */
-export function computeSessionCompletionPhase(
-  currentPhase: TaskPhase,
-  isError: boolean,
-): TaskPhase | null {
-  if (isError) return null;
-
-  const currentIndex = PHASE_ORDER.indexOf(currentPhase);
-  const targetIndex = PHASE_ORDER.indexOf('AGENT_COMPLETE');
-
-  // Only advance forward — never regress
-  if (currentIndex < targetIndex) {
-    return 'AGENT_COMPLETE';
-  }
-
-  return null;
-}
-
 // ── Phase migration (legacy data) ──
 
 /**
@@ -155,20 +116,121 @@ export function migratePhase(phase: string): TaskPhase {
   return 'TODO';
 }
 
-// ── Session-resume rollback ──
+// WHY unconditional: The old computeSessionCompletionPhase only advanced forward
+// (phase < AGENT_COMPLETE), which blocked self-healing — if a task drifted to
+// AWAIT_HUMAN_ACTION, the next session:result couldn't correct it back to
+// AGENT_COMPLETE. Unconditional transitions ensure any event always sets the
+// correct phase regardless of current state.
 
-/** Phases that should auto-rollback to IN_PROGRESS when a session resumes work.
- *  HUMAN_VERIFIED is intentionally excluded — during auto-push the phase must stay
- *  so triage knows the user already verified the work. */
-const ROLLBACK_PHASES = new Set<TaskPhase>([
-  'AGENT_COMPLETE',
-  'AWAIT_HUMAN_ACTION',
-  'POST_WORK_COMPLETED',
-  'PEER_CODE_REVIEW',
-  'RELEASE_IN_PIPELINE',
-]);
+// ── Unconditional Session → Phase State Machine ──
 
-/** Returns true if the given phase should roll back to IN_PROGRESS when a session resumes. */
-export function shouldRollbackToInProgress(phase: TaskPhase): boolean {
-  return ROLLBACK_PHASES.has(phase);
+/** Session produced result → AGENT_COMPLETE. Unconditional. */
+export function sessionResultPhase(current: TaskPhase): TaskPhase | null {
+  if (TERMINAL_PHASES.has(current) || current === 'AGENT_COMPLETE') return null
+  return 'AGENT_COMPLETE'
+}
+
+/** Session received input → IN_PROGRESS. Unconditional. */
+export function sessionInputPhase(current: TaskPhase): TaskPhase | null {
+  if (TERMINAL_PHASES.has(current) || current === 'IN_PROGRESS') return null
+  return 'IN_PROGRESS'
+}
+
+/** Session errored → AWAIT_HUMAN_ACTION. Unconditional. */
+export function sessionErrorPhase(current: TaskPhase): TaskPhase | null {
+  if (TERMINAL_PHASES.has(current) || current === 'AWAIT_HUMAN_ACTION') return null
+  return 'AWAIT_HUMAN_ACTION'
+}
+
+// ── applySessionPhase() — single entry point for all session → phase updates ──
+
+export type PhaseTransitionTrigger =
+  | 'session:result'
+  | 'session:input'
+  | 'session:error'
+  | 'triage-sync'
+  | 'reconciler'
+
+interface ApplySessionPhaseOpts {
+  sessionId?: string
+  processAlive?: boolean
+  /** For 'reconciler' trigger: caller computes the expected phase. */
+  newPhase?: TaskPhase
+}
+
+/**
+ * Apply a session-driven phase transition with full logging.
+ * Single entry point for ALL session → phase updates.
+ * Built-in retry (2 attempts) so Layer 1 is reliable on its own.
+ */
+export async function applySessionPhase(
+  taskId: string,
+  trigger: PhaseTransitionTrigger,
+  source: string,
+  opts?: ApplySessionPhaseOpts,
+): Promise<{ changed: boolean; oldPhase?: TaskPhase; newPhase?: TaskPhase }> {
+  // Dynamic imports to avoid circular dependencies (phase.ts ← task-manager.ts)
+  const { getTask, updateTask } = await import('./task-manager.js')
+  let task: Task
+  try {
+    task = await getTask(taskId)
+  } catch {
+    log.session.warn('applySessionPhase: task not found', { taskId, trigger, source })
+    return { changed: false }
+  }
+
+  // Compute new phase based on trigger
+  let newPhase: TaskPhase | null = null
+  switch (trigger) {
+    case 'session:result':  newPhase = sessionResultPhase(task.phase); break
+    case 'session:input':   newPhase = sessionInputPhase(task.phase); break
+    case 'session:error':   newPhase = sessionErrorPhase(task.phase); break
+    case 'triage-sync':     newPhase = task.phase === 'AGENT_COMPLETE' ? 'AWAIT_HUMAN_ACTION' : null; break
+    case 'reconciler':      newPhase = opts?.newPhase ?? null; break
+  }
+
+  if (!newPhase) {
+    log.session.debug('applySessionPhase: skip (no transition needed)', {
+      taskId, currentPhase: task.phase, trigger, source, sessionId: opts?.sessionId,
+    })
+    return { changed: false, oldPhase: task.phase }
+  }
+
+  const oldPhase = task.phase
+
+  // Push with retry (Layer 1 must be reliable on its own)
+  const MAX_RETRIES = 2
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    try {
+      await updateTask(taskId, {
+        phase: newPhase,
+        ...(newPhase === 'AWAIT_HUMAN_ACTION' ? { needs_attention: true } : {}),
+        ...(newPhase === 'IN_PROGRESS' ? { needs_attention: false } : {}),
+      }, { source })
+
+      log.session.info('phase transition', {
+        taskId, oldPhase, newPhase, trigger, source,
+        sessionId: opts?.sessionId,
+        ...(attempt > 0 ? { retryAttempt: attempt } : {}),
+      })
+      return { changed: true, oldPhase, newPhase }
+    } catch (err) {
+      if (attempt < MAX_RETRIES) {
+        log.session.warn('phase update failed, retrying', {
+          taskId, oldPhase, newPhase, trigger, source,
+          attempt: attempt + 1, maxRetries: MAX_RETRIES,
+          error: err instanceof Error ? err.message : String(err),
+        })
+        await new Promise(r => setTimeout(r, 100 * (attempt + 1)))
+        continue
+      }
+      log.session.error('phase update FAILED after retries (reconciler may fix if not ENOSPC)', {
+        taskId, oldPhase, newPhase, trigger, source,
+        sessionId: opts?.sessionId,
+        error: err instanceof Error ? err.message : String(err),
+      })
+      return { changed: false, oldPhase }
+    }
+  }
+  return { changed: false, oldPhase } // unreachable but TS needs it
 }

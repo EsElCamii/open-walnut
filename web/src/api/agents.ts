@@ -2,7 +2,8 @@ import { apiGet, apiPost, apiPatch, apiDelete } from './client';
 
 export type ContextSourceId =
   | 'task_details' | 'project_memory' | 'project_task_list'
-  | 'global_memory' | 'daily_log' | 'session_history' | 'conversation_log';
+  | 'global_memory' | 'daily_log' | 'session_history' | 'conversation_log'
+  | 'main_global_memory' | 'main_daily_log';
 
 export interface ContextSourceConfig {
   id: ContextSourceId;
@@ -30,6 +31,7 @@ export interface AgentDefinition {
   allowed_tools?: string[];
   working_directory?: string;
   context_sources?: ContextSourceConfig[];
+  console?: boolean;
   stateful?: AgentStatefulConfig;
   skills?: string[];
   source: 'builtin' | 'config';

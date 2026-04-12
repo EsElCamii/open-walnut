@@ -10,7 +10,6 @@
  *      Uses file mtime — persistent on disk, survives server restarts, no state machine dependency.
  */
 
-import fs from 'node:fs'
 import fsp from 'node:fs/promises'
 import { log } from '../logging/index.js'
 import { isProcessAliveAsync } from '../utils/process.js'
@@ -179,6 +178,21 @@ export class SessionHealthMonitor {
                 error: err instanceof Error ? err.message : String(err),
               })
             }
+            // Phase sync: process death → AGENT_COMPLETE (has result) or AWAIT_HUMAN_ACTION (no result)
+            try {
+              const { applySessionPhase } = await import('./phase.js')
+              await applySessionPhase(
+                session.taskId,
+                hasResult ? 'session:result' : 'session:error',
+                'health-monitor:process-death',
+                { sessionId: session.claudeSessionId, processAlive: false },
+              )
+            } catch (err) {
+              log.session.warn('health monitor: phase sync failed on process death', {
+                sessionId: session.claudeSessionId, taskId: session.taskId,
+                error: err instanceof Error ? err.message : String(err),
+              })
+            }
           }
 
           const newProcessStatus = hasResult ? 'stopped' : 'error'
@@ -235,10 +249,31 @@ export class SessionHealthMonitor {
               taskId: session.taskId,
               process_status: updates.process_status as string,
             }, ['*'], { source: 'health-monitor', urgency: 'urgent' })
+            // Phase sync for idle process death with work in progress
+            if (session.taskId) {
+              const hasResult = updates.status_reason === 'normal_completion'
+              try {
+                const { applySessionPhase } = await import('./phase.js')
+                await applySessionPhase(
+                  session.taskId,
+                  hasResult ? 'session:result' : 'session:error',
+                  'health-monitor:process-death-idle',
+                  { sessionId: session.claudeSessionId, processAlive: false },
+                )
+              } catch (err) {
+                log.session.warn('health monitor: phase sync failed on idle process death', {
+                  sessionId: session.claudeSessionId, taskId: session.taskId,
+                  error: err instanceof Error ? err.message : String(err),
+                })
+              }
+            }
           }
         }
       }
     }
+
+    // Layer 2: Reconcile task phases from session facts (30s cycle)
+    await this.reconcileTaskPhases(sessions, taskMap)
 
     // Log total check duration (> 500ms = worth investigating)
     const checkTotal = Date.now() - checkT0
@@ -265,7 +300,7 @@ export class SessionHealthMonitor {
     const WARN_THRESHOLD_MS = 5 * 60 * 1000  // log warning after 5 min with no Claude output
     const flaggedIds = new Set<string>()
 
-    let runner: { getSessionTimestamps(id: string): { lastClaudeOutputAt: number; lastMessageDeliveryAt: number } | undefined } | undefined
+    let runner: { getSessionTimestamps(id: string): { lastClaudeOutputAt: number; lastMessageDeliveryAt: number } | undefined; isTeamActive(id: string): boolean } | undefined
     try {
       const { sessionRunner } = await import('../providers/claude-code-session.js')
       runner = sessionRunner
@@ -274,6 +309,9 @@ export class SessionHealthMonitor {
     for (const session of sessions) {
       if (session.process_status !== 'running') continue
       if (session.host) continue  // remote sessions use different transport — skip for now
+
+      // Skip team-active sessions — poll loop produces no Claude output, but is not hung
+      if (runner.isTeamActive(session.claudeSessionId)) continue
 
       const ts = runner.getSessionTimestamps(session.claudeSessionId)
       if (!ts) continue
@@ -323,7 +361,7 @@ export class SessionHealthMonitor {
    *
    * Data sources for "last active" time:
    *   1. SessionManager.lastEventAt — works for both local (file mtime) and remote (in-memory)
-   *   2. Fallback: fs.statSync(outputFile).mtimeMs — for sessions without an active manager
+   *   2. Fallback: fsp.stat(outputFile) — for sessions without an active manager
    *
    * Skips sessions whose task phase is AWAIT_HUMAN_ACTION — they're waiting for user input, not truly idle.
    */
@@ -355,10 +393,27 @@ export class SessionHealthMonitor {
 
     const { getRegisteredSessionManager } = await import('../providers/session-manager.js')
 
+    // Import sessionRunner for team-active check (lazy, cached by Node module system)
+    let runner: { isTeamActive(id: string): boolean } | undefined
+    try {
+      const { sessionRunner } = await import('../providers/claude-code-session.js')
+      runner = sessionRunner
+    } catch { /* fallback: no team check */ }
+
     for (const session of sessions) {
       // Skip sessions whose task is awaiting human action — they're waiting for user input, not truly idle
       const taskPhase = session.taskId ? taskMap.get(session.taskId)?.phase : undefined
       if (taskPhase === 'AWAIT_HUMAN_ACTION') continue
+
+      // Skip team-active sessions — lead session is polling for in-process teammate
+      // results (Claude Code team mode). No JSONL output during poll loop sleep, but
+      // the session is NOT idle — teammates are working on the remote/local host.
+      if (runner?.isTeamActive(session.claudeSessionId)) {
+        log.session.debug('health monitor: skipping idle check — team active', {
+          sessionId: session.claudeSessionId, taskId: session.taskId,
+        })
+        continue
+      }
 
       // Check if process is actually alive before spending time on idle check
       if (!await isSessionProcessAlive(session)) continue
@@ -435,6 +490,22 @@ export class SessionHealthMonitor {
         taskId: session.taskId,
         process_status: 'stopped',
       }, ['*'], { source: 'health-monitor' })
+
+      // Phase sync: idle timeout → AWAIT_HUMAN_ACTION (we killed the session, not a normal completion)
+      if (session.taskId) {
+        try {
+          const { applySessionPhase } = await import('./phase.js')
+          await applySessionPhase(
+            session.taskId, 'session:error', 'health-monitor:idle-timeout',
+            { sessionId: session.claudeSessionId, processAlive: false },
+          )
+        } catch (err) {
+          log.session.warn('health monitor: phase sync failed on idle timeout', {
+            sessionId: session.claudeSessionId, taskId: session.taskId,
+            error: err instanceof Error ? err.message : String(err),
+          })
+        }
+      }
     }
 
     return killedIds
@@ -688,6 +759,84 @@ export class SessionHealthMonitor {
     }
   }
 
+  /**
+   * Layer 2 Reconciler: derive expected task phase from session facts.
+   * Called every 30s. Only fixes drift — if phase is already correct, does nothing.
+   *
+   * IMPORTANT: Only considers the task's PRIMARY sessions (listed in task.session_ids
+   * or task.session_id). Subagents (triage, etc.) also carry taskId but are NOT
+   * primary sessions — their liveness must not affect task phase.
+   */
+  private async reconcileTaskPhases(
+    sessions: SessionRecord[],
+    taskMap: Map<string, Task>,
+  ): Promise<void> {
+    const { TERMINAL_PHASES } = await import('./phase.js')
+
+    // Build set of primary session IDs per task (from task records, not session records)
+    const primarySessionIds = new Set<string>()
+    for (const task of taskMap.values()) {
+      if (task.session_id) primarySessionIds.add(task.session_id)
+      if (task.session_ids) for (const sid of task.session_ids) primarySessionIds.add(sid)
+    }
+
+    // Deduplicate: process each task at most once.
+    // Collect primary sessions per task, then decide phase per task.
+    const taskSessions = new Map<string, { alive: SessionRecord[]; dead: SessionRecord[] }>()
+
+    for (const session of sessions) {
+      if (session.archived || !session.taskId) continue
+      // Only consider primary sessions — skip subagents/triage
+      if (!primarySessionIds.has(session.claudeSessionId)) continue
+      const task = taskMap.get(session.taskId)
+      if (!task || TERMINAL_PHASES.has(task.phase)) continue
+
+      if (!taskSessions.has(session.taskId)) {
+        taskSessions.set(session.taskId, { alive: [], dead: [] })
+      }
+      const bucket = taskSessions.get(session.taskId)!
+      const processAlive = await isSessionProcessAlive(session)
+      ;(processAlive ? bucket.alive : bucket.dead).push(session)
+    }
+
+    for (const [taskId, { alive, dead }] of taskSessions) {
+      const task = taskMap.get(taskId)!
+
+      // Only Rule A: all primary sessions dead + task stuck at IN_PROGRESS → needs attention.
+      // isProcessAlive() is a hard OS fact — safe to act on.
+      //
+      // NO Rule B (alive → force IN_PROGRESS): if process_status is accurate, Layer 1
+      // already set IN_PROGRESS on session:input. If process_status is wrong (e.g. stuck
+      // at 'running' when should be 'idle'), propagating it to task phase makes two things
+      // wrong. Fix session status accuracy instead.
+      let expectedPhase: TaskPhase | null = null
+      if (alive.length === 0 && task.phase === 'IN_PROGRESS') {
+        expectedPhase = 'AWAIT_HUMAN_ACTION'  // all primary sessions dead + stuck at IN_PROGRESS
+      }
+
+      if (expectedPhase) {
+        const representativeSession = alive[0] ?? dead[0]
+        log.session.warn('reconciler: fixing phase drift', {
+          taskId, actual: task.phase, expected: expectedPhase,
+          sessionId: representativeSession?.claudeSessionId,
+          aliveSessions: alive.length, deadSessions: dead.length,
+        })
+        try {
+          const { applySessionPhase } = await import('./phase.js')
+          await applySessionPhase(
+            taskId, 'reconciler', 'health-monitor:reconciler',
+            { sessionId: representativeSession?.claudeSessionId, newPhase: expectedPhase },
+          )
+        } catch (err) {
+          log.session.warn('reconciler: phase fix failed', {
+            taskId, expected: expectedPhase,
+            error: err instanceof Error ? err.message : String(err),
+          })
+        }
+      }
+    }
+  }
+
   private async outputFileHasResult(filePath: string): Promise<boolean> {
     // Only read last ~8KB — result event is always the final JSONL line.
     // Avoids reading 100MB+ files for long sessions.
@@ -715,7 +864,7 @@ export class SessionHealthMonitor {
         error: err instanceof Error ? err.message : String(err),
       })
     } finally {
-      await fh?.close()
+      try { await fh?.close() } catch { /* ignore close errors */ }
     }
     return false
   }

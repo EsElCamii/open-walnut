@@ -8,7 +8,7 @@
 
 import { Router } from 'express'
 import crypto from 'node:crypto'
-import { getConfig, saveConfig } from '../../core/config-manager.js'
+import { getConfig, updateConfig } from '../../core/config-manager.js'
 import { log } from '../../logging/index.js'
 
 export const authRouter = Router()
@@ -45,7 +45,7 @@ authRouter.post('/keys', async (req, res, next) => {
       created_at: new Date().toISOString(),
     })
 
-    await saveConfig({ ...config, api_keys: keys })
+    await updateConfig({ api_keys: keys })
     log.web.info('auth: API key created', { name })
 
     // Return the key ONCE — it won't be shown again
@@ -88,7 +88,7 @@ authRouter.delete('/keys/:name', async (req, res, next) => {
     // Also remove any push tokens bound to this key
     const pushTokens = (config.push_tokens ?? []).filter((t) => t.key_name !== name)
 
-    await saveConfig({ ...config, api_keys: filtered, push_tokens: pushTokens })
+    await updateConfig({ api_keys: filtered, push_tokens: pushTokens })
     log.web.info('auth: API key deleted', { name })
     res.json({ ok: true })
   } catch (err) {

@@ -993,7 +993,7 @@ const connectionPool = new Map<string, DaemonConnection>()
 const connectingPromises = new Map<string, Promise<DaemonConnection>>()
 /** Cache recent connection failures to avoid repeated 42s SSH timeouts. */
 const failureCache = new Map<string, { time: number; error: string }>()
-const FAILURE_CACHE_TTL_MS = 60_000  // 60 seconds
+const FAILURE_CACHE_TTL_MS = 60_000  // 60s — longer than the worst-case SSH timeout (~42s) to avoid retrying mid-failure
 
 /**
  * Get or create a DaemonConnection for a remote host.

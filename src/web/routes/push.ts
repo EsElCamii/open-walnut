@@ -7,7 +7,7 @@
  */
 
 import { Router } from 'express'
-import { getConfig, saveConfig } from '../../core/config-manager.js'
+import { getConfig, updateConfig } from '../../core/config-manager.js'
 import { log } from '../../logging/index.js'
 import type { PushTokenEntry } from '../../core/types.js'
 
@@ -42,7 +42,7 @@ pushRouter.post('/register', async (req, res, next) => {
       registered_at: new Date().toISOString(),
     })
 
-    await saveConfig({ ...config, push_tokens: filtered })
+    await updateConfig({ push_tokens: filtered })
     log.web.info('push: token registered', { keyName, platform, tokenPrefix: token.slice(0, 30) })
     res.json({ ok: true })
   } catch (err) {
@@ -63,7 +63,7 @@ pushRouter.delete('/register', async (req, res, next) => {
     const tokens = config.push_tokens ?? []
     const filtered = tokens.filter((t: PushTokenEntry) => t.token !== token)
 
-    await saveConfig({ ...config, push_tokens: filtered })
+    await updateConfig({ push_tokens: filtered })
     log.web.info('push: token unregistered', { tokenPrefix: token.slice(0, 30) })
     res.json({ ok: true })
   } catch (err) {

@@ -13,21 +13,30 @@ export interface UseContextInspectorReturn {
   refresh: () => void;
 }
 
-export function useContextInspector(): UseContextInspectorReturn {
+export function useContextInspector(agentId?: string): UseContextInspectorReturn {
   const [data, setData] = useState<ContextInspectorResponse | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [isOpen, setIsOpen] = useState(false);
   const isOpenRef = useRef(false);
+  const agentIdRef = useRef(agentId);
+  agentIdRef.current = agentId;
+
+  // Clear cached data when agent changes so stale context isn't shown
+  useEffect(() => {
+    setData(null);
+    if (isOpenRef.current) {
+      doFetch();
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [agentId]);
 
   const doFetch = useCallback(() => {
     setLoading(true);
     setError(null);
-    fetchAgentContext()
+    fetchAgentContext(agentIdRef.current)
       .then((res) => setData(res))
       .catch((err) => {
-        // On error during refresh (data already loaded), preserve existing data
-        // and surface the error separately instead of blanking the display.
         setError(err instanceof Error ? err.message : String(err));
       })
       .finally(() => setLoading(false));

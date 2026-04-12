@@ -330,6 +330,79 @@ export interface ExtractedTeamAgent {
 }
 
 /**
+ * Extract team info from JSONL content string.
+ * Shared logic used by both local file read and remote content read.
+ */
+export function extractTeamsFromContent(content: string): Map<string, ExtractedTeamAgent[]> {
+  const teams = new Map<string, ExtractedTeamAgent[]>();
+  const lines = content.split('\n').filter(Boolean);
+
+  // First pass: collect Agent tool_use calls
+  const agentCalls = new Map<string, { name: string; teamName: string; prompt: string; model: string; agentType: string }>();
+
+  for (const line of lines) {
+    try {
+      const obj = JSON.parse(line);
+      if (obj.type === 'assistant') {
+        const blocks = obj.message?.content;
+        if (!Array.isArray(blocks)) continue;
+        for (const block of blocks) {
+          if (block.type === 'tool_use' && block.name === 'Agent') {
+            const input = block.input || {};
+            const teamName = input.team_name;
+            const agentName = input.name;
+            if (teamName && agentName) {
+              agentCalls.set(block.id, {
+                name: agentName,
+                teamName,
+                prompt: typeof input.prompt === 'string' ? input.prompt : '',
+                model: typeof input.model === 'string' ? input.model : 'sonnet',
+                agentType: typeof input.subagent_type === 'string' ? input.subagent_type : 'general-purpose',
+              });
+            }
+          }
+        }
+      }
+    } catch { /* skip malformed lines */ }
+  }
+
+  // Second pass: check tool_results to determine status
+  const completedToolUseIds = new Set<string>();
+  for (const line of lines) {
+    try {
+      const obj = JSON.parse(line);
+      if (obj.type === 'user') {
+        const blocks = obj.message?.content;
+        if (!Array.isArray(blocks)) continue;
+        for (const block of blocks) {
+          if (block.type === 'tool_result' && agentCalls.has(block.tool_use_id)) {
+            completedToolUseIds.add(block.tool_use_id);
+          }
+        }
+      }
+    } catch { /* skip */ }
+  }
+
+  // Build team map
+  for (const [toolId, call] of agentCalls) {
+    if (!teams.has(call.teamName)) {
+      teams.set(call.teamName, []);
+    }
+    teams.get(call.teamName)!.push({
+      name: call.name,
+      teamName: call.teamName,
+      agentType: call.agentType,
+      model: call.model,
+      promptSnippet: call.prompt.slice(0, 80),
+      fullPrompt: call.prompt,
+      status: completedToolUseIds.has(toolId) ? 'done' : 'calling',
+    });
+  }
+
+  return teams;
+}
+
+/**
  * Extract team info directly from the lead session JSONL.
  * This is the FALLBACK when TeamDelete has removed the config from disk.
  *
@@ -339,87 +412,24 @@ export interface ExtractedTeamAgent {
 export function extractTeamsFromLeadJsonl(
   sessionJsonlPath: string,
 ): Map<string, ExtractedTeamAgent[]> {
-  const teams = new Map<string, ExtractedTeamAgent[]>();
-
   try {
     const content = fs.readFileSync(sessionJsonlPath, 'utf-8');
-    const lines = content.split('\n').filter(Boolean);
-
-    // First pass: collect Agent tool_use calls
-    const agentCalls = new Map<string, { name: string; teamName: string; prompt: string; model: string; agentType: string }>();
-
-    for (const line of lines) {
-      try {
-        const obj = JSON.parse(line);
-        if (obj.type === 'assistant') {
-          const blocks = obj.message?.content;
-          if (!Array.isArray(blocks)) continue;
-          for (const block of blocks) {
-            if (block.type === 'tool_use' && block.name === 'Agent') {
-              const input = block.input || {};
-              const teamName = input.team_name;
-              const agentName = input.name;
-              if (teamName && agentName) {
-                agentCalls.set(block.id, {
-                  name: agentName,
-                  teamName,
-                  prompt: typeof input.prompt === 'string' ? input.prompt : '',
-                  model: typeof input.model === 'string' ? input.model : 'sonnet',
-                  agentType: typeof input.subagent_type === 'string' ? input.subagent_type : 'general-purpose',
-                });
-              }
-            }
-          }
-        }
-      } catch { /* skip malformed lines */ }
-    }
-
-    // Second pass: check tool_results to determine status
-    const completedToolUseIds = new Set<string>();
-    for (const line of lines) {
-      try {
-        const obj = JSON.parse(line);
-        if (obj.type === 'user') {
-          const blocks = obj.message?.content;
-          if (!Array.isArray(blocks)) continue;
-          for (const block of blocks) {
-            if (block.type === 'tool_result' && agentCalls.has(block.tool_use_id)) {
-              completedToolUseIds.add(block.tool_use_id);
-            }
-          }
-        }
-      } catch { /* skip */ }
-    }
-
-    // Build team map
-    for (const [toolId, call] of agentCalls) {
-      if (!teams.has(call.teamName)) {
-        teams.set(call.teamName, []);
-      }
-      teams.get(call.teamName)!.push({
-        name: call.name,
-        teamName: call.teamName,
-        agentType: call.agentType,
-        model: call.model,
-        promptSnippet: call.prompt.slice(0, 80),
-        fullPrompt: call.prompt,
-        status: completedToolUseIds.has(toolId) ? 'done' : 'calling',
-      });
-    }
+    const teams = extractTeamsFromContent(content);
 
     log.session.debug('extracted teams from lead JSONL', {
       path: sessionJsonlPath.slice(-60),
       teams: [...teams.keys()],
       agentCount: [...teams.values()].reduce((n, a) => n + a.length, 0),
     });
+
+    return teams;
   } catch (err) {
     log.session.warn('failed to extract teams from lead JSONL', {
       path: sessionJsonlPath.slice(-60),
       error: err instanceof Error ? err.message : String(err),
     });
+    return new Map();
   }
-
-  return teams;
 }
 
 /**
@@ -693,4 +703,117 @@ function readFileHead(filePath: string, bytes: number): string | null {
   } catch {
     return null;
   }
+}
+
+// ── Remote (SSH) Team Support ──
+// For remote sessions, team config and subagent JSONL files live on the remote host.
+// These async functions use DaemonFileReader to access them via the daemon WebSocket.
+
+/**
+ * Read team config from a remote host via DaemonFileReader.
+ */
+export async function readTeamConfigRemote(teamName: string, host: string): Promise<TeamConfig | null> {
+  try {
+    const { DaemonFileReader } = await import('./daemon-file-reader.js');
+    const reader = new DaemonFileReader(host);
+    const content = await reader.readFile(`~/.claude/teams/${teamName}/config.json`);
+    if (!content) return null;
+    return JSON.parse(content) as TeamConfig;
+  } catch (err) {
+    log.session.debug('readTeamConfigRemote failed', {
+      teamName, host, error: err instanceof Error ? err.message : String(err),
+    });
+    return null;
+  }
+}
+
+/**
+ * Extract team info from the lead session JSONL on a remote host.
+ * Fallback when TeamDelete has removed the config.
+ */
+export async function extractTeamsFromLeadJsonlRemote(
+  sessionId: string,
+  host: string,
+): Promise<Map<string, ExtractedTeamAgent[]>> {
+  try {
+    const { DaemonFileReader } = await import('./daemon-file-reader.js');
+    const reader = new DaemonFileReader(host);
+    const content = await reader.findSession(sessionId);
+    if (!content) {
+      log.session.debug('extractTeamsFromLeadJsonlRemote: lead JSONL not found', { sessionId, host });
+      return new Map();
+    }
+    const teams = extractTeamsFromContent(content);
+    log.session.debug('extractTeamsFromLeadJsonlRemote', {
+      sessionId, host, teams: [...teams.keys()],
+      agentCount: [...teams.values()].reduce((n, a) => n + a.length, 0),
+    });
+    return teams;
+  } catch (err) {
+    log.session.warn('extractTeamsFromLeadJsonlRemote failed', {
+      sessionId, host, error: err instanceof Error ? err.message : String(err),
+    });
+    return new Map();
+  }
+}
+
+/**
+ * Read all subagent JSONL files from a remote host and match to a specific agent.
+ * Returns { content, allContents } where content is the matched agent's JSONL
+ * and allContents is a map of filename → content for all subagent files.
+ */
+export async function readRemoteSubagentJsonls(
+  sessionId: string,
+  host: string,
+  cwd: string,
+  agentName: string,
+  fullPrompt?: string,
+): Promise<{ matched: Map<string, string>; all: Map<string, string> }> {
+  const result = { matched: new Map<string, string>(), all: new Map<string, string>() };
+
+  try {
+    const { DaemonFileReader } = await import('./daemon-file-reader.js');
+    const { encodeProjectPath: encode } = await import('./session-file-reader.js');
+    const reader = new DaemonFileReader(host);
+
+    const encoded = encode(cwd);
+    const subagentDir = `~/.claude/projects/${encoded}/${sessionId}/subagents`;
+    const allFiles = await reader.batchReadSubagents(subagentDir);
+    result.all = allFiles;
+
+    if (allFiles.size === 0) {
+      log.session.debug('readRemoteSubagentJsonls: no subagent files found', { sessionId, host, subagentDir });
+      return result;
+    }
+
+    // Match files to the agent by name or prompt
+    for (const [filename, content] of allFiles) {
+      // Check for agent name references in first ~8KB
+      const head = content.slice(0, 8192);
+      const hasNameRef = head.includes(`"${agentName}"`)
+        || head.includes(`\\"${agentName}\\"`)
+        || head.includes(`@${agentName}`)
+        || head.includes(`from="${agentName}"`);
+
+      if (hasNameRef) {
+        result.matched.set(filename, content);
+        continue;
+      }
+
+      // Check for prompt match (for the main conversation file)
+      if (fullPrompt && content.includes(fullPrompt.slice(0, 200))) {
+        result.matched.set(filename, content);
+      }
+    }
+
+    log.session.debug('readRemoteSubagentJsonls', {
+      agentName, host, totalFiles: allFiles.size, matchedFiles: result.matched.size,
+    });
+  } catch (err) {
+    log.session.warn('readRemoteSubagentJsonls failed', {
+      sessionId, host, agentName, error: err instanceof Error ? err.message : String(err),
+    });
+  }
+
+  return result;
 }

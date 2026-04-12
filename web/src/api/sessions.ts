@@ -174,6 +174,15 @@ export async function restartSession(sessionId: string): Promise<
   return apiPost(`/api/sessions/${sessionId}/restart`, {});
 }
 
+export async function respondToPermission(
+  sessionId: string,
+  requestId: string,
+  allow: boolean,
+  message?: string,
+): Promise<{ status: string; requestId: string; allow: boolean }> {
+  return apiPost(`/api/sessions/${sessionId}/permission`, { requestId, allow, message });
+}
+
 export async function forkSessionInWalnut(
   sessionId: string,
   opts?: { child_title?: string; message?: string; model?: string },

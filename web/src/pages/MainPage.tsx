@@ -2,6 +2,7 @@ import { useState, useCallback, useEffect, useMemo, useRef, Fragment } from 'rea
 import type { NavigateFunction } from 'react-router-dom';
 import type { Task } from '@open-walnut/core';
 import { useChat, type TaskContext, type ImageAttachment } from '@/hooks/useChat';
+import { useAgentConsole } from '@/hooks/useAgentConsole';
 import { usePlanMode } from '@/hooks/usePlanMode';
 import type { ChatStats } from '@/api/chat';
 import { useWebSocket, useEvent } from '@/hooks/useWebSocket';
@@ -22,6 +23,7 @@ import { TriagePanel } from '@/components/triage/TriagePanel';
 import { fetchSession, fetchSessionsForTask, quickStartSession } from '@/api/sessions';
 import { ContextInspectorPanel } from '@/components/context/ContextInspectorPanel';
 import { QuickAccessBar } from '@/components/chat/QuickAccessBar';
+import { AgentSwitcher } from '@/components/chat/AgentSwitcher';
 import { useContextInspector } from '@/hooks/useContextInspector';
 import { useUrlSync } from '@/hooks/useUrlSync';
 import { useSessionPanelMode } from '@/hooks/useSessionPanelMode';
@@ -36,7 +38,7 @@ import type { CommandContext } from '@/commands/types';
 
 const CONTEXT_WINDOW_DEFAULT = 200_000; // fallback when backend doesn't provide contextWindow
 
-function ChatHeaderRow({ title, stats, connectionState, inspectorOpen, onToggleInspector, hasMessages, onClear }: {
+function ChatHeaderRow({ title, stats, connectionState, inspectorOpen, onToggleInspector, hasMessages, onClear, agentSwitcher }: {
   title: string;
   stats: ChatStats | null;
   connectionState: string;
@@ -44,6 +46,7 @@ function ChatHeaderRow({ title, stats, connectionState, inspectorOpen, onToggleI
   onToggleInspector: () => void;
   hasMessages: boolean;
   onClear: () => void;
+  agentSwitcher?: React.ReactNode;
 }) {
   const [menuOpen, setMenuOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
@@ -65,7 +68,7 @@ function ChatHeaderRow({ title, stats, connectionState, inspectorOpen, onToggleI
   return (
     <div className="chat-header-row">
       <div className="chat-header-meta">
-        <span className="chat-header-title">{title}</span>
+        {agentSwitcher || <span className="chat-header-title">{title}</span>}
         {pct != null && (
           <span className="chat-header-pct" style={{ color: pctColor }} title={`${stats!.apiMessageCount} msgs · ~${Math.round((stats!.estimatedTotalTokens ?? stats!.estimatedTokens) / 1000)}K tokens${stats!.compacted ? ' · compacted' : ''}`}>
             {pct}%
@@ -157,7 +160,8 @@ interface MainPageProps {
 }
 
 export function MainPage({ visible = true, navigateRef }: MainPageProps) {
-  const chat = useChat();
+  const agentConsole = useAgentConsole();
+  const chat = useChat(agentConsole.activeAgentId);
   const { mode: chatMode, toggleMode, getPlanPayload } = usePlanMode();
   const { connectionState } = useWebSocket();
   const { tasks, loading, toggleComplete, setPhase, star, create, update, reorder, moveTask, reparentTask, operationError, clearOperationError, showOperationError } = useTasksContext();
@@ -170,7 +174,7 @@ export function MainPage({ visible = true, navigateRef }: MainPageProps) {
   const [focusedTask, setFocusedTask] = useState<Task | null>(null);
   // Nonce that increments on every focus action — forces re-scroll even for same task
   const [focusNonce, setFocusNonce] = useState(0);
-  const inspector = useContextInspector();
+  const inspector = useContextInspector(agentConsole.activeAgentId);
   // Force re-render when UI Only settings change (hook subscribes to localStorage)
   useUiOnlySettings();
 
@@ -936,6 +940,14 @@ export function MainPage({ visible = true, navigateRef }: MainPageProps) {
             onToggleInspector={inspector.toggle}
             hasMessages={chat.messages.length > 0}
             onClear={chat.clearMessages}
+            agentSwitcher={agentConsole.agents.length > 1 ? (
+              <AgentSwitcher
+                agents={agentConsole.agents}
+                activeAgentId={agentConsole.activeAgentId}
+                unreadCounts={agentConsole.unreadCounts}
+                onSwitch={agentConsole.switchAgent}
+              />
+            ) : undefined}
           />
 
           {inspector.isOpen && (
