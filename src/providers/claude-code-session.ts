@@ -243,6 +243,8 @@ export class ClaudeCodeSession {
   private _cwd: string | null = null
   private _active = false
   private _exitCode: number | null = null
+  /** Stderr from the remote daemon (populated on exit for remote sessions) */
+  private _exitStderr: string | undefined
   /** Session-lifetime flag: survives across turns, checked by handleProcessDeath and
    *  server-restart recovery to suppress spurious events from dead/old processes.
    *  Set true on kill/interrupt/respawn; set false when a new turn begins. */
@@ -517,6 +519,7 @@ export class ClaudeCodeSession {
     this._active = true
     this._processStatus = 'running'
     this._exitCode = null
+    this._exitStderr = undefined
     this.resultEmitted = false
     this._turnResultEmitted = false
     this._lastResultCost = undefined  // Fresh session — no previous cost to compare
@@ -541,11 +544,13 @@ export class ClaudeCodeSession {
       resume: isResume,
       fork: forkSession,
       onOutput: (event) => this.handleStreamLine(event.line),
-      onExit: (code) => {
+      onExit: (code, stderr) => {
         this._exitCode = code
+        this._exitStderr = stderr
         if (code !== 0) {
           log.session.warn('session process exited with non-zero code', {
             taskId: this.taskId, exitCode: code, host, isRemote: !!sshTarget,
+            stderr: stderr?.slice(0, 200),
           })
         }
         // Process died before init (no claudeSessionId) — emit error so callers
@@ -556,11 +561,15 @@ export class ClaudeCodeSession {
           this._processStatus = 'error'
           this._activity = undefined
           this.clearStallDiagTimer()
-          const errMsg = `Process exited with code ${code} before initialization`
+          const parts = [`Process exited with code ${code} before initialization`]
+          if (host) parts.push(`[${host}]`)
+          if (stderr) parts.push(stderr.slice(0, 500))
+          const errMsg = parts.join(' — ')
           log.session.error('session process died before init', {
             taskId: this.taskId, exitCode: code, host, fromPlanSessionId: this.fromPlanSessionId,
+            stderr: stderr?.slice(0, 500),
           })
-          this.emitStatusChanged('AGENT_COMPLETE')
+          this.emitStatusChanged('AGENT_COMPLETE', errMsg)
           bus.emit(EventNames.SESSION_ERROR, {
             sessionId: this.claudeSessionId ?? undefined,
             taskId: this.taskId,
@@ -766,6 +775,32 @@ export class ClaudeCodeSession {
         if (recovered.planCompleted != null) session.planCompleted = recovered.planCompleted
         if (recovered.activity) session._activity = recovered.activity
         if (recovered.jsonlByteLength) jsonlByteLength = recovered.jsonlByteLength
+        if (recovered.teamActive != null) session._teamActive = recovered.teamActive
+        // Arm team-idle safety timer when recovering into team mode.
+        // Without this, if no new JSONL events arrive after restart (process alive
+        // but team poll loop idle), _teamActive stays true forever and triage never fires.
+        // The live flow arms this timer inside the result handler (line ~2000); on
+        // recovery we must do it explicitly since result events before the crash are
+        // not replayed (tailer starts from fromOffset).
+        if (session._teamActive) {
+          session._teamIdleTimer = setTimeout(() => {
+            if (!session._teamActive) return
+            log.session.info('team-idle timeout after recovery — clearing _teamActive', {
+              sessionId: session.claudeSessionId, taskId: session.taskId,
+            })
+            session._teamActive = false
+            session._teamIdleTimer = null
+            session._processStatus = 'idle'
+            session._activity = undefined
+            session.emitStatusChanged('AGENT_COMPLETE')
+            bus.emit(EventNames.SESSION_RESULT, {
+              sessionId: session.claudeSessionId,
+              taskId: session.taskId,
+              result: '(team-idle timeout after server restart)',
+              isError: false,
+            }, ['main-ai', 'session-runner'], { source: 'session-runner' })
+          }, ClaudeCodeSession.TEAM_IDLE_TIMEOUT_MS)
+        }
         // Belt-and-suspenders: if the JSONL has a result event (hasResult),
         // reinforce resultEmitted even if tasks.json was momentarily stale.
         if (recovered.workStatus === 'agent_complete' || recovered.workStatus === 'await_human_action') {
@@ -828,8 +863,9 @@ export class ClaudeCodeSession {
           sessionId: record.claudeSessionId,
           fromOffset,
           onOutput: (event) => session.handleStreamLine(event.line),
-          onExit: (code) => {
+          onExit: (code, stderr) => {
             session._exitCode = code
+            session._exitStderr = stderr
           },
         })
       } catch (err) {
@@ -1075,11 +1111,16 @@ export class ClaudeCodeSession {
     this.stopLivenessMonitor()
 
     // Reject sessionReady with detailed diagnostics.
+    // For local sessions, read stderr from the .err file on disk.
+    // For remote sessions, the local path doesn't exist — use _exitStderr from daemon exit event.
     let initStderr = ''
     if (this._outputFile) {
       try {
         initStderr = fs.readFileSync(this._outputFile + '.err', 'utf-8').slice(0, 2048).trim()
-      } catch { /* no stderr file */ }
+      } catch { /* no stderr file (expected for remote sessions) */ }
+    }
+    if (!initStderr && this._exitStderr) {
+      initStderr = this._exitStderr.slice(0, 2048)
     }
     const parts = ['process died before session init']
     if (this._host) parts.push(`[SSH → ${this._host}]`)
@@ -1131,7 +1172,7 @@ export class ClaudeCodeSession {
         // Result event exists but is_error:true — e.g. --resume "No conversation found".
         // Surface the error instead of silently treating it as success.
         this._activity = undefined
-        this.emitStatusChanged('AGENT_COMPLETE')
+        this.emitStatusChanged('AGENT_COMPLETE', resultErrorMessage.slice(0, 500))
         log.session.error('session PID died — error result in output file', {
           taskId: this.taskId,
           sessionId: this.claudeSessionId,
@@ -1148,14 +1189,18 @@ export class ClaudeCodeSession {
         if (this._outputFile) {
           try {
             stderr = fs.readFileSync(this._outputFile + '.err', 'utf-8').slice(0, 10240).trim()
-          } catch { /* No stderr file */ }
+          } catch { /* No stderr file (expected for remote sessions) */ }
+        }
+        // For remote sessions, local .err file doesn't exist — use daemon-provided stderr
+        if (!stderr && this._exitStderr) {
+          stderr = this._exitStderr.slice(0, 10240)
         }
 
         const isRealError = stderr && !isBenignSshStderr(stderr)
 
         if (isRealError) {
           this._activity = undefined
-          this.emitStatusChanged('AGENT_COMPLETE')
+          this.emitStatusChanged('AGENT_COMPLETE', stderr.slice(0, 500))
           bus.emit(EventNames.SESSION_ERROR, {
             sessionId: this.claudeSessionId,
             taskId: this.taskId,
@@ -2101,7 +2146,7 @@ export class ClaudeCodeSession {
     }
   }
 
-  private emitStatusChanged(phase: TaskPhase): void {
+  private emitStatusChanged(phase: TaskPhase, errorMessage?: string): void {
     bus.emit(EventNames.SESSION_STATUS_CHANGED, {
       sessionId: this.claudeSessionId,
       taskId: this.taskId,
@@ -2112,6 +2157,7 @@ export class ClaudeCodeSession {
       ...(this.planCompleted ? { planCompleted: true } : {}),
       ...(this.fromPlanSessionId ? { fromPlanSessionId: this.fromPlanSessionId } : {}),
       ...(this.forkedFromSessionId ? { forkedFromSessionId: this.forkedFromSessionId } : {}),
+      ...(errorMessage ? { errorMessage } : {}),
     }, ['*'], { source: 'session-runner', urgency: 'urgent' })
   }
 

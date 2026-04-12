@@ -852,6 +852,8 @@ export interface RecoveredSessionState {
   /** Byte length of the JSONL content that was read during recovery.
    *  Used as fromOffset when attaching to remote daemons to skip stale replays. */
   jsonlByteLength?: number;
+  /** True if the last TeamCreate/TeamDelete pair leaves the session in team mode. */
+  teamActive?: boolean;
   /** Pending control_request that was never answered (no matching control_response).
    *  Happens when Walnut server restarts while Claude Code is waiting for permission. */
   pendingControlRequest?: {
@@ -1007,6 +1009,18 @@ export async function recoverStateFromJsonl(sessionId: string, cwd?: string, hos
           // bypass mode, not be incorrectly labeled as plan.
           if (name === 'ExitPlanMode') {
             state.planCompleted = true;
+          }
+
+          // ── TeamCreate / TeamDelete: team mode detection ──
+          // Mirrors live detection in claude-code-session.ts (handleStreamEvent).
+          // Needed so _teamActive survives server restart — without this, the
+          // dispatcher's teamActive guard has no signal and every intermediate
+          // team result triggers triage.
+          if (name === 'TeamCreate') {
+            state.teamActive = true;
+          }
+          if (name === 'TeamDelete') {
+            state.teamActive = false;
           }
         }
       }
