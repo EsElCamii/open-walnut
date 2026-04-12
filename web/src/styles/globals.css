@@ -7622,31 +7622,9 @@ img[data-lightbox-src],
   opacity: 0.5;
 }
 
-/* ── Focus card styles ── */
+/* ── Focus / Next card styles — same neutral base as .todo-pinned-card ── */
 
-.todo-focus-card {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 4px 6px;
-  border-radius: 6px;
-  cursor: pointer;
-  transition: background 0.12s;
-  min-height: 28px;
-  border-left: 3px solid var(--accent, #007aff);
-  background: color-mix(in srgb, var(--accent, #007aff) 4%, transparent);
-  font-weight: 500;
-}
-
-.todo-focus-card:hover {
-  background: color-mix(in srgb, var(--accent, #007aff) 10%, transparent);
-}
-
-.todo-focus-card.todo-pinned-card-active {
-  background: color-mix(in srgb, var(--accent, #007aff) 14%, transparent);
-}
-
-/* Next tier card — amber accent */
+.todo-focus-card,
 .todo-next-card {
   display: flex;
   align-items: center;
@@ -7656,33 +7634,30 @@ img[data-lightbox-src],
   cursor: pointer;
   transition: background 0.12s;
   min-height: 28px;
-  border-left: 3px solid #f5a623;
-  background: color-mix(in srgb, #f5a623 4%, transparent);
 }
 
+.todo-focus-card:hover,
 .todo-next-card:hover {
-  background: color-mix(in srgb, #f5a623 10%, transparent);
+  background: var(--hover-bg, rgba(0,0,0,0.04));
 }
 
+.todo-focus-card.todo-pinned-card-active,
 .todo-next-card.todo-pinned-card-active {
-  background: color-mix(in srgb, #f5a623 14%, transparent);
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
 }
 
+.todo-focus-card.todo-pinned-card-active:hover,
+.todo-next-card.todo-pinned-card-active:hover {
+  background: color-mix(in srgb, var(--accent) 15%, transparent);
+}
+
+.todo-focus-card.todo-pinned-card-attention,
 .todo-next-card.todo-pinned-card-attention {
-  border-left-color: var(--error);
   background: rgba(255, 59, 48, 0.08);
 }
 
+.todo-focus-card.todo-pinned-card-attention:hover,
 .todo-next-card.todo-pinned-card-attention:hover {
-  background: rgba(255, 59, 48, 0.14);
-}
-
-.todo-focus-card.todo-pinned-card-attention {
-  border-left-color: var(--error);
-  background: rgba(255, 59, 48, 0.08);
-}
-
-.todo-focus-card.todo-pinned-card-attention:hover {
   background: rgba(255, 59, 48, 0.14);
 }
 

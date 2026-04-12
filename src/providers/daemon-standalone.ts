@@ -415,9 +415,16 @@ function cmdStart(ws: ServerWebSocket<WsData>, id: number, cmd: Record<string, u
     killProcessGroup(pid, 'SIGTERM')
     setTimeout(() => killProcessGroup(pid, 'SIGKILL'), 2000)
 
+    // Read stderr for error diagnosis — the .jsonl.err file is local to this host,
+    // so this is the ONLY place that can capture it before it's lost.
+    let stderr: string | undefined
+    if (code !== 0) {
+      try { stderr = fs.readFileSync(stderrPath, 'utf-8').slice(0, 4096).trim() || undefined } catch {}
+    }
+
     // Broadcast exit to all connected clients watching this session
     for (const client of sessionData.watchers.keys()) {
-      sendEvent(client, 'exit', { sid, code: code ?? 1 })
+      sendEvent(client, 'exit', { sid, code: code ?? 1, stderr })
     }
   })
 

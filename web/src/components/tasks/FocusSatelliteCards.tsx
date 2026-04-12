@@ -43,6 +43,7 @@ interface SortableTierCardProps {
   task: Task;
   tier: FocusTier;
   isFocused: boolean;
+  isDetailOpen?: boolean;
   onClick?: (task: Task) => void;
   onSetTier?: (taskId: string, tier: FocusTier) => void;
   onUnpinTask?: (taskId: string) => void;
@@ -57,7 +58,7 @@ interface SortableTierCardProps {
   onUpdateTitle?: (id: string, title: string) => void;
 }
 
-export function SortableTierCard({ task, tier, isFocused, onClick, onSetTier, onUnpinTask, onPinTask, onSetPriority, onSetDate, onStar, onExpandDetail, onClearFocus, onOpenSession, onSetPhase, onUpdateTitle }: SortableTierCardProps) {
+export function SortableTierCard({ task, tier, isFocused, isDetailOpen, onClick, onSetTier, onUnpinTask, onPinTask, onSetPriority, onSetDate, onStar, onExpandDetail, onClearFocus, onOpenSession, onSetPhase, onUpdateTitle }: SortableTierCardProps) {
   const {
     attributes,
     listeners,
@@ -148,13 +149,9 @@ export function SortableTierCard({ task, tier, isFocused, onClick, onSetTier, on
 
   const handleTitleClick = useCallback((e: React.MouseEvent) => {
     if (!onUpdateTitle) return;
-    e.stopPropagation();
-    e.preventDefault();
-    // Prevent card's onClick from firing during the same event cycle as the title click
-    titleClickedRef.current = true;
+    // Don't stop propagation — let card onClick fire too (opens session)
     clickPosRef.current = { x: e.clientX, y: e.clientY };
     setIsEditing(true);
-    requestAnimationFrame(() => { titleClickedRef.current = false; });
   }, [onUpdateTitle]);
 
   const style: CSSProperties = {
@@ -172,8 +169,8 @@ export function SortableTierCard({ task, tier, isFocused, onClick, onSetTier, on
       style={style}
       className={`${cardClass}${isFocused ? ' todo-pinned-card-active' : ''}${needsAttention ? ' todo-pinned-card-attention' : ''}`}
       onClick={(e) => {
-        if (isEditing || titleClickedRef.current) return;
-        if ((e.target as HTMLElement).closest('.todo-pinned-title, .pinned-phase-picker')) return;
+        if (isEditing) return;
+        if ((e.target as HTMLElement).closest('.pinned-phase-picker')) return;
         onClick?.(task);
       }}
       role="button"
@@ -191,13 +188,14 @@ export function SortableTierCard({ task, tier, isFocused, onClick, onSetTier, on
             e.stopPropagation();
             if (!phaseMenuOpen && phaseWrapperRef.current) {
               const rect = phaseWrapperRef.current.getBoundingClientRect();
-              const spaceBelow = window.innerHeight - rect.bottom;
-              const menuHeight = 170; // approximate height of 4-row grid
-              if (spaceBelow < menuHeight) {
-                setPhaseMenuPos({ top: rect.top - menuHeight - 2, left: rect.left });
-              } else {
-                setPhaseMenuPos({ top: rect.bottom + 2, left: rect.left });
-              }
+              const menuWidth = 300;
+              const menuHeight = 170;
+              let top = rect.bottom + 2;
+              let left = rect.left;
+              if (window.innerHeight - rect.bottom < menuHeight) top = rect.top - menuHeight - 2;
+              if (left + menuWidth > window.innerWidth) left = window.innerWidth - menuWidth - 8;
+              if (left < 8) left = 8;
+              setPhaseMenuPos({ top, left });
             }
             setPhaseMenuOpen(!phaseMenuOpen);
           }}
@@ -252,6 +250,7 @@ export function SortableTierCard({ task, tier, isFocused, onClick, onSetTier, on
       <TaskKebabMenu
         task={task}
         isFocused={isFocused}
+        isDetailOpen={isDetailOpen}
         isPinned={true}
         pinnedTier={tier}
         isDone={task.status === 'done'}

@@ -228,7 +228,10 @@ export function TaskQuickActions({ taskId, task: externalTask, isPinned, pinnedT
     e.stopPropagation();
     if (!kebabOpen && kebabBtnRef.current) {
       const rect = kebabBtnRef.current.getBoundingClientRect();
-      setKebabPos({ top: rect.bottom + 2, right: window.innerWidth - rect.right });
+      const menuHeight = 350;
+      const spaceBelow = window.innerHeight - rect.bottom;
+      const top = spaceBelow < menuHeight ? Math.max(8, rect.top - menuHeight) : rect.bottom + 2;
+      setKebabPos({ top, right: window.innerWidth - rect.right });
     }
     setKebabOpen(!kebabOpen);
   };
@@ -248,7 +251,14 @@ export function TaskQuickActions({ taskId, task: externalTask, isPinned, pinnedT
             e.stopPropagation();
             if (!phaseMenuOpen && phaseBtnRef.current) {
               const rect = phaseBtnRef.current.getBoundingClientRect();
-              setPhaseMenuPos({ top: rect.bottom + 2, left: rect.left });
+              const menuWidth = 300;
+              const menuHeight = 170;
+              let top = rect.bottom + 2;
+              let left = rect.left;
+              if (window.innerHeight - rect.bottom < menuHeight) top = rect.top - menuHeight - 2;
+              if (left + menuWidth > window.innerWidth) left = window.innerWidth - menuWidth - 8;
+              if (left < 8) left = 8;
+              setPhaseMenuPos({ top, left });
             }
             setPhaseMenuOpen(!phaseMenuOpen);
           }}

@@ -577,6 +577,11 @@ export class ClaudeCodeSession {
             fromPlanSessionId: this.fromPlanSessionId,
           }, ['main-ai', 'session-runner'], { source: 'session-runner' })
         }
+        // Post-init remote death: claudeSessionId IS set, so the block above is skipped.
+        // Without this, the error is silently swallowed and the session drifts to 'idle'.
+        else if (this._transport?.isRemote && code !== 0 && !this.resultEmitted) {
+          this.handleRemoteProcessExit(code, stderr)
+        }
       },
     }).then((result) => {
       this.pid = result.pid
@@ -866,6 +871,10 @@ export class ClaudeCodeSession {
           onExit: (code, stderr) => {
             session._exitCode = code
             session._exitStderr = stderr
+            // Post-init remote death — surface error instead of silent swallow
+            if (session._transport?.isRemote && code !== 0 && !session.resultEmitted) {
+              session.handleRemoteProcessExit(code, stderr)
+            }
           },
         })
       } catch (err) {
@@ -1241,6 +1250,67 @@ export class ClaudeCodeSession {
     this.stopLivenessMonitor()
     this._transport?.stopTail()
     this.clearStallDiagTimer()
+  }
+
+  /**
+   * Handle non-zero exit from a remote daemon session that already has a claudeSessionId.
+   * This is the remote-session equivalent of handleProcessDeath() — the liveness
+   * monitor never fires for remote sessions, so daemon exit events are the only signal.
+   *
+   * Without this, post-init remote exits silently set the session to 'idle' and the
+   * user never sees what went wrong (exit code, stderr, command not found, etc.).
+   */
+  private handleRemoteProcessExit(code: number, stderr?: string): void {
+    const parts: string[] = []
+    if (code === 127) {
+      parts.push('Claude CLI not found on remote host')
+    } else {
+      parts.push(`Remote session exited with code ${code}`)
+    }
+    if (this._host) parts.push(`[${this._host}]`)
+    if (stderr) parts.push(stderr.slice(0, 500))
+    const errMsg = parts.join(' — ')
+
+    log.session.error('remote session process exited with error', {
+      taskId: this.taskId,
+      sessionId: this.claudeSessionId,
+      exitCode: code,
+      host: this._host,
+      stderr: stderr?.slice(0, 200),
+    })
+
+    this._active = false
+    this._processStatus = 'error'
+    this._activity = undefined
+    this.pid = null
+
+    // Persist error state to session record
+    if (this.claudeSessionId) {
+      const sid = this.claudeSessionId
+      import('../core/session-tracker.js').then(({ updateSessionRecord }) =>
+        updateSessionRecord(sid, {
+          process_status: 'error',
+          errorMessage: errMsg,
+          status_reason: 'daemon_reported_exit',
+          status_changed_by: 'system',
+          pid: undefined,
+        } as Record<string, unknown>),
+      ).catch((err) => {
+        log.session.warn('failed to persist remote exit error', { sessionId: sid, error: String(err) })
+      })
+    }
+
+    // Emit status change with errorMessage so frontend shows the error banner
+    this.emitStatusChanged('AGENT_COMPLETE', errMsg)
+
+    if (!this.resultEmitted) {
+      this.resultEmitted = true
+      bus.emit(EventNames.SESSION_ERROR, {
+        sessionId: this.claudeSessionId ?? undefined,
+        taskId: this.taskId,
+        error: errMsg,
+      }, ['main-ai', 'session-runner'], { source: 'session-runner' })
+    }
   }
 
   /**
@@ -1966,9 +2036,13 @@ export class ClaudeCodeSession {
           // Remote daemon session: process exited (hasPipe was cleared by daemon exit
           // event or FIFO write failure), but daemon connection is still alive.
           // Show 'idle' so user can send follow-up messages (triggers --resume).
+          // BUT: if onExit already set 'error' (non-zero exit code), don't overwrite —
+          // the error state + errorMessage must reach the frontend.
           this.resultEmitted = true
           this._active = false
-          this._processStatus = 'idle'
+          if (this._processStatus !== 'error') {
+            this._processStatus = 'idle'
+          }
           this._activity = undefined
           // Clear PID — the remote process exited. Prevents stale local PID checks.
           this.pid = null

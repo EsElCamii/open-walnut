@@ -16,6 +16,8 @@ import { DatePicker, formatDateDisplay } from '../common/DatePicker';
 interface TaskKebabMenuProps {
   task: Task;
   isFocused: boolean;
+  /** Whether the detail pane is actually visible (not just focused/selected). */
+  isDetailOpen?: boolean;
   isPinned: boolean;
   pinnedTier?: FocusTier;
   isDone: boolean;
@@ -49,7 +51,7 @@ const PRIORITY_OPTIONS: { value: TaskPriority; icon: string; label: string }[] =
   { value: 'none', icon: '--', label: 'None' },
 ];
 
-export function TaskKebabMenu({ task, isFocused, isPinned, pinnedTier, isDone, onExpandDetail, onClearFocus, onSetPriority, onStar, onPinTask, onUnpinTask, onSetTier, onOpenSession, onSetDate }: TaskKebabMenuProps) {
+export function TaskKebabMenu({ task, isFocused, isDetailOpen, isPinned, pinnedTier, isDone, onExpandDetail, onClearFocus, onSetPriority, onStar, onPinTask, onUnpinTask, onSetTier, onOpenSession, onSetDate }: TaskKebabMenuProps) {
   const integrations = useIntegrations();
   const [open, setOpen] = useState(false);
   const [menuPos, setMenuPos] = useState<{ top: number; right: number } | null>(null);
@@ -78,7 +80,10 @@ export function TaskKebabMenu({ task, isFocused, isPinned, pinnedTier, isDone, o
     e.stopPropagation();
     if (!open && btnRef.current) {
       const rect = btnRef.current.getBoundingClientRect();
-      setMenuPos({ top: rect.bottom + 2, right: window.innerWidth - rect.right });
+      const menuHeight = 350; // approximate max height
+      const spaceBelow = window.innerHeight - rect.bottom;
+      const top = spaceBelow < menuHeight ? Math.max(8, rect.top - menuHeight) : rect.bottom + 2;
+      setMenuPos({ top, right: window.innerWidth - rect.right });
     }
     setOpen(!open);
   };
@@ -133,16 +138,16 @@ export function TaskKebabMenu({ task, isFocused, isPinned, pinnedTier, isDone, o
 
           {/* Details */}
           <button
-            className={`task-kebab-item${isFocused ? ' task-kebab-item-active' : ''}`}
+            className={`task-kebab-item${(isDetailOpen ?? isFocused) ? ' task-kebab-item-active' : ''}`}
             onClick={(e) => {
               e.stopPropagation();
-              if (isFocused) onClearFocus?.();
+              if (isDetailOpen ?? isFocused) onClearFocus?.();
               else onExpandDetail?.(task);
               closeMenu();
             }}
           >
             <span className="task-kebab-icon">{ICONS.ICON_INFO}</span>
-            <span>{isFocused ? 'Close details' : 'Details'}</span>
+            <span>{(isDetailOpen ?? isFocused) ? 'Close details' : 'Details'}</span>
           </button>
 
           {/* Star */}

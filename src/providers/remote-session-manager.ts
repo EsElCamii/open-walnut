@@ -45,7 +45,7 @@ export class RemoteSessionManager implements SessionManager {
   private _imageCache = new Map<string, string>()
   private unsubscribeEvent: (() => void) | null = null
   private _onOutput: ((event: { line: string }) => void) | null = null
-  private _onExit: ((code: number) => void) | null = null
+  private _onExit: ((code: number, stderr?: string) => void) | null = null
   private _sid: string | null = null
   /**
    * Old sid kept during the async rename transition. Events may still arrive
@@ -542,7 +542,7 @@ export class RemoteSessionManager implements SessionManager {
         if (event.sid === this._sid || event.sid === this._prevSid) {
           this._lastEventAt = Date.now()
           this._hasPipe = false
-          this._onExit?.(event.code ?? 1)
+          this._onExit?.(event.code ?? 1, event.stderr)
         }
         break
 

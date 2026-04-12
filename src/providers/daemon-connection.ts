@@ -49,6 +49,8 @@ export interface DaemonEvent {
   lines?: string[]
   agent?: string
   code?: number
+  /** Stderr content from the process (only present on exit events with non-zero code) */
+  stderr?: string
   [key: string]: unknown
 }
 

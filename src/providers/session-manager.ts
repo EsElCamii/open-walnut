@@ -69,8 +69,8 @@ export interface TransportStartOptions {
   fork?: boolean
   /** Callback for each JSONL line from the output stream */
   onOutput: (event: OutputEvent) => void
-  /** Callback when the Claude process exits */
-  onExit: (code: number) => void
+  /** Callback when the Claude process exits. stderr is included for remote sessions (read from .jsonl.err on the remote host). */
+  onExit: (code: number, stderr?: string) => void
 }
 
 // ── Attach Options ──
@@ -82,8 +82,8 @@ export interface TransportAttachOptions {
   fromOffset?: number
   /** Callback for each JSONL line */
   onOutput: (event: OutputEvent) => void
-  /** Callback when the Claude process exits */
-  onExit: (code: number) => void
+  /** Callback when the Claude process exits. stderr is included for remote sessions. */
+  onExit: (code: number, stderr?: string) => void
 }
 
 // ── Start Result ──

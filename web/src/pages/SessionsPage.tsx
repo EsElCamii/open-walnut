@@ -151,10 +151,14 @@ export function SessionsPage() {
       });
     }
     loadTree();
+    // Re-fetch directSession if it's the one that errored (not in tree → tree patch misses it)
+    if (d.sessionId && d.sessionId === selectedId && !treeSession) {
+      fetchSession(d.sessionId).then((s) => setDirectSession(s)).catch(() => {});
+    }
   });
   useEvent('session:status-changed', (data: unknown) => {
     // Auto-switch to new exec session when "Clear Context & Execute" creates one
-    const d = data as { sessionId?: string; fromPlanSessionId?: string; process_status?: string; phase?: string; activity?: string };
+    const d = data as { sessionId?: string; fromPlanSessionId?: string; process_status?: string; phase?: string; activity?: string; errorMessage?: string };
     if (d.fromPlanSessionId && d.sessionId && d.fromPlanSessionId === selectedId) {
       setSelectedId(d.sessionId);
     }
@@ -171,8 +175,10 @@ export function SessionsPage() {
             if (s.claudeSessionId === d.sessionId) {
               if (d.process_status) s.process_status = d.process_status as SessionRecord['process_status'];
               if ('activity' in d) s.activity = d.activity;
+              // Surface errorMessage from status-changed event (e.g. stderr from remote process death)
+              if (d.errorMessage) s.errorMessage = d.errorMessage;
               // Clear stale error when session recovers from error state
-              if (d.process_status && d.process_status !== 'error') s.errorMessage = undefined;
+              else if (d.process_status && d.process_status !== 'error') s.errorMessage = undefined;
               return true;
             }
           }
@@ -190,6 +196,10 @@ export function SessionsPage() {
     }
 
     loadTree();
+    // Re-fetch directSession for status updates on sessions not in tree
+    if (d.sessionId && d.sessionId === selectedId && !treeSession) {
+      fetchSession(d.sessionId).then((s) => setDirectSession(s)).catch(() => {});
+    }
   });
 
   const handleToggleHideCompleted = () => {

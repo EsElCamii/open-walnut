@@ -293,7 +293,7 @@ export const SessionPanel = memo(function SessionPanel({ sessionId, onClose, onT
 
   // Merge event data directly on status changes (avoids stale DB reads)
   useEvent('session:status-changed', (data) => {
-    const d = data as { sessionId?: string; process_status?: string; phase?: string; activity?: string; mode?: string; planCompleted?: boolean };
+    const d = data as { sessionId?: string; process_status?: string; phase?: string; activity?: string; mode?: string; planCompleted?: boolean; errorMessage?: string };
     if (d.sessionId === sessionId) {
       setSession(prev => prev ? {
         ...prev,
@@ -301,8 +301,10 @@ export const SessionPanel = memo(function SessionPanel({ sessionId, onClose, onT
         activity: d.activity ?? prev.activity,
         mode: (d.mode ?? prev.mode) as SessionRecord['mode'],
         ...(d.planCompleted ? { planCompleted: true } : {}),
+        // Surface errorMessage from status-changed event (e.g. stderr from remote process death)
+        ...(d.errorMessage ? { errorMessage: d.errorMessage } : {}),
         // Clear stale error when session recovers from error state
-        ...(d.process_status && d.process_status !== 'error' ? { errorMessage: undefined } : {}),
+        ...(!d.errorMessage && d.process_status && d.process_status !== 'error' ? { errorMessage: undefined } : {}),
         lastActiveAt: new Date().toISOString(),
       } : prev);
       // Update phase on sessionTask if present
