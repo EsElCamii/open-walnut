@@ -3,14 +3,7 @@ import yaml from 'js-yaml';
 import { log } from '../logging/index.js';
 import { CONFIG_FILE } from '../constants.js';
 import { VALID_PRIORITIES, type Config, type TaskPriority } from './types.js';
-
-export const DEFAULT_AVAILABLE_MODELS = [
-  'global.anthropic.claude-opus-4-6-v1',
-  'global.anthropic.claude-opus-4-6-v1[1m]',
-  'us.anthropic.claude-sonnet-4-5-20250929-v1:0',
-  'us.anthropic.claude-sonnet-4-5-20250929-v1:0[1m]',
-  'us.anthropic.claude-haiku-4-5-20251001-v1:0',
-];
+import { MODEL_CATALOG } from '../agent/providers/model-catalog.js';
 
 const DEFAULT_CONFIG: Config = {
   version: 1,
@@ -34,53 +27,20 @@ export async function getConfig(): Promise<Config> {
       else if (p === 'medium' || p === 'low') config.defaults.priority = 'backlog';
       else config.defaults.priority = 'none';
     }
-    // Seed available_models default if agent section exists but field is missing
+    // Seed defaults from MODEL_CATALOG
     if (!config.agent?.available_models) {
-      config.agent = { ...config.agent, available_models: DEFAULT_AVAILABLE_MODELS };
+      config.agent = { ...config.agent, available_models: (MODEL_CATALOG.bedrock ?? []).map(m => m.id) };
     }
-    // Legacy migration: only applies to string[] format (not ModelEntry[] from new multi-provider config)
-    const isLegacyModelList = Array.isArray(config.agent?.available_models)
-      && config.agent!.available_models!.length > 0
-      && typeof config.agent!.available_models![0] === 'string';
-    if (isLegacyModelList) {
-      // Migrate: ensure 1M variants exist for non-Haiku models
-      const models = config.agent!.available_models! as string[];
-      const added: string[] = [];
-      for (const m of models) {
-        if (!m.endsWith('[1m]') && !m.toLowerCase().includes('haiku')) {
-          const oneM = m + '[1m]';
-          if (!models.includes(oneM)) added.push(oneM);
-        }
-      }
-      if (added.length > 0) {
-        const merged: string[] = [];
-        for (const m of models) {
-          merged.push(m);
-          const oneM = m + '[1m]';
-          if (added.includes(oneM)) merged.push(oneM);
-        }
-        config.agent = { ...config.agent, available_models: merged };
-      }
-      // Seed/migrate main_model: prefer 1M Opus variant for large context needs
-      const allModels = (config.agent?.available_models ?? DEFAULT_AVAILABLE_MODELS) as string[];
-      const oneM = allModels.find(m => m.includes('opus') && m.includes('[1m]'));
-      if (!config.agent?.main_model) {
-        config.agent = { ...config.agent, main_model: oneM ?? allModels[0] };
-      } else if (oneM && config.agent.main_model === oneM.replace('[1m]', '')) {
-        config.agent = { ...config.agent, main_model: oneM };
-      }
-    } else if (!config.agent?.main_model) {
-      // New format: seed main_model from first available model entry
-      const defaultOneM = DEFAULT_AVAILABLE_MODELS.find(m => m.includes('opus') && m.includes('[1m]')) ?? DEFAULT_AVAILABLE_MODELS[0];
-      config.agent = { ...config.agent, main_model: defaultOneM };
+    if (!config.agent?.main_model) {
+      config.agent = { ...config.agent, main_model: (MODEL_CATALOG.bedrock ?? [])[0]?.id };
     }
     return config;
   } catch (err) {
     log.session.debug('config-manager: config file not found, using defaults', {
       error: err instanceof Error ? err.message : String(err),
     });
-    const defaultOneM = DEFAULT_AVAILABLE_MODELS.find(m => m.includes('opus') && m.includes('[1m]')) ?? DEFAULT_AVAILABLE_MODELS[0];
-    return { ...DEFAULT_CONFIG, agent: { available_models: DEFAULT_AVAILABLE_MODELS, main_model: defaultOneM } };
+    const defaultModels = (MODEL_CATALOG.bedrock ?? []).map(m => m.id);
+    return { ...DEFAULT_CONFIG, agent: { available_models: defaultModels, main_model: defaultModels[0] } };
   }
 }
 

@@ -7,7 +7,8 @@
  * Priority: config > builtin (later source wins on ID conflict).
  */
 
-import { getConfig, updateConfig, DEFAULT_AVAILABLE_MODELS, _resetWriteLockForTest } from './config-manager.js';
+import { getConfig, updateConfig, _resetWriteLockForTest } from './config-manager.js';
+import { MODEL_CATALOG } from '../agent/providers/model-catalog.js';
 import { ensureProjectDir } from './project-memory.js';
 import type { AgentDefinition } from './types.js';
 import { log } from '../logging/index.js';
@@ -528,7 +529,8 @@ export async function getAgent(id: string): Promise<AgentDefinition | undefined>
 async function validateModel(model: string | undefined): Promise<void> {
   if (!model) return;
   const config = await getConfig();
-  const allowed = config.agent?.available_models ?? DEFAULT_AVAILABLE_MODELS;
+  const defaultModels = (MODEL_CATALOG.bedrock ?? []).map(m => m.id);
+  const allowed = config.agent?.available_models ?? defaultModels;
   if (!Array.isArray(allowed) || allowed.length === 0) return; // Empty list = allow all
   // Handle both legacy string[] and new ModelEntry[] formats
   const isLegacy = typeof allowed[0] === 'string';

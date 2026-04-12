@@ -16,12 +16,14 @@ import {
   CONTEXT_WINDOW_1M,
   CONTEXT_WINDOW_DEFAULT,
   BETA_CONTEXT_1M,
+  INTERLEAVED_THINKING_BETA,
 } from './providers/defaults.js';
-import type { UsageStats, ModelResult } from './providers/types.js';
+import { MODEL_CATALOG } from './providers/model-catalog.js';
+import type { UsageStats, ModelResult, ThinkingConfig, ModelEntry } from './providers/types.js';
 
 // Re-export types for backward compatibility — all callers import from here
 export type { MessageParam, ContentBlock, Tool, TextBlockParam };
-export type { UsageStats, ModelResult };
+export type { UsageStats, ModelResult, ThinkingConfig };
 
 export interface ModelConfig {
   model?: string;
@@ -33,23 +35,34 @@ export interface ModelConfig {
 
 export { DEFAULT_MODEL };
 
-// ── Context window helpers ──
+// ── Catalog lookup ──
 
-/** Check if a model string indicates 1M extended context. */
-function is1MModel(model?: string): boolean {
-  return model?.endsWith('[1m]') === true;
+/** Find a model entry in MODEL_CATALOG by model ID across all providers, or for a specific provider. */
+function lookupCatalogEntry(modelId: string, providerName?: string): ModelEntry | undefined {
+  if (providerName && MODEL_CATALOG[providerName]) {
+    const entry = MODEL_CATALOG[providerName].find(m => m.id === modelId);
+    if (entry) return entry;
+  }
+  // Fallback: search all providers
+  for (const entries of Object.values(MODEL_CATALOG)) {
+    const entry = entries.find(m => m.id === modelId);
+    if (entry) return entry;
+  }
+  return undefined;
 }
 
+// ── Context window helpers ──
+
 /**
- * Get the context window size for a model string.
- * Models with `[1m]` suffix have a 1M token context window; all others default to 200K.
+ * Get the context window size for a model.
+ * Uses MODEL_CATALOG to determine size; falls back to 200K for unknown models.
  * When totalInput is provided and exceeds 200K, auto-upgrades to 1M as a safety net.
- * Root cause: Walnut's processNext() previously didn't pass the stored record.model on
- * resume, falling back to a default without [1m]. That's now fixed, but totalInput
- * auto-upgrade remains as defense-in-depth for any other path that loses the suffix.
  */
 export function getContextWindowSize(model?: string, totalInput?: number): number {
-  if (is1MModel(model)) return CONTEXT_WINDOW_1M;
+  if (model) {
+    const entry = lookupCatalogEntry(model);
+    if (entry?.context_window) return entry.context_window;
+  }
   if (totalInput != null && totalInput > CONTEXT_WINDOW_DEFAULT) return CONTEXT_WINDOW_1M;
   return CONTEXT_WINDOW_DEFAULT;
 }
@@ -66,14 +79,17 @@ export function getContextThreshold(model: string | undefined, percent: number):
 /**
  * Resolve the provider config + adapter for a given ModelConfig.
  * Falls back to Bedrock from legacy config when no explicit provider is set.
+ *
+ * Automatically determines:
+ * - betas: 1M context beta (from catalog context_window) + interleaved thinking beta
+ * - thinking: adaptive/enabled based on catalog compat
+ * - maxTokens: from catalog max_tokens (not hardcoded 4096)
  */
 async function resolveForCall(config?: ModelConfig) {
   const fullConfig = await getConfig();
   const providerName = config?.provider ?? fullConfig.agent?.main_provider ?? 'bedrock';
 
   // Build providers map: auto-detected (env) + explicit config.providers overlay
-  // Always go through buildProviderMap to ensure env-detected providers (bedrock, ollama)
-  // are included even when config.providers only contains a subset.
   const hasExplicitProviders = fullConfig.providers && Object.keys(fullConfig.providers).length > 0;
   let providers = hasExplicitProviders
     ? buildProviderMap(fullConfig.providers)
@@ -88,13 +104,42 @@ async function resolveForCall(config?: ModelConfig) {
   }
 
   const model = config?.model ?? fullConfig.agent?.main_model ?? DEFAULT_MODEL;
+  const catalogEntry = lookupCatalogEntry(model, providerName);
+
+  // Build betas array from catalog capabilities
+  const betas: string[] = [];
+
+  // 1M context beta — driven by catalog context_window, not [1m] suffix.
+  // Guard is bedrock/anthropic only: other providers (OpenRouter, Gemini) have native 1M support without beta headers.
+  if (catalogEntry?.context_window && catalogEntry.context_window >= 1_000_000
+      && ['bedrock', 'anthropic'].includes(providerName)) {
+    betas.push(BETA_CONTEXT_1M);
+  }
+
+  // Thinking config — from catalog compat
+  let thinking: ThinkingConfig | undefined;
+  if (catalogEntry?.compat?.thinking_format === 'anthropic') {
+    if (catalogEntry.compat.supports_adaptive) {
+      thinking = { type: 'adaptive' };
+    } else {
+      const budget = Math.min((catalogEntry.max_tokens ?? 64_000) - 1, 64_000);
+      thinking = { type: 'enabled', budget_tokens: budget };
+    }
+    betas.push(INTERLEAVED_THINKING_BETA);
+  }
+
+  // max_tokens: caller override > catalog > default
+  const maxTokens = config?.maxTokens ?? catalogEntry?.max_tokens ?? DEFAULT_MAX_TOKENS;
+
+  // Resolve API model ID: catalog model_id (for variants like -1m) or the user-facing ID
+  const apiModel = catalogEntry?.model_id ?? model;
 
   return {
     ...resolved,
-    model,
-    maxTokens: config?.maxTokens ?? DEFAULT_MAX_TOKENS,
-    // 1M context requires the beta header (not thinking)
-    ...(is1MModel(model) && { betas: [BETA_CONTEXT_1M] }),
+    model: apiModel,
+    maxTokens,
+    ...(betas.length && { betas }),
+    ...(thinking && { thinking }),
   };
 }
 
@@ -111,12 +156,12 @@ export async function sendMessage(opts: {
   config?: ModelConfig;
   signal?: AbortSignal;
 }): Promise<ModelResult> {
-  const { adapter, config: providerConfig, model, maxTokens, betas } = await resolveForCall(opts.config);
+  const { adapter, config: providerConfig, model, maxTokens, betas, thinking } = await resolveForCall(opts.config);
 
   return adapter.sendMessage({
     providerConfig, model, maxTokens,
     system: opts.system, messages: opts.messages, tools: opts.tools,
-    signal: opts.signal, betas,
+    signal: opts.signal, betas, thinking,
   });
 }
 
@@ -133,12 +178,12 @@ export async function sendMessageStream(opts: {
   signal?: AbortSignal;
   onTextDelta?: (delta: string) => void;
 }): Promise<ModelResult> {
-  const { adapter, config: providerConfig, model, maxTokens, betas } = await resolveForCall(opts.config);
+  const { adapter, config: providerConfig, model, maxTokens, betas, thinking } = await resolveForCall(opts.config);
 
   return adapter.sendMessageStream({
     providerConfig, model, maxTokens,
     system: opts.system, messages: opts.messages, tools: opts.tools,
-    signal: opts.signal, onTextDelta: opts.onTextDelta, betas,
+    signal: opts.signal, onTextDelta: opts.onTextDelta, betas, thinking,
   });
 }
 

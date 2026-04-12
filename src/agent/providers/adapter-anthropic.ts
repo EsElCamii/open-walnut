@@ -12,7 +12,7 @@ import {
   MAX_RETRIES, isRetryableError, getRetryDelay, sleep,
   abortedResult, extractUsage,
 } from './retry.js';
-import { DEFAULT_BASE_URLS, stripModelSuffix } from './defaults.js';
+import { DEFAULT_BASE_URLS } from './defaults.js';
 import { log } from '../../logging/index.js';
 
 export class AnthropicAdapter implements ProtocolAdapter {
@@ -46,8 +46,7 @@ export class AnthropicAdapter implements ProtocolAdapter {
   }
 
   async sendMessage(opts: AdapterCallOptions): Promise<ModelResult> {
-    const model = stripModelSuffix(opts.model);
-    const { providerConfig } = opts;
+    const { model, providerConfig } = opts;
 
     for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
       const client = this.getClient(
@@ -62,6 +61,8 @@ export class AnthropicAdapter implements ProtocolAdapter {
           system: opts.system,
           messages: opts.messages,
           tools: opts.tools,
+          // Note: temperature must not be set when thinking is enabled (API defaults to 1.0)
+          ...(opts.thinking && opts.thinking.type !== 'disabled' && { thinking: opts.thinking }),
         };
         const requestOpts = opts.signal ? { signal: opts.signal } : undefined;
         // Use beta endpoint when betas are specified (e.g., 1M context window).
@@ -92,8 +93,7 @@ export class AnthropicAdapter implements ProtocolAdapter {
   async sendMessageStream(
     opts: AdapterCallOptions & { onTextDelta?: (delta: string) => void },
   ): Promise<ModelResult> {
-    const model = stripModelSuffix(opts.model);
-    const { providerConfig } = opts;
+    const { model, providerConfig } = opts;
 
     for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
       let accumulatedText = '';
@@ -110,6 +110,8 @@ export class AnthropicAdapter implements ProtocolAdapter {
           system: opts.system,
           messages: opts.messages,
           tools: opts.tools,
+          // Note: temperature must not be set when thinking is enabled (API defaults to 1.0)
+          ...(opts.thinking && opts.thinking.type !== 'disabled' && { thinking: opts.thinking }),
         };
         // Use beta endpoint when betas are specified (e.g., 1M context window).
         // BetaMessageStream and MessageStream are structurally compatible (same on/abort/finalMessage).

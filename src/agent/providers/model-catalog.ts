@@ -11,22 +11,45 @@ import type { ModelEntry } from './types.js';
  *  Only includes providers we actively test. Users can add more via config. */
 export const MODEL_CATALOG: Record<string, ModelEntry[]> = {
   // ── AWS Bedrock (Claude via cross-region inference) ──
+  // Models with 1M variants use model_id to map back to the same API model ID.
+  // The API has no -1m model; 1M capability is activated via the context-1m beta header.
+  // model_id therefore redirects the -1m catalog entry to the real API endpoint.
   bedrock: [
     { id: 'global.anthropic.claude-opus-4-6-v1', provider: 'bedrock',
-      label: 'Opus 4.6', max_tokens: 128_000, context_window: 1_000_000 },
+      label: 'Opus 4.6', max_tokens: 128_000, context_window: 200_000,
+      compat: { thinking_format: 'anthropic', supports_adaptive: true } },
+    { id: 'global.anthropic.claude-opus-4-6-v1-1m', provider: 'bedrock',
+      model_id: 'global.anthropic.claude-opus-4-6-v1',
+      label: 'Opus 4.6 (1M)', max_tokens: 128_000, context_window: 1_000_000,
+      compat: { thinking_format: 'anthropic', supports_adaptive: true } },
     { id: 'global.anthropic.claude-sonnet-4-6', provider: 'bedrock',
-      label: 'Sonnet 4.6', max_tokens: 64_000, context_window: 1_000_000 },
+      label: 'Sonnet 4.6', max_tokens: 64_000, context_window: 200_000,
+      compat: { thinking_format: 'anthropic', supports_adaptive: true } },
+    { id: 'global.anthropic.claude-sonnet-4-6-1m', provider: 'bedrock',
+      model_id: 'global.anthropic.claude-sonnet-4-6',
+      label: 'Sonnet 4.6 (1M)', max_tokens: 64_000, context_window: 1_000_000,
+      compat: { thinking_format: 'anthropic', supports_adaptive: true } },
     { id: 'us.anthropic.claude-haiku-4-5-20251001-v1:0', provider: 'bedrock',
-      label: 'Haiku 4.5', max_tokens: 64_000, context_window: 200_000 },
+      label: 'Haiku 4.5', max_tokens: 64_000, context_window: 200_000 }, // No extended thinking — Haiku 4.5 doesn't support it
   ],
   // ── Anthropic Direct API ──
   anthropic: [
     { id: 'claude-opus-4-6', provider: 'anthropic',
-      label: 'Opus 4.6', max_tokens: 128_000, context_window: 1_000_000 },
+      label: 'Opus 4.6', max_tokens: 128_000, context_window: 200_000,
+      compat: { thinking_format: 'anthropic', supports_adaptive: true } },
+    { id: 'claude-opus-4-6-1m', provider: 'anthropic',
+      model_id: 'claude-opus-4-6',
+      label: 'Opus 4.6 (1M)', max_tokens: 128_000, context_window: 1_000_000,
+      compat: { thinking_format: 'anthropic', supports_adaptive: true } },
     { id: 'claude-sonnet-4-6', provider: 'anthropic',
-      label: 'Sonnet 4.6', max_tokens: 64_000, context_window: 1_000_000 },
+      label: 'Sonnet 4.6', max_tokens: 64_000, context_window: 200_000,
+      compat: { thinking_format: 'anthropic', supports_adaptive: true } },
+    { id: 'claude-sonnet-4-6-1m', provider: 'anthropic',
+      model_id: 'claude-sonnet-4-6',
+      label: 'Sonnet 4.6 (1M)', max_tokens: 64_000, context_window: 1_000_000,
+      compat: { thinking_format: 'anthropic', supports_adaptive: true } },
     { id: 'claude-haiku-4-5', provider: 'anthropic',
-      label: 'Haiku 4.5', max_tokens: 64_000, context_window: 200_000 },
+      label: 'Haiku 4.5', max_tokens: 64_000, context_window: 200_000 }, // No extended thinking — Haiku 4.5 doesn't support it
   ],
   // ── OpenAI ──
   openai: [

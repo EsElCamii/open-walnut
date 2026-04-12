@@ -25,6 +25,8 @@ export type ApiProtocol =
 /** Avoids hardcoding provider-specific behavior. Lives on the model entry. */
 export interface ModelCompat {
   thinking_format?: 'anthropic' | 'openai' | 'deepseek' | 'qwen';
+  /** True for models that support adaptive thinking (Opus 4.6, Sonnet 4.6). */
+  supports_adaptive?: boolean;
   max_tokens_field?: 'max_tokens' | 'max_completion_tokens';
   supports_cache?: boolean;
   supports_vision?: boolean;
@@ -32,6 +34,14 @@ export interface ModelCompat {
   requires_tool_result_name?: boolean;
   requires_assistant_after_tool_result?: boolean;
 }
+
+// ── Thinking configuration ──
+
+/** Thinking config passed to Claude API. */
+export type ThinkingConfig =
+  | { type: 'adaptive' }
+  | { type: 'enabled'; budget_tokens: number }
+  | { type: 'disabled' };
 
 // ── Provider configuration ──
 
@@ -102,6 +112,8 @@ export interface AdapterCallOptions {
   compat?: ModelCompat;             // Per-model quirks
   /** Beta feature flags (e.g., 'context-1m-2025-08-07' for 1M context window). */
   betas?: string[];
+  /** Thinking configuration for Claude models. */
+  thinking?: ThinkingConfig;
 }
 
 /** The adapter interface — one implementation per protocol. */
