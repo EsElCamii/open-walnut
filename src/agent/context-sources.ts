@@ -29,6 +29,7 @@ const DEFAULT_BUDGETS: Record<ContextSourceId, number> = {
   conversation_log: 1000,
   main_global_memory: 2000,
   main_daily_log: 3000,
+  journal_recent: 4000,
 };
 
 // Auto-inferred sources — always loaded when taskId is present
@@ -151,6 +152,37 @@ async function loadConversationLog(task: Task, budget: number): Promise<string> 
   return '[...earlier entries omitted]\n\n' + clean;
 }
 
+/** Load recent diary entries from the Obsidian vault (for Inner Space). */
+async function loadJournalRecent(budget: number): Promise<string> {
+  const fs = await import('node:fs');
+  const path = await import('node:path');
+  const { NOTES_DIR } = await import('../constants.js');
+
+  // "Dairy" is the actual folder name in the user's Obsidian vault (not a typo for "Diary")
+  const diaryDir = path.join(NOTES_DIR, 'Areas', 'Journal', 'Dairy');
+  let files: string[];
+  try {
+    files = fs.readdirSync(diaryDir)
+      .filter((f: string) => /^\d{4}-\d{2}-\d{2}\.md$/.test(f))
+      .sort()
+      .reverse()
+      .slice(0, 7);
+  } catch {
+    return '(no diary entries found)';
+  }
+  if (files.length === 0) return '(no diary entries found)';
+
+  const entries: string[] = [];
+  for (const file of files) {
+    try {
+      const content = fs.readFileSync(path.join(diaryDir, file), 'utf-8');
+      entries.push(`--- ${file.replace('.md', '')} ---\n${content.trim()}`);
+    } catch { /* skip unreadable */ }
+  }
+  if (entries.length === 0) return '(no diary entries found)';
+  return truncateToTokenBudgetTail(entries.join('\n\n'), budget);
+}
+
 // ── XML tag names for each source ──
 
 /** Load General agent's global memory (read-only, for non-General console agents). */
@@ -181,6 +213,7 @@ const SOURCE_XML_TAGS: Record<ContextSourceId, string> = {
   conversation_log: 'conversation_log',
   main_global_memory: 'main_global_memory',
   main_daily_log: 'main_daily_log',
+  journal_recent: 'recent_journal',
 };
 
 // ── Main entry point ──
@@ -287,6 +320,9 @@ export async function loadContextSources(
         break;
       case 'main_daily_log':
         promise = loadMainDailyLog(budget);
+        break;
+      case 'journal_recent':
+        promise = loadJournalRecent(budget);
         break;
       default:
         continue;
