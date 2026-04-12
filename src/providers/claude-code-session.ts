@@ -548,6 +548,26 @@ export class ClaudeCodeSession {
             taskId: this.taskId, exitCode: code, host, isRemote: !!sshTarget,
           })
         }
+        // Process died before init (no claudeSessionId) — emit error so callers
+        // waiting for this session (e.g. plan execute endpoint) can detect the failure.
+        if (!this.claudeSessionId && !this.resultEmitted) {
+          this.resultEmitted = true
+          this._active = false
+          this._processStatus = 'error'
+          this._activity = undefined
+          this.clearStallDiagTimer()
+          const errMsg = `Process exited with code ${code} before initialization`
+          log.session.error('session process died before init', {
+            taskId: this.taskId, exitCode: code, host, fromPlanSessionId: this.fromPlanSessionId,
+          })
+          this.emitStatusChanged('AGENT_COMPLETE')
+          bus.emit(EventNames.SESSION_ERROR, {
+            sessionId: this.claudeSessionId ?? undefined,
+            taskId: this.taskId,
+            error: errMsg,
+            fromPlanSessionId: this.fromPlanSessionId,
+          }, ['main-ai', 'session-runner'], { source: 'session-runner' })
+        }
       },
     }).then((result) => {
       this.pid = result.pid
@@ -762,6 +782,23 @@ export class ClaudeCodeSession {
         if (recovered.model) record.model = recovered.model
         if (recovered.planFile) record.planFile = recovered.planFile
         if (recovered.planCompleted != null) record.planCompleted = recovered.planCompleted
+
+        // Recover orphaned control_request: if Claude Code is blocked waiting for
+        // a control_response that was lost when the server restarted, re-populate
+        // the pending map so the UI can re-prompt the user (or auto-approve).
+        // Must populate _pendingPermissionRequests BEFORE transport.attach() since
+        // attach starts delivering live events that may reference these requests.
+        if (recovered.pendingControlRequest) {
+          const { request_id, request } = recovered.pendingControlRequest
+          session._pendingPermissionRequests.set(request_id, { request_id, request })
+          const action = session._mode === 'bypass' ? 'will auto-approve after attach' : 'will re-emit to UI after attach'
+          log.session.info(`recovered orphaned control_request from JSONL — ${action}`, {
+            sessionId: record.claudeSessionId,
+            requestId: request_id,
+            toolName: request.tool_name,
+            mode: session._mode,
+          })
+        }
       }
     } catch (err) {
       log.session.warn('state recovery from canonical JSONL failed, using session record', {
@@ -804,6 +841,42 @@ export class ClaudeCodeSession {
     }
 
     session.startLivenessMonitor()
+
+    // Re-emit pending permission requests to the UI after transport is ready.
+    // Re-emit must happen AFTER transport.attach() returns because the WebSocket
+    // subscription isn't live until then — emitting earlier would be lost.
+    // If the server restarted while Claude Code was waiting for control_response,
+    // the UI needs to show the permission dialog again so the user can approve/deny.
+    if (session._pendingPermissionRequests.size > 0 && record.claudeSessionId) {
+      // Snapshot before iterating: resolvePermissionRequest() deletes from the map
+      const pendingSnapshot = [...session._pendingPermissionRequests.values()]
+      for (const pending of pendingSnapshot) {
+        if (session._mode === 'bypass') {
+          // Bypass mode = blanket trust. Auto-approve immediately to unblock Claude Code.
+          // Non-bypass modes require explicit user re-confirmation via the UI dialog.
+          log.session.info('auto-approving recovered control_request (bypass mode)', {
+            sessionId: record.claudeSessionId,
+            requestId: pending.request_id,
+            toolName: pending.request.tool_name,
+          })
+          session.resolvePermissionRequest(pending.request_id, true)
+        } else {
+          log.session.info('re-emitting recovered control_request to UI', {
+            sessionId: record.claudeSessionId,
+            requestId: pending.request_id,
+            toolName: pending.request.tool_name,
+          })
+          bus.emit(EventNames.SESSION_PERMISSION_REQUEST, {
+            sessionId: record.claudeSessionId,
+            taskId: record.taskId,
+            requestId: pending.request_id,
+            toolName: pending.request.tool_name,
+            input: pending.request.input,
+            reason: pending.request.decision_reason,
+          }, ['*'], { source: 'session-runner', urgency: 'urgent' })
+        }
+      }
+    }
 
     return session
   }

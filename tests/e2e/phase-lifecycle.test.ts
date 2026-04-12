@@ -160,8 +160,8 @@ describe('Phase lifecycle E2E', () => {
       ['IN_PROGRESS', 'in_progress'],
       ['AGENT_COMPLETE', 'in_progress'],
       ['AWAIT_HUMAN_ACTION', 'in_progress'],
-      ['PEER_CODE_REVIEW', 'in_progress'],
-      ['RELEASE_IN_PIPELINE', 'in_progress'],
+      ['HUMAN_VERIFIED', 'in_progress'],
+      ['POST_WORK_COMPLETED', 'in_progress'],
       ['COMPLETE', 'done'],
     ];
 
@@ -181,8 +181,8 @@ describe('Phase lifecycle E2E', () => {
       'IN_PROGRESS',
       'AGENT_COMPLETE',
       'AWAIT_HUMAN_ACTION',
-      'PEER_CODE_REVIEW',
-      'RELEASE_IN_PIPELINE',
+      'HUMAN_VERIFIED',
+      'POST_WORK_COMPLETED',
       'COMPLETE',
       'TODO', // back to start (full loop)
     ];
@@ -283,11 +283,11 @@ describe('Phase lifecycle E2E', () => {
       const task = await createTask('Phase test: WS event');
 
       const eventPromise = waitForWsEvent(ws, 'task:updated');
-      await updateTask(task.id, { phase: 'PEER_CODE_REVIEW' });
+      await updateTask(task.id, { phase: 'HUMAN_VERIFIED' });
 
       const event = await eventPromise;
       const eventTask = (event.data as { task: TaskResponse }).task;
-      expect(eventTask.phase).toBe('PEER_CODE_REVIEW');
+      expect(eventTask.phase).toBe('HUMAN_VERIFIED');
       expect(eventTask.status).toBe('in_progress');
     } finally {
       ws.close();

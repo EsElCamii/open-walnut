@@ -407,7 +407,9 @@ export function shellQuote(s: string): string {
  * Order: nvm (most popular) > fnm > volta > asdf/mise.
  */
 export const REMOTE_BASE_PATH = [
-  'export PATH="$HOME/.local/bin:$HOME/.npm-global/bin:$PATH"',
+  // Source RC files FIRST, then add our paths — RC files may hard-reset PATH
+  // (e.g. zsh `export PATH=; path=(...)`) which would clobber earlier prepends.
+  //
   // Source the user's shell RC file to get their full environment (nvm, pyenv,
   // conda, rbenv, etc.) — just like their interactive terminal/tmux session.
   //
@@ -430,6 +432,7 @@ export const REMOTE_BASE_PATH = [
     + ' */zsh) [ -f "$HOME/.zshrc" ] && . "$HOME/.zshrc" >/dev/null 2>&1 ;;'
     + ' */bash) [ -f "$HOME/.bashrc" ] && . "$HOME/.bashrc" >/dev/null 2>&1 ;;'
     + ' esac',
+  'export PATH="$HOME/.local/bin:$HOME/.npm-global/bin:$PATH"',
   // Fallback auto-discovery if the RC file didn't provide node (e.g., no RC file,
   // interactive guard skipped setup, or nvm default is broken).
   // Tries nvm > fnm > volta > asdf. All stdout suppressed to avoid JSONL pollution.

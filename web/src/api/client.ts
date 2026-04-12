@@ -8,8 +8,8 @@ class ApiError extends Error {
   }
 }
 
-async function request<T>(method: string, path: string, body?: unknown, extra?: { signal?: AbortSignal }): Promise<T> {
-  const timeoutMs = 15_000;
+async function request<T>(method: string, path: string, body?: unknown, extra?: { signal?: AbortSignal; timeoutMs?: number }): Promise<T> {
+  const timeoutMs = extra?.timeoutMs ?? 15_000;
   const timeoutSignal = AbortSignal.timeout(timeoutMs);
   const signal = extra?.signal
     ? AbortSignal.any([extra.signal, timeoutSignal])
@@ -61,8 +61,8 @@ export function apiGet<T>(path: string, params?: Record<string, string>, opts?: 
   return request<T>('GET', url, undefined, opts);
 }
 
-export function apiPost<T>(path: string, body?: unknown): Promise<T> {
-  return request<T>('POST', path, body);
+export function apiPost<T>(path: string, body?: unknown, opts?: { timeoutMs?: number }): Promise<T> {
+  return request<T>('POST', path, body, opts);
 }
 
 export function apiPatch<T>(path: string, body?: unknown): Promise<T> {

@@ -15,8 +15,6 @@ const phaseSymbols: Record<string, ReactNode> = {
   AWAIT_HUMAN_ACTION: <PersonIcon />,
   HUMAN_VERIFIED: phaseIcon('HUMAN_VERIFIED'),
   POST_WORK_COMPLETED: phaseIcon('POST_WORK_COMPLETED'),
-  PEER_CODE_REVIEW: phaseIcon('PEER_CODE_REVIEW'),
-  RELEASE_IN_PIPELINE: phaseIcon('RELEASE_IN_PIPELINE'),
   COMPLETE: phaseIcon('COMPLETE'),
 };
 
@@ -27,8 +25,6 @@ const phaseLabels: Record<string, string> = {
   AWAIT_HUMAN_ACTION: 'Await Human Action',
   HUMAN_VERIFIED: 'Human Verified',
   POST_WORK_COMPLETED: 'Post-Work Done',
-  PEER_CODE_REVIEW: 'Peer Code Review',
-  RELEASE_IN_PIPELINE: 'Release in Pipeline',
   COMPLETE: 'Complete',
 };
 

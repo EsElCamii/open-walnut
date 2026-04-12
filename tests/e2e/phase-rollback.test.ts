@@ -2,7 +2,7 @@
  * E2E tests for automatic phase rollback when sessions resume.
  *
  * When send_to_session is called and the task is in a post-completion phase
- * (AGENT_COMPLETE, AWAIT_HUMAN_ACTION, PEER_CODE_REVIEW, RELEASE_IN_PIPELINE),
+ * (AGENT_COMPLETE, AWAIT_HUMAN_ACTION, POST_WORK_COMPLETED),
  * the phase should auto-rollback to IN_PROGRESS. COMPLETE and pre-completion
  * phases are unaffected.
  */
@@ -65,20 +65,20 @@ afterAll(async () => {
   await fs.rm(WALNUT_HOME, { recursive: true, force: true });
 });
 
-describe('shouldRollbackToInProgress', () => {
-  it('returns true for AGENT_COMPLETE, AWAIT_HUMAN_ACTION, PEER_CODE_REVIEW, RELEASE_IN_PIPELINE', async () => {
-    const { shouldRollbackToInProgress } = await import('../../src/core/phase.js');
-    expect(shouldRollbackToInProgress('AGENT_COMPLETE')).toBe(true);
-    expect(shouldRollbackToInProgress('AWAIT_HUMAN_ACTION')).toBe(true);
-    expect(shouldRollbackToInProgress('PEER_CODE_REVIEW')).toBe(true);
-    expect(shouldRollbackToInProgress('RELEASE_IN_PIPELINE')).toBe(true);
+describe('sessionInputPhase (replaces shouldRollbackToInProgress)', () => {
+  it('returns IN_PROGRESS for post-completion phases', async () => {
+    const { sessionInputPhase } = await import('../../src/core/phase.js');
+    expect(sessionInputPhase('AGENT_COMPLETE')).toBe('IN_PROGRESS');
+    expect(sessionInputPhase('AWAIT_HUMAN_ACTION')).toBe('IN_PROGRESS');
+    expect(sessionInputPhase('POST_WORK_COMPLETED')).toBe('IN_PROGRESS');
+    expect(sessionInputPhase('TODO')).toBe('IN_PROGRESS');
   });
 
-  it('returns false for COMPLETE, IN_PROGRESS, TODO', async () => {
-    const { shouldRollbackToInProgress } = await import('../../src/core/phase.js');
-    expect(shouldRollbackToInProgress('COMPLETE')).toBe(false);
-    expect(shouldRollbackToInProgress('IN_PROGRESS')).toBe(false);
-    expect(shouldRollbackToInProgress('TODO')).toBe(false);
+  it('returns null for terminal and already-IN_PROGRESS phases', async () => {
+    const { sessionInputPhase } = await import('../../src/core/phase.js');
+    expect(sessionInputPhase('COMPLETE')).toBeNull();
+    expect(sessionInputPhase('HUMAN_VERIFIED')).toBeNull();
+    expect(sessionInputPhase('IN_PROGRESS')).toBeNull();
   });
 });
 
@@ -93,16 +93,17 @@ describe('Phase rollback on send_to_session', () => {
     const { createSessionRecord } = await import('../../src/core/session-tracker.js');
     await createSessionRecord('rollback-sess-1', taskId, 'test-project');
 
-    // Simulate what send_to_session does: check phase and rollback
+    // Simulate what send_to_session does: sessionInputPhase determines rollback
     const { getTask, updateTask } = await import('../../src/core/task-manager.js');
-    const { shouldRollbackToInProgress } = await import('../../src/core/phase.js');
+    const { sessionInputPhase } = await import('../../src/core/phase.js');
 
     const loaded = await getTask(taskId);
     expect(loaded).toBeTruthy();
     expect(loaded!.phase).toBe('AGENT_COMPLETE');
 
-    if (shouldRollbackToInProgress(loaded!.phase)) {
-      await updateTask(taskId, { phase: 'IN_PROGRESS' });
+    const newPhase = sessionInputPhase(loaded!.phase);
+    if (newPhase) {
+      await updateTask(taskId, { phase: newPhase });
     }
 
     // Verify via REST
@@ -120,11 +121,11 @@ describe('Phase rollback on send_to_session', () => {
     await createSessionRecord('rollback-sess-2', taskId, 'test-project');
 
     const { getTask } = await import('../../src/core/task-manager.js');
-    const { shouldRollbackToInProgress } = await import('../../src/core/phase.js');
+    const { sessionInputPhase } = await import('../../src/core/phase.js');
 
     const loaded = await getTask(taskId);
     expect(loaded).toBeTruthy();
-    expect(shouldRollbackToInProgress(loaded!.phase)).toBe(false);
+    expect(sessionInputPhase(loaded!.phase)).toBeNull();
 
     // Verify phase unchanged via REST
     const fetched = await fetchTask(taskId);
@@ -140,11 +141,11 @@ describe('Phase rollback on send_to_session', () => {
     await createSessionRecord('rollback-sess-3', taskId, 'test-project');
 
     const { getTask } = await import('../../src/core/task-manager.js');
-    const { shouldRollbackToInProgress } = await import('../../src/core/phase.js');
+    const { sessionInputPhase } = await import('../../src/core/phase.js');
 
     const loaded = await getTask(taskId);
     expect(loaded).toBeTruthy();
-    expect(shouldRollbackToInProgress(loaded!.phase)).toBe(false);
+    expect(sessionInputPhase(loaded!.phase)).toBeNull();
 
     const fetched = await fetchTask(taskId);
     expect(fetched.phase).toBe('IN_PROGRESS');
@@ -156,13 +157,14 @@ describe('Phase rollback on send_to_session', () => {
     await patchTask(taskId, { phase: 'AWAIT_HUMAN_ACTION' });
 
     const { getTask, updateTask } = await import('../../src/core/task-manager.js');
-    const { shouldRollbackToInProgress } = await import('../../src/core/phase.js');
+    const { sessionInputPhase } = await import('../../src/core/phase.js');
 
     const loaded = await getTask(taskId);
     expect(loaded!.phase).toBe('AWAIT_HUMAN_ACTION');
 
-    if (shouldRollbackToInProgress(loaded!.phase)) {
-      await updateTask(taskId, { phase: 'IN_PROGRESS' });
+    const newPhase = sessionInputPhase(loaded!.phase);
+    if (newPhase) {
+      await updateTask(taskId, { phase: newPhase });
     }
 
     const fetched = await fetchTask(taskId);

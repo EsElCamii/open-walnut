@@ -15,8 +15,8 @@ export const PHASE_TO_JIRA_STATUS: Record<TaskPhase, string> = {
   IN_PROGRESS: 'In Progress',
   AGENT_COMPLETE: 'In Progress',
   AWAIT_HUMAN_ACTION: 'In Progress',
-  PEER_CODE_REVIEW: 'In Review',
-  RELEASE_IN_PIPELINE: 'Done',
+  HUMAN_VERIFIED: 'In Review',
+  POST_WORK_COMPLETED: 'Done',
   COMPLETE: 'Done',
 };
 
@@ -30,8 +30,8 @@ export const JIRA_STATUS_TO_PHASE: Record<string, TaskPhase> = {
   'Selected for Development': 'TODO',
   'In Progress': 'IN_PROGRESS',
   'In Development': 'IN_PROGRESS',
-  'In Review': 'PEER_CODE_REVIEW',
-  'Code Review': 'PEER_CODE_REVIEW',
+  'In Review': 'HUMAN_VERIFIED',
+  'Code Review': 'HUMAN_VERIFIED',
   'Done': 'COMPLETE',
   'Closed': 'COMPLETE',
   'Resolved': 'COMPLETE',
@@ -48,11 +48,11 @@ export const JIRA_PHASE_GROUPS: Record<string, TaskPhase[]> = {
   'Selected for Development': ['TODO'],
   'In Progress': ['IN_PROGRESS', 'AGENT_COMPLETE', 'AWAIT_HUMAN_ACTION'],
   'In Development': ['IN_PROGRESS', 'AGENT_COMPLETE', 'AWAIT_HUMAN_ACTION'],
-  'In Review': ['PEER_CODE_REVIEW'],
-  'Code Review': ['PEER_CODE_REVIEW'],
-  'Done': ['RELEASE_IN_PIPELINE', 'COMPLETE'],
-  'Closed': ['RELEASE_IN_PIPELINE', 'COMPLETE'],
-  'Resolved': ['RELEASE_IN_PIPELINE', 'COMPLETE'],
+  'In Review': ['HUMAN_VERIFIED'],
+  'Code Review': ['HUMAN_VERIFIED'],
+  'Done': ['POST_WORK_COMPLETED', 'COMPLETE'],
+  'Closed': ['POST_WORK_COMPLETED', 'COMPLETE'],
+  'Resolved': ['POST_WORK_COMPLETED', 'COMPLETE'],
 };
 
 // ── Status category fallback ──

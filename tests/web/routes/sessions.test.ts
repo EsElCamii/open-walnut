@@ -196,11 +196,12 @@ describe('POST /api/sessions/:sessionId/execute', () => {
       .send({})
       .timeout(35_000); // endpoint waits up to 30s for session runner
 
-    // The endpoint reaches SESSION_START emit (past the buggy line) then waits
-    // for a session runner that doesn't exist in test env → 200 with no sessionId.
-    // The key assertion: no "record is not defined" ReferenceError.
+    // No session runner in test env → new session never starts → 502 with timeout error.
+    // The key assertion: no "record is not defined" ReferenceError (the original bug).
+    // Plan session is preserved (not archived) so user can retry.
     expect(res.body.error ?? '').not.toContain('record is not defined');
-    expect(res.body.status).toBe('started');
+    expect(res.status).toBe(502);
+    expect(res.body.planPreserved).toBe(true);
     expect(res.body.planSessionId).toBe('plan-sess-1');
   }, 40_000);
 
@@ -231,8 +232,9 @@ describe('POST /api/sessions/:sessionId/execute', () => {
       .send({})
       .timeout(35_000);
 
-    // Must NOT crash with "record is not defined"
+    // Must NOT crash with "record is not defined" — 502 timeout is expected (no session runner in test)
     expect(res.body.error ?? '').not.toContain('record is not defined');
-    expect(res.body.status).toBe('started');
+    expect(res.status).toBe(502);
+    expect(res.body.planPreserved).toBe(true);
   }, 40_000);
 });

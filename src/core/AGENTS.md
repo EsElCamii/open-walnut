@@ -28,7 +28,7 @@ Migration: legacy `source: 'local'` → `'ms-todo'` with a one-time `scheduleUns
 
 ### Task phase system
 
-Tasks have a 7-state `phase` lifecycle (`TODO` → `IN_PROGRESS` → `AGENT_COMPLETE` → `AWAIT_HUMAN_ACTION` → `PEER_CODE_REVIEW` → `RELEASE_IN_PIPELINE` → `COMPLETE`) that replaces the old 3-state `status`. Status is auto-derived from phase via `PHASE_TO_STATUS` for backward compatibility.
+Tasks have a 7-state `phase` lifecycle (`TODO` → `IN_PROGRESS` → `AGENT_COMPLETE` → `AWAIT_HUMAN_ACTION` → `HUMAN_VERIFIED` → `POST_WORK_COMPLETED` → `COMPLETE`) that replaces the old 3-state `status`. Status is auto-derived from phase via `PHASE_TO_STATUS` for backward compatibility.
 
 Key mappings in `src/core/phase.ts`:
 - `PHASE_TO_WORKFLOW` / `WORKFLOW_TO_PHASE` — external plugin workflow sync (includes both canonical names like `'Implementation'` and common aliases like `'In Progress'`)

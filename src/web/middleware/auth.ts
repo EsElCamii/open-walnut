@@ -12,9 +12,24 @@ import { log } from '../../logging/index.js'
 
 const LOCALHOST_ADDRS = new Set(['127.0.0.1', '::1', '::ffff:127.0.0.1', 'localhost'])
 
+// Walnut is a personal tool that runs on a home/office LAN. Devices on the same
+// private network (phones, tablets) need API access without API keys; only
+// requests arriving from the public internet require Bearer auth.
+function isPrivateNetwork(ip: string): boolean {
+  // Strip ::ffff: prefix for IPv4-mapped IPv6
+  const v4 = ip.startsWith('::ffff:') ? ip.slice(7) : ip
+  if (LOCALHOST_ADDRS.has(ip)) return true
+  // 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16
+  const parts = v4.split('.').map(Number)
+  if (parts.length !== 4) return false
+  return parts[0] === 10
+    || (parts[0] === 172 && parts[1] >= 16 && parts[1] <= 31)
+    || (parts[0] === 192 && parts[1] === 168)
+}
+
 function isLocalhost(req: Request): boolean {
   const ip = req.ip ?? req.socket.remoteAddress ?? ''
-  return LOCALHOST_ADDRS.has(ip)
+  return isPrivateNetwork(ip)
 }
 
 /**

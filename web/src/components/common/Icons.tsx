@@ -15,10 +15,6 @@ export const ICON_PHASE_AGENT_COMPLETE = <svg width="14" height="14" viewBox="0 
 export const ICON_PHASE_HUMAN_VERIFIED = <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round"><path d="M8 1L2 4v4c0 3.3 2.6 6.4 6 7 3.4-.6 6-3.7 6-7V4z"/><path d="M5.5 8l2 2 3.5-4" strokeWidth="1.6"/></svg>;
 /** 📦 box — Post-Work Completed */
 export const ICON_PHASE_POST_WORK = <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round"><path d="M2 5l6-3 6 3v6l-6 3-6-3z"/><path d="M2 5l6 3 6-3"/><path d="M8 8v6"/></svg>;
-/** ⋈ code review — Peer Code Review */
-export const ICON_PHASE_CODE_REVIEW = <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round"><path d="M5 4L1 8l4 4"/><path d="M11 4l4 4-4 4"/><path d="M10 2L6 14"/></svg>;
-/** ▷ pipeline — Release in Pipeline */
-export const ICON_PHASE_PIPELINE = <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round"><path d="M4 2v12l9-6z"/></svg>;
 /** ✓✓ double check — Complete */
 export const ICON_PHASE_COMPLETE = <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="M1 8l3 3.5L10.5 4"/><path d="M5.5 8l3 3.5L15 4"/></svg>;
 
@@ -50,8 +46,6 @@ export function phaseIcon(phase: string): ReactNode {
     case 'AGENT_COMPLETE': return ICON_PHASE_AGENT_COMPLETE;
     case 'HUMAN_VERIFIED': return ICON_PHASE_HUMAN_VERIFIED;
     case 'POST_WORK_COMPLETED': return ICON_PHASE_POST_WORK;
-    case 'PEER_CODE_REVIEW': return ICON_PHASE_CODE_REVIEW;
-    case 'RELEASE_IN_PIPELINE': return ICON_PHASE_PIPELINE;
     case 'COMPLETE': return ICON_PHASE_COMPLETE;
     default: return ICON_PHASE_TODO;
   }

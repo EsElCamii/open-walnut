@@ -19,16 +19,15 @@
  *
  * Terminal phases: COMPLETE, HUMAN_VERIFIED — system never overwrites these.
  *
- * Task Phases (9):
+ * Task Phases (7):
  *   TODO → IN_PROGRESS → AGENT_COMPLETE → AWAIT_HUMAN_ACTION
- *        → HUMAN_VERIFIED → POST_WORK_COMPLETED
- *        → PEER_CODE_REVIEW → RELEASE_IN_PIPELINE → COMPLETE
+ *        → HUMAN_VERIFIED → POST_WORK_COMPLETED → COMPLETE
  */
 
 import { log } from '../logging/index.js'
 import type { TaskPhase, TaskStatus, Task } from './types.js';
 
-// ── Phase → Status (9 → 3) ──
+// ── Phase → Status (7 → 3) ──
 
 export const PHASE_TO_STATUS: Record<TaskPhase, TaskStatus> = {
   TODO: 'todo',
@@ -37,8 +36,6 @@ export const PHASE_TO_STATUS: Record<TaskPhase, TaskStatus> = {
   AWAIT_HUMAN_ACTION: 'in_progress',
   HUMAN_VERIFIED: 'in_progress',
   POST_WORK_COMPLETED: 'in_progress',
-  PEER_CODE_REVIEW: 'in_progress',
-  RELEASE_IN_PIPELINE: 'in_progress',
   COMPLETE: 'done',
 };
 
@@ -59,8 +56,6 @@ export const PHASE_ORDER: TaskPhase[] = [
   'AWAIT_HUMAN_ACTION',
   'HUMAN_VERIFIED',
   'POST_WORK_COMPLETED',
-  'PEER_CODE_REVIEW',
-  'RELEASE_IN_PIPELINE',
   'COMPLETE',
 ];
 
@@ -74,7 +69,7 @@ export const TERMINAL_PHASES = new Set<TaskPhase>(['COMPLETE', 'HUMAN_VERIFIED']
 
 // ── Core functions ──
 
-/** Derive the 3-state status from a 9-state phase. */
+/** Derive the 3-state status from a 7-state phase. */
 export function deriveStatusFromPhase(phase: TaskPhase): TaskStatus {
   return PHASE_TO_STATUS[phase] ?? 'todo';
 }
@@ -112,6 +107,8 @@ export function applyPhase(task: Task, phase: TaskPhase): void {
 export function migratePhase(phase: string): TaskPhase {
   if (phase === 'INVESTIGATION') return 'TODO';
   if (phase === 'HUMAN_VERIFICATION') return 'AWAIT_HUMAN_ACTION';
+  if (phase === 'PEER_CODE_REVIEW') return 'HUMAN_VERIFIED';
+  if (phase === 'RELEASE_IN_PIPELINE') return 'POST_WORK_COMPLETED';
   if (VALID_PHASES.has(phase)) return phase as TaskPhase;
   return 'TODO';
 }

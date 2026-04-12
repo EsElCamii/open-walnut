@@ -6,8 +6,6 @@ export type TaskPhase =
   | 'AWAIT_HUMAN_ACTION'
   | 'HUMAN_VERIFIED'
   | 'POST_WORK_COMPLETED'
-  | 'PEER_CODE_REVIEW'
-  | 'RELEASE_IN_PIPELINE'
   | 'COMPLETE';
 export type TaskPriority = 'immediate' | 'important' | 'backlog' | 'none';
 /** Canonical list of valid priority values — use for runtime validation. */

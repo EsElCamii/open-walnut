@@ -77,6 +77,7 @@ export interface SessionErrorEvent {
   error: string;
   taskId?: string;
   sessionId?: string;
+  fromPlanSessionId?: string;
 }
 
 // ── Session streaming events ──

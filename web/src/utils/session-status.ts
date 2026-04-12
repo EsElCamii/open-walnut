@@ -36,8 +36,6 @@ export const PHASE_LABELS: Record<TaskPhase, string> = {
   AWAIT_HUMAN_ACTION: 'Awaiting Human',
   HUMAN_VERIFIED: 'Verified',
   POST_WORK_COMPLETED: 'Post Work',
-  PEER_CODE_REVIEW: 'Code Review',
-  RELEASE_IN_PIPELINE: 'In Pipeline',
   COMPLETE: 'Complete',
 };
 
@@ -57,8 +55,6 @@ export const PHASE_COLORS: Record<TaskPhase, string> = {
   AWAIT_HUMAN_ACTION: '#a855f7',
   HUMAN_VERIFIED: '#10b981',
   POST_WORK_COMPLETED: '#06b6d4',
-  PEER_CODE_REVIEW: '#ec4899',
-  RELEASE_IN_PIPELINE: '#f97316',
   COMPLETE: '#22c55e',
 };
 
@@ -85,8 +81,6 @@ export function pillPhaseClassSuffix(phase: TaskPhase | string | undefined): str
     case 'TODO': return 'agent-complete';
     case 'HUMAN_VERIFIED': return 'completed';
     case 'POST_WORK_COMPLETED': return 'completed';
-    case 'PEER_CODE_REVIEW': return 'agent-complete';
-    case 'RELEASE_IN_PIPELINE': return 'running';
     default: return 'agent-complete';
   }
 }

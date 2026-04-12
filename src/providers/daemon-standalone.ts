@@ -205,7 +205,7 @@ function shellQuote(s: string): string {
 /**
  * Build a shell preamble that activates the user's full dev environment.
  *
- * Matches the proven REMOTE_BASE_PATH approach from session-io.ts:
+ * Mirrors the REMOTE_BASE_PATH approach from session-io.ts:
  *   1. Source shell RC files (.bashrc/.zshrc) to activate nvm/pyenv/volta
  *   2. Fallback: source nvm.sh directly and try each version (with GLIBC check)
  *
@@ -216,15 +216,22 @@ function buildSpawnPreamble(): string {
   return [
     // Source RC files FIRST, then add our paths — RC files may hard-reset PATH
     // (e.g. zsh `export PATH=; path=(...)`) which would clobber earlier prepends.
+    // Redirect >/dev/null suppresses stdout only — stderr flows to .jsonl.err
+    // for debugging. Stdout suppression is load-bearing: the spawned process's
+    // stdout IS the JSONL output file, so interactive plugins (oh-my-zsh, p10k)
+    // would corrupt the stream with escape codes.
     'case "$SHELL" in'
-      + ' */zsh) [ -f "$HOME/.zshrc" ] && . "$HOME/.zshrc" >/dev/null 2>&1 ;;'
-      + ' */bash) [ -f "$HOME/.bashrc" ] && . "$HOME/.bashrc" >/dev/null 2>&1 ;;'
+      + ' */zsh) [ -f "$HOME/.zshrc" ] && . "$HOME/.zshrc" >/dev/null ;;'
+      + ' */bash) [ -f "$HOME/.bashrc" ] && . "$HOME/.bashrc" >/dev/null ;;'
       + ' esac',
     'export PATH="$HOME/.local/bin:$HOME/.npm-global/bin:$PATH"',
     'node -v >/dev/null 2>&1 || {'
       + ' if [ -s "$HOME/.nvm/nvm.sh" ]; then'
       + '   . "$HOME/.nvm/nvm.sh" >/dev/null 2>&1;'
       + '   node -v >/dev/null 2>&1 || {'
+      // nvm default may be compiled against a newer GLIBC than the host provides
+      // (e.g. node 18+ needs GLIBC 2.27+ but AL2 has 2.26). Try each installed
+      // version in reverse order until one actually executes.
       + '     for v in $(ls -1r "$NVM_DIR/versions/node/" 2>/dev/null); do'
       + '       nvm use --delete-prefix "$v" >/dev/null 2>&1 && node -v >/dev/null 2>&1 && break;'
       + '     done; };'

@@ -1055,15 +1055,79 @@ sessionsRouter.post('/:sessionId/execute', async (req: Request, res: Response, n
     // Use host from request body, or inherit from the plan session
     const execHost = host ?? sourceRecord?.host
 
-    // Archive the current session (hidden from UI). Guard prevents double-archive on retry/double-click.
-    // planContent is only snapshotted on plan sessions (planCompleted=true); exec sessions skip it (already stored on the plan record).
+    // ── Start new session FIRST, archive old plan only after confirmation ──
+    // This prevents the user from ending up with an archived plan and no execution
+    // session if the new session fails to start (e.g. CLI not found, SSH failure).
+
+    // Set up a temporary bus listener BEFORE emitting SESSION_START so we
+    // catch the status-changed event that carries the new session's ID,
+    // or a SESSION_ERROR if the process dies before init.
+    const WAIT_TIMEOUT_MS = 30_000
+    const subName = `exec-wait-${planSessionId}`
+    const newSessionPromise = new Promise<string>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        bus.unsubscribe(subName)
+        reject(new Error('Timed out waiting for execution session to start'))
+      }, WAIT_TIMEOUT_MS)
+
+      bus.subscribe(subName, (event) => {
+        if (event.name === EventNames.SESSION_STATUS_CHANGED) {
+          const d = eventData<'session:status-changed'>(event)
+          if (d.fromPlanSessionId === planSessionId && d.sessionId) {
+            clearTimeout(timer)
+            bus.unsubscribe(subName)
+            resolve(d.sessionId)
+          }
+        }
+        // Catch early process death (e.g. exit code 127 — CLI not found)
+        if (event.name === EventNames.SESSION_ERROR) {
+          const d = eventData<'session:error'>(event)
+          if (d.fromPlanSessionId === planSessionId) {
+            clearTimeout(timer)
+            bus.unsubscribe(subName)
+            reject(new Error(d.error ?? 'Execution session failed to start'))
+          }
+        }
+      }, { global: true })
+    })
+
+    bus.emit(EventNames.SESSION_START, {
+      taskId: taskId ?? '',
+      message: planMessage,
+      cwd,
+      project: sourceRecord?.project ?? '',
+      mode: execMode,
+      title: `Execute plan from ${planSessionId.slice(0, 16)}...`,
+      ...(execHost ? { host: execHost } : {}),
+      fromPlanSessionId: planSessionId,
+    }, ['session-runner'], { source: 'web-api' })
+
+    // Wait for the new session to start (up to 30s). If it fails, the plan
+    // session stays intact so the user can retry.
+    let newSessionId: string
+    try {
+      newSessionId = await newSessionPromise
+    } catch (waitErr) {
+      log.web.error('execute: new session failed to start, plan NOT archived', {
+        planSessionId, taskId, error: waitErr instanceof Error ? waitErr.message : String(waitErr),
+      })
+      res.status(502).json({
+        error: waitErr instanceof Error ? waitErr.message : 'Execution session failed to start',
+        planSessionId,
+        planPreserved: true,
+      })
+      return
+    }
+
+    // ── New session confirmed — now archive the old plan session ──
+    const archiveReason = sourceRecord.planCompleted ? 'plan_executed' : 'plan_re_executed'
     if (!sourceRecord.archived) {
       await updateSessionRecord(planSessionId, {
         archived: true,
-        archive_reason: sourceRecord.planCompleted ? 'plan_executed' : 'plan_re_executed',
+        archive_reason: archiveReason,
         ...(sourceRecord.planCompleted ? { planContent: planResult.content } : {}),
       })
-      log.web.info('execute: archived session', { planSessionId, reason: sourceRecord.planCompleted ? 'plan_executed' : 'plan_re_executed' })
+      log.web.info('execute: archived session', { planSessionId, reason: archiveReason })
     }
 
     // Clear task session slot so UI no longer shows archived plan as active
@@ -1083,42 +1147,7 @@ sessionsRouter.post('/:sessionId/execute', async (req: Request, res: Response, n
       archived: true,
     }, ['web-ui'])
 
-    // Set up a temporary bus listener BEFORE emitting SESSION_START so we
-    // catch the status-changed event that carries the new session's ID.
-    const WAIT_TIMEOUT_MS = 30_000
-    const subName = `exec-wait-${planSessionId}`
-    const newSessionPromise = new Promise<string | undefined>((resolve) => {
-      const timer = setTimeout(() => {
-        bus.unsubscribe(subName)
-        resolve(undefined)
-      }, WAIT_TIMEOUT_MS)
-
-      bus.subscribe(subName, (event) => {
-        if (event.name !== EventNames.SESSION_STATUS_CHANGED) return
-        const d = eventData<'session:status-changed'>(event)
-        if (d.fromPlanSessionId === planSessionId && d.sessionId) {
-          clearTimeout(timer)
-          bus.unsubscribe(subName)
-          resolve(d.sessionId)
-        }
-      }, { global: true })
-    })
-
-    bus.emit(EventNames.SESSION_START, {
-      taskId: taskId ?? '',
-      message: planMessage,
-      cwd,
-      project: sourceRecord?.project ?? '',
-      mode: execMode,
-      title: `Execute plan from ${planSessionId.slice(0, 16)}...`,
-      ...(execHost ? { host: execHost } : {}),
-      fromPlanSessionId: planSessionId,
-    }, ['session-runner'], { source: 'web-api' })
-
-    // Wait for the new session to start (up to 30s) so we can return its ID
-    const newSessionId = await newSessionPromise
-
-    res.json({ status: 'started', planSessionId, taskId, mode: execMode, ...(newSessionId ? { sessionId: newSessionId } : {}), ...(execHost ? { host: execHost } : {}) })
+    res.json({ status: 'started', planSessionId, taskId, mode: execMode, sessionId: newSessionId, ...(execHost ? { host: execHost } : {}) })
   } catch (err) {
     next(err)
   }

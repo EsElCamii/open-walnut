@@ -87,7 +87,9 @@ export async function executePlanSession(
   sessionId: string,
   opts?: { task_id?: string; working_directory?: string; instructions?: string; mode?: string },
 ): Promise<{ status: string; planSessionId: string; taskId: string; mode: string; sessionId?: string }> {
-  return apiPost(`/api/sessions/${sessionId}/execute`, opts ?? {});
+  // Backend waits up to 30s for the new session to start; use 45s client timeout to avoid
+  // the frontend timing out before the backend can return an error or success.
+  return apiPost(`/api/sessions/${sessionId}/execute`, opts ?? {}, { timeoutMs: 45_000 });
 }
 
 export async function executePlanContinue(sessionId: string): Promise<{ status: string; sessionId: string }> {

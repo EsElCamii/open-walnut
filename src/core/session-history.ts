@@ -852,6 +852,12 @@ export interface RecoveredSessionState {
   /** Byte length of the JSONL content that was read during recovery.
    *  Used as fromOffset when attaching to remote daemons to skip stale replays. */
   jsonlByteLength?: number;
+  /** Pending control_request that was never answered (no matching control_response).
+   *  Happens when Walnut server restarts while Claude Code is waiting for permission. */
+  pendingControlRequest?: {
+    request_id: string;
+    request: { subtype: string; tool_name?: string; input?: Record<string, unknown>; tool_use_id?: string; decision_reason?: string };
+  };
 }
 
 /**
@@ -1002,6 +1008,36 @@ export async function recoverStateFromJsonl(sessionId: string, cwd?: string, hos
           if (name === 'ExitPlanMode') {
             state.planCompleted = true;
           }
+        }
+      }
+
+      // ── control_request / control_response: detect orphaned permission requests ──
+      // Claude Code emits control_request when it needs permission for a tool.
+      // Walnut responds with control_response via FIFO. If the server crashes/restarts
+      // between these two events, Claude Code's stdin read loop freezes waiting for
+      // control_response — it ignores all other FIFO input (user messages pile up
+      // unread). No internal timeout exists, so the session hangs permanently.
+      // Track the last unmatched control_request so attachToExisting() can recover it.
+      if (type === 'control_request') {
+        const req = parsed as { request_id?: string; request?: Record<string, unknown> };
+        if (req.request_id && req.request) {
+          state.pendingControlRequest = {
+            request_id: req.request_id,
+            request: req.request as NonNullable<RecoveredSessionState['pendingControlRequest']>['request'],
+          };
+        }
+      }
+      if (type === 'control_response') {
+        // A control_response means the pending request was answered — clear it.
+        // Match by request_id to avoid clearing the wrong request in edge cases
+        // (e.g., rapid sequential control_request events).
+        const resp = parsed as { response?: { request_id?: string } };
+        const respId = resp.response?.request_id;
+        if (respId && state.pendingControlRequest?.request_id === respId) {
+          state.pendingControlRequest = undefined;
+        } else if (!respId) {
+          // Fallback: if no request_id in response, clear unconditionally
+          state.pendingControlRequest = undefined;
         }
       }
     }

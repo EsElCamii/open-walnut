@@ -206,8 +206,8 @@ export const tools: ToolDefinition[] = [
           description: 'Filter conditions. Category: { name }. Project: { name, category }. Task: { phase, category, project, priority, starred }. Legacy: status (todo/in_progress/done) still works as a convenience alias.',
           properties: {
             name: { type: 'string', description: 'Filter category/project by name.' },
-            phase: { type: 'string', enum: ['TODO', 'IN_PROGRESS', 'AGENT_COMPLETE', 'AWAIT_HUMAN_ACTION', 'PEER_CODE_REVIEW', 'RELEASE_IN_PIPELINE', 'COMPLETE'], description: 'Filter by 7-state phase (preferred).' },
-            status: { type: 'string', enum: ['todo', 'in_progress', 'done'], description: 'Legacy 3-state filter. Maps to phases: todo→TODO, in_progress→IN_PROGRESS+AGENT_COMPLETE+AWAIT_HUMAN_ACTION+PEER_CODE_REVIEW+RELEASE_IN_PIPELINE, done→COMPLETE.' },
+            phase: { type: 'string', enum: ['TODO', 'IN_PROGRESS', 'AGENT_COMPLETE', 'AWAIT_HUMAN_ACTION', 'HUMAN_VERIFIED', 'POST_WORK_COMPLETED', 'COMPLETE'], description: 'Filter by 7-state phase (preferred).' },
+            status: { type: 'string', enum: ['todo', 'in_progress', 'done'], description: 'Legacy 3-state filter. Maps to phases: todo→TODO, in_progress→IN_PROGRESS+AGENT_COMPLETE+AWAIT_HUMAN_ACTION+HUMAN_VERIFIED+POST_WORK_COMPLETED, done→COMPLETE.' },
             category: { type: 'string' },
             project: { type: 'string' },
             priority: { type: 'string', enum: ['immediate', 'important', 'backlog', 'none'] },

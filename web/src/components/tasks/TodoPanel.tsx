@@ -114,8 +114,6 @@ const PHASE_ICON: Record<string, ReactNode> = {
   AWAIT_HUMAN_ACTION: <PersonIcon />,
   HUMAN_VERIFIED: ICONS.ICON_PHASE_HUMAN_VERIFIED,
   POST_WORK_COMPLETED: ICONS.ICON_PHASE_POST_WORK,
-  PEER_CODE_REVIEW: ICONS.ICON_PHASE_CODE_REVIEW,
-  RELEASE_IN_PIPELINE: ICONS.ICON_PHASE_PIPELINE,
   COMPLETE: ICONS.ICON_PHASE_COMPLETE,
 };
 
@@ -126,8 +124,6 @@ const PHASE_LABEL: Record<string, string> = {
   AWAIT_HUMAN_ACTION: 'Await Human Action',
   HUMAN_VERIFIED: 'Human Verified',
   POST_WORK_COMPLETED: 'Post-Work Done',
-  PEER_CODE_REVIEW: 'Peer Code Review',
-  RELEASE_IN_PIPELINE: 'Release in Pipeline',
   COMPLETE: 'Complete',
 };
 
@@ -1235,11 +1231,13 @@ interface RecentCardProps {
   onExpandDetail?: (task: Task) => void;
   onClearFocus?: () => void;
   onOpenSession?: (sessionId: string) => void;
+  onSetPhase?: (id: string, phase: string) => void;
+  onUpdateTitle?: (id: string, title: string) => void;
 }
 
 // ── SortableRecentCard — draggable recent-activity card with kebab menu ──
 
-function SortableRecentCard({ task, isFocused, onClick, onPinTask, onUnpinTask, isPinned, pinnedTier, onSetPriority, onSetDate, onStar, onSetTier, onExpandDetail, onClearFocus, onOpenSession }: RecentCardProps) {
+function SortableRecentCard({ task, isFocused, onClick, onPinTask, onUnpinTask, isPinned, pinnedTier, onSetPriority, onSetDate, onStar, onSetTier, onExpandDetail, onClearFocus, onOpenSession, onSetPhase, onUpdateTitle }: RecentCardProps) {
   const {
     attributes,
     listeners,
@@ -1249,8 +1247,89 @@ function SortableRecentCard({ task, isFocused, onClick, onPinTask, onUnpinTask, 
     isDragging,
   } = useSortable({ id: task.id, data: { source: 'recent' } });
 
+  // Phase picker state — fixed positioning to escape overflow:hidden scroll containers
+  const [phaseMenuOpen, setPhaseMenuOpen] = useState(false);
+  const [phaseMenuPos, setPhaseMenuPos] = useState<{ top: number; left: number } | null>(null);
+  const phaseWrapperRef = useRef<HTMLDivElement>(null);
+
+  // Editable title state
+  const [isEditing, setIsEditing] = useState(false);
+  const titleRef = useRef<HTMLSpanElement>(null);
+  const isCommittingRef = useRef(false);
+  const clickPosRef = useRef<{ x: number; y: number } | null>(null);
+  const titleClickedRef = useRef(false);
+
+  // Close phase menu on outside click or scroll
+  useEffect(() => {
+    if (!phaseMenuOpen) return;
+    const handleClick = (e: MouseEvent) => {
+      if (phaseWrapperRef.current?.contains(e.target as Node)) return;
+      setPhaseMenuOpen(false);
+    };
+    const handleScroll = () => setPhaseMenuOpen(false);
+    document.addEventListener('mousedown', handleClick);
+    window.addEventListener('scroll', handleScroll, true);
+    return () => {
+      document.removeEventListener('mousedown', handleClick);
+      window.removeEventListener('scroll', handleScroll, true);
+    };
+  }, [phaseMenuOpen]);
+
+  useEffect(() => {
+    if (!isEditing && titleRef.current && titleRef.current.textContent !== task.title) {
+      titleRef.current.textContent = task.title;
+    }
+  }, [task.title, isEditing]);
+
+  useEffect(() => {
+    if (isEditing && titleRef.current) {
+      titleRef.current.focus();
+      if (clickPosRef.current) {
+        const { x, y } = clickPosRef.current;
+        clickPosRef.current = null;
+        if (document.caretRangeFromPoint) {
+          const range = document.caretRangeFromPoint(x, y);
+          if (range) { const sel = window.getSelection(); sel?.removeAllRanges(); sel?.addRange(range); return; }
+        }
+      }
+      const range = document.createRange();
+      range.selectNodeContents(titleRef.current);
+      range.collapse(false);
+      const sel = window.getSelection();
+      sel?.removeAllRanges();
+      sel?.addRange(range);
+    }
+  }, [isEditing]);
+
+  const commitEdit = useCallback(() => {
+    if (!isEditing || isCommittingRef.current) return;
+    isCommittingRef.current = true;
+    setIsEditing(false);
+    const trimmed = (titleRef.current?.textContent ?? '').trim();
+    if (trimmed && trimmed !== task.title && onUpdateTitle) {
+      onUpdateTitle(task.id, trimmed);
+    } else if (titleRef.current) {
+      titleRef.current.textContent = task.title;
+    }
+    isCommittingRef.current = false;
+  }, [isEditing, task.title, task.id, onUpdateTitle]);
+
+  const cancelEdit = useCallback(() => {
+    setIsEditing(false);
+    if (titleRef.current) titleRef.current.textContent = task.title;
+  }, [task.title]);
+
+  const handleTitleClick = useCallback((e: React.MouseEvent) => {
+    if (!onUpdateTitle) return;
+    e.stopPropagation();
+    e.preventDefault();
+    titleClickedRef.current = true;
+    clickPosRef.current = { x: e.clientX, y: e.clientY };
+    setIsEditing(true);
+    requestAnimationFrame(() => { titleClickedRef.current = false; });
+  }, [onUpdateTitle]);
+
   const needsAttention = task.phase === 'AGENT_COMPLETE' || task.phase === 'AWAIT_HUMAN_ACTION';
-  const phaseLabel = PHASE_LABEL[task.phase] ?? task.phase;
   const ago = timeAgo(task.last_session_update ?? task.created_at);
 
   const style: CSSProperties = {
@@ -1264,14 +1343,80 @@ function SortableRecentCard({ task, isFocused, onClick, onPinTask, onUnpinTask, 
       ref={setNodeRef}
       style={style}
       className={`todo-pinned-card${isFocused ? ' todo-pinned-card-active' : ''}${needsAttention ? ' todo-pinned-card-attention' : ''}`}
-      onClick={() => onClick?.(task)}
+      onClick={(e) => {
+        if (isEditing || titleClickedRef.current) return;
+        if ((e.target as HTMLElement).closest('.todo-pinned-title, .pinned-phase-picker')) return;
+        onClick?.(task);
+      }}
       role="button"
       tabIndex={0}
-      onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onClick?.(task); } }}
+      onKeyDown={(e) => { if (e.key === 'Enter' && !isEditing) { e.preventDefault(); onClick?.(task); } }}
     >
       <span className="todo-pinned-drag-handle" {...attributes} {...listeners}>{'\u2261'}</span>
-      <span className="todo-pinned-title" title={task.title}>{task.title}</span>
-      <span className={`todo-pinned-phase${needsAttention ? ' todo-pinned-phase-attention' : ''}`} title={phaseLabel} />
+      {/* Phase icon with picker */}
+      <div className="phase-picker-wrapper phase-picker-inline pinned-phase-picker" ref={phaseWrapperRef}>
+        <button
+          className={`task-phase-icon-btn task-status-${task.status} task-phase-${task.phase?.toLowerCase()}`}
+          onClick={(e) => {
+            e.stopPropagation();
+            if (!phaseMenuOpen && phaseWrapperRef.current) {
+              const rect = phaseWrapperRef.current.getBoundingClientRect();
+              const spaceBelow = window.innerHeight - rect.bottom;
+              const menuHeight = 170;
+              if (spaceBelow < menuHeight) {
+                setPhaseMenuPos({ top: rect.top - menuHeight - 2, left: rect.left });
+              } else {
+                setPhaseMenuPos({ top: rect.bottom + 2, left: rect.left });
+              }
+            }
+            setPhaseMenuOpen(!phaseMenuOpen);
+          }}
+          aria-label={PHASE_LABEL[task.phase] ?? 'Change phase'}
+          title={PHASE_LABEL[task.phase] ?? 'Change phase'}
+        >
+          {PHASE_ICON[task.phase] ?? ICONS.ICON_PHASE_TODO}
+        </button>
+        {phaseMenuOpen && (
+          <div
+            className="phase-picker-menu"
+            style={phaseMenuPos ? { position: 'fixed', top: phaseMenuPos.top, left: phaseMenuPos.left, zIndex: 9999 } : undefined}
+          >
+            {PHASE_ORDER.map((phase, i) => (
+              <button
+                key={phase}
+                className={`phase-picker-item${task.phase === phase ? ' active' : ''}`}
+                style={i === PHASE_ORDER.length - 1 && PHASE_ORDER.length % 2 === 1 ? { gridColumn: '1 / -1' } : undefined}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  if (task.phase !== phase) onSetPhase?.(task.id, phase);
+                  setPhaseMenuOpen(false);
+                }}
+              >
+                <span className={`phase-picker-icon task-phase-${phase.toLowerCase()}`}>{PHASE_ICON[phase]}</span>
+                <span>{PHASE_LABEL[phase]}</span>
+                {task.phase === phase && <span className="phase-picker-check">✓</span>}
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
+      {/* Editable title */}
+      <span
+        ref={titleRef}
+        className={`todo-pinned-title${isEditing ? ' editing' : ''}`}
+        contentEditable={isEditing}
+        suppressContentEditableWarning
+        title={task.title}
+        onClick={isEditing ? (e) => e.stopPropagation() : handleTitleClick}
+        onBlur={isEditing ? commitEdit : undefined}
+        onKeyDown={isEditing ? (e) => {
+          if (e.nativeEvent.isComposing || e.keyCode === 229) return;
+          if (e.key === 'Enter') { e.preventDefault(); commitEdit(); }
+          if (e.key === 'Escape') { e.preventDefault(); cancelEdit(); }
+        } : undefined}
+      >
+        {task.title}
+      </span>
       {ago && <span className="todo-recent-ago" title={task.last_session_update}>{ago}</span>}
       <TaskKebabMenu
         task={task}
@@ -2854,7 +2999,7 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
                         <div className="todo-pinned-list-scroll" style={focusTasksDisplay.length > tierLimits.focus ? { maxHeight: tierLimits.focus * CARD_HEIGHT_PX } : undefined}>
                           <TierDropZone id="focus-drop-zone" isEmpty={focusTasksDisplay.length === 0}>
                             {focusTasksDisplay.map((task) => (
-                              <SortableTierCard key={task.id} task={task} tier="focus" isFocused={focusedTaskId === task.id} onClick={handlePinnedCardClick} onSetTier={onSetTier} onUnpinTask={onUnpinTask} onPinTask={onPinTask} onSetPriority={onSetPriority} onSetDate={onSetDate} onStar={onStar} onExpandDetail={handleExpandDetail} onClearFocus={onClearFocus} onOpenSession={onOpenSession} />
+                              <SortableTierCard key={task.id} task={task} tier="focus" isFocused={focusedTaskId === task.id} onClick={handlePinnedCardClick} onSetTier={onSetTier} onUnpinTask={onUnpinTask} onPinTask={onPinTask} onSetPriority={onSetPriority} onSetDate={onSetDate} onStar={onStar} onExpandDetail={handleExpandDetail} onClearFocus={onClearFocus} onOpenSession={onOpenSession} onSetPhase={onSetPhase ?? ((id) => onComplete(id))} onUpdateTitle={onUpdate ? handleUpdateTitle : undefined} />
                             ))}
                           </TierDropZone>
                         </div>
@@ -2875,7 +3020,7 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
                         <div className="todo-pinned-list-scroll" style={nextTasksDisplay.length > tierLimits.next ? { maxHeight: tierLimits.next * CARD_HEIGHT_PX } : undefined}>
                           <TierDropZone id="next-drop-zone" isEmpty={nextTasksDisplay.length === 0}>
                             {nextTasksDisplay.map((task) => (
-                              <SortableTierCard key={task.id} task={task} tier="next" isFocused={focusedTaskId === task.id} onClick={handlePinnedCardClick} onSetTier={onSetTier} onUnpinTask={onUnpinTask} onPinTask={onPinTask} onSetPriority={onSetPriority} onSetDate={onSetDate} onStar={onStar} onExpandDetail={handleExpandDetail} onClearFocus={onClearFocus} onOpenSession={onOpenSession} />
+                              <SortableTierCard key={task.id} task={task} tier="next" isFocused={focusedTaskId === task.id} onClick={handlePinnedCardClick} onSetTier={onSetTier} onUnpinTask={onUnpinTask} onPinTask={onPinTask} onSetPriority={onSetPriority} onSetDate={onSetDate} onStar={onStar} onExpandDetail={handleExpandDetail} onClearFocus={onClearFocus} onOpenSession={onOpenSession} onSetPhase={onSetPhase ?? ((id) => onComplete(id))} onUpdateTitle={onUpdate ? handleUpdateTitle : undefined} />
                             ))}
                           </TierDropZone>
                         </div>
@@ -2896,7 +3041,7 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
                         <SortableContext items={satelliteIds_arr} strategy={verticalListSortingStrategy}>
                           <div className="todo-pinned-list todo-pinned-list-scroll" style={satelliteTasksDisplay.length > tierLimits.satellite ? { maxHeight: tierLimits.satellite * CARD_HEIGHT_PX } : undefined}>
                             {satelliteTasksDisplay.map((task) => (
-                              <SortableTierCard key={task.id} task={task} tier="satellite" isFocused={focusedTaskId === task.id} onClick={handlePinnedCardClick} onSetTier={onSetTier} onUnpinTask={onUnpinTask} onPinTask={onPinTask} onSetPriority={onSetPriority} onSetDate={onSetDate} onStar={onStar} onExpandDetail={handleExpandDetail} onClearFocus={onClearFocus} onOpenSession={onOpenSession} />
+                              <SortableTierCard key={task.id} task={task} tier="satellite" isFocused={focusedTaskId === task.id} onClick={handlePinnedCardClick} onSetTier={onSetTier} onUnpinTask={onUnpinTask} onPinTask={onPinTask} onSetPriority={onSetPriority} onSetDate={onSetDate} onStar={onStar} onExpandDetail={handleExpandDetail} onClearFocus={onClearFocus} onOpenSession={onOpenSession} onSetPhase={onSetPhase ?? ((id) => onComplete(id))} onUpdateTitle={onUpdate ? handleUpdateTitle : undefined} />
                             ))}
                           </div>
                         </SortableContext>
@@ -2936,6 +3081,8 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
                         onExpandDetail={handleExpandDetail}
                         onClearFocus={onClearFocus}
                         onOpenSession={onOpenSession}
+                        onSetPhase={onSetPhase ?? ((id) => onComplete(id))}
+                        onUpdateTitle={onUpdate ? handleUpdateTitle : undefined}
                       />
                     ))}
                   </div>

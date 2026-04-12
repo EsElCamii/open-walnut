@@ -213,15 +213,15 @@ test('clicking outside phase picker closes it', async ({ page }) => {
 
 test('task detail page shows phase badge', async ({ page }) => {
   const task = await createTaskViaApi('Detail page phase test')
-  await updateTaskPhase(task.id, 'PEER_CODE_REVIEW')
+  await updateTaskPhase(task.id, 'HUMAN_VERIFIED')
 
   await page.goto(`/tasks/${task.id}`)
   await page.waitForLoadState('networkidle')
 
   // The StatusBadge should show phase text
-  const badge = page.locator('.badge-phase-peer_code_review')
+  const badge = page.locator('.badge-phase-human_verified')
   await expect(badge).toBeVisible({ timeout: 5000 })
-  await expect(badge).toContainText('Peer Code Review')
+  await expect(badge).toContainText('Human Verified')
 })
 
 // ── New task gets phase=TODO ──

@@ -26,8 +26,6 @@ const PHASE_ICON: Record<string, ReactNode> = {
   AWAIT_HUMAN_ACTION: '👤',
   HUMAN_VERIFIED: '✅',
   POST_WORK_COMPLETED: '📦',
-  PEER_CODE_REVIEW: '⋈',
-  RELEASE_IN_PIPELINE: '▷',
   COMPLETE: '✓✓',
 };
 
@@ -38,15 +36,13 @@ const PHASE_LABEL: Record<string, string> = {
   AWAIT_HUMAN_ACTION: 'Await Human Action',
   HUMAN_VERIFIED: 'Human Verified',
   POST_WORK_COMPLETED: 'Post-Work Done',
-  PEER_CODE_REVIEW: 'Peer Code Review',
-  RELEASE_IN_PIPELINE: 'Release in Pipeline',
   COMPLETE: 'Complete',
 };
 
 const PHASE_ORDER: string[] = [
   'TODO', 'IN_PROGRESS', 'AGENT_COMPLETE', 'AWAIT_HUMAN_ACTION',
   'HUMAN_VERIFIED', 'POST_WORK_COMPLETED',
-  'PEER_CODE_REVIEW', 'RELEASE_IN_PIPELINE', 'COMPLETE',
+  'COMPLETE',
 ];
 
 const TIER_OPTIONS: { value: FocusTier; label: string }[] = [

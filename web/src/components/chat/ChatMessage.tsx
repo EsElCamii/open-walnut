@@ -257,8 +257,7 @@ function CompactionDetails({ details }: { details: string }) {
 const PHASE_SYMBOLS: Record<string, string> = {
   TODO: '\u25CB', IN_PROGRESS: '\u25D0', AGENT_COMPLETE: '\u2713',
   AWAIT_HUMAN_ACTION: '\u229A', HUMAN_VERIFIED: '\u2705',
-  POST_WORK_COMPLETED: '\uD83D\uDCE6', PEER_CODE_REVIEW: '\u22C8',
-  RELEASE_IN_PIPELINE: '\u25B7', COMPLETE: '\u2713\u2713',
+  POST_WORK_COMPLETED: '\uD83D\uDCE6', COMPLETE: '\u2713\u2713',
 };
 
 // Truncation limits matching buildTaskContextPrefix in src/web/routes/chat.ts:128-188
