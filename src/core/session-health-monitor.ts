@@ -393,8 +393,8 @@ export class SessionHealthMonitor {
 
     const { getRegisteredSessionManager } = await import('../providers/session-manager.js')
 
-    // Import sessionRunner for team-active check (lazy, cached by Node module system)
-    let runner: { isTeamActive(id: string): boolean } | undefined
+    // Import sessionRunner for team-active + permission checks (lazy, cached by Node module system)
+    let runner: { isTeamActive(id: string): boolean; hasPendingPermission?(id: string): boolean } | undefined
     try {
       const { sessionRunner } = await import('../providers/claude-code-session.js')
       runner = sessionRunner
@@ -410,6 +410,16 @@ export class SessionHealthMonitor {
       // the session is NOT idle — teammates are working on the remote/local host.
       if (runner?.isTeamActive(session.claudeSessionId)) {
         log.session.debug('health monitor: skipping idle check — team active', {
+          sessionId: session.claudeSessionId, taskId: session.taskId,
+        })
+        continue
+      }
+
+      // Skip sessions waiting for permission — they re-emit every 60s for visibility.
+      // No auto-resolve: session waits indefinitely for human decision.
+      // Don't kill the process: Claude Code is alive but blocked on control_response.
+      if (runner?.hasPendingPermission?.(session.claudeSessionId)) {
+        log.session.debug('health monitor: skipping idle check — pending permission', {
           sessionId: session.claudeSessionId, taskId: session.taskId,
         })
         continue

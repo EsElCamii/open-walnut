@@ -16,6 +16,7 @@ export function SessionsSection({ config, onSave }: Props) {
   const [maxIdle, setMaxIdle] = useState<number | undefined>(config.session?.max_idle);
   const [sessionLimits, setSessionLimits] = useState<Record<string, string | number>>(config.session_limits ?? {});
   const [permissionPrompt, setPermissionPrompt] = useState(config.session?.permission_prompt ?? true);
+  const [autoApproveBypass, setAutoApproveBypass] = useState(config.session?.auto_approve_bypass !== false);
   const ALL_MODES = ['default', 'bypass', 'plan', 'accept'] as const;
   const DEFAULT_MODES = ['bypass', 'plan'];
   const [enabledModes, setEnabledModes] = useState<string[]>(config.session?.enabled_modes ?? DEFAULT_MODES);
@@ -28,6 +29,7 @@ export function SessionsSection({ config, onSave }: Props) {
     setMaxIdle(config.session?.max_idle);
     setSessionLimits(config.session_limits ?? {});
     setPermissionPrompt(config.session?.permission_prompt ?? true);
+    setAutoApproveBypass(config.session?.auto_approve_bypass !== false);
     setEnabledModes(config.session?.enabled_modes ?? ['bypass', 'plan']);
     setSdkEnabled(config.session_server?.enabled ?? false);
     setSdkPort(config.session_server?.port ?? 7890);
@@ -46,6 +48,7 @@ export function SessionsSection({ config, onSave }: Props) {
         idle_timeout_minutes: idleTimeout,
         max_idle: maxIdle,
         permission_prompt: permissionPrompt,
+        auto_approve_bypass: autoApproveBypass,
         enabled_modes: enabledModes,
       },
       session_limits: limits,
@@ -116,10 +119,34 @@ export function SessionsSection({ config, onSave }: Props) {
           label="Permission Prompt Interception"
         />
         <p className="text-sm text-muted" style={{ marginTop: 2 }}>
-          Intercept sensitive-file and permission prompts from Claude Code.
-          In bypass mode, requests are auto-approved. In other modes, prompts are forwarded to the UI.
+          Intercept permission prompts from Claude Code (e.g. writing to sensitive files, running destructive commands).
         </p>
       </div>
+
+      {permissionPrompt && (
+        <div className="form-group" style={{ marginLeft: 16, borderLeft: '2px solid var(--border)', paddingLeft: 12 }}>
+          <ToggleSwitch
+            id="auto-approve-bypass"
+            checked={autoApproveBypass}
+            onChange={setAutoApproveBypass}
+            label="Auto-approve in Bypass Mode"
+          />
+          <p className="text-sm text-muted" style={{ marginTop: 2 }}>
+            When a session runs in <strong>bypass</strong> mode, automatically approve all permission prompts without asking.
+          </p>
+          <div style={{ marginTop: 6, padding: '6px 10px', background: 'var(--bg-subtle)', borderRadius: 6, fontSize: 12, color: 'var(--text-muted)' }}>
+            <strong>Examples of auto-approved actions:</strong>
+            <ul style={{ margin: '4px 0 0', paddingLeft: 18, lineHeight: 1.6 }}>
+              <li>Writing to files outside the project directory</li>
+              <li>Running shell commands (npm install, git push, etc.)</li>
+              <li>Exiting plan mode to start execution</li>
+            </ul>
+            <p style={{ margin: '4px 0 0' }}>
+              Turn <strong>off</strong> if you want to manually review every action, even in bypass mode.
+            </p>
+          </div>
+        </div>
+      )}
 
       <div className="form-group">
         <label>Enabled Session Modes</label>

@@ -29,7 +29,7 @@ import path from 'node:path'
 import crypto from 'node:crypto'
 import { bus, EventNames, eventData } from '../core/event-bus.js'
 import { isProcessAliveAsync } from '../utils/process.js'
-import { SESSION_STREAMS_DIR } from '../constants.js'
+import { SESSION_STREAMS_DIR, CLAUDE_HOME } from '../constants.js'
 import { log } from '../logging/index.js'
 import { markProcessing, removeProcessed, revertToPending, loadQueue, getAllSessionsWithPending } from '../core/session-message-queue.js'
 // Image transfer for remote sessions: RemoteSessionManager.prepareOutbound() uploads
@@ -295,13 +295,83 @@ export class ClaudeCodeSession {
    *  or team-idle timeout. While active, intermediate `result` events suppress
    *  idle/AGENT_COMPLETE/triage because the lead is polling for teammate results. */
   private _teamActive = false
+  /** The team name from the most recent TeamCreate — used to check teammate liveness. */
+  private _teamName: string | undefined
   /** Public getter for health monitor — skip idle timeout while team is active. */
   get teamActive(): boolean { return this._teamActive }
-  /** Timer that auto-clears _teamActive if no new JSONL events arrive after the
-   *  last result event. Prevents sessions from being stuck as "running" forever
-   *  when Claude Code never calls TeamDelete (common in -p mode). */
+  /** Timer that periodically checks if teammates are still active.
+   *  Only clears _teamActive when ALL teammates have been idle for the full timeout. */
   private _teamIdleTimer: ReturnType<typeof setTimeout> | null = null
   private static readonly TEAM_IDLE_TIMEOUT_MS = 120_000 // 2 min
+
+  /**
+   * Check if any teammate subagent JSONL files have been written to recently.
+   * Subagent files live at ~/.claude/projects/{encoded}/{sessionId}/subagents/*.jsonl.
+   * If any file's mtime is within the timeout window, teammates are still active.
+   */
+  private _areTeammatesStillActive(): boolean {
+    if (!this.claudeSessionId || !this.cwd) return false
+    try {
+      const encoded = this.cwd.replaceAll('/', '-')
+      const subagentDir = path.join(CLAUDE_HOME, 'projects', encoded, this.claudeSessionId, 'subagents')
+      if (!fs.existsSync(subagentDir)) return false
+
+      const now = Date.now()
+      const cutoff = now - ClaudeCodeSession.TEAM_IDLE_TIMEOUT_MS
+      const files = fs.readdirSync(subagentDir).filter(f => f.endsWith('.jsonl'))
+      for (const file of files) {
+        const stat = fs.statSync(path.join(subagentDir, file))
+        if (stat.mtimeMs > cutoff) return true
+      }
+    } catch {
+      // If we can't check (e.g. remote session), fall through to clear _teamActive
+    }
+    return false
+  }
+
+  /**
+   * Schedule (or reschedule) the team-idle check. When the timer fires:
+   *   - If subagent files are still being written → reschedule (teammates alive)
+   *   - If no recent writes → clear _teamActive and transition to idle
+   */
+  private _scheduleTeamIdleCheck(resultText?: string, totalCost?: number, durationMs?: number): void {
+    if (this._teamIdleTimer) clearTimeout(this._teamIdleTimer)
+    this._teamIdleTimer = setTimeout(() => {
+      if (!this._teamActive) return
+
+      // Check if teammates are still writing to their JSONL files
+      if (this._areTeammatesStillActive()) {
+        log.session.debug('team-idle timer: teammates still active, rescheduling', {
+          sessionId: this.claudeSessionId, taskId: this.taskId,
+        })
+        // Ensure status shows 'running' while team is active
+        if (this._processStatus !== 'running') {
+          this._processStatus = 'running'
+          this._activity = 'Team subagents working'
+          this.emitStatusChanged('IN_PROGRESS')
+        }
+        this._scheduleTeamIdleCheck(resultText, totalCost, durationMs)
+        return
+      }
+
+      log.session.info('team-idle timeout — no active teammates, clearing _teamActive', {
+        sessionId: this.claudeSessionId, taskId: this.taskId,
+      })
+      this._teamActive = false
+      this._teamIdleTimer = null
+      this._processStatus = 'idle'
+      this._activity = undefined
+      this.emitStatusChanged('AGENT_COMPLETE')
+      bus.emit(EventNames.SESSION_RESULT, {
+        sessionId: this.claudeSessionId,
+        taskId: this.taskId,
+        result: resultText ?? '(team-idle timeout)',
+        totalCost,
+        duration: durationMs,
+        isError: false,
+      }, ['main-ai', 'session-runner'], { source: 'session-runner' })
+    }, ClaudeCodeSession.TEAM_IDLE_TIMEOUT_MS)
+  }
   /** Plan content captured from the most recent Write to ~/.claude/plans/ */
   private _lastPlanWriteContent: string | null = null
   /** True when we've already auto-replied to AskUserQuestion this turn. Reset on new turn. */
@@ -311,6 +381,8 @@ export class ClaudeCodeSession {
     request_id: string
     request: { subtype: string; tool_name?: string; input?: Record<string, unknown>; tool_use_id?: string; decision_reason?: string }
   }>()
+  /** Periodic re-emit timers for pending permission requests (no auto-resolve). */
+  private _permissionReEmitTimers = new Map<string, ReturnType<typeof setTimeout>>()
   /** Timestamp when spawn() was called — used to measure time-to-init for diagnostics. */
   private _spawnTs = 0
   /** Timestamp of the last message delivery (FIFO write or --resume spawn). */
@@ -380,6 +452,7 @@ export class ClaudeCodeSession {
     this._active = false
     this._processStatus = 'stopped'
     this._pendingPermissionRequests.clear()
+    this._clearAllPermissionReEmitTimers()
   }
 
   get mode(): SessionMode {
@@ -788,23 +861,24 @@ export class ClaudeCodeSession {
         // recovery we must do it explicitly since result events before the crash are
         // not replayed (tailer starts from fromOffset).
         if (session._teamActive) {
-          session._teamIdleTimer = setTimeout(() => {
-            if (!session._teamActive) return
-            log.session.info('team-idle timeout after recovery — clearing _teamActive', {
+          // If teammates are still active, show 'running' (not 'idle')
+          if (session._areTeammatesStillActive()) {
+            session._processStatus = 'running'
+            session._activity = 'Team subagents working'
+            log.session.info('recovery: team still active — keeping running status', {
               sessionId: session.claudeSessionId, taskId: session.taskId,
             })
-            session._teamActive = false
-            session._teamIdleTimer = null
-            session._processStatus = 'idle'
-            session._activity = undefined
-            session.emitStatusChanged('AGENT_COMPLETE')
-            bus.emit(EventNames.SESSION_RESULT, {
-              sessionId: session.claudeSessionId,
-              taskId: session.taskId,
-              result: '(team-idle timeout after server restart)',
-              isError: false,
-            }, ['main-ai', 'session-runner'], { source: 'session-runner' })
-          }, ClaudeCodeSession.TEAM_IDLE_TIMEOUT_MS)
+            // Persist to session record so API/frontend show 'running'
+            if (session.claudeSessionId) {
+              import('../core/session-tracker.js').then(({ updateSessionRecord }) =>
+                updateSessionRecord(session.claudeSessionId!, {
+                  process_status: 'running',
+                  activity: 'Team subagents working',
+                }),
+              ).catch(() => {})
+            }
+          }
+          session._scheduleTeamIdleCheck('(team-idle timeout after server restart)')
         }
         // Belt-and-suspenders: if the JSONL has a result event (hasResult),
         // reinforce resultEmitted even if tasks.json was momentarily stale.
@@ -823,16 +897,13 @@ export class ClaudeCodeSession {
         if (recovered.planFile) record.planFile = recovered.planFile
         if (recovered.planCompleted != null) record.planCompleted = recovered.planCompleted
 
-        // Recover orphaned control_request: if Claude Code is blocked waiting for
-        // a control_response that was lost when the server restarted, re-populate
-        // the pending map so the UI can re-prompt the user (or auto-approve).
-        // Must populate _pendingPermissionRequests BEFORE transport.attach() since
-        // attach starts delivering live events that may reference these requests.
+        // Layer 1 (canonical JSONL): recover orphaned control_request.
+        // Note: control_request events are typically NOT in the canonical JSONL —
+        // they only appear in the STDOUT stream. This check exists as a belt-and-suspenders.
         if (recovered.pendingControlRequest) {
           const { request_id, request } = recovered.pendingControlRequest
           session._pendingPermissionRequests.set(request_id, { request_id, request })
-          const action = session._mode === 'bypass' ? 'will auto-approve after attach' : 'will re-emit to UI after attach'
-          log.session.info(`recovered orphaned control_request from JSONL — ${action}`, {
+          log.session.info(`recovered orphaned control_request from canonical JSONL`, {
             sessionId: record.claudeSessionId,
             requestId: request_id,
             toolName: request.tool_name,
@@ -845,6 +916,111 @@ export class ClaudeCodeSession {
         sessionId: record.claudeSessionId,
         error: err instanceof Error ? err.message : String(err),
       })
+    }
+
+    // ── Permission recovery: 3 layers, first one wins ──
+    // Layer 1 (canonical JSONL) — already checked above
+    // Layer 2 (session record on disk) — most reliable, persisted atomically
+    // Layer 3 (stream JSONL scan) — fallback, reads STDOUT capture file
+    //
+    // Must populate _pendingPermissionRequests BEFORE transport.attach() since
+    // attach starts delivering live events that may reference these requests.
+
+    // Layer 2: Recover from session record (sessions.json)
+    if (session._pendingPermissionRequests.size === 0 && record.pendingPermission) {
+      const pp = record.pendingPermission
+      session._pendingPermissionRequests.set(pp.requestId, {
+        request_id: pp.requestId,
+        request: {
+          subtype: pp.subtype ?? 'can_use_tool',
+          tool_name: pp.toolName,
+          input: pp.input,
+          decision_reason: pp.reason,
+        },
+      })
+      log.session.info('recovered orphaned control_request from session record (Layer 2)', {
+        sessionId: record.claudeSessionId,
+        requestId: pp.requestId,
+        toolName: pp.toolName,
+        mode: session._mode,
+        receivedAt: pp.receivedAt,
+      })
+    }
+
+    // Layer 3: Scan stream JSONL TAIL for pending control_request events.
+    // control_request events appear ONLY in the STDOUT stream (Walnut's stream file),
+    // NOT in Claude Code's canonical JSONL (~/.claude/projects/.../*.jsonl).
+    // Only read the last 32KB — control_request is always near the end of the file.
+    // This avoids loading 50-200MB stream files for long sessions.
+    if (session._pendingPermissionRequests.size === 0 && record.outputFile
+      && !record.outputFile.startsWith('remote://')) {
+      try {
+        const TAIL_BYTES = 32768
+        const stat = await fsp.stat(record.outputFile)
+        const seekOffset = Math.max(0, stat.size - TAIL_BYTES)
+        let tailContent: string
+        if (seekOffset === 0) {
+          tailContent = await fsp.readFile(record.outputFile, 'utf-8')
+        } else {
+          const fh = await fsp.open(record.outputFile, 'r')
+          try {
+            const buf = Buffer.alloc(TAIL_BYTES)
+            const { bytesRead } = await fh.read(buf, 0, TAIL_BYTES, seekOffset)
+            tailContent = buf.subarray(0, bytesRead).toString('utf-8')
+          } finally {
+            await fh.close()
+          }
+        }
+        const lines = tailContent.split('\n')
+        // If we seeked into the middle of the file, the first line is likely partial — skip it.
+        if (seekOffset > 0 && lines.length > 1) lines.shift()
+        let pendingCtrl: { request_id: string; request: Record<string, unknown> } | undefined
+        for (const line of lines) {
+          if (!line) continue
+          let parsed: Record<string, unknown>
+          try { parsed = JSON.parse(line) } catch { continue }
+          if (parsed.type === 'control_request' && parsed.request_id && parsed.request) {
+            pendingCtrl = {
+              request_id: parsed.request_id as string,
+              request: parsed.request as Record<string, unknown>,
+            }
+          } else if (parsed.type === 'control_response') {
+            const resp = parsed as { response?: { request_id?: string } }
+            const respId = resp.response?.request_id
+            if (respId && pendingCtrl?.request_id === respId) {
+              pendingCtrl = undefined
+            } else if (!respId) {
+              pendingCtrl = undefined
+            }
+          }
+        }
+        if (pendingCtrl) {
+          session._pendingPermissionRequests.set(pendingCtrl.request_id, {
+            request_id: pendingCtrl.request_id,
+            request: pendingCtrl.request as { subtype: string; tool_name?: string; input?: Record<string, unknown>; decision_reason?: string },
+          })
+          log.session.info('recovered orphaned control_request from stream JSONL tail (Layer 3)', {
+            sessionId: record.claudeSessionId,
+            requestId: pendingCtrl.request_id,
+            toolName: (pendingCtrl.request as { tool_name?: string }).tool_name,
+            mode: session._mode,
+          })
+        }
+      } catch (err) {
+        log.session.debug('stream JSONL control_request scan failed (Layer 3)', {
+          sessionId: record.claudeSessionId,
+          outputFile: record.outputFile,
+          error: err instanceof Error ? err.message : String(err),
+        })
+      }
+    }
+
+    // Start periodic re-emit timer for ALL recovered permissions (Layer 4 visibility net).
+    // Re-emits every 60s so the UI picks it up. No auto-approve/deny — waits for human decision.
+    if (session._pendingPermissionRequests.size > 0) {
+      for (const pending of session._pendingPermissionRequests.values()) {
+        session._startPermissionReEmitTimer(pending.request_id, pending.request)
+      }
     }
 
     log.session.info('attaching to existing session', {
@@ -893,12 +1069,21 @@ export class ClaudeCodeSession {
     // If the server restarted while Claude Code was waiting for control_response,
     // the UI needs to show the permission dialog again so the user can approve/deny.
     if (session._pendingPermissionRequests.size > 0 && record.claudeSessionId) {
+      // Check config for bypass auto-approve setting
+      let autoApproveBypassed = true
+      if (session._mode === 'bypass') {
+        try {
+          const { getConfig } = await import('../core/config-manager.js')
+          const cfg = await getConfig()
+          autoApproveBypassed = cfg.session?.auto_approve_bypass !== false
+        } catch { /* default true */ }
+      }
+
       // Snapshot before iterating: resolvePermissionRequest() deletes from the map
       const pendingSnapshot = [...session._pendingPermissionRequests.values()]
       for (const pending of pendingSnapshot) {
-        if (session._mode === 'bypass') {
-          // Bypass mode = blanket trust. Auto-approve immediately to unblock Claude Code.
-          // Non-bypass modes require explicit user re-confirmation via the UI dialog.
+        if (session._mode === 'bypass' && autoApproveBypassed) {
+          // Bypass mode + auto-approve ON: approve immediately to unblock Claude Code.
           log.session.info('auto-approving recovered control_request (bypass mode)', {
             sessionId: record.claudeSessionId,
             requestId: pending.request_id,
@@ -948,6 +1133,7 @@ export class ClaudeCodeSession {
     this._transport?.kill()
     this._active = false
     this._pendingPermissionRequests.clear()
+    this._clearAllPermissionReEmitTimers()
   }
 
   /**
@@ -1075,6 +1261,7 @@ export class ClaudeCodeSession {
     this._processStatus = 'stopped'
     this._activity = undefined
     this._pendingPermissionRequests.clear()
+    this._clearAllPermissionReEmitTimers()
   }
 
   // ── Private ──
@@ -1675,9 +1862,10 @@ export class ClaudeCodeSession {
             // because the lead session is polling for in-process teammate results (print.ts poll loop).
             if (block.name === 'TeamCreate') {
               this._teamActive = true
+              this._teamName = (block.input as Record<string, unknown>)?.name as string | undefined
               log.session.info('team created — entering team mode', {
                 sessionId: this.claudeSessionId, taskId: this.taskId,
-                teamName: (block.input as Record<string, unknown>)?.name,
+                teamName: this._teamName,
               })
             }
             if (block.name === 'TeamDelete') {
@@ -2062,14 +2250,15 @@ export class ClaudeCodeSession {
           if (this._teamIdleTimer) { clearTimeout(this._teamIdleTimer); this._teamIdleTimer = null }
           this.stopMonitoring()
           this._pendingPermissionRequests.clear()
+          this._clearAllPermissionReEmitTimers()
 
-          // Clear PID from record to prevent stale PID orphan kills on future PID reuse
+          // Clear PID + pendingPermission from record to prevent stale state on future reuse
           if (this.claudeSessionId) {
             const sid = this.claudeSessionId
             import('../core/session-tracker.js').then(({ updateSessionRecord }) =>
-              updateSessionRecord(sid, { pid: undefined }),
+              updateSessionRecord(sid, { pid: undefined, pendingPermission: undefined }),
             ).catch((err) => {
-              log.session.warn('failed to clear PID on process exit', { sessionId: sid, error: String(err) })
+              log.session.warn('failed to clear PID/pendingPermission on process exit', { sessionId: sid, error: String(err) })
             })
           }
         }
@@ -2094,32 +2283,10 @@ export class ClaudeCodeSession {
             teamActive: true,
           }, ['main-ai', 'session-runner'], { source: 'session-runner' })
 
-          // Start team-idle timer: if no new JSONL events arrive within 2 min,
-          // assume the team is done (Claude Code often skips TeamDelete in -p mode).
-          // The timer auto-clears _teamActive so normal idle/triage kicks in.
-          if (this._teamIdleTimer) clearTimeout(this._teamIdleTimer)
-          this._teamIdleTimer = setTimeout(() => {
-            if (this._teamActive) {
-              log.session.info('team-idle timeout — auto-clearing _teamActive', {
-                sessionId: this.claudeSessionId, taskId: this.taskId,
-              })
-              this._teamActive = false
-              this._teamIdleTimer = null
-              // Now trigger the idle/AGENT_COMPLETE transition that was suppressed.
-              // The process should still be alive in the poll loop.
-              this._processStatus = 'idle'
-              this._activity = undefined
-              this.emitStatusChanged('AGENT_COMPLETE')
-              bus.emit(EventNames.SESSION_RESULT, {
-                sessionId: this.claudeSessionId,
-                taskId: this.taskId,
-                result: resultText,
-                totalCost: result.total_cost_usd,
-                duration: result.duration_ms,
-                isError: false,
-              }, ['main-ai', 'session-runner'], { source: 'session-runner' })
-            }
-          }, ClaudeCodeSession.TEAM_IDLE_TIMEOUT_MS)
+          // Schedule team-idle check: periodically checks if subagent JSONL files
+          // are still being written. Only clears _teamActive when all teammates
+          // have been idle for the full timeout period.
+          this._scheduleTeamIdleCheck(resultText, result.total_cost_usd, result.duration_ms)
         } else {
           this.emitStatusChanged('AGENT_COMPLETE')
           log.session.info('session result emitted', { sessionId: this.claudeSessionId, taskId: this.taskId, resultLength: resultText?.length ?? 0 })
@@ -2170,8 +2337,42 @@ export class ClaudeCodeSession {
 
         if (request.subtype === 'can_use_tool') {
           if (this._mode === 'bypass') {
-            // Bypass mode: auto-approve everything (sensitive files, AskUserQuestion, etc.)
-            this.respondToControlRequest(request_id, request, true)
+            // Bypass mode: check auto_approve_bypass config (default: true).
+            // Config read is async — use .then() since handleStreamLine is sync.
+            // Add sentinel BEFORE async gap so hasPendingPermission is true during config read.
+            this._pendingPermissionRequests.set(request_id, { request_id, request })
+            import('../core/config-manager.js').then(({ getConfig }) => getConfig()).then(cfg => {
+              if (!this._active) return  // Session killed during async gap — discard
+              const autoApprove = cfg.session?.auto_approve_bypass !== false
+              if (autoApprove) {
+                this._pendingPermissionRequests.delete(request_id)
+                this.respondToControlRequest(request_id, request, true)
+              } else {
+                // auto_approve_bypass OFF: treat bypass like other modes — show to user.
+                // Sentinel already in _pendingPermissionRequests; start re-emit timer.
+                this._startPermissionReEmitTimer(request_id, request)
+                if (this.claudeSessionId) {
+                  import('../core/session-tracker.js').then(({ updateSessionRecord }) =>
+                    updateSessionRecord(this.claudeSessionId!, {
+                      pendingPermission: { requestId: request_id, toolName: request.tool_name, input: request.input, reason: request.decision_reason, subtype: request.subtype, receivedAt: new Date().toISOString() },
+                    }),
+                  ).catch(() => {})
+                  bus.emit(EventNames.SESSION_PERMISSION_REQUEST, {
+                    sessionId: this.claudeSessionId,
+                    taskId: this.taskId,
+                    requestId: request_id,
+                    toolName: request.tool_name,
+                    input: request.input,
+                    reason: request.decision_reason,
+                  }, ['*'], { source: 'session-runner', urgency: 'urgent' })
+                }
+              }
+            }).catch(() => {
+              if (!this._active) return  // Session killed during async gap — discard
+              // Config read failed — default to auto-approve in bypass
+              this._pendingPermissionRequests.delete(request_id)
+              this.respondToControlRequest(request_id, request, true)
+            })
           } else {
             // Non-bypass modes: emit to UI for user decision.
             // Store the pending request so the API route can resolve it later.
@@ -2183,7 +2384,30 @@ export class ClaudeCodeSession {
               toolName: request.tool_name,
               mode: this._mode,
             })
+
+            // Layer 2: Persist to session record on disk — survives server crashes.
+            // Best-effort: don't block the event handler on disk I/O.
             if (this.claudeSessionId) {
+              import('../core/session-tracker.js').then(({ updateSessionRecord }) =>
+                updateSessionRecord(this.claudeSessionId!, {
+                  pendingPermission: {
+                    requestId: request_id,
+                    toolName: request.tool_name,
+                    input: request.input,
+                    reason: request.decision_reason,
+                    subtype: request.subtype,
+                    receivedAt: new Date().toISOString(),
+                  },
+                }),
+              ).catch(err => log.session.warn('failed to persist pendingPermission', {
+                sessionId: this.claudeSessionId, error: err instanceof Error ? err.message : String(err),
+              }))
+
+              // Layer 4: Periodic re-emit of permission request every 60s.
+              // If the UI missed the initial event, the re-emit ensures visibility.
+              // No auto-approve or auto-deny — the session waits indefinitely for human decision.
+              this._startPermissionReEmitTimer(request_id, request)
+
               bus.emit(EventNames.SESSION_PERMISSION_REQUEST, {
                 sessionId: this.claudeSessionId,
                 taskId: this.taskId,
@@ -2300,8 +2524,21 @@ export class ClaudeCodeSession {
     const pending = this._pendingPermissionRequests.get(requestId)
     if (!pending) return false
     this._pendingPermissionRequests.delete(requestId)
+    this._clearPermissionReEmitTimer(requestId)
     this.respondToControlRequest(requestId, pending.request, allow, denyMessage)
+
+    // Clear persisted pendingPermission from session record (best-effort)
+    if (this.claudeSessionId) {
+      import('../core/session-tracker.js').then(({ updateSessionRecord }) =>
+        updateSessionRecord(this.claudeSessionId!, { pendingPermission: undefined }),
+      ).catch(() => {})
+    }
     return true
+  }
+
+  /** True when Claude Code is blocked waiting for a permission decision. */
+  get hasPendingPermission(): boolean {
+    return this._pendingPermissionRequests.size > 0
   }
 
   /** Get all pending permission requests (for API/UI). */
@@ -2317,6 +2554,55 @@ export class ClaudeCodeSession {
       input: p.request.input,
       reason: p.request.decision_reason,
     }))
+  }
+
+  /**
+   * Layer 4: Periodic re-emit of pending permission requests.
+   * If the UI missed the initial prompt (WebSocket disconnect, page reload, etc.),
+   * keep re-emitting every 60s so the user eventually sees it.
+   * No auto-approve or auto-deny — human decision is required.
+   */
+  private _startPermissionReEmitTimer(requestId: string, request: { subtype: string; tool_name?: string; input?: Record<string, unknown>; decision_reason?: string }): void {
+    this._clearPermissionReEmitTimer(requestId)
+    const REEMIT_INTERVAL_MS = 60_000 // re-emit every 60s
+    const timer = setInterval(() => {
+      if (!this._pendingPermissionRequests.has(requestId)) {
+        this._clearPermissionReEmitTimer(requestId)
+        return
+      }
+      if (this.claudeSessionId) {
+        log.session.info('re-emitting stale permission request (periodic)', {
+          sessionId: this.claudeSessionId,
+          taskId: this.taskId,
+          requestId,
+          toolName: request.tool_name,
+        })
+        bus.emit(EventNames.SESSION_PERMISSION_REQUEST, {
+          sessionId: this.claudeSessionId,
+          taskId: this.taskId,
+          requestId,
+          toolName: request.tool_name,
+          input: request.input,
+          reason: request.decision_reason,
+        }, ['*'], { source: 'session-runner', urgency: 'urgent' })
+      }
+    }, REEMIT_INTERVAL_MS)
+    timer.unref()
+    this._permissionReEmitTimers.set(requestId, timer)
+  }
+
+  private _clearPermissionReEmitTimer(requestId: string): void {
+    const timer = this._permissionReEmitTimers.get(requestId)
+    if (timer) {
+      clearInterval(timer)
+      this._permissionReEmitTimers.delete(requestId)
+    }
+  }
+
+  /** Clear ALL permission re-emit timers (called on session cleanup). */
+  private _clearAllPermissionReEmitTimers(): void {
+    for (const timer of this._permissionReEmitTimers.values()) clearInterval(timer)
+    this._permissionReEmitTimers.clear()
   }
 
   private async persistSessionRecord(claudeSessionId: string, cwd?: string): Promise<void> {
@@ -2530,7 +2816,7 @@ export class SessionRunner {
                 last_status_change: new Date().toISOString(),
                 status_reason: isError ? 'api_error' : (status === 'idle' ? 'turn_completed' : 'normal_completion'),
                 status_changed_by: 'session-runner',
-              } as any).then(() => {
+              }).then(() => {
                 // Clear task session slot only when truly stopped/error
                 if (status === 'stopped' || status === 'error') {
                   getSessionByClaudeId(sessionId).then(rec => {
@@ -2731,6 +3017,12 @@ export class SessionRunner {
   isTeamActive(claudeSessionId: string): boolean {
     const session = this.findSessionByClaudeId(claudeSessionId)
     return session?.teamActive ?? false
+  }
+
+  /** Check if a session has a pending permission request. Used by health monitor to skip idle timeout. */
+  hasPendingPermission(claudeSessionId: string): boolean {
+    const session = this.findSessionByClaudeId(claudeSessionId)
+    return session?.hasPendingPermission ?? false
   }
 
   /**
@@ -3401,6 +3693,13 @@ export class SessionRunner {
       return
     }
 
+    // Guard: don't inject via FIFO while Claude is blocked on a permission prompt.
+    // Messages would be silently lost — Claude only reads control_response in that state.
+    if (targetSession.hasPendingPermission) {
+      log.session.info('handleSend: session blocked on permission request, skipping mid-turn injection', { sessionId })
+      return
+    }
+
     // Atomically move pending messages to processing state
     const newMsgs = await markProcessing(sessionId)
     if (newMsgs.length === 0) return
@@ -3519,6 +3818,32 @@ export class SessionRunner {
 
       // Try stdin write first (stream-json mode — reuses running process)
       if (targetSession && !hasPendingSwitch) {
+        // Guard: if Claude Code is blocked waiting for a permission decision (control_request),
+        // writing user messages to FIFO is futile — Claude ignores everything except
+        // control_response while in that state. Revert messages to pending and re-emit
+        // the permission request so the UI can prompt the user.
+        if (targetSession.hasPendingPermission) {
+          log.session.warn('processNext: session blocked on permission request — keeping messages queued', {
+            sessionId,
+            pendingPermissions: targetSession.getPendingPermissionRequests().map(p => p.toolName),
+          })
+          this.clearActiveProcessing(sessionId)
+          await revertToPending(msgs)
+
+          // Re-emit permission request to UI in case it was missed
+          for (const p of targetSession.getPendingPermissionRequests()) {
+            bus.emit(EventNames.SESSION_PERMISSION_REQUEST, {
+              sessionId,
+              taskId: targetSession.taskId,
+              requestId: p.requestId,
+              toolName: p.toolName,
+              input: p.input,
+              reason: p.reason,
+            }, ['*'], { source: 'session-runner', urgency: 'urgent' })
+          }
+          return
+        }
+
         // Pre-flight liveness check: verify process is alive before writing to FIFO.
         // Without this, a dead process leaves a stale FIFO on disk — writes succeed
         // (kernel buffers them) but nobody reads, so messages are silently lost.

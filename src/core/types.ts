@@ -259,10 +259,14 @@ export interface Config {
     /** Enable --permission-prompt-tool stdio for local sessions.
      *  When enabled, Walnut intercepts permission prompts from Claude Code
      *  (sensitive file writes, AskUserQuestion) and handles them:
-     *  - Bypass mode: auto-approves all requests
+     *  - Bypass mode + auto_approve_bypass: auto-approves all requests
      *  - Other modes: forwards to UI for user decision
      *  Default: true. */
     permission_prompt?: boolean;
+    /** Auto-approve all permission prompts in bypass mode.
+     *  Bypass = full trust: Claude can write files, run commands, etc. without asking.
+     *  Default: true. Set to false to manually review every permission even in bypass. */
+    auto_approve_bypass?: boolean;
     /** Which session modes are available in the mode toggle cycle.
      *  Default: all four ['default', 'bypass', 'plan', 'accept'].
      *  Set to e.g. ['bypass', 'plan'] to only cycle between those two. */
@@ -556,4 +560,14 @@ export interface SessionRecord {
   status_changed_by?: StatusChangedBy;
   /** Recent status transitions, newest first. Max 10 entries. */
   status_history?: StatusTransition[];
+  /** Pending permission request — persisted so it survives server crashes.
+   *  Set when Claude Code emits control_request, cleared on resolve. */
+  pendingPermission?: {
+    requestId: string;
+    subtype?: string;     // control_request subtype (e.g. 'can_use_tool')
+    toolName?: string;
+    input?: Record<string, unknown>;
+    reason?: string;
+    receivedAt: string;  // ISO timestamp — for stale detection
+  };
 }
