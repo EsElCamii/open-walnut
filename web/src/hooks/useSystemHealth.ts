@@ -30,6 +30,8 @@ export interface DaemonHealth {
 export interface SystemHealth {
   embedding: EmbeddingHealth;
   daemons?: DaemonHealth[];
+  claudeCliAvailable?: boolean;
+  hasReadyProvider?: boolean;
 }
 
 const defaultHealth: SystemHealth = {
@@ -89,6 +91,9 @@ export function useSystemHealth() {
   const gitSyncFailing = !gitSync.protected || gitSync.consecutiveFailures >= 3;
   const hasIssues = health.embedding.unindexed > 0 || !health.embedding.ollamaAvailable || gitSyncFailing;
 
+  // Setup complete when both required checks pass (default true for backward compat)
+  const setupComplete = (health.claudeCliAvailable ?? true) && (health.hasReadyProvider ?? true);
+
   const triggerReindex = useCallback(async () => {
     setReindexing(true);
     try {
@@ -108,5 +113,5 @@ export function useSystemHealth() {
     }
   }, [health.embedding.lastReconcileAt, reindexing]);
 
-  return { health, gitSync, hasIssues, loading, reindexing, triggerReindex };
+  return { health, gitSync, hasIssues, setupComplete, loading, reindexing, triggerReindex };
 }

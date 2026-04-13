@@ -105,7 +105,10 @@ async function runEphemeralLauncher(): Promise<void> {
   const prefix = `open-walnut-${process.ppid}-`
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), prefix))
 
-  // 4. Copy data snapshot (skip large/lockable files)
+  // 4. Ensure WALNUT_HOME exists (first run on a fresh machine)
+  fs.mkdirSync(WALNUT_HOME, { recursive: true })
+
+  // 5. Copy data snapshot (skip large/lockable files)
   fs.cpSync(WALNUT_HOME, tmpDir, {
     recursive: true,
     filter: (src: string) => {

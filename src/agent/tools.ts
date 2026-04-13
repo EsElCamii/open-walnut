@@ -781,7 +781,7 @@ For projects (type='project'): set default_host and default_cwd for remote sessi
 
   {
     name: 'delete_task',
-    description: 'Permanently delete a task. Fails if the task has active sessions — complete or stop those sessions first.',
+    description: 'Permanently delete a task. Any active sessions will be stopped automatically.',
     input_schema: {
       type: 'object',
       properties: {
@@ -797,7 +797,19 @@ For projects (type='project'): set default_host and default_cwd for remote sessi
         return `Task deleted: ${taskRef(task.id, task.title)}`;
       } catch (err) {
         if (err instanceof ActiveSessionError) {
-          return `Cannot delete: task has ${err.activeSessionIds.length} active session(s): ${err.activeSessionIds.join(', ')}. Stop or complete those sessions first.`;
+          // Auto-stop active sessions and retry
+          const { completeTaskSessions } = await import('../core/session-tracker.js');
+          const { clearSessionSlot } = await import('../core/task-manager.js');
+          const { sessionRunner } = await import('../providers/claude-code-session.js');
+          await completeTaskSessions(err.activeSessionIds);
+          for (const sid of err.activeSessionIds) {
+            sessionRunner.findByClaudeId(sid)?.interrupt();
+            try { await clearSessionSlot(params.id as string, sid); } catch { /* best-effort */ }
+          }
+          // Retry deletion now that sessions are cleared
+          const { task } = await deleteTask(params.id as string);
+          bus.emit(EventNames.TASK_DELETED, { id: task.id, task }, ['web-ui'], { source: 'agent' });
+          return `Task deleted (stopped ${err.activeSessionIds.length} active session(s)): ${taskRef(task.id, task.title)}`;
         }
         return `Error: ${err instanceof Error ? err.message : String(err)}`;
       }

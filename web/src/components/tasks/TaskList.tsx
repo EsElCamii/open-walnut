@@ -7,10 +7,11 @@ interface TaskListProps {
   tasks: Task[];
   onComplete: (id: string) => void;
   onStar: (id: string) => void;
+  onDelete?: (id: string) => void;
   onAdd?: () => void;
 }
 
-export function TaskList({ tasks, onComplete, onStar, onAdd }: TaskListProps) {
+export function TaskList({ tasks, onComplete, onStar, onDelete, onAdd }: TaskListProps) {
   const [collapsedCategories, setCollapsedCategories] = useState<Set<string>>(new Set());
   const [collapsedProjects, setCollapsedProjects] = useState<Set<string>>(new Set());
 
@@ -79,7 +80,7 @@ export function TaskList({ tasks, onComplete, onStar, onAdd }: TaskListProps) {
               {directTasks.length > 0 && (
                 <div className="task-subgroup-items">
                   {directTasks.map((task) => (
-                    <TaskCard key={task.id} task={task} onComplete={onComplete} onStar={onStar} />
+                    <TaskCard key={task.id} task={task} onComplete={onComplete} onStar={onStar} onDelete={onDelete} />
                   ))}
                 </div>
               )}
@@ -96,7 +97,7 @@ export function TaskList({ tasks, onComplete, onStar, onAdd }: TaskListProps) {
                     {!collapsedProjects.has(projKey) && (
                       <div className="task-subgroup-items">
                         {projTasks.map((task) => (
-                          <TaskCard key={task.id} task={task} onComplete={onComplete} onStar={onStar} />
+                          <TaskCard key={task.id} task={task} onComplete={onComplete} onStar={onStar} onDelete={onDelete} />
                         ))}
                       </div>
                     )}

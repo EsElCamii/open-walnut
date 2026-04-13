@@ -5,11 +5,13 @@ import { StarButton } from '../common/StarButton';
 import { TagChip } from './TagChip';
 import { SessionPill } from './SessionPill';
 import { useIntegrations, getIntegrationMeta } from '@/hooks/useIntegrations';
+import { ICON_TRASH } from '../common/Icons';
 
 interface TaskCardProps {
   task: Task;
   onComplete: (id: string) => void;
   onStar: (id: string) => void;
+  onDelete?: (id: string) => void;
 }
 
 /** Legacy field lookup for backward compat before ext migration. */
@@ -73,7 +75,7 @@ function SyncIndicator({ task }: { task: Task }) {
   );
 }
 
-export function TaskCard({ task, onComplete, onStar }: TaskCardProps) {
+export function TaskCard({ task, onComplete, onStar, onDelete }: TaskCardProps) {
   const navigate = useNavigate();
   const subtasksDone = task.subtasks?.filter((s) => s.done).length ?? 0;
   const subtasksTotal = task.subtasks?.length ?? 0;
@@ -98,6 +100,22 @@ export function TaskCard({ task, onComplete, onStar }: TaskCardProps) {
       </button>
 
       <StarButton starred={!!task.starred} onClick={() => onStar(task.id)} />
+
+      {onDelete && (
+        <button
+          className="task-delete-btn"
+          onClick={(e) => {
+            e.stopPropagation();
+            if (window.confirm(`Delete task "${task.title}"? This cannot be undone.`)) {
+              onDelete(task.id);
+            }
+          }}
+          aria-label="Delete task"
+          title="Delete task"
+        >
+          {ICON_TRASH}
+        </button>
+      )}
 
       <div className="task-card-body">
         <span className="task-card-title">

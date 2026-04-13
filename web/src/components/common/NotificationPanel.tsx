@@ -3,6 +3,7 @@
  * iOS-style notification center: embedding status, Ollama availability, etc.
  */
 import { useSystemHealth } from '@/hooks/useSystemHealth';
+import { SETUP_DISMISS_KEY, SETUP_SHOW_EVENT } from './SetupBanner';
 
 interface NotificationPanelProps {
   open: boolean;
@@ -11,7 +12,7 @@ interface NotificationPanelProps {
 }
 
 export function NotificationPanel({ open, onClose, sidebarCollapsed }: NotificationPanelProps) {
-  const { health, gitSync, loading, reindexing, triggerReindex } = useSystemHealth();
+  const { health, gitSync, setupComplete, loading, reindexing, triggerReindex } = useSystemHealth();
 
   if (!open) return null;
 
@@ -46,6 +47,40 @@ export function NotificationPanel({ open, onClose, sidebarCollapsed }: Notificat
             </div>
           ) : (
             <>
+              {/* Setup incomplete */}
+              {!setupComplete && (
+                <div className="notification-card warn">
+                  <div className="notification-card-row">
+                    <span className="notification-card-icon warn">{'\u26A0'}</span>
+                    <span className="notification-card-label">Setup Incomplete</span>
+                  </div>
+                  <div className="notification-card-details">
+                    {!(health.claudeCliAvailable ?? true) && (
+                      <div className="notification-detail-row warn">
+                        <span>Claude Code CLI</span>
+                        <span className="notification-detail-value warn">Not installed</span>
+                      </div>
+                    )}
+                    {!(health.hasReadyProvider ?? true) && (
+                      <div className="notification-detail-row warn">
+                        <span>AI Provider</span>
+                        <span className="notification-detail-value warn">Not configured</span>
+                      </div>
+                    )}
+                  </div>
+                  <button
+                    className="notification-retry-btn"
+                    onClick={() => {
+                      try { localStorage.removeItem(SETUP_DISMISS_KEY); } catch {}
+                      window.dispatchEvent(new CustomEvent(SETUP_SHOW_EVENT));
+                      onClose();
+                    }}
+                  >
+                    Show Setup Guide
+                  </button>
+                </div>
+              )}
+
               {/* Embedding status */}
               <div className={`notification-card ${embeddingOk ? 'ok' : 'warn'}`}>
                 <div className="notification-card-row">

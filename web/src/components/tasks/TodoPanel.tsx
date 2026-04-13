@@ -71,6 +71,7 @@ interface TodoPanelProps {
   onCreate: (input: { title: string; priority: string; category?: string; project?: string }) => Promise<Task | unknown>;
   onUpdate?: (id: string, updates: { title?: string }) => void;
   onStar?: (id: string) => void;
+  onDelete?: (id: string) => void;
   onSetPriority?: (id: string, priority: string) => void;
   onFocusTask?: (task: Task, opts?: { openDetail?: boolean }) => void;
   onClearFocus?: () => void;
@@ -214,6 +215,7 @@ interface SortableTaskItemProps {
   onClick: () => void;
   onSetPhase: (id: string, phase: string) => void;
   onStar?: (id: string) => void;
+  onDelete?: (id: string) => void;
   onSetPriority?: (id: string, priority: string) => void;
   onUpdateTitle?: (id: string, title: string) => void;
   onOpenSession?: (sessionId: string) => void;
@@ -233,7 +235,8 @@ interface SortableTaskItemProps {
   searchSemanticScore?: number; // Normalized semantic contribution [0,1]
 }
 
-function SortableTaskItem({ task, isFocused, isDetailOpen, isRecentlyDone, depth = 0, childCount, isExpanded, onToggleExpand, onClick, onSetPhase, onStar, onSetPriority, onUpdateTitle, onOpenSession, openSessionIds, onExpandDetail, onClearFocus, onPinTask, onUnpinTask, onSetTier, onSetDate, isPinned, pinnedTier, searchContext, searchMatchField, searchScore, searchKeywordScore, searchSemanticScore }: SortableTaskItemProps) {
+function SortableTaskItem({ task, isFocused, isDetailOpen, isRecentlyDone, depth = 0, childCount, isExpanded, onToggleExpand, onClick, onSetPhase, onStar, onDelete, onSetPriority, onUpdateTitle, onOpenSession, openSessionIds, onExpandDetail, onClearFocus, onPinTask, onUnpinTask, onSetTier, onSetDate, isPinned, pinnedTier, searchContext, searchMatchField, searchScore, searchKeywordScore, searchSemanticScore }: SortableTaskItemProps) {
+  const integrations = useIntegrations();
   const hookPhases = usePhaseHooks();
   const {
     attributes,
@@ -471,10 +474,122 @@ function SortableTaskItem({ task, isFocused, isDetailOpen, isRecentlyDone, depth
           >
             {task.title}
           </span>
-          {/* Inline info badges (read-only, compact) */}
-          {dueDateLabel && (
-            <span className={`todo-item-due-pill${dueDateOverdue ? ' todo-item-due-overdue' : ''}`}>
-              {dueDateLabel}
+        </div>
+        {/* — badge row: [attention dot below 🏃] status · source · link · actions — */}
+        <div className="todo-item-meta-row">
+          {task.needs_attention && !isDone && (
+            <span className="task-attention-dot" role="img" aria-label="Needs your attention" title="Needs your attention" />
+          )}
+          <TaskStatusDot task={task} onClick={onOpenSession ? () => {
+            const sid = resolveTaskSessionId(task);
+            if (sid) onOpenSession(sid);
+          } : undefined} />
+          {task.source && (() => {
+            const meta = getIntegrationMeta(integrations, task.source);
+            const badge = task.source === 'local' ? 'L' : (meta?.badge ?? task.source.charAt(0).toUpperCase());
+            const integrationName = task.source === 'local' ? 'Local' : (meta?.name ?? task.source);
+            const badgeColor = meta?.badgeColor;
+            const synced = task.source !== 'local' && (!!task.ext?.[task.source] || !!((task as unknown as Record<string, unknown>)[({ 'ms-todo': 'ms_todo_id' } as Record<string, string>)[task.source] ?? '']));
+            const errorClass = task.sync_error ? ' task-source-badge-error' : '';
+            const unsyncedClass = !task.sync_error && task.source !== 'local' && !synced ? ' task-source-badge-unsynced' : '';
+            return (
+              <span
+                className={`task-source-badge${errorClass}${unsyncedClass}`}
+                style={!task.sync_error && !unsyncedClass && badgeColor ? { background: badgeColor, color: 'white' } : task.source === 'local' ? { background: '#8E8E93', color: 'white' } : undefined}
+                title={
+                  task.sync_error
+                    ? `Sync error: ${task.sync_error}`
+                    : task.source === 'local'
+                      ? 'Local only — not synced'
+                      : synced ? `Synced to ${integrationName}` : `Not synced to ${integrationName} — will retry`
+                }
+              >
+                {task.sync_error ? '!' : badge}
+              </span>
+            );
+          })()}
+          {task.external_url && (() => {
+            const meta = getIntegrationMeta(integrations, task.source);
+            const label = meta?.externalLinkLabel ?? meta?.name ?? 'external';
+            return (
+              <a
+                className="task-external-link"
+                href={task.external_url}
+                target="_blank"
+                rel="noopener noreferrer"
+                title={`Open in ${label}`}
+                onClick={(e) => e.stopPropagation()}
+              >
+                &#x2197;
+              </a>
+            );
+          })()}
+          <button
+            className={`task-action-btn task-expand-btn${isFocused ? ' active' : ''}`}
+            onClick={(e) => {
+              e.stopPropagation();
+              if (isFocused) {
+                onClearFocus?.();
+              } else {
+                onExpandDetail?.(task);
+              }
+            }}
+            title={isFocused ? 'Close detail' : 'Open detail'}
+          >
+            {ICONS.ICON_INFO}
+          </button>
+          {onSetPriority ? (
+            <PriorityPicker
+              priority={task.priority}
+              onChange={(p) => onSetPriority(task.id, p)}
+            />
+          ) : (
+            <span className={`badge badge-${task.priority}`}>{task.priority === 'immediate' ? '!!' : task.priority === 'important' ? '!' : task.priority === 'backlog' ? '~' : '--'}</span>
+          )}
+          {onStar && (
+            <button
+              className={`task-action-btn task-star-btn${task.starred ? ' starred' : ''}`}
+              onClick={(e) => { e.stopPropagation(); onStar(task.id); }}
+              title={task.starred ? 'Unstar' : 'Star'}
+            >
+              {task.starred ? ICONS.ICON_STAR_FILLED : ICONS.ICON_STAR_EMPTY}
+            </button>
+          )}
+          {onPinTask && !isPinned && task.status !== 'done' && task.phase !== 'COMPLETE' && (
+            <button
+              className="task-action-btn task-pin-btn"
+              onClick={(e) => { e.stopPropagation(); onPinTask(task.id); }}
+              title="Pin to Focus Dock"
+            >
+              {ICONS.ICON_PIN}
+            </button>
+          )}
+          {isPinned && onUnpinTask && (
+            <button
+              className="task-action-btn task-pin-btn pinned"
+              onClick={(e) => { e.stopPropagation(); onUnpinTask(task.id); }}
+              title="Unpin from Focus Dock"
+            >
+              {ICONS.ICON_PIN_FILLED}
+            </button>
+          )}
+          {onDelete && (
+            <button
+              className="task-action-btn task-delete-btn"
+              onClick={(e) => {
+                e.stopPropagation();
+                if (window.confirm(`Delete task "${task.title}"? This cannot be undone.`)) {
+                  onDelete(task.id);
+                }
+              }}
+              title="Delete task"
+            >
+              {ICONS.ICON_TRASH}
+            </button>
+          )}
+          {dueDateInfo && (
+            <span className={`todo-item-due-pill${dueDateInfo.overdue ? ' todo-item-due-overdue' : ''}`}>
+              {dueDateInfo.label}
             </span>
           )}
           {!!(task as Record<string, unknown>).is_blocked && !isDone && (
@@ -1462,7 +1577,7 @@ function SortableRecentCard({ task, isFocused, isDetailOpen, onClick, onPinTask,
 
 // ── TodoPanel ──
 
-export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onComplete, onSetPhase, onCreate, onUpdate, onStar, onSetPriority, onFocusTask, onClearFocus, focusedTaskId, focusNonce, favorites, ordering, onReorder, onMoveTask, onReparentTask, onOpenSession, onOpenTriageForTask, onPinTask, onUnpinTask, onReorderPinned, onSetTier, onSetDate, pinnedTaskIds, focusTaskIds, nextTaskIds, suppressDetail, openSessionIds, operationError, onClearOperationError, onOperationError, externalCategory, onCategoryChange }: TodoPanelProps) {
+export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onComplete, onSetPhase, onCreate, onUpdate, onStar, onDelete, onSetPriority, onFocusTask, onClearFocus, focusedTaskId, focusNonce, favorites, ordering, onReorder, onMoveTask, onReparentTask, onOpenSession, onOpenTriageForTask, onPinTask, onUnpinTask, onReorderPinned, onSetTier, onSetDate, pinnedTaskIds, focusTaskIds, nextTaskIds, suppressDetail, openSessionIds, operationError, onClearOperationError, onOperationError, externalCategory, onCategoryChange }: TodoPanelProps) {
   // Hide .metadata* tasks (project/category configuration tasks, not user-visible)
   const tasks = useMemo(() => rawTasks.filter((t) => !t.title.startsWith('.metadata')), [rawTasks]);
   const { tierLimits } = useFocusBarContext();
@@ -3214,6 +3329,7 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
                     onClick={() => handleTaskClick(task)}
                     onSetPhase={onSetPhase ?? ((id) => onComplete(id))}
                     onStar={onStar}
+                    onDelete={onDelete}
                     onSetPriority={onSetPriority}
                     onSetDate={onSetDate}
                     onUpdateTitle={onUpdate ? handleUpdateTitle : undefined}
@@ -3256,6 +3372,7 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
                   onClick={() => handleTaskClick(task)}
                   onSetPhase={onSetPhase ?? ((id) => onComplete(id))}
                   onStar={onStar}
+                  onDelete={onDelete}
                   onSetPriority={onSetPriority}
                   onSetDate={onSetDate}
                   onUpdateTitle={onUpdate ? handleUpdateTitle : undefined}
@@ -3329,6 +3446,7 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
                                   onClick={() => handleTaskClick(task)}
                                   onSetPhase={onSetPhase ?? ((id) => onComplete(id))}
                                   onStar={onStar}
+                                  onDelete={onDelete}
                                   onSetPriority={onSetPriority}
                                   onSetDate={onSetDate}
                                   onUpdateTitle={onUpdate ? handleUpdateTitle : undefined}
@@ -3393,6 +3511,7 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
                                                 onClick={() => handleTaskClick(task)}
                                                 onSetPhase={onSetPhase ?? ((id) => onComplete(id))}
                                                 onStar={onStar}
+                                                onDelete={onDelete}
                                                 onSetPriority={onSetPriority}
                                                 onSetDate={onSetDate}
                                                 onUpdateTitle={onUpdate ? handleUpdateTitle : undefined}

@@ -190,6 +190,7 @@ interface UseTasksReturn {
   reorder: (category: string, project: string, taskIds: string[]) => void;
   moveTask: (taskId: string, category: string, project: string, insertNearTaskId?: string) => void;
   reparentTask: (taskId: string, newParentId: string | null) => void;
+  deleteTask: (id: string) => Promise<void>;
 }
 
 export function useTasks(filter?: tasksApi.TaskFilter): UseTasksReturn {
@@ -480,5 +481,14 @@ export function useTasks(filter?: tasksApi.TaskFilter): UseTasksReturn {
       .catch(onOpError);
   }, [refetch, guardEcho, onOpError]);
 
-  return { tasks, loading, error, operationError, clearOperationError, showOperationError, refetch, create, update, toggleComplete, setPhase, star, reorder, moveTask, reparentTask };
+  const deleteTask = useCallback(async (id: string) => {
+    setTasks((prev) => prev.filter((t) => t.id !== id));
+    try {
+      await tasksApi.deleteTask(id, { force: true });
+    } catch (err) {
+      onOpError(err instanceof Error ? err : new Error(String(err)));
+    }
+  }, [onOpError]);
+
+  return { tasks, loading, error, operationError, clearOperationError, showOperationError, refetch, create, update, toggleComplete, setPhase, star, reorder, moveTask, reparentTask, deleteTask };
 }

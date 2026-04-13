@@ -10,12 +10,19 @@ import {
   DAILY_DIR,
   PROJECTS_MEMORY_DIR,
   SESSION_STREAMS_DIR,
+  NOTES_DIR,
+  IMAGES_DIR,
+  REMOTE_IMAGES_DIR,
+  REPOSITORIES_DIR,
+  TIMELINE_DIR,
+  REPOS_MEMORY_DIR,
 } from '../constants.js';
 import { ensureMemoryFile } from './memory-file.js';
 import { seedConfigDefaults } from './config-manager.js';
 
 /**
  * Ensure the full ~/.open-walnut/ directory structure exists.
+ * Called early in startServer() so first-run works on a fresh machine.
  */
 export async function initDirectories(): Promise<void> {
   await ensureDir(WALNUT_HOME);
@@ -28,6 +35,12 @@ export async function initDirectories(): Promise<void> {
   await ensureDir(DAILY_DIR);
   await ensureDir(PROJECTS_MEMORY_DIR);
   await ensureDir(SESSION_STREAMS_DIR);
+  await ensureDir(NOTES_DIR);
+  await ensureDir(IMAGES_DIR);
+  await ensureDir(REMOTE_IMAGES_DIR);
+  await ensureDir(REPOSITORIES_DIR);
+  await ensureDir(TIMELINE_DIR);
+  await ensureDir(REPOS_MEMORY_DIR);
   ensureMemoryFile();
   await seedConfigDefaults();
 }

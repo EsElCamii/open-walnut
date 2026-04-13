@@ -589,6 +589,153 @@ input:focus, textarea:focus, select:focus {
   cursor: not-allowed;
 }
 
+/* ── Setup Banner ── */
+
+.setup-banner {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 14px;
+  margin: 12px;
+  background: var(--bg-secondary);
+}
+
+.setup-banner-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 10px;
+}
+
+.setup-banner-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--fg);
+}
+
+.setup-banner-dismiss {
+  background: none;
+  border: none;
+  color: var(--fg-muted);
+  font-size: 18px;
+  cursor: pointer;
+  padding: 0 4px;
+  line-height: 1;
+}
+
+.setup-banner-dismiss:hover {
+  color: var(--fg);
+}
+
+.setup-banner-steps {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.setup-step {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  padding: 8px;
+  border-radius: var(--radius-sm);
+}
+
+.setup-step.done {
+  opacity: 0.6;
+}
+
+.setup-step-icon {
+  font-size: 14px;
+  flex-shrink: 0;
+  margin-top: 1px;
+}
+
+.setup-step.done .setup-step-icon {
+  color: #34c759;
+}
+
+.setup-step.pending .setup-step-icon {
+  color: var(--fg-muted);
+}
+
+.setup-step-content {
+  flex: 1;
+  min-width: 0;
+}
+
+.setup-step-label {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--fg);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.setup-step-optional {
+  font-size: 11px;
+  font-weight: 400;
+  color: var(--fg-muted);
+  background: var(--bg-tertiary);
+  padding: 1px 5px;
+  border-radius: var(--radius-sm);
+}
+
+.setup-step-action {
+  margin-top: 6px;
+}
+
+.setup-copy-wrap {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.setup-command {
+  font-size: 12px;
+  font-family: var(--font-mono);
+  background: var(--bg-tertiary);
+  padding: 3px 8px;
+  border-radius: var(--radius-sm);
+  color: var(--fg);
+  cursor: pointer;
+  word-break: break-all;
+}
+
+.setup-command:hover {
+  background: var(--border);
+}
+
+.setup-copy-btn {
+  background: none;
+  border: none;
+  color: var(--fg-muted);
+  font-size: 14px;
+  cursor: pointer;
+  padding: 2px 4px;
+  flex-shrink: 0;
+}
+
+.setup-copy-btn:hover {
+  color: var(--fg);
+}
+
+.setup-step-btn {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--accent);
+  background: none;
+  border: 1px solid var(--accent);
+  border-radius: var(--radius-sm);
+  padding: 4px 10px;
+  cursor: pointer;
+}
+
+.setup-step-btn:hover {
+  background: var(--accent);
+  color: #fff;
+}
+
 .main-content {
   flex: 1;
   display: flex;
@@ -9976,6 +10123,10 @@ img[data-lightbox-src],
 .task-star-btn:hover { color: var(--warning); background: rgba(255, 149, 0, 0.08); }
 .task-pin-btn.pinned { color: var(--accent); background: rgba(0, 122, 255, 0.12); }
 .task-pin-btn:hover { color: var(--accent); }
+.task-delete-btn { opacity: 0; transition: opacity 0.15s; }
+.todo-item:hover .task-delete-btn,
+.task-card:hover .task-delete-btn { opacity: 1; }
+.task-delete-btn:hover { color: var(--danger, #ff453a); background: rgba(255, 69, 58, 0.12); }
 
 /* ===== Task Kebab Menu ===== */
 

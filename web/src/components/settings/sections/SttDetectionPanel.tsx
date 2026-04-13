@@ -636,14 +636,32 @@ export function SttDetectionPanel({ config, onSave, onConfigured }: Props) {
     if (!detection?.ffmpeg.found) {
       steps.push({ action: 'install_brew_pkg', params: { pkg: 'ffmpeg' }, label: 'Install ffmpeg' });
     }
-    if (!detection?.whisperCli.found) {
+    // whisper-server is part of the whisper-cpp brew formula
+    const needsWhisperBinary = engine === 'whisper-server'
+      ? !detection?.whisperServer?.found
+      : !detection?.whisperCli.found;
+    if (needsWhisperBinary) {
       steps.push({ action: 'install_brew_pkg', params: { pkg: 'whisper-cpp' }, label: 'Install whisper-cpp' });
     }
     if (steps.length > 0) setInstallSteps(steps);
   };
 
-  const handleInstallComplete = () => {
+  const handleInstallComplete = async () => {
     setInstallSteps(null);
+    setLoading(true);
+    // Retry detection — the binary may not be immediately visible in PATH
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        const result = await fetchSttDetection();
+        setDetection(result);
+        setError(null);
+        setLoading(false);
+        return;
+      } catch {
+        if (attempt < 2) await new Promise(r => setTimeout(r, 500));
+      }
+    }
+    // All retries failed — still run once more to set the error state
     runDetection();
   };
 
@@ -679,7 +697,7 @@ export function SttDetectionPanel({ config, onSave, onConfigured }: Props) {
       {loading && <p className="text-sm text-muted" style={{ marginTop: 8 }}>Scanning system...</p>}
 
       {/* whisper-cpp / whisper-server: binary not installed warning + install button */}
-      {(whisperNotInstalled || whisperServerNotInstalled) && (
+      {!loading && (whisperNotInstalled || whisperServerNotInstalled) && (
         <div className="stt-install-banner">
           <p>{engine === 'whisper-server' ? 'whisper-server' : 'whisper-cli'} is not installed.</p>
           {canInstallViaBrew && !installSteps && (

@@ -10,6 +10,7 @@
  */
 
 import fs from 'node:fs'
+import path from 'node:path'
 import { FREQUENT_DIRS_FILE } from '../constants.js'
 import { log } from '../logging/index.js'
 
@@ -59,6 +60,7 @@ function readStore(): FrequentDirsStore | null {
 }
 
 function writeStore(store: FrequentDirsStore): void {
+  fs.mkdirSync(path.dirname(FREQUENT_DIRS_FILE), { recursive: true })
   fs.writeFileSync(FREQUENT_DIRS_FILE, JSON.stringify(store, null, 2))
 }
 

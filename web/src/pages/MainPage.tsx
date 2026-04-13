@@ -31,6 +31,8 @@ import { shouldHideUiOnlyMessage } from '@/hooks/useDeveloperSettings';
 import { useUiOnlySettings } from '@/hooks/useDeveloperSettings';
 import { resolveTaskSessionId } from '@/utils/session-status';
 import { FocusDock } from '@/components/dock/FocusDock';
+import { SetupBanner } from '@/components/common/SetupBanner';
+import { useSystemHealth } from '@/hooks/useSystemHealth';
 import type { SlashCommand } from '@/commands/types';
 import type { CommandContext } from '@/commands/types';
 
@@ -162,9 +164,10 @@ interface MainPageProps {
 export function MainPage({ visible = true, navigateRef }: MainPageProps) {
   const agentConsole = useAgentConsole();
   const chat = useChat(agentConsole.activeAgentId);
+  const { health, setupComplete } = useSystemHealth();
   const { mode: chatMode, toggleMode, getPlanPayload } = usePlanMode();
   const { connectionState } = useWebSocket();
-  const { tasks, loading, toggleComplete, setPhase, star, create, update, reorder, moveTask, reparentTask, operationError, clearOperationError, showOperationError } = useTasksContext();
+  const { tasks, loading, toggleComplete, setPhase, star, create, update, reorder, moveTask, reparentTask, deleteTask, operationError, clearOperationError, showOperationError } = useTasksContext();
   const favorites = useFavorites();
   const focusBar = useFocusBarContext();
   const pinnedTaskIdSet = useMemo(() => new Set(focusBar.pinnedIds), [focusBar.pinnedIds]);
@@ -177,6 +180,10 @@ export function MainPage({ visible = true, navigateRef }: MainPageProps) {
   const inspector = useContextInspector(agentConsole.activeAgentId);
   // Force re-render when UI Only settings change (hook subscribes to localStorage)
   useUiOnlySettings();
+
+  const handleNavigateSettings = useCallback(() => {
+    navigateRef?.current?.('/settings');
+  }, [navigateRef]);
 
   // Chat panel visibility — toggle via Focus Dock "Chat" button or Sidebar toggle
   const [chatVisible, setChatVisible] = useState<boolean>(
@@ -891,6 +898,7 @@ export function MainPage({ visible = true, navigateRef }: MainPageProps) {
           onCreate={handleCreate}
           onUpdate={handleUpdate}
           onStar={star}
+          onDelete={deleteTask}
           onSetPriority={handleSetPriority}
           onSetDate={handleSetDate}
           onFocusTask={handleFocusTask}
@@ -957,6 +965,10 @@ export function MainPage({ visible = true, navigateRef }: MainPageProps) {
               error={inspector.error}
               onRefresh={inspector.refresh}
             />
+          )}
+
+          {!setupComplete && (
+            <SetupBanner health={health} onNavigateSettings={handleNavigateSettings} />
           )}
 
           <ChatPanel messageCount={chat.messages.length} prependedRef={chat.prependedRef}>

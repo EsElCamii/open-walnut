@@ -561,22 +561,41 @@ tasksRouter.post('/:id/star', async (req: Request, res: Response, next: NextFunc
   }
 })
 
-// DELETE /api/tasks/:id — delete a task (blocked if active sessions exist)
+// DELETE /api/tasks/:id — delete a task (blocked if active sessions exist, unless ?force=true)
 tasksRouter.delete('/:id', async (req: Request, res: Response, next: NextFunction) => {
   try {
     const id = param(req.params.id)
-    const result = await deleteTask(id)
-    log.web.info('task deleted via REST', { taskId: id })
-    bus.emit(EventNames.TASK_DELETED, { id: result.task.id, task: result.task }, ['web-ui', 'main-agent'], { source: 'api' })
-    res.status(204).end()
-  } catch (err) {
-    if (err instanceof ActiveSessionError) {
-      res.status(409).json({
-        error: `Cannot delete task: has active sessions: ${err.activeSessionIds.join(', ')}`,
-        active_session_ids: err.activeSessionIds,  // kept for API compat
-      })
-      return
+    const force = req.query.force === 'true'
+    try {
+      const result = await deleteTask(id)
+      log.web.info('task deleted via REST', { taskId: id })
+      bus.emit(EventNames.TASK_DELETED, { id: result.task.id, task: result.task }, ['web-ui', 'main-agent'], { source: 'api' })
+      res.status(204).end()
+    } catch (err) {
+      if (err instanceof ActiveSessionError && force) {
+        // Force mode: stop sessions and retry
+        const { completeTaskSessions } = await import('../../core/session-tracker.js')
+        const { clearSessionSlot } = await import('../../core/task-manager.js')
+        await completeTaskSessions(err.activeSessionIds)
+        for (const sid of err.activeSessionIds) {
+          try { await clearSessionSlot(id, sid) } catch { /* best-effort */ }
+        }
+        const result = await deleteTask(id)
+        log.web.info('task force-deleted via REST (stopped sessions)', { taskId: id, stoppedSessions: err.activeSessionIds.length })
+        bus.emit(EventNames.TASK_DELETED, { id: result.task.id, task: result.task }, ['web-ui', 'main-agent'], { source: 'api' })
+        res.status(204).end()
+        return
+      }
+      if (err instanceof ActiveSessionError) {
+        res.status(409).json({
+          error: `Cannot delete task: has active sessions: ${err.activeSessionIds.join(', ')}`,
+          active_session_ids: err.activeSessionIds,  // kept for API compat
+        })
+        return
+      }
+      throw err
     }
+  } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)
     if (msg.includes('No task found matching')) {
       res.status(404).json({ error: msg })

@@ -116,8 +116,9 @@ export async function toggleSubtask(taskId: string, subtaskId: string): Promise<
   return res.task;
 }
 
-export function deleteTask(taskId: string): Promise<void> {
-  return apiDelete(`/api/tasks/${taskId}`);
+export function deleteTask(taskId: string, opts?: { force?: boolean }): Promise<void> {
+  const qs = opts?.force ? '?force=true' : '';
+  return apiDelete(`/api/tasks/${taskId}${qs}`);
 }
 
 export function deleteSubtask(taskId: string, subtaskId: string): Promise<void> {

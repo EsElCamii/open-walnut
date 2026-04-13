@@ -6,6 +6,7 @@
  */
 
 import { createServer, type Server as HttpServer } from 'node:http'
+import { execFileSync } from 'node:child_process'
 import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -47,7 +48,6 @@ import { sessionRunner } from '../providers/claude-code-session.js'
 import { SessionHealthMonitor } from '../core/session-health-monitor.js'
 import { SessionReaper } from '../core/session-reaper.js'
 import { subagentRunner } from '../providers/subagent-runner.js'
-import { seedConfigDefaults } from '../core/config-manager.js'
 import { getTask, listTasks } from '../core/task-manager.js'
 import { log } from '../logging/index.js'
 import { usageTracker } from '../core/usage/index.js'
@@ -153,14 +153,51 @@ export interface SystemHealthState {
     lastError?: string;
   };
   daemons?: Array<{ host: string; label: string; connected: boolean }>;
+  claudeCliAvailable: boolean;
+  hasReadyProvider: boolean;
 }
 
 const systemHealth: SystemHealthState = {
   embedding: { total: 0, indexed: 0, unindexed: 0, ollamaAvailable: true },
+  claudeCliAvailable: false,
+  hasReadyProvider: false,
 }
 
 export function getSystemHealth(): SystemHealthState {
   return systemHealth
+}
+
+/** Check if Claude Code CLI is on the PATH. */
+function checkClaudeCliAvailable(): boolean {
+  try {
+    execFileSync('which', ['claude'], { stdio: 'ignore' })
+    return true
+  } catch {
+    return false
+  }
+}
+
+/** Check if any AI provider has status 'ready'. */
+async function checkHasReadyProvider(): Promise<boolean> {
+  try {
+    const { getConfig } = await import('../core/config-manager.js')
+    const { buildProviderMap } = await import('../agent/providers/registry.js')
+    const { autoDetectApiKey } = await import('../agent/providers/secret.js')
+    const config = await getConfig()
+    const merged = buildProviderMap(config.providers)
+    for (const [name, prov] of Object.entries(merged)) {
+      if (prov.api === 'ollama') continue // Ollama is optional, not a primary provider
+      const envKey = autoDetectApiKey(name)
+      const hasKey = !!(prov.api_key || prov.bearer_token || envKey)
+      const keyNotRequired = prov.api === 'bedrock'
+      const implemented = prov.api === 'bedrock' || prov.api === 'anthropic-messages'
+        || prov.api === 'openai-chat' || prov.api === 'google-generative-ai'
+      if (implemented && (hasKey || keyNotRequired)) return true
+    }
+    return false
+  } catch {
+    return false
+  }
 }
 
 /**
@@ -170,8 +207,19 @@ export function getSystemHealth(): SystemHealthState {
 export async function startServer(options: ServerOptions = {}): Promise<HttpServer> {
   if (httpServer) throw new Error('Server already running. Call stopServer() first.')
 
-  // Seed config defaults (e.g. available_models) on first run
-  await seedConfigDefaults()
+  // Ensure ~/.open-walnut/ directory structure exists and seed config defaults
+  const { initDirectories } = await import('../core/init.js')
+  await initDirectories()
+
+  // ── Setup health checks: Claude CLI + provider readiness ──
+  systemHealth.claudeCliAvailable = checkClaudeCliAvailable()
+  if (!systemHealth.claudeCliAvailable) {
+    log.web.warn('Claude Code CLI not found on PATH — sessions will not work')
+  }
+  systemHealth.hasReadyProvider = await checkHasReadyProvider()
+  if (!systemHealth.hasReadyProvider) {
+    log.web.warn('No AI provider configured — configure one in Settings')
+  }
 
   // Migrate global-notes.md → notes/global.md (one-time, idempotent)
   await migrateGlobalNotes()
@@ -870,6 +918,18 @@ export async function startServer(options: ServerOptions = {}): Promise<HttpServ
         error: err instanceof Error ? err.message : String(err),
       })
     }
+  })
+
+  // -- Re-check provider readiness when config changes (e.g. user adds API key in Settings) --
+  bus.subscribe('setup-health', async (event) => {
+    if (event.name !== EventNames.CONFIG_CHANGED) return
+    try {
+      const prev = systemHealth.hasReadyProvider
+      systemHealth.hasReadyProvider = await checkHasReadyProvider()
+      if (systemHealth.hasReadyProvider !== prev) {
+        broadcastEvent('system:health', systemHealth)
+      }
+    } catch { /* non-critical */ }
   })
 
   // -- Main AI triage: process session results with AI judgment --
@@ -1941,6 +2001,7 @@ export async function stopServer(): Promise<void> {
   bus.unsubscribe('main-ai')
   bus.unsubscribe('heartbeat-config')
   bus.unsubscribe('embedding-sync')
+  bus.unsubscribe('setup-health')
   closeWss()
 
   if (httpServer) {
