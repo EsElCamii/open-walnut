@@ -91,10 +91,7 @@ export function Sidebar({ open, collapsed, onToggleCollapse }: SidebarProps) {
           <TasksIcon />
           <span className="sidebar-label">Tasks</span>
         </NavLink>
-        <NavLink to="/search" className={navLinkClass} title={collapsed ? 'Search' : undefined}>
-          <SearchIcon />
-          <span className="sidebar-label">Search</span>
-        </NavLink>
+
         <NavLink to="/sessions" className={navLinkClass} title={collapsed ? 'Sessions' : undefined}>
           <SessionsIcon />
           <span className="sidebar-label">Sessions</span>
@@ -107,18 +104,12 @@ export function Sidebar({ open, collapsed, onToggleCollapse }: SidebarProps) {
           <NotesIcon />
           <span className="sidebar-label">Notes</span>
         </NavLink>
-        <NavLink to="/repos" className={navLinkClass} title={collapsed ? 'Repos' : undefined}>
-          <ReposIcon />
-          <span className="sidebar-label">Repos</span>
-        </NavLink>
+
         <NavLink to="/cron" className={navLinkClass} title={collapsed ? 'Scheduled' : undefined}>
           <ScheduleIcon />
           <span className="sidebar-label">Scheduled</span>
         </NavLink>
-        <NavLink to="/usage" className={navLinkClass} title={collapsed ? 'Usage' : undefined}>
-          <UsageIcon />
-          <span className="sidebar-label">Usage</span>
-        </NavLink>
+
         <NavLink to="/agents" className={navLinkClass} title={collapsed ? 'Agents' : undefined}>
           <AgentsIcon />
           <span className="sidebar-label">Agents</span>
@@ -131,14 +122,8 @@ export function Sidebar({ open, collapsed, onToggleCollapse }: SidebarProps) {
           <CommandsIcon />
           <span className="sidebar-label">Commands</span>
         </NavLink>
-        <NavLink to="/hooks" className={navLinkClass} title={collapsed ? 'Hooks' : undefined}>
-          <HooksIcon />
-          <span className="sidebar-label">Hooks</span>
-        </NavLink>
-        <NavLink to="/timeline" className={navLinkClass} title={collapsed ? 'Timeline' : undefined}>
-          <TimelineIcon />
-          <span className="sidebar-label">Timeline</span>
-        </NavLink>
+
+
         <NavLink to="/settings" className={navLinkClass} title={collapsed ? 'Settings' : undefined}>
           <SettingsIcon />
           <span className="sidebar-label">Settings</span>
@@ -183,17 +168,6 @@ export function Sidebar({ open, collapsed, onToggleCollapse }: SidebarProps) {
         </div>
       )}
 
-      <div className="sidebar-stats">
-        <div className="sidebar-stat">
-          <span>Tasks</span>
-          <span className="sidebar-stat-value" id="stat-tasks">--</span>
-        </div>
-        <div className="sidebar-stat">
-          <span>Active</span>
-          <span className="sidebar-stat-value" id="stat-active">--</span>
-        </div>
-      </div>
-
       <NotificationPanel
         open={notifOpen}
         onClose={() => setNotifOpen(false)}
@@ -227,14 +201,6 @@ function TasksIcon() {
   );
 }
 
-function SearchIcon() {
-  return (
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-      <circle cx="11" cy="11" r="8" />
-      <line x1="21" y1="21" x2="16.65" y2="16.65" />
-    </svg>
-  );
-}
 
 function SessionsIcon() {
   return (
@@ -264,15 +230,6 @@ function ScheduleIcon() {
   );
 }
 
-function UsageIcon() {
-  return (
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-      <line x1="18" y1="20" x2="18" y2="10" />
-      <line x1="12" y1="20" x2="12" y2="4" />
-      <line x1="6" y1="20" x2="6" y2="14" />
-    </svg>
-  );
-}
 
 function AgentsIcon() {
   return (
@@ -302,27 +259,7 @@ function CommandsIcon() {
   );
 }
 
-function HooksIcon() {
-  return (
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-      <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2" />
-    </svg>
-  );
-}
 
-function TimelineIcon() {
-  return (
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-      <line x1="12" y1="2" x2="12" y2="22" />
-      <circle cx="12" cy="6" r="2" />
-      <circle cx="12" cy="12" r="2" />
-      <circle cx="12" cy="18" r="2" />
-      <line x1="14" y1="6" x2="20" y2="6" />
-      <line x1="4" y1="12" x2="10" y2="12" />
-      <line x1="14" y1="18" x2="20" y2="18" />
-    </svg>
-  );
-}
 
 function MemoryIcon() {
   return (
@@ -335,15 +272,6 @@ function MemoryIcon() {
   );
 }
 
-function ReposIcon() {
-  return (
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-      <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
-      <line x1="12" y1="11" x2="12" y2="17" />
-      <polyline points="9 14 12 11 15 14" />
-    </svg>
-  );
-}
 
 function NotesIcon() {
   return (

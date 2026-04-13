@@ -33,6 +33,8 @@ import { resolveTaskSessionId } from '@/utils/session-status';
 import { FocusDock } from '@/components/dock/FocusDock';
 import { SetupBanner } from '@/components/common/SetupBanner';
 import { useSystemHealth } from '@/hooks/useSystemHealth';
+import { getErrorSuggestion } from '@/utils/error-suggestions';
+import { ErrorSuggestionLink } from '@/components/common/ErrorSuggestionLink';
 import type { SlashCommand } from '@/commands/types';
 import type { CommandContext } from '@/commands/types';
 
@@ -181,8 +183,8 @@ export function MainPage({ visible = true, navigateRef }: MainPageProps) {
   // Force re-render when UI Only settings change (hook subscribes to localStorage)
   useUiOnlySettings();
 
-  const handleNavigateSettings = useCallback(() => {
-    navigateRef?.current?.('/settings');
+  const handleNavigateSettings = useCallback((hash?: string) => {
+    navigateRef?.current?.(`/settings${hash ?? ''}`);
   }, [navigateRef]);
 
   // Chat panel visibility — toggle via Focus Dock "Chat" button or Sidebar toggle
@@ -1020,7 +1022,20 @@ export function MainPage({ visible = true, navigateRef }: MainPageProps) {
               </div>
             )}
             {chat.error && (
-              <div className="text-sm" style={{ color: 'var(--error)', padding: '8px 12px' }}>Error: {chat.error}</div>
+              <div className="chat-message chat-message-notification chat-message-notification-error">
+                <div className="chat-message-header chat-notification-header">
+                  <div className="chat-message-role">Error</div>
+                </div>
+                <div className="chat-message-content">
+                  <div className="markdown-body">
+                    <p>{chat.error}</p>
+                  </div>
+                  {(() => {
+                    const sug = getErrorSuggestion(chat.error);
+                    return sug ? <ErrorSuggestionLink {...sug} /> : null;
+                  })()}
+                </div>
+              </div>
             )}
           </ChatPanel>
 

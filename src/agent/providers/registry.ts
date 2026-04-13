@@ -100,9 +100,11 @@ export function buildProviderMap(
     }
   }
 
-  // 3. Inject Bedrock bearer token from env if not already set.
-  //    Supports Identity Center (SSO) bearer-token auth for Bedrock.
-  if (result.bedrock && !result.bedrock.bearer_token) {
+  // 3. Inject Bedrock bearer token from env if no auth method is explicitly configured.
+  //    Only inject when there's no bearer_token, no access keys, and no profile —
+  //    otherwise the env token would override the user's chosen auth method.
+  if (result.bedrock && !result.bedrock.bearer_token
+      && !result.bedrock.aws_access_key_id && !result.bedrock.aws_profile) {
     const envToken = process.env.AWS_BEARER_TOKEN_BEDROCK;
     if (envToken) {
       result.bedrock = { ...result.bedrock, bearer_token: envToken };

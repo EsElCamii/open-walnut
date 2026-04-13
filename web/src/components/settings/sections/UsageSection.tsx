@@ -13,15 +13,15 @@ const PERIODS: { value: Period; label: string }[] = [
   { value: 'all', label: 'All time' },
 ];
 
-export function UsagePage() {
+export function UsageSection() {
   const { summary, daily, bySource, byModel, recent, loading, error, period, setPeriod, refresh } = useUsage();
 
   const activeSummary = summary?.[period === 'today' ? 'today' : period === '7d' ? 'week' : period === '30d' ? 'month' : 'allTime'];
 
   return (
-    <div className="usage-page">
+    <div id="usage" className="card settings-section settings-section-wide">
       <div className="usage-header">
-        <h1>Usage &amp; Costs</h1>
+        <h3 className="settings-section-title">Usage &amp; Costs</h3>
         <button className="usage-refresh-btn" onClick={refresh} disabled={loading}>
           Refresh
         </button>
@@ -98,4 +98,3 @@ export function UsagePage() {
     </div>
   );
 }
-

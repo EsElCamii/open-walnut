@@ -6,7 +6,7 @@ import crypto from 'node:crypto';
 import { log } from '../../logging/index.js';
 import { listTasks } from '../task-manager.js';
 import type { Task } from '../types.js';
-import { batchEmbed, unloadModel, type OllamaEmbedOptions } from './client.js';
+import { batchEmbed, unloadModel, isOllamaAvailable, type OllamaEmbedOptions } from './client.js';
 import {
   ensureEmbeddingTables,
   getTaskEmbeddingHash,
@@ -212,9 +212,8 @@ export async function reconcileAllEmbeddings(
   const { getAllTaskEmbeddings } = await import('./store.js');
   const indexedTasks = getAllTaskEmbeddings().length;
 
-  // Ollama was available if we embedded everything we needed to, or nothing needed embedding
-  const neededEmbedding = totalTasks - taskResult.skipped;
-  const ollamaAvailable = neededEmbedding === 0 || taskResult.embedded === neededEmbedding;
+  // Actually ping Ollama to check availability instead of inferring from results
+  const ollamaAvailable = await isOllamaAvailable(options?.ollamaUrl);
 
   if (totalEmbedded > 0) {
     log.agent.info(`Embedding reconciliation complete in ${elapsed}ms (${totalEmbedded} vectors)`);

@@ -167,6 +167,17 @@ export function getSystemHealth(): SystemHealthState {
   return systemHealth
 }
 
+/** Re-run all health checks, update shared state, and broadcast to clients. */
+export async function refreshSystemHealth(): Promise<SystemHealthState> {
+  systemHealth.claudeCliAvailable = checkClaudeCliAvailable()
+  systemHealth.hasReadyProvider = await checkHasReadyProvider()
+  const { resetAvailabilityCache, isOllamaAvailable } = await import('../core/embedding/client.js')
+  resetAvailabilityCache()
+  systemHealth.embedding.ollamaAvailable = await isOllamaAvailable()
+  broadcastEvent('system:health', systemHealth)
+  return systemHealth
+}
+
 /** Check if Claude Code CLI is on the PATH. */
 function checkClaudeCliAvailable(): boolean {
   try {
@@ -177,22 +188,36 @@ function checkClaudeCliAvailable(): boolean {
   }
 }
 
-/** Check if any AI provider has status 'ready'. */
+/** Check if at least one AI provider is ready.
+ *  Uses the same buildProviderMap + credential detection as the Settings page
+ *  so the two always agree. */
 async function checkHasReadyProvider(): Promise<boolean> {
   try {
     const { getConfig } = await import('../core/config-manager.js')
     const { buildProviderMap } = await import('../agent/providers/registry.js')
-    const { autoDetectApiKey } = await import('../agent/providers/secret.js')
     const config = await getConfig()
-    const merged = buildProviderMap(config.providers)
-    for (const [name, prov] of Object.entries(merged)) {
-      if (prov.api === 'ollama') continue // Ollama is optional, not a primary provider
-      const envKey = autoDetectApiKey(name)
-      const hasKey = !!(prov.api_key || prov.bearer_token || envKey)
-      const keyNotRequired = prov.api === 'bedrock'
+    // buildProviderMap auto-detects bedrock + merges env-based providers
+    const providers = buildProviderMap(config.providers)
+    for (const [, prov] of Object.entries(providers)) {
+      if (prov.api === 'ollama') continue
       const implemented = prov.api === 'bedrock' || prov.api === 'anthropic-messages'
         || prov.api === 'openai-chat' || prov.api === 'google-generative-ai'
-      if (implemented && (hasKey || keyNotRequired)) return true
+      if (!implemented) continue
+      // For bedrock: check the full AWS credential chain (env, files, profiles)
+      if (prov.api === 'bedrock') {
+        if (prov.bearer_token || prov.api_key) return true
+        if (process.env.AWS_BEARER_TOKEN_BEDROCK) return true
+        if (process.env.AWS_ACCESS_KEY_ID && process.env.AWS_SECRET_ACCESS_KEY) return true
+        // Check ~/.aws/credentials file
+        const { existsSync } = await import('node:fs')
+        const { join } = await import('node:path')
+        const home = process.env.HOME ?? ''
+        if (existsSync(join(home, '.aws', 'credentials'))) return true
+        if (existsSync(join(home, '.aws', 'config'))) return true
+        continue
+      }
+      // Other providers need an explicit key
+      if (prov.api_key || prov.bearer_token) return true
     }
     return false
   } catch {

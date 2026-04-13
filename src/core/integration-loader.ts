@@ -375,6 +375,19 @@ async function loadPlugin(
 
   // Validate config against configSchema
   const { enabled: _enabled, ...pluginConfig } = configEntry;
+
+  // Skip plugin if required config fields are missing
+  const requiredFields = (manifest.configSchema as any)?.required as string[] | undefined;
+  if (requiredFields?.length) {
+    const missing = requiredFields.filter(f => !(f in pluginConfig));
+    if (missing.length > 0) {
+      log.info('Plugin not loaded — missing required config', {
+        id: pluginId, missing, hint: `Add to plugins.${pluginId} in config.yaml`,
+      });
+      return;
+    }
+  }
+
   if (manifest.configSchema && Object.keys(pluginConfig).length > 0) {
     const errors = validateConfigValue(pluginConfig, manifest.configSchema, `plugins.${pluginId}`);
     if (errors.length > 0) {

@@ -3,6 +3,8 @@ import type { Config } from '@open-walnut/core';
 import { SectionCard } from '../inputs/SectionCard';
 import { ToggleSwitch } from '../inputs/ToggleSwitch';
 import { NumberInput } from '../inputs/NumberInput';
+import { useSystemHealth } from '@/hooks/useSystemHealth';
+import { InstallButton } from '@/components/common/InstallButton';
 
 interface Props {
   config: Config;
@@ -16,6 +18,8 @@ export function SearchSection({ config, onSave }: Props) {
   const [model, setModel] = useState(search.model ?? 'bge-m3');
   const [defaultMode, setDefaultMode] = useState(search.default_mode ?? 'hybrid');
   const [rrfAlpha, setRrfAlpha] = useState<number | undefined>(search.rrf_alpha ?? 0.4);
+  const { health } = useSystemHealth();
+  const ollamaOk = health.embedding.ollamaAvailable;
 
   useEffect(() => {
     const s = config.search ?? {};
@@ -54,6 +58,15 @@ export function SearchSection({ config, onSave }: Props) {
           onChange={(e) => setOllamaUrl(e.target.value)}
           placeholder="http://localhost:11434"
         />
+        {!ollamaOk && (
+          <div style={{ marginTop: 6, display: 'flex', alignItems: 'center', gap: 8 }}>
+            <span className="text-sm" style={{ color: 'var(--red, #ff3b30)' }}>Ollama not detected</span>
+            <InstallButton target="ollama" label="Install Ollama" />
+          </div>
+        )}
+        {ollamaOk && (
+          <p className="text-sm" style={{ marginTop: 2, color: 'var(--green, #34c759)' }}>Ollama connected</p>
+        )}
       </div>
 
       <div className="form-row">

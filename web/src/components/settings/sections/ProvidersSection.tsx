@@ -4,7 +4,8 @@ import { SectionCard } from '../inputs/SectionCard';
 import { SecretInput } from '../inputs/SecretInput';
 import { StatusIndicator } from '../inputs/StatusIndicator';
 import { NumberInput } from '../inputs/NumberInput';
-import { fetchProviders, testProvider, testConnection, type ProviderStatus, type TestConnectionResult, type ModelEntry } from '@/api/config';
+import { fetchProviders, fetchAwsProfiles, testProvider, testConnection, type ProviderStatus, type TestConnectionResult, type ModelEntry } from '@/api/config';
+import { InstallButton } from '@/components/common/InstallButton';
 
 // Providers we actively test and support.
 const ALL_PROVIDERS: { name: string; label: string; api: string; base_url?: string; needsKey: boolean }[] = [
@@ -49,47 +50,139 @@ interface Props {
 // ── Bedrock-specific config inside the active card ──
 function BedrockConfig({
   config,
+  serverInfo,
   onSave,
+  onAfterSave,
   onTest,
   testStatus,
   testMsg,
 }: {
   config: Config;
+  serverInfo?: ProviderStatus;
   onSave: (partial: Partial<Config>) => Promise<void>;
-  onTest: (region: string, token: string) => Promise<void>;
+  onAfterSave?: () => Promise<void>;
+  onTest: (params: {
+    bedrock_region: string;
+    bedrock_bearer_token?: string;
+    bedrock_access_key?: string;
+    bedrock_secret_key?: string;
+    bedrock_profile?: string;
+  }) => Promise<void>;
   testStatus: 'idle' | 'testing' | 'ok' | 'error';
   testMsg?: string;
 }) {
-  const envHint = (config as Config & { _envTokenHint?: string })._envTokenHint ?? '';
-  const [region, setRegion] = useState(config.provider?.bedrock_region ?? 'us-west-2');
-  const [token, setToken] = useState(config.provider?.bedrock_bearer_token ?? '');
+  const bedrockConf = config.providers?.bedrock;
+  const legacyRegion = config.provider?.bedrock_region;
+  const legacyToken = config.provider?.bedrock_bearer_token;
+
+  const [region, setRegion] = useState(bedrockConf?.region ?? legacyRegion ?? 'us-west-2');
+  const [token, setToken] = useState(bedrockConf?.bearer_token ?? legacyToken ?? '');
+  const [accessKey, setAccessKey] = useState(bedrockConf?.aws_access_key_id ?? '');
+  const [secretKey, setSecretKey] = useState(bedrockConf?.aws_secret_access_key ?? '');
+  const [profile, setProfile] = useState(bedrockConf?.aws_profile ?? '');
+  const [profiles, setProfiles] = useState<string[]>([]);
   const [saving, setSaving] = useState(false);
 
+  // Credential source detected by backend
+  const cs = serverInfo?.credential_source;
+  const keyHint = serverInfo?.key_hint;
+  const isReady = serverInfo?.status === 'ready';
+
+  // Determine which method the backend is actually using
+  const detectedMethod: 'token' | 'keys' | 'profile' | 'auto' =
+    cs === 'bearer_token' ? 'token'
+    : (cs === 'access_keys' || cs === 'env_api_key' || cs === 'aws_env' || cs === 'aws_credentials_file' || cs === 'api_key') ? 'keys'
+    : (cs === 'profile' || cs === 'aws_config_file') ? 'profile'
+    : 'auto';
+
+  // Selected credential tab — defaults to backend-detected method, or 'token' as fallback
+  const [selectedMethod, setSelectedMethod] = useState<'token' | 'keys' | 'profile'>(
+    detectedMethod !== 'auto' ? detectedMethod : 'token'
+  );
+
   useEffect(() => {
-    setRegion(config.provider?.bedrock_region ?? 'us-west-2');
-    setToken(config.provider?.bedrock_bearer_token ?? '');
+    const bc = config.providers?.bedrock;
+    setRegion(bc?.region ?? config.provider?.bedrock_region ?? 'us-west-2');
+    setToken(bc?.bearer_token ?? config.provider?.bedrock_bearer_token ?? '');
+    setAccessKey(bc?.aws_access_key_id ?? '');
+    setSecretKey(bc?.aws_secret_access_key ?? '');
+    setProfile(bc?.aws_profile ?? '');
   }, [config]);
 
-  const displayValue = token || envHint;
+  // Update selected tab when backend detection changes
+  useEffect(() => {
+    if (detectedMethod !== 'auto') setSelectedMethod(detectedMethod);
+  }, [detectedMethod]);
+
+  // Fetch AWS profiles on mount
+  useEffect(() => {
+    fetchAwsProfiles().then(setProfiles).catch(() => {});
+  }, []);
+
+  // Save with a specific method (uses current field values)
+  const saveWithMethod = async (method: 'token' | 'keys' | 'profile') => {
+    const creds: Record<string, string> = {};
+    if (method === 'token' && token) creds.bearer_token = token;
+    if (method === 'keys' && accessKey) creds.aws_access_key_id = accessKey;
+    if (method === 'keys' && secretKey) creds.aws_secret_access_key = secretKey;
+    if (method === 'profile' && profile) creds.aws_profile = profile;
+
+    await onSave({
+      providers: {
+        ...config.providers,
+        bedrock: {
+          api: 'bedrock' as const,
+          region,
+          ...creds,
+        },
+      },
+    });
+    await onAfterSave?.();
+  };
 
   const handleSave = async () => {
     setSaving(true);
     try {
-      await onSave({
-        provider: {
-          ...config.provider,
-          type: config.provider?.type ?? 'bedrock',
-          bedrock_region: region,
-          ...(token ? { bedrock_bearer_token: token } : {}),
-        },
-      });
+      await saveWithMethod(selectedMethod);
     } finally {
       setSaving(false);
     }
   };
 
+  // Check if a method has the required fields filled
+  const methodReady = (method: 'token' | 'keys' | 'profile'): boolean => {
+    if (method === 'token') return !!(token || (cs === 'bearer_token'));  // env token counts
+    if (method === 'keys') return !!(accessKey && secretKey);
+    if (method === 'profile') return !!(profile || profiles.length > 0);  // profile dropdown has a default
+    return false;
+  };
+
+  // Radio click: select + auto-save only if fields are ready
+  const selectMethod = (method: 'token' | 'keys' | 'profile') => {
+    if (method === selectedMethod) return;
+    setSelectedMethod(method);
+    if (methodReady(method)) saveWithMethod(method);
+  };
+
+  // Auto-save when fields change (called on blur from inputs)
+  const handleFieldBlur = () => {
+    if (methodReady(selectedMethod)) saveWithMethod(selectedMethod);
+  };
+
+  const handleTest = () => {
+    const params: Parameters<typeof onTest>[0] = { bedrock_region: region };
+    if (selectedMethod === 'token' && token) params.bedrock_bearer_token = token;
+    if (selectedMethod === 'keys' && accessKey && secretKey) {
+      params.bedrock_access_key = accessKey;
+      params.bedrock_secret_key = secretKey;
+    }
+    if (selectedMethod === 'profile' && profile) params.bedrock_profile = profile;
+    onTest(params);
+  };
+
   return (
     <div className="provider-active-config">
+      {/* Region — applies to all auth methods */}
       <div className="provider-config-row">
         <div className="form-group" style={{ margin: 0, flex: 1, maxWidth: 200 }}>
           <label htmlFor="bedrock-region">Region</label>
@@ -97,28 +190,116 @@ function BedrockConfig({
             {BEDROCK_REGIONS.map((r) => <option key={r} value={r}>{r}</option>)}
           </select>
         </div>
-        <div className="form-group" style={{ margin: 0, flex: 2 }}>
-          <label htmlFor="bedrock-token">Bearer Token</label>
+      </div>
+
+      {/* Credentials — radio selection */}
+      <div className="bedrock-cred-section">
+        <div className="bedrock-cred-section-header">Credentials</div>
+
+        {/* Bearer Token */}
+        <div className={`bedrock-cred-group${selectedMethod !== 'token' ? ' dimmed' : ''}`}>
+          <label className="bedrock-cred-radio" onClick={() => selectMethod('token')}>
+            <input type="radio" name="bedrock-auth" checked={selectedMethod === 'token'} onChange={() => selectMethod('token')} />
+            <span>Bearer Token</span>
+          </label>
           <SecretInput
             id="bedrock-token"
-            value={displayValue}
+            value={token}
             onChange={setToken}
-            placeholder="Via environment variable or paste here"
+            onBlur={handleFieldBlur}
+            disabled={selectedMethod !== 'token'}
+            placeholder={cs === 'bearer_token' && keyHint && !token
+              ? `Detected from env (${keyHint})`
+              : 'AWS Identity Center bearer token'}
           />
-          {!token && envHint && (
-            <p className="text-sm text-muted" style={{ marginTop: 2 }}>
-              From environment variable.
+          {selectedMethod === 'token' && cs === 'bearer_token' && !token && (
+            <p className="text-xs text-muted" style={{ marginTop: 2 }}>
+              Using <code style={{ fontSize: 11 }}>AWS_BEARER_TOKEN_BEDROCK</code> from env. Paste above to override.
+            </p>
+          )}
+        </div>
+
+        {/* Access Keys */}
+        <div className={`bedrock-cred-group${selectedMethod !== 'keys' ? ' dimmed' : ''}`}>
+          <label className="bedrock-cred-radio" onClick={() => selectMethod('keys')}>
+            <input type="radio" name="bedrock-auth" checked={selectedMethod === 'keys'} onChange={() => selectMethod('keys')} />
+            <span>Access Keys</span>
+          </label>
+          <input
+            id="bedrock-access-key"
+            type="text"
+            value={accessKey}
+            onChange={(e) => setAccessKey(e.target.value)}
+            onBlur={handleFieldBlur}
+            disabled={selectedMethod !== 'keys'}
+            placeholder="Access Key ID (AKIA...)"
+            autoComplete="off"
+          />
+          <SecretInput
+            id="bedrock-secret-key"
+            value={secretKey}
+            onChange={setSecretKey}
+            onBlur={handleFieldBlur}
+            disabled={selectedMethod !== 'keys'}
+            placeholder="Secret Access Key"
+          />
+          {selectedMethod === 'keys' && cs === 'aws_env' && !accessKey && (
+            <p className="text-xs text-muted" style={{ marginTop: 2 }}>
+              Using <code style={{ fontSize: 11 }}>AWS_ACCESS_KEY_ID</code> from env. Enter keys above to override.
+            </p>
+          )}
+          {selectedMethod === 'keys' && cs === 'aws_credentials_file' && !accessKey && (
+            <p className="text-xs text-muted" style={{ marginTop: 2 }}>
+              Using <code style={{ fontSize: 11 }}>~/.aws/credentials</code>. Enter keys above to override.
+            </p>
+          )}
+        </div>
+
+        {/* AWS Profile */}
+        <div className={`bedrock-cred-group${selectedMethod !== 'profile' ? ' dimmed' : ''}`}>
+          <label className="bedrock-cred-radio" onClick={() => selectMethod('profile')}>
+            <input type="radio" name="bedrock-auth" checked={selectedMethod === 'profile'} onChange={() => selectMethod('profile')} />
+            <span>AWS Profile</span>
+          </label>
+          {profiles.length > 0 ? (
+            <select
+              id="bedrock-profile"
+              value={profile}
+              disabled={selectedMethod !== 'profile'}
+              onChange={(e) => { setProfile(e.target.value); setTimeout(handleFieldBlur, 0); }}
+            >
+              <option value="">None (auto-detect)</option>
+              {profiles.map((p) => <option key={p} value={p}>{p}</option>)}
+            </select>
+          ) : (
+            <input
+              id="bedrock-profile"
+              type="text"
+              value={profile}
+              disabled={selectedMethod !== 'profile'}
+              onChange={(e) => setProfile(e.target.value)}
+              onBlur={handleFieldBlur}
+              placeholder="Profile name from ~/.aws/config"
+            />
+          )}
+          {selectedMethod === 'profile' && (
+            <p className="text-xs text-muted" style={{ marginTop: 2 }}>
+              {cs === 'aws_config_file' && !profile
+                ? <>Using <code style={{ fontSize: 11 }}>~/.aws/config</code>. Select a profile to override.</>
+                : 'Supports SSO, credential_process, role chaining.'}
             </p>
           )}
         </div>
       </div>
-      <div className="provider-config-row" style={{ alignItems: 'center', gap: 8 }}>
+
+      {/* Actions */}
+      <div className="provider-config-row" style={{ alignItems: 'center', gap: 8, marginTop: 8 }}>
         <button type="button" className="btn btn-primary btn-sm" onClick={handleSave} disabled={saving}>
           {saving ? 'Saving...' : 'Save'}
         </button>
         <button
           type="button" className="btn btn-sm"
-          onClick={() => onTest(region, token)}
+          onClick={handleTest}
           disabled={testStatus === 'testing'}
         >
           {testStatus === 'testing' ? 'Testing...' : 'Test Connection'}
@@ -242,6 +423,7 @@ function ProviderCard({
   maxTokens,
   onSelectActive,
   onSave,
+  onAfterSave,
   onSaveKey,
   onSaveMainModel,
   onSaveMaxTokens,
@@ -256,6 +438,7 @@ function ProviderCard({
   maxTokens: number | undefined;
   onSelectActive: (name: string) => void;
   onSave: (partial: Partial<Config>) => Promise<void>;
+  onAfterSave?: () => Promise<void>;
   onSaveKey: (name: string, key: string) => Promise<void>;
   onSaveMainModel: (v: string) => void;
   onSaveMaxTokens: (v: number | undefined) => void;
@@ -294,11 +477,17 @@ function ProviderCard({
     }
   };
 
-  const handleBedrockTest = async (region: string, token: string) => {
+  const handleBedrockTest = async (params: {
+    bedrock_region: string;
+    bedrock_bearer_token?: string;
+    bedrock_access_key?: string;
+    bedrock_secret_key?: string;
+    bedrock_profile?: string;
+  }) => {
     setTestStatus('testing');
     setTestMsg(undefined);
     try {
-      const result = await testConnection({ bedrock_region: region, bedrock_bearer_token: token || undefined });
+      const result = await testConnection(params);
       if (result.ok) {
         setTestStatus('ok');
         setTestMsg(`Connected${result.latencyMs ? ` (${result.latencyMs}ms)` : ''}`);
@@ -327,15 +516,26 @@ function ProviderCard({
     }
   };
 
-  // Status display
+  // Status display — rely on backend status, not frontend needsKey heuristics
   let statusDot: 'connected' | 'error' | 'unknown' = 'unknown';
   let statusLabel = 'Not configured';
   if (testStatus === 'ok') { statusDot = 'connected'; statusLabel = testMsg!; }
   else if (testStatus === 'error') { statusDot = 'error'; statusLabel = testMsg!; }
   else if (testStatus === 'testing') { statusDot = 'unknown'; statusLabel = 'Testing...'; }
-  else if (isConfigured) { statusDot = 'connected'; statusLabel = isEnv ? 'Ready (env)' : 'Ready'; }
-  else if (!def.needsKey && def.api === 'ollama') { statusDot = 'error'; statusLabel = 'Offline'; }
-  else if (!def.needsKey) { statusDot = 'connected'; statusLabel = 'Available'; }
+  else if (isConfigured) {
+    statusDot = 'connected';
+    // Show credential source for bedrock
+    const cs = serverInfo?.credential_source;
+    if (cs === 'access_keys') statusLabel = 'Ready (access keys)';
+    else if (cs === 'profile') statusLabel = 'Ready (profile)';
+    else if (cs === 'aws_credentials_file') statusLabel = 'Ready (~/.aws/credentials)';
+    else if (cs === 'aws_config_file') statusLabel = 'Ready (~/.aws/config)';
+    else if (cs === 'aws_env') statusLabel = 'Ready (AWS env vars)';
+    else if (cs === 'bearer_token' && isEnv) statusLabel = 'Ready (env)';
+    else if (isEnv) statusLabel = 'Ready (env)';
+    else statusLabel = 'Ready';
+  }
+  else if (def.api === 'ollama') { statusDot = 'error'; statusLabel = 'Offline'; }
 
   const envKeyName = `${def.name.toUpperCase().replace(/-/g, '_')}_API_KEY`;
 
@@ -369,11 +569,13 @@ function ProviderCard({
             {def.base_url && <span>URL: {def.base_url}</span>}
           </div>
 
-          {/* Bedrock: region + bearer token */}
+          {/* Bedrock: region + credentials */}
           {def.api === 'bedrock' && isActive && (
             <BedrockConfig
               config={config}
+              serverInfo={serverInfo}
               onSave={onSave}
+              onAfterSave={onAfterSave}
               onTest={handleBedrockTest}
               testStatus={testStatus}
               testMsg={testMsg}
@@ -415,9 +617,16 @@ function ProviderCard({
 
           {/* Non-key providers (bedrock handled above, ollama) */}
           {!def.needsKey && def.api !== 'bedrock' && (
-            <p className="text-sm text-muted">
-              No API key required — connects to local server.
-            </p>
+            <div>
+              <p className="text-sm text-muted">
+                No API key required — connects to local server.
+              </p>
+              {def.api === 'ollama' && statusDot === 'error' && (
+                <div style={{ marginTop: 8 }}>
+                  <InstallButton target="ollama" label="Install Ollama" />
+                </div>
+              )}
+            </div>
           )}
 
           {/* Model config: active provider shows full config, others show model list only */}
@@ -544,6 +753,7 @@ export function ProvidersSection({ config, onSave }: Props) {
               maxTokens={maxTokens}
               onSelectActive={handleSetActive}
               onSave={onSave}
+              onAfterSave={loadProviders}
               onSaveKey={handleSaveKey}
               onSaveMainModel={handleSaveMainModel}
               onSaveMaxTokens={handleSaveMaxTokens}

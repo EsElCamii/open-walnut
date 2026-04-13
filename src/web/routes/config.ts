@@ -32,30 +32,58 @@ configRouter.get('/', async (_req: Request, res: Response, next: NextFunction) =
   }
 })
 
-// POST /api/config/test-connection — test Bedrock connection
+// POST /api/config/test-connection — test Bedrock connection with any auth method
 configRouter.post('/test-connection', async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const { bedrock_region, bedrock_bearer_token } = req.body
+    const { bedrock_region, bedrock_bearer_token, bedrock_access_key, bedrock_secret_key, bedrock_profile } = req.body
     const config = await getConfig()
-    const region = bedrock_region || config.provider?.bedrock_region || 'us-west-2'
+    const region = bedrock_region || config.provider?.bedrock_region || config.providers?.bedrock?.region || 'us-west-2'
+
+    const { default: AnthropicBedrock } = await import('@anthropic-ai/bedrock-sdk')
+    let client: InstanceType<typeof AnthropicBedrock>
+    let authMethod = 'auto'
+
+    // Priority: explicit request params → config → env → auto-detect
     const token = bedrock_bearer_token
       || config.provider?.bedrock_bearer_token
       || config.providers?.bedrock?.bearer_token
       || process.env.AWS_BEARER_TOKEN_BEDROCK
+    const accessKey = bedrock_access_key || config.providers?.bedrock?.aws_access_key_id
+    const secretKey = bedrock_secret_key || config.providers?.bedrock?.aws_secret_access_key
+    const profile = bedrock_profile || config.providers?.bedrock?.aws_profile
 
-    if (!token) {
-      res.json({ ok: false, error: 'No bearer token configured (set in config or AWS_BEARER_TOKEN_BEDROCK env var)' })
-      return
+    if (bedrock_bearer_token || (!bedrock_access_key && !bedrock_profile && token)) {
+      // Bearer token auth
+      client = new AnthropicBedrock({
+        awsRegion: region,
+        skipAuth: true,
+        authToken: token,
+      } as unknown as ConstructorParameters<typeof AnthropicBedrock>[0])
+      authMethod = 'bearer_token'
+    } else if (bedrock_access_key && bedrock_secret_key) {
+      // Explicit access keys from request
+      client = new AnthropicBedrock({ awsRegion: region, awsAccessKey: bedrock_access_key, awsSecretKey: bedrock_secret_key })
+      authMethod = 'access_keys'
+    } else if (accessKey && secretKey) {
+      // Access keys from config
+      client = new AnthropicBedrock({ awsRegion: region, awsAccessKey: accessKey, awsSecretKey: secretKey })
+      authMethod = 'access_keys'
+    } else if (bedrock_profile || profile) {
+      // AWS profile
+      const profileName = bedrock_profile || profile
+      client = new AnthropicBedrock({
+        awsRegion: region,
+        providerChainResolver: () =>
+          import('@aws-sdk/credential-providers').then(({ fromNodeProviderChain }) =>
+            fromNodeProviderChain({ profile: profileName }),
+          ),
+      } as unknown as ConstructorParameters<typeof AnthropicBedrock>[0])
+      authMethod = 'profile'
+    } else {
+      // Auto-detect (default credential chain)
+      client = new AnthropicBedrock({ awsRegion: region })
+      authMethod = 'auto'
     }
-
-    // Dynamic import to avoid pulling heavy dependency at module load
-    const { default: AnthropicBedrock } = await import('@anthropic-ai/bedrock-sdk')
-    // Must match the auth pattern in adapter-bedrock.ts: skipAuth + authToken for bearer tokens
-    const client = new AnthropicBedrock({
-      awsRegion: region,
-      skipAuth: true,
-      authToken: token,
-    } as unknown as ConstructorParameters<typeof AnthropicBedrock>[0])
 
     const start = Date.now()
     await client.messages.create({
@@ -65,14 +93,42 @@ configRouter.post('/test-connection', async (req: Request, res: Response, next: 
     })
     const latencyMs = Date.now() - start
 
-    // If token came from env (not config or request body), send a masked hint so UI can display it
-    const fromEnv = !bedrock_bearer_token && !config.provider?.bedrock_bearer_token && !config.providers?.bedrock?.bearer_token
-    const envTokenHint = fromEnv && token ? token.slice(0, 8) + '••••••••' + token.slice(-4) : undefined
-
-    res.json({ ok: true, latencyMs, envTokenHint })
+    res.json({ ok: true, latencyMs, authMethod })
   } catch (err) {
-    log.warn('test-connection failed', { error: (err as Error).message })
+    log.web.warn('test-connection failed', { error: (err as Error).message })
     res.json({ ok: false, error: (err as Error).message })
+  }
+})
+
+// GET /api/config/aws-profiles — list AWS profiles from ~/.aws/config + ~/.aws/credentials
+configRouter.get('/aws-profiles', async (_req: Request, res: Response) => {
+  try {
+    const { readFileSync, existsSync } = await import('fs')
+    const { homedir } = await import('os')
+    const { join } = await import('path')
+    const home = homedir()
+    const profiles = new Set<string>()
+
+    // Parse profile names from INI-style files
+    const parseProfiles = (filePath: string, configStyle: boolean) => {
+      if (!existsSync(filePath)) return
+      const content = readFileSync(filePath, 'utf-8')
+      for (const line of content.split('\n')) {
+        const trimmed = line.trim()
+        if (!trimmed.startsWith('[') || !trimmed.endsWith(']')) continue
+        let name = trimmed.slice(1, -1).trim()
+        // ~/.aws/config uses [profile foo], ~/.aws/credentials uses [foo]
+        if (configStyle && name.startsWith('profile ')) name = name.slice(8).trim()
+        if (name === 'default' || name.length > 0) profiles.add(name)
+      }
+    }
+
+    parseProfiles(join(home, '.aws', 'credentials'), false)
+    parseProfiles(join(home, '.aws', 'config'), true)
+
+    res.json({ profiles: [...profiles].sort() })
+  } catch {
+    res.json({ profiles: [] })
   }
 })
 
@@ -98,7 +154,7 @@ async function fetchOllamaModels(baseUrl?: string): Promise<ModelEntry[]> {
     _ollamaCache = { models, ts: Date.now() }
     return models
   } catch (err) {
-    log.warn('fetchOllamaModels failed', { url, error: (err as Error).message })
+    log.web.warn('fetchOllamaModels failed', { url, error: (err as Error).message })
     _ollamaCache = { models: [], ts: Date.now() }
     return []
   }
@@ -120,6 +176,7 @@ configRouter.get('/providers', async (_req: Request, res: Response, next: NextFu
       key_hint?: string  // last 4 chars of resolved key
       auto_detected: boolean
       models: import('../../agent/providers/types.js').ModelEntry[]
+      credential_source?: string  // bedrock: 'bearer_token' | 'api_key' | 'aws_credentials_file'
     }> = {}
 
     for (const [name, prov] of Object.entries(merged)) {
@@ -148,10 +205,33 @@ configRouter.get('/providers', async (_req: Request, res: Response, next: NextFu
 
       // Try to resolve the key from env
       const envKey = autoDetectApiKey(name)
-      const hasKey = !!(prov.api_key || prov.bearer_token || envKey)
+      let hasKey = !!(prov.api_key || prov.bearer_token || envKey
+        || prov.aws_access_key_id || prov.aws_profile)
 
-      // Some protocols don't need a key
-      const keyNotRequired = prov.api === 'bedrock'
+      // For Bedrock: check the full AWS credential chain when no explicit key is found
+      let awsCredentialSource: 'env' | 'credentials_file' | 'config_file' | undefined
+      if (prov.api === 'bedrock' && !hasKey) {
+        // AWS_ACCESS_KEY_ID env var (standard AWS SDK credential chain)
+        if (process.env.AWS_ACCESS_KEY_ID && process.env.AWS_SECRET_ACCESS_KEY) {
+          awsCredentialSource = 'env'
+          hasKey = true
+        }
+        if (!hasKey) {
+          try {
+            const { existsSync } = await import('fs')
+            const { homedir } = await import('os')
+            const home = homedir()
+            if (existsSync(`${home}/.aws/credentials`)) {
+              awsCredentialSource = 'credentials_file'
+              hasKey = true
+            } else if (existsSync(`${home}/.aws/config`)) {
+              // May contain SSO profiles or credential_process
+              awsCredentialSource = 'config_file'
+              hasKey = true
+            }
+          } catch { /* ignore */ }
+        }
+      }
 
       // Must match adapter implementations in registry.ts getOrCreateAdapter()
       const implemented = prov.api === 'bedrock' || prov.api === 'anthropic-messages'
@@ -161,13 +241,25 @@ configRouter.get('/providers', async (_req: Request, res: Response, next: NextFu
       const rawKey = prov.api_key || prov.bearer_token || envKey
       const keyHint = rawKey && rawKey.length > 4 ? `...${rawKey.slice(-4)}` : undefined
 
+      // Build credential source label for Bedrock
+      let credentialSource: string | undefined
+      if (prov.api === 'bedrock' && hasKey) {
+        if (prov.bearer_token) credentialSource = 'bearer_token'
+        else if (prov.aws_access_key_id) credentialSource = 'access_keys'
+        else if (prov.aws_profile) credentialSource = 'profile'
+        else if (envKey) credentialSource = 'env_api_key'
+        else if (prov.api_key) credentialSource = 'api_key'
+        else if (awsCredentialSource) credentialSource = `aws_${awsCredentialSource}`
+      }
+
       providers[name] = {
         api: prov.api,
         base_url: prov.base_url,
-        status: !implemented ? 'not_implemented' : (hasKey || keyNotRequired) ? 'ready' : 'no_key',
+        status: !implemented ? 'not_implemented' : hasKey ? 'ready' : 'no_key',
         key_hint: keyHint,
         auto_detected: !explicitNames.has(name),
         models: getModelsForProvider(name, prov.models),
+        ...(credentialSource && { credential_source: credentialSource }),
       }
     }
 
@@ -279,7 +371,7 @@ configRouter.put('/', async (req: Request, res: Response, next: NextFunction) =>
     await updateConfig(body)
     // Re-read merged config so the event carries the full picture
     const merged = await getConfig()
-    bus.emit(EventNames.CONFIG_CHANGED, { config: merged }, ['web-ui', 'main-agent', 'heartbeat-config'], { source: 'api' })
+    bus.emit(EventNames.CONFIG_CHANGED, { config: merged }, ['web-ui', 'main-agent', 'heartbeat-config', 'setup-health'], { source: 'api' })
     res.json({ ok: true })
   } catch (err) {
     next(err)

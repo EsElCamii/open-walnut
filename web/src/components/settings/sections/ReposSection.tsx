@@ -6,7 +6,7 @@ import { RepoDetail } from '@/components/repositories/RepoDetail';
 import { LoadingSpinner } from '@/components/common/LoadingSpinner';
 import type { RepoSummary } from '@/api/repositories';
 
-export function RepositoriesPage() {
+export function ReposSection() {
   const { repos, loading, error, save, remove, refresh } = useRepositories();
   const [search, setSearch] = useState('');
   const [selected, setSelected] = useState<RepoSummary | null>(null);
@@ -63,13 +63,12 @@ export function RepositoriesPage() {
     setSelected(null);
   }, []);
 
-  if (loading) return <LoadingSpinner />;
-  if (error) return <div className="empty-state"><p>Error: {error}</p></div>;
+  if (loading) return <div id="repositories" className="card settings-section settings-section-wide"><LoadingSpinner /></div>;
+  if (error) return <div id="repositories" className="card settings-section settings-section-wide"><div className="empty-state"><p>Error: {error}</p></div></div>;
 
-  // Show form
   if (showForm) {
     return (
-      <div className="repos-page">
+      <div id="repositories" className="card settings-section settings-section-wide">
         <RepoForm
           editSlug={editingSlug}
           onSave={handleSave}
@@ -79,10 +78,9 @@ export function RepositoriesPage() {
     );
   }
 
-  // Show detail
   if (selected) {
     return (
-      <div className="repos-page">
+      <div id="repositories" className="card settings-section settings-section-wide">
         <RepoDetail
           repo={selected}
           onBack={handleBack}
@@ -93,11 +91,10 @@ export function RepositoriesPage() {
     );
   }
 
-  // List view
   return (
-    <div className="repos-page">
+    <div id="repositories" className="card settings-section settings-section-wide">
       <div className="repos-header">
-        <h2>Repositories</h2>
+        <h3 className="settings-section-title">Repositories</h3>
         <button className="btn btn-primary" onClick={handleCreate}>
           + Add Repository
         </button>

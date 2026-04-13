@@ -12,6 +12,8 @@
 
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { useEvent } from '../../hooks/useWebSocket';
+import { getErrorSuggestion } from '@/utils/error-suggestions';
+import { ErrorSuggestionLink } from '@/components/common/ErrorSuggestionLink';
 
 /** Timeout thresholds (ms) */
 const SLOW_THRESHOLD_MS = 20_000;    // 20s → "Taking longer than expected..."
@@ -125,6 +127,10 @@ export function PendingSessionPanel({ cwd, host, hostLabel, label, realTaskId, i
             <span className="pending-session-path" style={{ marginTop: 4 }}>
               {errorHint}
             </span>
+            {(() => {
+              const sug = getErrorSuggestion(errorMessage, { host });
+              return sug ? <ErrorSuggestionLink {...sug} /> : null;
+            })()}
             <span className="pending-session-path" title={cwd} style={{ marginTop: 8 }}>
               {cwd}
             </span>

@@ -19,23 +19,58 @@ export class BedrockAdapter implements ProtocolAdapter {
   private client: AnthropicBedrock | null = null;
   private lastConfig: string | null = null;
 
-  private createClient(region?: string, bearerToken?: string): AnthropicBedrock {
-    const effectiveRegion = region ?? process.env.AWS_REGION ?? 'us-west-2';
+  private createClient(config: {
+    region?: string;
+    bearerToken?: string;
+    accessKey?: string;
+    secretKey?: string;
+    profile?: string;
+  }): AnthropicBedrock {
+    const effectiveRegion = config.region ?? process.env.AWS_REGION ?? 'us-west-2';
 
-    if (bearerToken) {
+    // Bearer token auth (Identity Center / SSO)
+    if (config.bearerToken) {
       return new AnthropicBedrock({
         awsRegion: effectiveRegion,
         skipAuth: true,
-        authToken: bearerToken,
+        authToken: config.bearerToken,
       } as unknown as ConstructorParameters<typeof AnthropicBedrock>[0]);
     }
+
+    // Explicit access key + secret
+    if (config.accessKey && config.secretKey) {
+      return new AnthropicBedrock({
+        awsRegion: effectiveRegion,
+        awsAccessKey: config.accessKey,
+        awsSecretKey: config.secretKey,
+      });
+    }
+
+    // AWS profile — use providerChainResolver to specify profile
+    if (config.profile) {
+      return new AnthropicBedrock({
+        awsRegion: effectiveRegion,
+        providerChainResolver: () =>
+          import('@aws-sdk/credential-providers').then(({ fromNodeProviderChain }) =>
+            fromNodeProviderChain({ profile: config.profile }),
+          ),
+      } as unknown as ConstructorParameters<typeof AnthropicBedrock>[0]);
+    }
+
+    // Default: AWS credential chain (env vars → ~/.aws/credentials → instance metadata)
     return new AnthropicBedrock({ awsRegion: effectiveRegion });
   }
 
-  private getClient(region?: string, bearerToken?: string): AnthropicBedrock {
-    const configKey = `${region}:${bearerToken?.slice(-6) ?? ''}`;
+  private getClient(config: {
+    region?: string;
+    bearerToken?: string;
+    accessKey?: string;
+    secretKey?: string;
+    profile?: string;
+  }): AnthropicBedrock {
+    const configKey = `${config.region}:${config.bearerToken?.slice(-6) ?? ''}:${config.accessKey?.slice(-4) ?? ''}:${config.profile ?? ''}`;
     if (this.client && this.lastConfig === configKey) return this.client;
-    this.client = this.createClient(region, bearerToken);
+    this.client = this.createClient(config);
     this.lastConfig = configKey;
     return this.client;
   }
@@ -49,7 +84,13 @@ export class BedrockAdapter implements ProtocolAdapter {
     const { model, providerConfig } = opts;
 
     for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
-      const bedrock = this.getClient(providerConfig.region, providerConfig.bearer_token);
+      const bedrock = this.getClient({
+          region: providerConfig.region,
+          bearerToken: providerConfig.bearer_token,
+          accessKey: providerConfig.aws_access_key_id,
+          secretKey: providerConfig.aws_secret_access_key,
+          profile: providerConfig.aws_profile,
+        });
       try {
         const params = {
           model,
@@ -100,7 +141,13 @@ export class BedrockAdapter implements ProtocolAdapter {
       let accumulatedText = '';
 
       try {
-        const bedrock = this.getClient(providerConfig.region, providerConfig.bearer_token);
+        const bedrock = this.getClient({
+          region: providerConfig.region,
+          bearerToken: providerConfig.bearer_token,
+          accessKey: providerConfig.aws_access_key_id,
+          secretKey: providerConfig.aws_secret_access_key,
+          profile: providerConfig.aws_profile,
+        });
         const streamParams = {
           model,
           max_tokens: opts.maxTokens,

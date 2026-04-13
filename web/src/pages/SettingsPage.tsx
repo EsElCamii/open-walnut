@@ -36,10 +36,15 @@ import { RemoteHostsSection } from '@/components/settings/sections/RemoteHostsSe
 import { AdvancedSection } from '@/components/settings/sections/AdvancedSection';
 import { SttSection } from '@/components/settings/sections/SttSection';
 import { AudioCaptureSection } from '@/components/settings/sections/AudioCaptureSection';
+import { ReposSection } from '@/components/settings/sections/ReposSection';
+import { HooksSection } from '@/components/settings/sections/HooksSection';
+import { UsageSection } from '@/components/settings/sections/UsageSection';
+import { TimelineSection } from '@/components/settings/sections/TimelineSection';
 
 const SECTION_IDS = [
   'providers', 'general', 'sessions',
   'integrations', 'search', 'stt', 'audio-capture', 'heartbeat', 'remote-hosts', 'advanced',
+  'repositories', 'hooks', 'usage', 'timeline',
 ];
 
 export function SettingsPage() {
@@ -124,6 +129,10 @@ export function SettingsPage() {
           <SectionErrorBoundary name="Heartbeat"><HeartbeatSection config={config} onSave={saveSection} /></SectionErrorBoundary>
           <SectionErrorBoundary name="Remote Hosts"><RemoteHostsSection config={config} onSave={saveSection} /></SectionErrorBoundary>
           <SectionErrorBoundary name="Advanced"><AdvancedSection config={config} onSave={saveSection} /></SectionErrorBoundary>
+          <SectionErrorBoundary name="Repositories"><ReposSection /></SectionErrorBoundary>
+          <SectionErrorBoundary name="Hooks"><HooksSection /></SectionErrorBoundary>
+          <SectionErrorBoundary name="Usage & Costs"><UsageSection /></SectionErrorBoundary>
+          <SectionErrorBoundary name="Timeline"><TimelineSection /></SectionErrorBoundary>
         </div>
       </div>
     </div>

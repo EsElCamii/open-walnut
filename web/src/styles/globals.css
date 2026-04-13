@@ -308,25 +308,6 @@ input:focus, textarea:focus, select:focus {
   margin: 6px 12px;
 }
 
-.sidebar-stats {
-  padding: 14px 16px;
-  border-top: 1px solid var(--border);
-  font-size: 12px;
-  color: var(--fg-muted);
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-
-.sidebar-stat {
-  display: flex;
-  justify-content: space-between;
-}
-
-.sidebar-stat-value {
-  color: var(--fg);
-  font-weight: 600;
-}
 
 /* Sidebar collapse */
 
@@ -386,15 +367,16 @@ input:focus, textarea:focus, select:focus {
   gap: 0;
 }
 
-.sidebar.collapsed .sidebar-stats {
-  display: none;
-}
 
 /* ── Notification bell + panel ── */
 
 .sidebar-notification-area {
   padding: 4px 8px;
   border-top: 1px solid var(--border);
+}
+
+.sidebar-notification-area .sidebar-link {
+  width: 100%;
 }
 
 .sidebar-notification-btn {
@@ -735,6 +717,34 @@ input:focus, textarea:focus, select:focus {
   background: var(--accent);
   color: #fff;
 }
+
+/* Install button */
+.install-btn-wrap { display: inline-flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.install-btn {
+  font-size: 12px; font-weight: 500;
+  color: #fff; background: var(--accent);
+  border: 1px solid var(--accent); border-radius: var(--radius-sm);
+  padding: 4px 12px; cursor: pointer;
+}
+.install-btn:hover { filter: brightness(1.1); }
+.install-btn--installing { opacity: 0.7; cursor: wait; }
+.install-btn--success { background: none; color: var(--green, #34c759); border-color: var(--green, #34c759); cursor: default; font-weight: 600; }
+.install-btn--error { border-color: var(--red, #ff3b30); }
+.install-btn-error { font-size: 11px; color: var(--red, #ff3b30); }
+.install-btn-spinner {
+  display: inline-block; width: 12px; height: 12px; margin-right: 4px;
+  border: 2px solid rgba(255,255,255,0.3); border-top-color: #fff;
+  border-radius: 50%; animation: install-spin 0.6s linear infinite;
+  vertical-align: middle;
+}
+@keyframes install-spin { to { transform: rotate(360deg); } }
+
+/* Error suggestion link — actionable hint below error banners */
+.error-suggestion { display: flex; align-items: center; gap: 6px; margin-top: 4px; font-size: 11px; color: var(--fg-secondary); flex-wrap: wrap; }
+.error-suggestion-text { min-width: 0; }
+.error-suggestion-link { color: var(--accent); font-weight: 500; cursor: pointer; background: none; border: none; padding: 0; font-size: 11px; white-space: nowrap; font-family: inherit; }
+.error-suggestion-link:hover { text-decoration: underline; }
+.error-suggestion-install { font-size: 10px; }
 
 .main-content {
   flex: 1;
@@ -12669,7 +12679,11 @@ a.task-kebab-info:hover {
   max-width: 1200px;
   margin: 0 auto;
   padding: 24px;
+  scroll-margin-top: 16px;
 }
+
+
+
 
 .usage-header {
   display: flex;
@@ -14225,19 +14239,32 @@ a.task-kebab-info:hover {
 }
 
 .settings-content-inner {
-  max-width: 680px;
+  max-width: 1200px;
   margin: 0 auto;
 }
 
+.settings-content-inner > .page-header {
+  max-width: 680px;
+}
+
 .settings-section {
-  margin-bottom: 0;
-  padding: 20px 0;
-  border-bottom: 1px solid var(--border);
+  max-width: 680px;
+  margin: 0 auto 16px;
+  padding: 20px 24px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md, 12px);
+  background: var(--bg-card, var(--bg));
   scroll-margin-top: 16px;
 }
 
-.settings-section:last-child {
-  border-bottom: none;
+.settings-section-wide {
+  max-width: 1200px;
+}
+
+.settings-nav-divider {
+  height: 1px;
+  background: var(--border);
+  margin: 8px 0;
 }
 
 .settings-section-title {
@@ -14804,6 +14831,73 @@ a.task-kebab-info:hover {
 
 .chip-remove:hover {
   color: var(--danger, #e53e3e);
+}
+
+/* ── Bedrock credential sections ── */
+
+.bedrock-cred-section {
+  margin-top: 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 12px 14px;
+}
+
+.bedrock-cred-section-header {
+  font-size: 13px;
+  font-weight: 600;
+  margin-bottom: 8px;
+}
+
+.bedrock-cred-group {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 8px 0;
+  transition: opacity 0.15s;
+}
+
+.bedrock-cred-group + .bedrock-cred-group {
+  border-top: 1px solid var(--border);
+}
+
+.bedrock-cred-group.dimmed {
+  opacity: 0.4;
+}
+
+.bedrock-cred-group.dimmed input,
+.bedrock-cred-group.dimmed select {
+  pointer-events: none;
+}
+
+.bedrock-cred-radio {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--fg);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  margin-bottom: 2px;
+}
+
+.bedrock-cred-radio input[type="radio"] {
+  margin: 0;
+  accent-color: var(--accent);
+}
+
+.bedrock-cred-group label:not(.bedrock-cred-radio) {
+  font-size: 12px;
+  color: var(--fg-muted);
+  margin-top: 2px;
+}
+
+.cred-active-dot {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--success, #34c759);
+  flex-shrink: 0;
 }
 
 /* ── Question Popover (ask_question tool — floating above chat input) ── */

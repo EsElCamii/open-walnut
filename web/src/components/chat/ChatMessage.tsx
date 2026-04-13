@@ -10,6 +10,8 @@ import { Lightbox } from '@/components/common/Lightbox';
 import { entityRefsToHtml, renderToolResultWithRefs, extractMarkdownFields } from '@/utils/markdown';
 import { parseAskQuestionInput } from './QuestionPopover';
 import { SubagentBlock } from './SubagentBlock';
+import { getErrorSuggestion } from '@/utils/error-suggestions';
+import { ErrorSuggestionLink } from '@/components/common/ErrorSuggestionLink';
 export interface RouteInfo {
   direction: 'sent' | 'received';
   event: string;
@@ -1275,6 +1277,11 @@ function ChatMessageInner({ role, content, blocks, images, taskContext, routeInf
                 onClick={handleContentClick}
                 dangerouslySetInnerHTML={{ __html: html ?? '' }}
               />
+              {isErrorNotification && (() => {
+                const domain = source === 'session-error' ? 'session' as const : undefined;
+                const sug = getErrorSuggestion(content, { domain });
+                return sug ? <ErrorSuggestionLink {...sug} /> : null;
+              })()}
             </div>
           )
         )}

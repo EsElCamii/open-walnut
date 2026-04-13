@@ -40,7 +40,7 @@ function formatDuration(minutes: number): string {
   return `${h}h ${m}m`;
 }
 
-// ── Components ──
+// ── Sub-components ──
 
 function CategoryBar({ entries }: { entries: TimelineEntry[] }) {
   const totalMinutes = entries.reduce(
@@ -49,7 +49,6 @@ function CategoryBar({ entries }: { entries: TimelineEntry[] }) {
   );
   if (totalMinutes === 0) return null;
 
-  // Group by category
   const byCategory: Record<string, number> = {};
   for (const e of entries) {
     const dur = Math.max(1, timeToMinutes(e.endTime) - timeToMinutes(e.startTime));
@@ -238,9 +237,9 @@ function DatePicker({
   );
 }
 
-// ── Main Page ──
+// ── Main Section ──
 
-export function TimelinePage() {
+export function TimelineSection() {
   const [date, setDate] = useState(() => new Date().toISOString().slice(0, 10));
   const [data, setData] = useState<TimelineResponse | null>(null);
   const [dates, setDates] = useState<string[]>([]);
@@ -287,13 +286,10 @@ export function TimelinePage() {
   }, [data]);
 
   return (
-    <div style={{ padding: '24px 32px', maxWidth: 960, margin: '0 auto' }}>
+    <div id="timeline" className="card settings-section settings-section-wide">
       {/* Header */}
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 24 }}>
-        <div>
-          <h1 className="page-title">Timeline</h1>
-          <p className="page-subtitle">Activity tracker powered by screenshots + AI analysis</p>
-        </div>
+        <h3 className="settings-section-title" style={{ margin: 0 }}>Timeline</h3>
         <button
           onClick={handleToggle}
           disabled={toggling}

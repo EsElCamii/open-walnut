@@ -31,6 +31,8 @@ import { SessionRetryButton } from './SessionRetryButton';
 import { wsClient } from '@/api/ws';
 import type { SessionRecord, TaskPhase } from '@/types/session';
 import { useEnabledModes } from '@/hooks/useEnabledModes';
+import { getErrorSuggestion } from '@/utils/error-suggestions';
+import { ErrorSuggestionLink } from '@/components/common/ErrorSuggestionLink';
 
 interface SessionPanelErrorBoundaryProps {
   sessionId: string;
@@ -775,9 +777,15 @@ export const SessionPanel = memo(function SessionPanel({ sessionId, onClose, onT
           return (
             <div className={`session-error-banner${isReconnecting ? ' session-error-banner--reconnecting' : ''}`}>
               <span className="session-error-banner-icon">{isReconnecting ? '\u21BB' : '\u26A0\uFE0F'}</span>
-              <span className="session-error-banner-text">
-                {isReconnecting ? 'Reconnecting to remote host...' : session.errorMessage}
-              </span>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <span className="session-error-banner-text">
+                  {isReconnecting ? 'Reconnecting to remote host...' : session.errorMessage}
+                </span>
+                {!isReconnecting && (() => {
+                  const sug = getErrorSuggestion(session.errorMessage!, { host: session.host, provider: session.provider });
+                  return sug ? <ErrorSuggestionLink {...sug} /> : null;
+                })()}
+              </div>
               <SessionRetryButton sessionId={sessionId} onRetried={handleRetried} onResuming={handleResuming} />
             </div>
           );

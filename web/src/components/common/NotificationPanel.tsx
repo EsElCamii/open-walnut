@@ -2,8 +2,12 @@
  * Notification panel — slide-out overlay from sidebar showing system health.
  * iOS-style notification center: embedding status, Ollama availability, etc.
  */
+import { useNavigate } from 'react-router-dom';
 import { useSystemHealth } from '@/hooks/useSystemHealth';
 import { SETUP_DISMISS_KEY, SETUP_SHOW_EVENT } from './SetupBanner';
+import { InstallButton } from './InstallButton';
+import { getErrorSuggestion } from '@/utils/error-suggestions';
+import { ErrorSuggestionLink } from './ErrorSuggestionLink';
 
 interface NotificationPanelProps {
   open: boolean;
@@ -12,6 +16,7 @@ interface NotificationPanelProps {
 }
 
 export function NotificationPanel({ open, onClose, sidebarCollapsed }: NotificationPanelProps) {
+  const navigate = useNavigate();
   const { health, gitSync, setupComplete, loading, reindexing, triggerReindex } = useSystemHealth();
 
   if (!open) return null;
@@ -59,12 +64,19 @@ export function NotificationPanel({ open, onClose, sidebarCollapsed }: Notificat
                       <div className="notification-detail-row warn">
                         <span>Claude Code CLI</span>
                         <span className="notification-detail-value warn">Not installed</span>
+                        <div className="error-suggestion">
+                          <button className="error-suggestion-link" onClick={() => { navigate('/settings#sessions'); onClose(); }}>Sessions &rarr;</button>
+                          <InstallButton target="claude-cli" label="Install" className="error-suggestion-install" />
+                        </div>
                       </div>
                     )}
                     {!(health.hasReadyProvider ?? true) && (
                       <div className="notification-detail-row warn">
                         <span>AI Provider</span>
                         <span className="notification-detail-value warn">Not configured</span>
+                        <div className="error-suggestion">
+                          <button className="error-suggestion-link" onClick={() => { navigate('/settings#providers'); onClose(); }}>AI Provider &rarr;</button>
+                        </div>
                       </div>
                     )}
                   </div>
@@ -111,10 +123,22 @@ export function NotificationPanel({ open, onClose, sidebarCollapsed }: Notificat
                       {emb.ollamaAvailable ? 'Available' : 'Unavailable'}
                     </span>
                   </div>
+                  {!emb.ollamaAvailable && (
+                    <ErrorSuggestionLink
+                      suggestion="Install and start Ollama for semantic search."
+                      settingsHash="search"
+                      settingsLabel="Search"
+                      installTarget="ollama"
+                    />
+                  )}
 
                   {emb.lastError && (
                     <div className="notification-detail-row error">
                       <span className="notification-error-text">{emb.lastError}</span>
+                      {(() => {
+                        const sug = getErrorSuggestion(emb.lastError, { domain: 'embedding' });
+                        return sug ? <ErrorSuggestionLink {...sug} /> : null;
+                      })()}
                     </div>
                   )}
 
@@ -178,6 +202,11 @@ export function NotificationPanel({ open, onClose, sidebarCollapsed }: Notificat
                       <span className="notification-detail-value">
                         {gitSync.error ?? 'git unavailable'}
                       </span>
+                      <ErrorSuggestionLink
+                        suggestion="Configure git backup for data protection."
+                        settingsHash="integrations"
+                        settingsLabel="Integrations"
+                      />
                     </div>
                   ) : gitSync.consecutiveFailures >= 3 ? (
                     <>
@@ -192,6 +221,11 @@ export function NotificationPanel({ open, onClose, sidebarCollapsed }: Notificat
                       {gitSync.error && (
                         <div className="notification-detail-row error">
                           <span className="notification-error-text">{gitSync.error}</span>
+                          <ErrorSuggestionLink
+                            suggestion="Check git backup configuration."
+                            settingsHash="integrations"
+                            settingsLabel="Integrations"
+                          />
                         </div>
                       )}
                     </>

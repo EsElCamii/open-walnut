@@ -5,19 +5,19 @@ import { AppShell } from './components/layout/AppShell';
 import { MainPage } from './pages/MainPage';
 import { DashboardPage } from './pages/DashboardPage';
 import { TaskDetailPage } from './pages/TaskDetailPage';
-import { SearchPage } from './pages/SearchPage';
+
 import { SessionsPage } from './pages/SessionsPage';
 import { SettingsPage } from './pages/SettingsPage';
 import { CronPage } from './pages/CronPage';
-import { UsagePage } from './pages/UsagePage';
+
 import { AgentsPage } from './pages/AgentsPage';
 import { CommandsPage } from './pages/CommandsPage';
 import { SkillsPage } from './pages/SkillsPage';
-import { TimelinePage } from './pages/TimelinePage';
+
 import { MemoryPage } from './pages/MemoryPage';
 import { NotesPage } from './pages/NotesPage';
-import { HooksPage } from './pages/HooksPage';
-import { RepositoriesPage } from './pages/RepositoriesPage';
+
+
 
 /**
  * Memoized MainPage — only re-renders when `visible` prop changes.
@@ -49,18 +49,18 @@ export function App() {
         <Route path="/" element={null} />
         <Route path="/tasks" element={<DashboardPage />} />
         <Route path="/tasks/:id" element={<TaskDetailPage />} />
-        <Route path="/search" element={<SearchPage />} />
+        <Route path="/search" element={<Navigate to="/" replace />} />
         <Route path="/sessions" element={<SessionsPage />} />
         <Route path="/memory" element={<MemoryPage />} />
         <Route path="/notes" element={<NotesPage />} />
         <Route path="/cron" element={<CronPage />} />
-        <Route path="/usage" element={<UsagePage />} />
+        <Route path="/usage" element={<Navigate to="/settings#usage" replace />} />
         <Route path="/agents" element={<AgentsPage />} />
         <Route path="/commands" element={<CommandsPage />} />
         <Route path="/skills" element={<SkillsPage />} />
-        <Route path="/hooks" element={<HooksPage />} />
-        <Route path="/repos" element={<RepositoriesPage />} />
-        <Route path="/timeline" element={<TimelinePage />} />
+        <Route path="/hooks" element={<Navigate to="/settings#hooks" replace />} />
+        <Route path="/repos" element={<Navigate to="/settings#repositories" replace />} />
+        <Route path="/timeline" element={<Navigate to="/settings#timeline" replace />} />
         <Route path="/chat" element={<Navigate to="/" replace />} />
         <Route path="/settings" element={<SettingsPage />} />
         <Route path="/dashboard" element={<Navigate to="/" replace />} />

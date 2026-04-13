@@ -3,12 +3,12 @@ import { fetchPhaseHooks, type PhaseHookInfo } from '@/api/hooks';
 import { LoadingSpinner } from '@/components/common/LoadingSpinner';
 
 const ACTION_ICON: Record<string, string> = {
-  send_message: '💬',
-  invoke_agent: '🤖',
-  schedule_check: '⏱',
+  send_message: '\u{1F4AC}',
+  invoke_agent: '\u{1F916}',
+  schedule_check: '\u23F1',
 };
 
-export function HooksPage() {
+export function HooksSection() {
   const [hooks, setHooks] = useState<PhaseHookInfo[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -20,21 +20,17 @@ export function HooksPage() {
       .finally(() => setLoading(false));
   }, []);
 
-  if (loading) return <LoadingSpinner />;
-  if (error) return <div className="empty-state"><p>Error: {error}</p></div>;
+  if (loading) return <div id="hooks"><LoadingSpinner /></div>;
+  if (error) return <div id="hooks"><div className="empty-state"><p>Error: {error}</p></div></div>;
 
   return (
-    <div>
-      <div className="page-header">
-        <h1 className="page-title">Phase Hooks</h1>
-        <p className="page-subtitle">
-          Automated actions triggered by task phase transitions
-        </p>
-      </div>
+    <div id="hooks" className="card settings-section settings-section-wide">
+      <h3 className="settings-section-title">Phase Hooks</h3>
+      <p className="settings-section-subtitle">Automated actions triggered by task phase transitions</p>
 
       {hooks.length === 0 ? (
         <div className="empty-state">
-          <div className="empty-state-icon">⚡</div>
+          <div className="empty-state-icon">{'\u26A1'}</div>
           <p>No hooks registered</p>
           <p className="text-sm" style={{ marginTop: 8 }}>
             Hooks are defined in the server code and execute automatically when tasks change phase
@@ -46,7 +42,7 @@ export function HooksPage() {
             <div key={hook.id} className="hook-card">
               <div className="hook-card-header">
                 <span className="hook-card-icon">
-                  {ACTION_ICON[hook.actionType] ?? '⚡'}
+                  {ACTION_ICON[hook.actionType] ?? '\u26A1'}
                 </span>
                 <span className="hook-card-name">{hook.name}</span>
                 <span className="hook-card-priority" title="Priority (lower = runs first)">
@@ -60,7 +56,7 @@ export function HooksPage() {
                 <div className="hook-card-detail">
                   <span className="hook-card-detail-label">Trigger</span>
                   <span className="hook-card-detail-value hook-card-phase">
-                    → {hook.triggerPhase.replace(/_/g, ' ')}
+                    {'\u2192'} {hook.triggerPhase.replace(/_/g, ' ')}
                   </span>
                 </div>
 
@@ -73,7 +69,7 @@ export function HooksPage() {
                   <div className="hook-card-detail">
                     <span className="hook-card-detail-label">Conditions</span>
                     <span className="hook-card-detail-value">
-                      {hook.conditions.join(' · ')}
+                      {hook.conditions.join(' \u00B7 ')}
                     </span>
                   </div>
                 )}
@@ -83,7 +79,6 @@ export function HooksPage() {
                 <div className="hook-card-message">
                   <div className="hook-card-message-label">Message</div>
                   <pre className="hook-card-message-content">
-                    {/* Strip the 'Send message: "..."' wrapper produced by describeAction() in registry.ts */}
                     {hook.actionDetail.replace(/^Send message: "/, '').replace(/"$/, '')}
                   </pre>
                 </div>

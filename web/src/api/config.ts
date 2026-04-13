@@ -16,13 +16,24 @@ export interface TestConnectionResult {
   ok: boolean;
   error?: string;
   latencyMs?: number;
-  envTokenHint?: string;
+  authMethod?: string;
 }
 
 export async function testConnection(
-  params: { bedrock_region?: string; bedrock_bearer_token?: string },
+  params: {
+    bedrock_region?: string;
+    bedrock_bearer_token?: string;
+    bedrock_access_key?: string;
+    bedrock_secret_key?: string;
+    bedrock_profile?: string;
+  },
 ): Promise<TestConnectionResult> {
   return apiPost<TestConnectionResult>('/api/config/test-connection', params);
+}
+
+export async function fetchAwsProfiles(): Promise<string[]> {
+  const res = await apiGet<{ profiles: string[] }>('/api/config/aws-profiles');
+  return res.profiles;
 }
 
 // ── Multi-provider API ──
@@ -42,6 +53,7 @@ export interface ProviderStatus {
   key_hint?: string;
   auto_detected: boolean;
   models: ModelEntry[];
+  credential_source?: string;  // bedrock: 'bearer_token' | 'api_key' | 'aws_credentials_file'
 }
 
 export async function fetchProviders(): Promise<Record<string, ProviderStatus>> {

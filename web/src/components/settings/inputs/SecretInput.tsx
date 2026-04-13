@@ -4,10 +4,12 @@ interface SecretInputProps {
   id?: string;
   value: string;
   onChange: (v: string) => void;
+  onBlur?: () => void;
   placeholder?: string;
+  disabled?: boolean;
 }
 
-export function SecretInput({ id, value, onChange, placeholder }: SecretInputProps) {
+export function SecretInput({ id, value, onChange, onBlur, placeholder, disabled }: SecretInputProps) {
   const [visible, setVisible] = useState(false);
 
   return (
@@ -17,9 +19,11 @@ export function SecretInput({ id, value, onChange, placeholder }: SecretInputPro
         type={visible ? 'text' : 'password'}
         value={value}
         onChange={(e) => onChange(e.target.value)}
+        onBlur={onBlur}
         placeholder={placeholder}
         className="secret-input"
         autoComplete="off"
+        disabled={disabled}
       />
       <button
         type="button"

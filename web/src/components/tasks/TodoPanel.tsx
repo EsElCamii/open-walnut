@@ -50,6 +50,8 @@ import { DatePicker, formatDateDisplay, isOverdue, parseDateLocal } from '../com
 import { PersonIcon } from '../common/PersonIcon';
 import { useVerticalSplitter } from '@/hooks/useVerticalSplitter';
 import { useIntegrations, getIntegrationMeta } from '@/hooks/useIntegrations';
+import { TaskStatusDot } from './TaskStatusDot';
+import { PriorityPicker } from '../common/PriorityPicker';
 import { ProjectDetailPane } from './ProjectDetailPane';
 import { CategoryDetailPane } from './CategoryDetailPane';
 import { GlobalNotesSection } from '../notes/GlobalNotesSection';
@@ -587,9 +589,9 @@ function SortableTaskItem({ task, isFocused, isDetailOpen, isRecentlyDone, depth
               {ICONS.ICON_TRASH}
             </button>
           )}
-          {dueDateInfo && (
-            <span className={`todo-item-due-pill${dueDateInfo.overdue ? ' todo-item-due-overdue' : ''}`}>
-              {dueDateInfo.label}
+          {dueDateLabel && (
+            <span className={`todo-item-due-pill${dueDateOverdue ? ' todo-item-due-overdue' : ''}`}>
+              {dueDateLabel}
             </span>
           )}
           {!!(task as Record<string, unknown>).is_blocked && !isDone && (

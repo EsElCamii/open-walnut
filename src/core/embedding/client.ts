@@ -21,9 +21,19 @@ interface OllamaEmbedResponse {
 
 let _available: boolean | null = null;
 
-/** Check if Ollama is reachable. Caches result for 60s. */
+/** Check if Ollama is installed and reachable. Caches result for 60s. */
 export async function isOllamaAvailable(ollamaUrl?: string): Promise<boolean> {
   if (_available !== null) return _available;
+  // First: check if the ollama binary is installed
+  try {
+    const { execFileSync } = await import('node:child_process');
+    execFileSync('which', ['ollama'], { timeout: 2000, stdio: 'ignore' });
+  } catch {
+    _available = false;
+    setTimeout(() => { _available = null; }, 60_000);
+    return false;
+  }
+  // Binary exists — now check if the service is reachable
   try {
     const res = await fetch(`${ollamaUrl ?? DEFAULT_OLLAMA_URL}/api/tags`, {
       signal: AbortSignal.timeout(2000),

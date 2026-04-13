@@ -1,6 +1,7 @@
 interface NavItem {
   id: string;
   label: string;
+  divider?: boolean;
 }
 
 const NAV_ITEMS: NavItem[] = [
@@ -14,6 +15,10 @@ const NAV_ITEMS: NavItem[] = [
   { id: 'heartbeat', label: 'Heartbeat' },
   { id: 'remote-hosts', label: 'Remote Hosts' },
   { id: 'advanced', label: 'Advanced' },
+  { id: 'repositories', label: 'Repositories', divider: true },
+  { id: 'hooks', label: 'Hooks' },
+  { id: 'usage', label: 'Usage & Costs', divider: true },
+  { id: 'timeline', label: 'Timeline' },
 ];
 
 interface SettingsNavProps {
@@ -25,14 +30,16 @@ export function SettingsNav({ activeSection, onNavigate }: SettingsNavProps) {
   return (
     <nav className="settings-nav" aria-label="Settings sections">
       {NAV_ITEMS.map((item) => (
-        <button
-          key={item.id}
-          type="button"
-          className={`settings-nav-item${activeSection === item.id ? ' settings-nav-active' : ''}`}
-          onClick={() => onNavigate(item.id)}
-        >
-          {item.label}
-        </button>
+        <span key={item.id}>
+          {item.divider && <div className="settings-nav-divider" />}
+          <button
+            type="button"
+            className={`settings-nav-item${activeSection === item.id ? ' settings-nav-active' : ''}`}
+            onClick={() => onNavigate(item.id)}
+          >
+            {item.label}
+          </button>
+        </span>
       ))}
     </nav>
   );

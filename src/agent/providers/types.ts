@@ -51,7 +51,10 @@ export interface ProviderConfig {
   api_key?: string;            // Resolved (env vars expanded)
   base_url?: string;           // Protocol-specific default if omitted
   region?: string;             // Bedrock-specific
-  bearer_token?: string;       // Bedrock-specific
+  bearer_token?: string;       // Bedrock: Identity Center bearer token
+  aws_access_key_id?: string;  // Bedrock: explicit IAM access key
+  aws_secret_access_key?: string; // Bedrock: explicit IAM secret key
+  aws_profile?: string;        // Bedrock: AWS profile from ~/.aws/config
   auth_header?: boolean;       // Use Authorization header instead of x-api-key
   headers?: Record<string, string>;  // Extra headers (e.g., OpenRouter site headers)
   /** User-defined model overrides. Merged with code-level MODEL_CATALOG at runtime.
