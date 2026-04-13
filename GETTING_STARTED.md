@@ -2,11 +2,11 @@
 
 Open Walnut is a personal AI butler that manages tasks, accumulates knowledge, and orchestrates Claude Code sessions — all from a beautiful web UI. This guide walks you through installation, configuration, and your first productive session.
 
-> **Time estimate**: 5 minutes for the fast track, 10 minutes for the full walkthrough.
+> **Time estimate**: 5 minutes for the fast track (plus a one-time ~1.16 GB model download on first start), 10 minutes for the full walkthrough.
 
 ---
 
-## Fast Track (5 Minutes)
+## Fast Track (5 Minutes + Model Download)
 
 If you already have Node.js >= 22, here's the quickest path:
 
@@ -29,6 +29,8 @@ npm start                             # builds everything, starts on port 3456
 
 Open [http://localhost:3456](http://localhost:3456) — type "hello" in the chat and the agent should reply. You're done!
 
+> **First start is slower**: The BGE-M3 embedding model (~1.16 GB) downloads automatically on first launch. This is a one-time download that can take 5-30 minutes depending on your connection. The server starts and is usable while the download happens in the background.
+
 > **Want coding sessions too?** Run `claude` once in your terminal to complete the Claude Code CLI auth flow. This is separate from the API key above.
 
 > **Not working?** See [Troubleshooting](#troubleshooting) below, or continue reading for the full setup.
@@ -37,7 +39,7 @@ Open [http://localhost:3456](http://localhost:3456) — type "hello" in the chat
 
 ## Table of Contents
 
-- [Fast Track (5 Minutes)](#fast-track-5-minutes)
+- [Fast Track (5 Minutes + Model Download)](#fast-track-5-minutes--model-download)
 - [Prerequisites](#prerequisites)
 - [Installation](#installation)
 - [Provider Configuration](#provider-configuration)
@@ -46,6 +48,7 @@ Open [http://localhost:3456](http://localhost:3456) — type "hello" in the chat
 - [Starting Sessions (Claude Code)](#starting-sessions-claude-code)
 - [Chatting with the Agent](#chatting-with-the-agent)
 - [Memory System](#memory-system)
+- [Search & Embedding Setup](#search--embedding-setup)
 - [Intermediate: Cron, Skills, Commands](#intermediate-cron-skills-commands)
 - [Advanced: SSH, Integrations, Plugins](#advanced-ssh-integrations-plugins)
 - [CLI Quick Reference](#cli-quick-reference)
@@ -64,6 +67,7 @@ Open [http://localhost:3456](http://localhost:3456) — type "hello" in the chat
 | **npm** | (comes with Node.js) | — | Package manager for dependencies |
 | **Claude Code CLI** | Latest | `npm install -g @anthropic-ai/claude-code` | Required for coding sessions (chat, tasks, and memory work without it) |
 | **API Key** | — | See [Provider Configuration](#provider-configuration) | Either an Anthropic API key or AWS Bedrock credentials |
+| **Disk space** | ~2 GB free | — | For the embedding model (~1.16 GB) and search index |
 
 > **Native modules**: Open Walnut uses `better-sqlite3` (for search index) and `sharp` (for image processing). Both ship prebuilt binaries for macOS, Linux, and Windows — no compiler needed in most cases. If prebuilds fail on your platform, you may need Python 3 and a C++ compiler (`xcode-select --install` on macOS, `build-essential` on Ubuntu).
 
@@ -71,7 +75,6 @@ Open [http://localhost:3456](http://localhost:3456) — type "hello" in the chat
 
 | Dependency | How to install | Why | Without it |
 |---|---|---|---|
-| **Ollama** + `bge-m3` model | `brew install ollama && ollama pull bge-m3` | Semantic (vector) search across memory | Search still works via keyword matching (SQLite FTS5). No errors — the Notifications panel shows "Ollama: Unavailable" but everything else is fully functional. |
 | **Git** | `brew install git` or [git-scm.com](https://git-scm.com/) | Auto-backup of `~/.open-walnut/` every 30 seconds | Data is still saved locally, just not version-controlled. |
 
 ### Important: Two Separate AI Connections
@@ -171,22 +174,39 @@ On first launch, Open Walnut:
 2. **Seeds `config.yaml`** — with default model settings and available models
 3. **Initializes directories** — `tasks/`, `memory/`, `sessions/`, and more
 4. **Builds the frontend** — compiles the React SPA (takes ~10 seconds the first time)
-5. **Starts the server** on [http://localhost:3456](http://localhost:3456)
+5. **Downloads the embedding model** — BGE-M3 (~1.16 GB) for semantic search. This is a one-time download that can take 5-30 minutes depending on your connection. The server is usable while the download runs in the background.
+6. **Starts the server** on [http://localhost:3456](http://localhost:3456)
 
 The data directory structure:
 
 ```
 ~/.open-walnut/
-  config.yaml          # Your configuration
+  config.yaml              # Your configuration
+  MEMORY.md                # Global memory (agent reads/writes this)
+  sessions.json            # Session registry
+  chat-history.json        # Persistent chat history
+  cron-jobs.json           # Scheduled jobs
+  usage.sqlite             # Usage tracking
+  memory-search.sqlite     # Search index (BM25 + vector)
+  notes-search.sqlite      # Notes search index
   tasks/
-    tasks.json         # Task database
+    tasks.json             # Task database
+    archive/               # Completed task archives
   memory/
-    daily/             # Daily activity logs
-    projects/          # Per-project memory
-    sessions/          # Session summaries
-  sessions.json        # Session registry
-  chat-history.json    # Persistent chat history
-  MEMORY.md            # Global memory (agent reads/writes this)
+    daily/                 # Daily activity logs
+    projects/              # Per-project memory
+    sessions/              # Session summaries
+    topics/                # Topic-based memory
+    repos/                 # Per-repo memory
+    compaction/            # Working memory snapshots
+    working-memory.md      # Real-time conversation scratchpad
+    index.md               # Memory index
+  notes/                   # User notes and instructions
+  recordings/              # Audio recordings and transcripts
+  timeline/                # Timeline events
+  repositories/            # Tracked repository metadata
+  skills/                  # User-installed skills
+  commands/                # Custom slash commands
 ```
 
 > **All data is local** — plain JSON, YAML, Markdown, and SQLite files. No cloud database.
@@ -229,7 +249,7 @@ Where `-c` is category, `-l` is project (label), and `-p` is priority.
 
 ### Task Lifecycle
 
-Tasks move through phases automatically (simplified — see [README](README.md) for the full 9-phase lifecycle):
+Tasks move through phases automatically (simplified — see [README](README.md) for the full 7-phase lifecycle):
 
 ```
 TODO → IN_PROGRESS → ... → AGENT_COMPLETE → ... → COMPLETE
@@ -277,6 +297,7 @@ Navigate to `/sessions` in the sidebar. Browse your task tree on the left, selec
 |---|---|
 | `plan` | Session produces a plan file for your review before executing |
 | `default` | Normal interactive mode — the AI works and asks for confirmation on risky actions |
+| `accept` | The AI auto-accepts file edits but still asks for confirmation on other actions (shell commands, etc.) |
 | `bypass` | The AI runs without asking for permission (use with caution) |
 
 ### Watching Sessions
@@ -320,10 +341,17 @@ Open Walnut accumulates knowledge over time. The more you use it, the smarter it
 | Layer | Where | What |
 |---|---|---|
 | **Global memory** | `~/.open-walnut/MEMORY.md` | User preferences, facts the agent learns |
+| **Working memory** | `memory/working-memory.md` | Real-time scratchpad for the active conversation (7 structured sections, 12K token budget) |
 | **Project memory** | `memory/projects/{category}/{project}/MEMORY.md` | Per-project context and decisions |
+| **Topic memory** | `memory/topics/` | Topic-based knowledge accumulated over time |
 | **Daily logs** | `memory/daily/YYYY-MM-DD.md` | Timestamped activity records |
 | **Session summaries** | `memory/sessions/` | Auto-captured when coding sessions end |
-| **Search index** | `memory/memory-index.sqlite` | Full-text search (SQLite FTS5) |
+| **Compaction archive** | `memory/compaction/` | Working memory snapshots saved during context compaction |
+| **Search index** | `~/.open-walnut/memory-search.sqlite` and `notes-search.sqlite` | Hybrid search (BM25 + vector via QMD) |
+
+### Working Memory
+
+Working memory is a real-time scratchpad that the agent maintains during conversations. It has 7 structured sections — Active Focus, User Requests, Decisions & Rationale, Struggles & Breakthroughs, Session Status, Open Threads, and Learnings. The agent updates it continuously as you chat, so context survives even when conversation history gets compacted. Working memory snapshots are archived to `memory/compaction/` automatically.
 
 ### Searching Memory
 
@@ -333,18 +361,51 @@ Use the search page (`/search`) or ask the agent:
 
 The agent searches across all memory layers using hybrid keyword + semantic search.
 
-### Semantic Search (Optional)
+---
 
-For vector-based semantic search, install Ollama and pull the embedding model:
+## Search & Embedding Setup
 
-```bash
-# Install Ollama (macOS)
-brew install ollama
-ollama serve       # Start the Ollama server
-ollama pull bge-m3 # Download the embedding model
+Open Walnut uses [QMD](https://github.com/tobi/qmd) (`@tobilu/qmd`) as its built-in search engine — a local hybrid search library combining BM25 keyword matching, vector embeddings, and re-ranking. No external services needed.
+
+### What Happens on First Start
+
+The BGE-M3 embedding model (~1.16 GB) downloads automatically from HuggingFace on first server start. This is a one-time download that can take **5-30 minutes** depending on your connection speed. The model is cached at:
+
+```
+~/.cache/qmd/models/          # macOS / Linux (default)
+$XDG_CACHE_HOME/qmd/models/   # if XDG_CACHE_HOME is set
+%LOCALAPPDATA%\qmd\models\    # Windows
 ```
 
-Open Walnut auto-detects Ollama and enables semantic search alongside keyword search.
+BGE-M3 supports **multilingual search** (strong Chinese + English coverage, plus 100+ other languages) out of the box.
+
+### Using a Different Model
+
+Set the `QMD_EMBED_MODEL` environment variable before starting:
+
+```bash
+export QMD_EMBED_MODEL="hf:Qwen/Qwen3-Embedding-0.6B-GGUF/Qwen3-Embedding-0.6B-Q8_0.gguf"
+npm start
+```
+
+You can also change the model from the web UI: **Settings → Search & Embeddings**.
+
+Available model options:
+
+| Model | URI | Size | Languages | Notes |
+|---|---|---|---|---|
+| **BGE-M3** (Walnut default) | `hf:CompendiumLabs/bge-m3-gguf/bge-m3-f16.gguf` | ~1.16 GB | Multilingual (100+ languages, strong Chinese + English) | Best quality; set by Walnut at startup |
+| **Qwen3-Embedding-0.6B** | `hf:Qwen/Qwen3-Embedding-0.6B-GGUF/Qwen3-Embedding-0.6B-Q8_0.gguf` | ~640 MB | Multilingual (strong Chinese + English) | Smaller alternative |
+| **EmbeddingGemma** (QMD library default) | `hf:ggml-org/embeddinggemma-300M-Q8_0/embeddinggemma-300M-Q8_0.gguf` | ~300 MB | English only | Lightest option; what QMD uses if no override is set |
+
+After changing models, you must click **Re-index** in **Settings → Search & Embeddings** to rebuild the search index with the new model.
+
+You can also set the model persistently in `~/.open-walnut/config.yaml`:
+
+```yaml
+search:
+  qmd_model: "hf:Qwen/Qwen3-Embedding-0.6B-GGUF/Qwen3-Embedding-0.6B-Q8_0.gguf"
+```
 
 ---
 
@@ -370,10 +431,12 @@ Cron jobs can trigger agent turns (the agent runs a task) or system events.
 
 ### Skills
 
-Skills are pluggable knowledge modules (`.md` files) that extend the agent's capabilities. Place them in:
+Skills are pluggable knowledge modules (`.md` files) that extend the agent's capabilities. They are loaded from these directories (highest priority first):
 
-- `~/.open-walnut/skills/` — user skills
-- `~/.claude/skills/` — Claude Code skills (shared with CLI)
+1. `./skills/` — workspace-local skills (relative to the current working directory)
+2. `~/.open-walnut/skills/` — user-installed global skills
+3. Built-in skills shipped with Open Walnut
+4. `~/.claude/skills/` — Claude Code skills (shared with the CLI)
 
 Each skill is a `SKILL.md` file with optional requirements (binaries, environment variables, platform). Only eligible skills appear in the agent's context.
 
@@ -438,7 +501,7 @@ plugins:
     client_id: YOUR_CLIENT_ID
 ```
 
-3. Run `walnut auth` to complete OAuth flow
+3. Run `open-walnut auth` to complete OAuth flow
 
 Tasks sync bidirectionally — changes in either direction are reflected.
 
@@ -482,8 +545,22 @@ walnut start <task-id>              # Start coding session for task
 walnut recall "query"               # Search across all memory
 walnut projects                     # List projects
 
-# Chat & Logs
+# Subtasks
+walnut subtask add <task-id> "title"           # Add subtask
+walnut subtask done <task-id> <subtask-id>     # Complete subtask
+walnut subtask rm <task-id> <subtask-id>       # Remove subtask
+walnut subtask list <task-id>                  # List subtasks
+
+# Lists (categories/projects)
+walnut lists                        # List all categories and projects
+walnut lists create <name>          # Create a new list
+walnut lists rename <id> <name>     # Rename a list
+walnut lists delete <id>            # Delete a list
+
+# Other
 walnut chat                         # Chat with agent in terminal
+walnut auth                         # Authenticate with external services
+walnut sync                         # Sync with external integrations
 walnut logs                         # View recent logs
 walnut logs -f -s agent             # Follow agent logs
 walnut logs --json                  # Raw JSON output
@@ -537,17 +614,19 @@ All commands support `--json` for structured output.
    - Then: `npm rebuild better-sqlite3`
 4. If `sharp` fails: `npm rebuild sharp` (it downloads prebuilt libvips binaries for your platform)
 
-### Semantic search not working
+### Search or embedding model issues
 
-**Symptoms**: Search works but only returns keyword matches, no semantic results. The Notifications panel (bell icon) shows "Ollama: Unavailable".
+**Symptoms**: First startup takes a long time, or search returns no vector results.
 
-**This is expected if Ollama is not installed.** Keyword search (SQLite FTS5) works perfectly without it. Semantic search is a nice-to-have upgrade.
+**The BGE-M3 embedding model (~1.16 GB) downloads on first start.** This is a one-time download that can take 5-30 minutes. If the download is interrupted, delete the specific model file (e.g. `~/.cache/qmd/models/bge-m3-f16.gguf`) and restart.
 
-**To enable semantic search**:
-1. Install Ollama: `brew install ollama` (macOS) or see [ollama.com](https://ollama.com)
-2. Start the Ollama server: `ollama serve`
-3. Pull the embedding model: `ollama pull bge-m3`
-4. Restart the Open Walnut server — it detects Ollama on startup and begins indexing
+**To use a smaller model** (faster download, less disk):
+```bash
+export QMD_EMBED_MODEL="hf:Qwen/Qwen3-Embedding-0.6B-GGUF/Qwen3-Embedding-0.6B-Q8_0.gguf"
+npm start
+```
+
+See [Search & Embedding Setup](#search--embedding-setup) for all model options.
 
 ---
 

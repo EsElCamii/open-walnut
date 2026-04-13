@@ -10,7 +10,7 @@
 
 **An AI agent that manages your projects, notes, and coding sessions — with the missing web UI for Claude Code built in.**
 
-Open Walnut is not just a dashboard — it's an AI-native app. A built-in AI agent with 30+ tools manages your tasks, accumulates knowledge, spawns and monitors Claude Code sessions, and acts on your behalf. It also gives Claude Code a proper web interface: real-time session streaming, multi-session monitoring, visual task boards, and persistent memory. Think of it as an AI butler that happens to have a beautiful UI.
+Open Walnut is not just a dashboard — it's an AI-native app. A built-in AI agent with 30+ tools manages your tasks, spawns and monitors Claude Code sessions, and builds a **self-organizing knowledge base** that gets smarter the more you use it. Raw daily observations auto-distill into organized topic pages. Old noise decays. Important patterns persist. It also gives Claude Code a proper web interface: real-time streaming, multi-session monitoring, visual task boards, and a personal notes vault. Think of it as an AI butler with a perfect memory and a beautiful UI.
 
 > **Philosophy**: Open Walnut is human-first. It amplifies *your* productivity — not by building a swarm of agents talking to each other, but by giving *you* superpowers. You stay in control. The AI handles the grunt work, surfaces what matters, and gets out of your way. The goal is simple: make your day smooth, focused, and productive.
 
@@ -51,7 +51,7 @@ Open Walnut replaces all of that with one system:
 |---|---|
 | Claude Code (terminal) | Web UI with real-time streaming, multi-session view, model switching |
 | Todoist / Notion projects | 4-layer task hierarchy (Category → Project → Task → Subtask) |
-| Apple Notes / Obsidian | Per-project memory files, daily logs, session summaries |
+| Apple Notes / Obsidian | Notes vault (wiki-links, backlinks, PARA folders) + agent-maintained memory (daily logs, topics, project memory) |
 | Manual AI workflows | 30+ agent tools, cron jobs, automated triage |
 
 ## Screenshots
@@ -83,18 +83,52 @@ Open Walnut replaces all of that with one system:
 
 ### Project & Task Tracking
 - **4-layer hierarchy**: Category → Project → Task → Subtask
-- **7-phase lifecycle**: TODO → IN_PROGRESS → AGENT_COMPLETE → AWAIT_HUMAN_ACTION → PEER_CODE_REVIEW → RELEASE_IN_PIPELINE → COMPLETE
+- **7-phase lifecycle**: TODO → IN_PROGRESS → AGENT_COMPLETE → AWAIT_HUMAN_ACTION → HUMAN_VERIFIED → POST_WORK_COMPLETED → COMPLETE
 - **Rich metadata**: priorities (4 tiers), due dates, dependencies with cycle detection, starred favorites, tags
 - **Parent-child tasks**: nested task hierarchies with starred-parent auto-includes-children
 - **Drag-and-drop** task reordering within and across projects
 - **Natural language task creation** — just tell the agent what you need
 
-### Notes & Knowledge Base
-- **Per-project memory** — `~/.open-walnut/memory/projects/{category}/{project}/MEMORY.md`
-- **Daily activity logs** — auto-generated at `memory/daily/YYYY-MM-DD.md`
-- **Session summaries** — knowledge captured automatically when sessions end
-- **Full-text + semantic search** — SQLite FTS5 + BGE-M3 vector embeddings (local Ollama)
-- **Knowledge accumulates** — the agent reads and writes memory as it works; it gets smarter over time
+### Notes — Your Personal Knowledge Vault
+- **Obsidian-style editor** — rich markdown with `[[wiki-links]]`, backlinks, slash commands, and folder tree navigation
+- **PARA organization** — Areas, Projects, Resources, Archive folders (or organize however you like)
+- **Global Notes** — a quick-capture scratchpad on the home page, always one click away
+- **Instructions file** — `notes/AGENTS.md` is injected into every Claude Code session, so the AI always knows your conventions
+- **Searchable** — notes are indexed alongside memory for hybrid BM25 + vector search
+
+### Memory — Self-Organizing AI Knowledge
+
+Most AI tools forget everything between sessions. Open Walnut doesn't. Its memory system is designed around one principle: **knowledge should organize itself**. You never file, tag, or maintain anything — the AI captures raw observations in real time, then a background "Dream" agent periodically wakes up and distills them into organized wiki-style topic pages. Old noise fades. Important patterns rise. The result is a knowledge base that **grows cleaner over time, not messier**.
+
+**The auto-distillation cycle:**
+
+```
+Real-time                          Background                      Always available
+───────────                        ──────────                      ────────────────
+
+Working Memory ◄─── updated        Dream Agent                     Hybrid Search
+  7 sections:       every ~5K        wakes every ~24h               ┌─ BM25 keyword
+  focus, decisions,  tokens          reads daily logs +             ├─ vector (BGE-M3)
+  struggles, ...                     working memory                 ├─ LLM re-ranking
+       │                                    │                       └─ query expansion
+       ▼                                    ▼
+Daily Logs          ──────────►    Topic Files (wiki pages)         temporal decay:
+Project Memory      ──────────►      edit-in-place, not append       recent = ranked higher
+Repo Memory         ──────────►      knowledge stays current         old noise fades out
+Session Summaries   ──────────►    Memory Index (table of contents)  evergreen = no decay
+```
+
+- **Working memory** — a live scratchpad with 7 structured sections (Active Focus, Decisions & Rationale, Struggles & Breakthroughs, Open Threads, etc.). A background process updates it every ~5K tokens of conversation. When context gets compacted, working memory *replaces* the traditional LLM summary — saving an API call and preserving richer context. This is why long conversations in Walnut don't lose the plot.
+
+- **Daily logs** — the agent's journal (`memory/daily/YYYY-MM-DD.md`). Written in butler-journal style: user requests in their own words, decisions with rationale, struggles and resolutions, open threads. Not git logs or commit hashes — things you'd actually want to recall two weeks later.
+
+- **Project & repo memory** — scoped knowledge that auto-loads when you work on related tasks. Project memory tracks decisions and context per project. Repo memory stores environment quirks: build commands, conventions, SSH configs, monorepo structure.
+
+- **Dream consolidation** — inspired by how biological memory consolidates during sleep. A background agent wakes up periodically (after ≥24h and ≥5 sessions), reads through recent daily logs, working memory, and compaction archives, then distills them into **topic files** (`memory/topics/*.md`). Topics are updated in-place — contradicted facts get deleted, relative dates become absolute, cross-project patterns get extracted. An **index file** (`memory/index.md`) serves as the wiki table of contents (≤200 lines, always injected into context so the AI knows what it knows).
+
+- **Temporal decay** — not all memories are equal. Search results are weighted by freshness: recent daily logs rank higher than month-old ones (30-day half-life). Session summaries decay faster (14-day half-life). But topic files, project memory, and your notes are **evergreen** — they never decay, because distilled knowledge doesn't expire. The formula: `score = relevance × source_weight × exp(-ln2 / halflife × age_days)`.
+
+- **Hybrid search with source isolation** — powered by [QMD](https://github.com/tobi/qmd) with local multilingual embeddings (BGE-M3, strong Chinese + English). Two separate indexes — memory and notes — prevent noisy-neighbor effects. Each source type (topic, daily, project, repo, notes) is searched independently with its own weight and guaranteed minimum slots, then results are merged by final score. The AI searches on demand, not by dumping everything into the system prompt.
 
 ### AI Agent (30+ Tools)
 - **Task management**: create, query, update, complete, delete tasks — with full hierarchy awareness
@@ -151,7 +185,7 @@ Open [http://localhost:3456](http://localhost:3456) in your browser.
 - **Node.js** >= 22
 - **Claude Code CLI** — `npm install -g @anthropic-ai/claude-code` (powers coding sessions)
 - **API key** — Anthropic API key or AWS Bedrock credentials ([setup guide](GETTING_STARTED.md#provider-configuration))
-- **Ollama** (optional) — enables local vector search for memory
+- **Embedding model** — BGE-M3 (~1.16 GB) auto-downloads on first start; configurable via `QMD_EMBED_MODEL` env var
 
 ## Configuration
 
@@ -190,7 +224,8 @@ External plugins go in `~/.open-walnut/plugins/{plugin-name}/`.
 | `/sessions` | **Sessions** | Task tree browser + full session detail with chat, model picker, plan preview |
 | `/tasks` | **Task Board** | Full task management with filters, search, drag-and-drop |
 | `/tasks/:id` | **Task Detail** | Single task view with subtasks, sessions, notes, dependencies |
-| `/search` | **Search** | Hybrid full-text + semantic search across tasks and memory |
+| `/notes` | **Notes** | Obsidian-style knowledge vault with wiki-links, backlinks, tree navigation, and rich editor |
+| `/search` | **Search** | Hybrid full-text + semantic search across tasks, memory, and notes |
 | `/usage` | **Usage** | Token costs, cache efficiency, daily spending charts |
 | `/settings` | **Settings** | Config editor, integration management |
 
@@ -252,9 +287,9 @@ npm test              # All tests (parallel)
 
 - **Backend**: Node.js, Express, TypeScript, better-sqlite3
 - **Frontend**: React, Vite, TypeScript
-- **AI**: Anthropic Claude (Opus / Sonnet / Haiku) via AWS Bedrock
+- **AI**: Anthropic Claude (Opus / Sonnet / Haiku) via Anthropic API or AWS Bedrock
 - **Sessions**: Claude Code CLI (`claude -p`) with stream-json I/O
-- **Search**: SQLite FTS5 + BGE-M3 embeddings (local Ollama)
+- **Search**: QMD hybrid search (BM25 + vector + re-ranking) with local BGE-M3 embeddings
 - **Testing**: Vitest, Playwright
 - **Integrations**: Microsoft Graph API, plugin system
 
@@ -288,7 +323,7 @@ Open Walnut is not just a coding agent or a Kanban board — it's a **complete s
 - **Task hierarchy** (Category > Project > Task > Subtask) with lifecycle management
 - **AI agent with 30+ tools** that understands your tasks and acts on your behalf
 - **Claude Code session orchestration** — spawn, monitor, and manage sessions from a web UI
-- **Persistent memory** — per-project memory, daily logs, semantic search
+- **Memory that gets smarter, not messier** — working memory survives compaction, daily logs auto-distill into wiki-style topics via Dream consolidation, old noise decays while evergreen knowledge persists. Hybrid search (BM25 + vector + re-ranking) spans memory and your personal notes vault
 - **Self-hosted, local-first** — all data in `~/.open-walnut/` as JSON, Markdown, and SQLite
 
 ## Contributing
