@@ -2,7 +2,7 @@
  * Tier card components and drop zone for Focus / Next / Satellite.
  * Each tier gets a SortableTierCard with a kebab menu (same as regular task items).
  */
-import { useState, useRef, useCallback, useEffect, type CSSProperties, type ReactNode } from 'react';
+import { useState, useRef, useCallback, useEffect, memo, type CSSProperties, type ReactNode } from 'react';
 import type { Task } from '@walnut/core';
 import type { FocusTier } from '@/api/focus';
 import { useSortable } from '@dnd-kit/sortable';
@@ -38,6 +38,9 @@ const PHASE_ORDER: string[] = [
 ];
 
 // ── SortableTierCard — unified draggable card for any tier ──
+// Wrapped in React.memo (invariant #4) to prevent re-render cascades during drag.
+// Without memo, every RAF tick from bumpDragTick would re-render all cards in all tiers,
+// compounding into the React #185 maximum update depth error.
 
 interface SortableTierCardProps {
   task: Task;
@@ -58,7 +61,7 @@ interface SortableTierCardProps {
   onUpdateTitle?: (id: string, title: string) => void;
 }
 
-export function SortableTierCard({ task, tier, isFocused, isDetailOpen, onClick, onSetTier, onUnpinTask, onPinTask, onSetPriority, onSetDate, onStar, onExpandDetail, onClearFocus, onOpenSession, onSetPhase, onUpdateTitle }: SortableTierCardProps) {
+export const SortableTierCard = memo(function SortableTierCard({ task, tier, isFocused, isDetailOpen, onClick, onSetTier, onUnpinTask, onPinTask, onSetPriority, onSetDate, onStar, onExpandDetail, onClearFocus, onOpenSession, onSetPhase, onUpdateTitle }: SortableTierCardProps) {
   const {
     attributes,
     listeners,
@@ -266,7 +269,7 @@ export function SortableTierCard({ task, tier, isFocused, isDetailOpen, onClick,
       />
     </div>
   );
-}
+});
 
 // ── TierDropZone — droppable target for any tier section ──
 

@@ -1925,6 +1925,13 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
   // ── Live cross-container DnD ──
   // During drag, we maintain local overrides of tier arrays so items appear in the
   // target section in real-time. On drop we commit to the server; on cancel we revert.
+  //
+  // Four invariants prevent React error #185 (Maximum update depth exceeded):
+  //  1. RAF-batch all setState in the drag hot path (bumpDragTick via requestAnimationFrame)
+  //  2. Freeze tier refs at drag start to isolate from external task updates
+  //  3. Never mutate SortableContext items for same-tier moves in onDragOver
+  //     (DnD Kit handles visual reorder via CSS transforms; final position resolved in onDragEnd)
+  //  4. React.memo on card components to prevent re-render cascades
 
   const DROP_ZONE_TIERS: Record<string, FocusTier> = { 'focus-drop-zone': 'focus', 'next-drop-zone': 'next', 'satellite-drop-zone': 'satellite' };
 
@@ -1936,7 +1943,14 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
   const dragNextIdsRef = useRef<string[] | null>(null);
   const dragSatelliteIdsRef = useRef<string[] | null>(null);
   const [, setDragTick] = useState(0);
-  const bumpDragTick = useCallback(() => setDragTick(n => n + 1), []);
+  const dragRafRef = useRef(0);
+  const bumpDragTick = useCallback(() => {
+    if (dragRafRef.current) return; // already scheduled this frame
+    dragRafRef.current = requestAnimationFrame(() => {
+      dragRafRef.current = 0;
+      setDragTick(n => n + 1);
+    });
+  }, []);
   // Convenience getters for the current render
   const dragFocusIds = dragFocusIdsRef.current;
   const dragNextIds = dragNextIdsRef.current;
@@ -1972,11 +1986,13 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
   // Recent task IDs for SortableContext
   const recentIds = useMemo(() => recentTasks.map((t) => t.id), [recentTasks]);
 
-  const tierOfIdInArrays = useCallback((id: string): FocusTier => {
-    if (focusIds_arr.includes(id)) return 'focus';
-    if (nextIds_arr.includes(id)) return 'next';
-    return 'satellite';
-  }, [focusIds_arr, nextIds_arr]);
+  // Stable fallback for onSetPhase — avoids creating a new arrow function every render
+  // which would defeat React.memo on SortableTierCard and other memoized task items.
+  // Signature matches onSetPhase (id, phase) but only forwards id to onComplete.
+  const setPhaseOrComplete = useCallback(
+    (id: string, _phase: string) => onSetPhase ? onSetPhase(id, _phase) : onComplete(id),
+    [onSetPhase, onComplete],
+  );
 
   const handlePinnedDragStart = useCallback((event: DragStartEvent) => {
     const fArr = focusTasksLocal.map((t) => t.id);
@@ -1984,6 +2000,10 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
     const sArr = satelliteTasksLocal.map((t) => t.id);
     const rArr = recentTasks.map((t) => t.id);
     dragStartSnapshot.current = { focus: fArr, next: nArr, satellite: sArr, recent: rArr };
+    // Freeze tier state — SortableContext items won't change from external events during drag
+    dragFocusIdsRef.current = fArr;
+    dragNextIdsRef.current = nArr;
+    dragSatelliteIdsRef.current = sArr;
     setActiveDragPinnedId(event.active.id as string);
   }, [focusTasksLocal, nextTasksLocal, satelliteTasksLocal, recentTasks]);
 
@@ -2038,27 +2058,19 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
     }
 
     // Existing pinned-to-pinned cross-tier logic
-    const currentTier = tierOfIdInArrays(activeId);
-    if (currentTier === targetTier) {
-      // After a cross-tier move, also track within-tier position changes so
-      // buildOrderFromRefs() in dragEnd has the exact drop position. Only
-      // applies when live refs are active (a cross-tier move already happened).
-      const refArr = currentTier === 'focus' ? dragFocusIdsRef.current : currentTier === 'next' ? dragNextIdsRef.current : dragSatelliteIdsRef.current;
-      if (refArr) {
-        const ai = refArr.indexOf(activeId);
-        const oi = refArr.indexOf(overId);
-        if (ai !== -1 && oi !== -1 && ai !== oi) {
-          const updated = [...refArr];
-          updated.splice(ai, 1);
-          updated.splice(oi, 0, activeId);
-          if (currentTier === 'focus') dragFocusIdsRef.current = updated;
-          else if (currentTier === 'next') dragNextIdsRef.current = updated;
-          else dragSatelliteIdsRef.current = updated;
-          bumpDragTick();
-        }
-      }
-      return;
-    }
+    // Read directly from refs (live drag state) rather than memoized arrays that close
+    // over render-time values. With RAF batching, refs can be mutated multiple times
+    // between renders; reading stale tier data would duplicate the item across two
+    // tier arrays.
+    const currentTier: FocusTier =
+      (dragFocusIdsRef.current ?? snap.focus).includes(activeId) ? 'focus' :
+      (dragNextIdsRef.current ?? snap.next).includes(activeId) ? 'next' : 'satellite';
+    // Same tier — skip (invariant #3: never mutate SortableContext items for same-tier
+    // reorders in onDragOver). DnD Kit handles visual reorder via CSS transforms;
+    // final position is resolved in handlePinnedDragEnd using the `over` target.
+    // Mutating items here would cause SortableContext to re-register → setState → re-render
+    // loop → React #185.
+    if (currentTier === targetTier) return;
 
     // Move activeId from current to target tier arrays
     const remove = (arr: string[]) => arr.filter((id) => id !== activeId);
@@ -2076,9 +2088,10 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
     setArr(currentTier, remove(getArr(currentTier)));
     setArr(targetTier, addAt(getArr(targetTier), overId));
     bumpDragTick(); // trigger visual update
-  }, [tierOfIdInArrays, bumpDragTick]);
+  }, [bumpDragTick]);
 
   const clearDragState = useCallback(() => {
+    if (dragRafRef.current) { cancelAnimationFrame(dragRafRef.current); dragRafRef.current = 0; }
     dragFocusIdsRef.current = null;
     dragNextIdsRef.current = null;
     dragSatelliteIdsRef.current = null;
@@ -2111,15 +2124,23 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
     // Check if item came from Recent section
     const isFromRecent = snap.recent?.includes(activeId) ?? false;
 
-    // Build new global pinned order from live tier arrays — preserves the drop
-    // position that handlePinnedDragOver calculated. Per-tier display order is
-    // derived from the global pinnedIds order, so this controls where the moved
-    // item appears within the target tier.
-    const buildOrderFromRefs = () => [
-      ...(liveFocus ?? snap.focus),
-      ...(liveNext ?? snap.next),
-      ...(liveSatellite ?? snap.satellite),
-    ];
+    // Build global pinned order from live tier refs, optionally adjusting the
+    // active item's position within a tier to match the final drop target.
+    const buildOrderFromRefs = (adjustInTier?: FocusTier) => {
+      const focus = [...(liveFocus ?? snap.focus)];
+      const next = [...(liveNext ?? snap.next)];
+      const satellite = [...(liveSatellite ?? snap.satellite)];
+      if (adjustInTier && activeId !== overId) {
+        const arr = adjustInTier === 'focus' ? focus : adjustInTier === 'next' ? next : satellite;
+        const ai = arr.indexOf(activeId);
+        const oi = arr.indexOf(overId);
+        if (ai !== -1 && oi !== -1 && ai !== oi) {
+          arr.splice(ai, 1);
+          arr.splice(oi, 0, activeId);
+        }
+      }
+      return [...focus, ...next, ...satellite];
+    };
 
     // When over === active, collision detected the dragged card itself (its center
     // follows the pointer). handlePinnedDragOver may have moved it cross-tier —
@@ -2167,7 +2188,7 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
       ?? 'satellite';
 
     if (origTier !== targetTier) {
-      onSetTier?.(activeId, targetTier, buildOrderFromRefs());
+      onSetTier?.(activeId, targetTier, buildOrderFromRefs(targetTier));
       return;
     }
 
@@ -3139,7 +3160,7 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
                         <div className="todo-pinned-list-scroll" style={focusTasksDisplay.length > tierLimits.focus ? { maxHeight: tierLimits.focus * CARD_HEIGHT_PX } : undefined}>
                           <TierDropZone id="focus-drop-zone" isEmpty={focusTasksDisplay.length === 0}>
                             {focusTasksDisplay.map((task) => (
-                              <SortableTierCard key={task.id} task={task} tier="focus" isFocused={focusedTaskId === task.id} isDetailOpen={focusedTaskId === task.id && !suppressDetail} onClick={handlePinnedCardClick} onSetTier={onSetTier} onUnpinTask={onUnpinTask} onPinTask={onPinTask} onSetPriority={onSetPriority} onSetDate={onSetDate} onStar={onStar} onExpandDetail={handleExpandDetail} onClearFocus={onClearFocus} onOpenSession={onOpenSession} onSetPhase={onSetPhase ?? ((id) => onComplete(id))} onUpdateTitle={onUpdate ? handleUpdateTitle : undefined} />
+                              <SortableTierCard key={task.id} task={task} tier="focus" isFocused={focusedTaskId === task.id} isDetailOpen={focusedTaskId === task.id && !suppressDetail} onClick={handlePinnedCardClick} onSetTier={onSetTier} onUnpinTask={onUnpinTask} onPinTask={onPinTask} onSetPriority={onSetPriority} onSetDate={onSetDate} onStar={onStar} onExpandDetail={handleExpandDetail} onClearFocus={onClearFocus} onOpenSession={onOpenSession} onSetPhase={setPhaseOrComplete} onUpdateTitle={onUpdate ? handleUpdateTitle : undefined} />
                             ))}
                           </TierDropZone>
                         </div>
@@ -3160,7 +3181,7 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
                         <div className="todo-pinned-list-scroll" style={nextTasksDisplay.length > tierLimits.next ? { maxHeight: tierLimits.next * CARD_HEIGHT_PX } : undefined}>
                           <TierDropZone id="next-drop-zone" isEmpty={nextTasksDisplay.length === 0}>
                             {nextTasksDisplay.map((task) => (
-                              <SortableTierCard key={task.id} task={task} tier="next" isFocused={focusedTaskId === task.id} isDetailOpen={focusedTaskId === task.id && !suppressDetail} onClick={handlePinnedCardClick} onSetTier={onSetTier} onUnpinTask={onUnpinTask} onPinTask={onPinTask} onSetPriority={onSetPriority} onSetDate={onSetDate} onStar={onStar} onExpandDetail={handleExpandDetail} onClearFocus={onClearFocus} onOpenSession={onOpenSession} onSetPhase={onSetPhase ?? ((id) => onComplete(id))} onUpdateTitle={onUpdate ? handleUpdateTitle : undefined} />
+                              <SortableTierCard key={task.id} task={task} tier="next" isFocused={focusedTaskId === task.id} isDetailOpen={focusedTaskId === task.id && !suppressDetail} onClick={handlePinnedCardClick} onSetTier={onSetTier} onUnpinTask={onUnpinTask} onPinTask={onPinTask} onSetPriority={onSetPriority} onSetDate={onSetDate} onStar={onStar} onExpandDetail={handleExpandDetail} onClearFocus={onClearFocus} onOpenSession={onOpenSession} onSetPhase={setPhaseOrComplete} onUpdateTitle={onUpdate ? handleUpdateTitle : undefined} />
                             ))}
                           </TierDropZone>
                         </div>
@@ -3181,7 +3202,7 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
                         <SortableContext items={satelliteIds_arr} strategy={verticalListSortingStrategy}>
                           <div className="todo-pinned-list todo-pinned-list-scroll" style={satelliteTasksDisplay.length > tierLimits.satellite ? { maxHeight: tierLimits.satellite * CARD_HEIGHT_PX } : undefined}>
                             {satelliteTasksDisplay.map((task) => (
-                              <SortableTierCard key={task.id} task={task} tier="satellite" isFocused={focusedTaskId === task.id} isDetailOpen={focusedTaskId === task.id && !suppressDetail} onClick={handlePinnedCardClick} onSetTier={onSetTier} onUnpinTask={onUnpinTask} onPinTask={onPinTask} onSetPriority={onSetPriority} onSetDate={onSetDate} onStar={onStar} onExpandDetail={handleExpandDetail} onClearFocus={onClearFocus} onOpenSession={onOpenSession} onSetPhase={onSetPhase ?? ((id) => onComplete(id))} onUpdateTitle={onUpdate ? handleUpdateTitle : undefined} />
+                              <SortableTierCard key={task.id} task={task} tier="satellite" isFocused={focusedTaskId === task.id} isDetailOpen={focusedTaskId === task.id && !suppressDetail} onClick={handlePinnedCardClick} onSetTier={onSetTier} onUnpinTask={onUnpinTask} onPinTask={onPinTask} onSetPriority={onSetPriority} onSetDate={onSetDate} onStar={onStar} onExpandDetail={handleExpandDetail} onClearFocus={onClearFocus} onOpenSession={onOpenSession} onSetPhase={setPhaseOrComplete} onUpdateTitle={onUpdate ? handleUpdateTitle : undefined} />
                             ))}
                           </div>
                         </SortableContext>
@@ -3222,7 +3243,7 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
                         onExpandDetail={handleExpandDetail}
                         onClearFocus={onClearFocus}
                         onOpenSession={onOpenSession}
-                        onSetPhase={onSetPhase ?? ((id) => onComplete(id))}
+                        onSetPhase={setPhaseOrComplete}
                         onUpdateTitle={onUpdate ? handleUpdateTitle : undefined}
                       />
                     ))}
@@ -3329,7 +3350,7 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
                     isExpanded={expandedParents.has(task.id)}
                     onToggleExpand={() => toggleParentExpand(task.id)}
                     onClick={() => handleTaskClick(task)}
-                    onSetPhase={onSetPhase ?? ((id) => onComplete(id))}
+                    onSetPhase={setPhaseOrComplete}
                     onStar={onStar}
                     onDelete={onDelete}
                     onSetPriority={onSetPriority}
@@ -3372,7 +3393,7 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
                   isExpanded={expandedParents.has(task.id)}
                   onToggleExpand={() => toggleParentExpand(task.id)}
                   onClick={() => handleTaskClick(task)}
-                  onSetPhase={onSetPhase ?? ((id) => onComplete(id))}
+                  onSetPhase={setPhaseOrComplete}
                   onStar={onStar}
                   onDelete={onDelete}
                   onSetPriority={onSetPriority}
@@ -3446,7 +3467,7 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
                                   isExpanded={expandedParents.has(task.id)}
                                   onToggleExpand={() => toggleParentExpand(task.id)}
                                   onClick={() => handleTaskClick(task)}
-                                  onSetPhase={onSetPhase ?? ((id) => onComplete(id))}
+                                  onSetPhase={setPhaseOrComplete}
                                   onStar={onStar}
                                   onDelete={onDelete}
                                   onSetPriority={onSetPriority}
@@ -3511,7 +3532,7 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
                                                 isExpanded={expandedParents.has(task.id)}
                                                 onToggleExpand={() => toggleParentExpand(task.id)}
                                                 onClick={() => handleTaskClick(task)}
-                                                onSetPhase={onSetPhase ?? ((id) => onComplete(id))}
+                                                onSetPhase={setPhaseOrComplete}
                                                 onStar={onStar}
                                                 onDelete={onDelete}
                                                 onSetPriority={onSetPriority}
