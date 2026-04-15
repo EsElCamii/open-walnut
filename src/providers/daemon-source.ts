@@ -4,8 +4,8 @@
  * ARCHITECTURE:
  * This file contains the daemon source as a string constant. When connecting
  * to a remote host, DaemonConnection:
- *   1. Deploys this code via SSH (cat > /tmp/open-walnut/daemon.js)
- *   2. Starts it (node /tmp/open-walnut/daemon.js --start)
+ *   1. Deploys this code via SSH (cat > /tmp/open-walnut/daemon.cjs)
+ *   2. Starts it (node /tmp/open-walnut/daemon.cjs --start)
  *   3. Connects via WebSocket through an SSH tunnel
  *
  * The daemon runs independently on the remote machine — SSH dropping
@@ -42,7 +42,7 @@ export function getDaemonSource(): string {
 }
 
 // ── Daemon source code ──
-// This is deployed to /tmp/open-walnut/daemon.js on the remote machine.
+// This is deployed to /tmp/open-walnut/daemon.cjs on the remote machine.
 
 const DAEMON_SOURCE = `#!/usr/bin/env node
 'use strict';
@@ -171,7 +171,7 @@ function createManualWsServer(httpServer) {
 
     const acceptKey = crypto
       .createHash('sha1')
-      .update(key + '258EAFA5-E914-47DA-95CA-5AB5DC085B11')
+      .update(key + '258EAFA5-E914-47DA-95CA-C5AB0DC85B11')
       .digest('base64');
 
     socket.write(

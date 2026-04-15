@@ -3,7 +3,7 @@
  *
  * ARCHITECTURE:
  * One DaemonConnection per remote host. Manages:
- *   1. Deploying daemon.js to the remote host
+ *   1. Deploying daemon.cjs to the remote host
  *   2. Starting the daemon (or connecting to existing)
  *   3. SSH tunnel (localhost:localPort → remote:daemonPort)
  *   4. WebSocket connection through the tunnel
@@ -422,7 +422,7 @@ export class DaemonConnection {
     // Fallback: check old node-based daemon (may still be running from previous deploy)
     try {
       const preamble = buildRemotePreamble(this.sshTarget.shell_setup)
-      const result = await this.sshExec(`${preamble}; node /tmp/open-walnut/daemon.js --status 2>/dev/null`)
+      const result = await this.sshExec(`${preamble}; node /tmp/open-walnut/daemon.cjs --status 2>/dev/null`)
       const status = JSON.parse(result)
       if (status.running && status.port) {
         log.session.info('DaemonConnection: daemon already running (node)', {
@@ -562,10 +562,10 @@ export class DaemonConnection {
     const preamble = buildRemotePreamble(this.sshTarget.shell_setup)
 
     try {
-      // Create directory and write daemon.js
-      await this.sshExec('mkdir -p /tmp/open-walnut')
+      // Create directory and clean up legacy daemon.js (which breaks under "type":"module")
+      await this.sshExec('mkdir -p /tmp/open-walnut && rm -f /tmp/open-walnut/daemon.js')
 
-      const args = [...this.baseSshArgs, this.sshHostString, 'cat > /tmp/open-walnut/daemon.js']
+      const args = [...this.baseSshArgs, this.sshHostString, 'cat > /tmp/open-walnut/daemon.cjs']
       const proc = spawn('ssh', args, { stdio: ['pipe', 'pipe', 'pipe'] })
 
       await new Promise<void>((resolve, reject) => {
@@ -611,7 +611,7 @@ export class DaemonConnection {
       } else {
         // Source deploy — needs node PATH discovery
         const preamble = buildRemotePreamble(this.sshTarget.shell_setup)
-        startCmd = `${preamble}; nohup node /tmp/open-walnut/daemon.js --start > /tmp/open-walnut/daemon-start.log 2>&1 & ` +
+        startCmd = `${preamble}; nohup node /tmp/open-walnut/daemon.cjs --start > /tmp/open-walnut/daemon-start.log 2>&1 & ` +
           'sleep 2 && cat /tmp/open-walnut/daemon.port'
       }
 
