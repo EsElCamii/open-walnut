@@ -60,6 +60,8 @@ import { SortableTierCard, TierDropZone } from './FocusSatelliteCards';
 import type { FocusTier } from '@/api/focus';
 import { useFocusBarContext } from '@/contexts/FocusBarContext';
 
+const DATE_LABELS: Record<string, string> = { now: 'Now', overdue: 'Overdue', 'this-week': 'This Week', 'no-date': 'No Date' } as const;
+
 type DetailTarget =
   | { type: 'project'; category: string; project: string }
   | { type: 'category'; category: string }
@@ -235,9 +237,11 @@ interface SortableTaskItemProps {
   searchScore?: number;       // Combined normalized score [0,1]
   searchKeywordScore?: number;  // Normalized keyword contribution [0,1]
   searchSemanticScore?: number; // Normalized semantic contribution [0,1]
+  filterOverrideReason?: string;  // Why this task is outside current filters (focus override)
+  isFadingOverride?: boolean;     // Task is fading out after focus moved away
 }
 
-function SortableTaskItem({ task, isFocused, isDetailOpen, isRecentlyDone, depth = 0, childCount, isExpanded, onToggleExpand, onClick, onSetPhase, onStar, onDelete, onSetPriority, onUpdateTitle, onOpenSession, openSessionIds, onExpandDetail, onClearFocus, onPinTask, onUnpinTask, onSetTier, onSetDate, isPinned, pinnedTier, searchContext, searchMatchField, searchScore, searchKeywordScore, searchSemanticScore }: SortableTaskItemProps) {
+function SortableTaskItem({ task, isFocused, isDetailOpen, isRecentlyDone, depth = 0, childCount, isExpanded, onToggleExpand, onClick, onSetPhase, onStar, onDelete, onSetPriority, onUpdateTitle, onOpenSession, openSessionIds, onExpandDetail, onClearFocus, onPinTask, onUnpinTask, onSetTier, onSetDate, isPinned, pinnedTier, searchContext, searchMatchField, searchScore, searchKeywordScore, searchSemanticScore, filterOverrideReason, isFadingOverride }: SortableTaskItemProps) {
   const integrations = useIntegrations();
   const hookPhases = usePhaseHooks();
   const {
@@ -284,6 +288,8 @@ function SortableTaskItem({ task, isFocused, isDetailOpen, isRecentlyDone, depth
     isDone ? 'todo-panel-item-done' : '',
     isRecentlyDone ? 'todo-panel-item-recently-done' : '',
     isFocused ? 'task-focused' : '',
+    filterOverrideReason ? 'task-filter-override' : '',
+    isFadingOverride ? 'task-filter-override-fading' : '',
   ].filter(Boolean).join(' ');
 
   const dueDateLabel = formatDateDisplay(task.due_date);
@@ -627,6 +633,14 @@ function SortableTaskItem({ task, isFocused, isDetailOpen, isRecentlyDone, depth
             onSetDate={onSetDate}
           />
         </div>
+        {/* Filter override reason — shown below title when task is outside current filters */}
+        {filterOverrideReason && (
+          <div className="task-filter-override-row">
+            <span className="task-filter-override-badge" title="This task is outside your current filters and is shown temporarily because you navigated to it. It will fade away when you select another task.">
+              {filterOverrideReason}
+            </span>
+          </div>
+        )}
         {/* Search result scores (only visible during search) */}
         {(searchScore != null || searchContext) && (
           <div className="todo-item-meta-row">
@@ -1595,6 +1609,39 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
   const [groupBy, setGroupBy] = useState<GroupBy>(readGroupBy);
   const [activeCategory, setActiveCategory] = useState(readTab);
 
+  // Focus override: when a focused task would be hidden by filters, store its ID here
+  // instead of clearing filters. The filtered useMemo exempts this task from all filter checks.
+  // When focus moves away, the task fades out (fadingOverrideRef) before being removed.
+  const focusOverrideRef = useRef<string | null>(null);
+  const fadingOverrideRef = useRef<string | null>(null);
+  const fadingTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [_overrideTick, setOverrideTick] = useState(0);
+  const clearFocusOverride = useCallback(() => {
+    if (focusOverrideRef.current) {
+      const fadingId = focusOverrideRef.current;
+      focusOverrideRef.current = null;
+      // Start fade-out: keep in list briefly with fading style
+      fadingOverrideRef.current = fadingId;
+      setOverrideTick(n => n + 1);
+      if (fadingTimerRef.current) clearTimeout(fadingTimerRef.current);
+      fadingTimerRef.current = setTimeout(() => {
+        fadingOverrideRef.current = null;
+        fadingTimerRef.current = null;
+        setOverrideTick(n => n + 1);
+      }, 600); // 600ms — must match CSS .task-filter-override-fading animation duration
+    } else if (fadingOverrideRef.current) {
+      // Cancel in-progress fade immediately (e.g. when filter changes during fade)
+      if (fadingTimerRef.current) { clearTimeout(fadingTimerRef.current); fadingTimerRef.current = null; }
+      fadingOverrideRef.current = null;
+      setOverrideTick(n => n + 1);
+    }
+  }, []);
+
+  // Cleanup fadingTimerRef on unmount
+  useEffect(() => {
+    return () => { if (fadingTimerRef.current) clearTimeout(fadingTimerRef.current); };
+  }, []);
+
   // Apply externally-set category (e.g. from URL deep link)
   const prevExternalCatRef = useRef(externalCategory);
   useEffect(() => {
@@ -1732,6 +1779,7 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
     if (!focusedTaskId) {
       prevFocusedRef.current = focusedTaskId;
       focusHandledRef.current = false;
+      clearFocusOverride();
       return;
     }
     const isNewFocus = focusedTaskId !== prevFocusedRef.current;
@@ -1804,22 +1852,31 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
       }
     }
 
-    // Auto-reveal: adjust filters if the focused task is hidden by current filters
+    // Focus override: instead of clearing filters, temporarily inject the task
+    // into the filtered list. It fades out when focus moves away.
+    // Note: activeCategory is NOT checked here — tab-switching above (lines ~1682-1698)
+    // already ensures the task's category is visible. Override only handles toolbar filters.
+    // SYNC: these conditions must match the filter logic in the `filtered` useMemo
     const isDone = task.status === 'done';
-    if (isDone && !showCompleted && phaseFilter !== 'COMPLETE') {
-      setShowCompleted(true);
-    }
-    if (priorityFilter && effectivePriority(task.priority) !== priorityFilter) {
-      setPriorityFilter('');
-    }
-    if (phaseFilter && task.phase !== phaseFilter) {
-      setPhaseFilter('');
-    }
-    if (sessionFilter && task.phase !== sessionFilter) {
-      setSessionFilter('');
-    }
-    if (sourceFilter !== 'all' && (task.source || 'ms-todo') !== sourceFilter) {
-      setSourceFilter('all');
+    const wouldBeHidden =
+      (isDone && !showCompleted && phaseFilter !== 'COMPLETE') ||
+      (!!priorityFilter && effectivePriority(task.priority) !== priorityFilter) ||
+      (!!phaseFilter && task.phase !== phaseFilter) ||
+      (!!sessionFilter && task.phase !== sessionFilter) ||
+      (sourceFilter !== 'all' && (task.source || 'ms-todo') !== sourceFilter) ||
+      (!!dateFilter && !isDone && !matchesDateFilter(task, dateFilter, tasks)) ||
+      (!!tagFilter && (!task.tags || !task.tags.includes(tagFilter)));
+
+    if (wouldBeHidden) {
+      // Cancel any in-progress fade-out from a previous override
+      if (fadingTimerRef.current) { clearTimeout(fadingTimerRef.current); fadingTimerRef.current = null; }
+      fadingOverrideRef.current = null;
+      focusOverrideRef.current = focusedTaskId;
+      setOverrideTick(n => n + 1);
+    } else if (focusOverrideRef.current) {
+      // Task is visible normally — clear stale override
+      focusOverrideRef.current = null;
+      setOverrideTick(n => n + 1);
     }
 
     // Scroll to the focused task after state changes (expand/filter) have flushed to DOM.
@@ -2299,7 +2356,11 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
 
   const filtered = useMemo(() => {
     // First pass: apply all filters to get directly-matching tasks
+    // SYNC: keep in sync with wouldBeHidden in focus effect
     const directList = tasks.filter((t) => {
+      // Focus override: always include the focused/fading task regardless of filters
+      if (focusOverrideRef.current === t.id || fadingOverrideRef.current === t.id) return true;
+
       if (!showCompleted && t.status === 'done' && phaseFilter !== 'COMPLETE') {
         // Keep recently-completed tasks visible briefly for visual feedback
         if (!recentlyCompletedRef.current.has(t.id)) return false;
@@ -2362,8 +2423,30 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
       }
     }
     return result;
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- isDescendantVisibleInStarred is stable (useCallback)
-  }, [tasks, showCompleted, priorityFilter, phaseFilter, sessionFilter, sourceFilter, tagFilter, dateFilter, _tick, activeCategory, favorites, isDescendantVisibleInStarred]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- isDescendantVisibleInStarred is stable (useCallback); focusOverrideRef/fadingOverrideRef read via _overrideTick
+  }, [tasks, showCompleted, priorityFilter, phaseFilter, sessionFilter, sourceFilter, tagFilter, dateFilter, _tick, _overrideTick, activeCategory, favorites, isDescendantVisibleInStarred]);
+
+  const filterOverrideId = focusOverrideRef.current;
+  const fadingOverrideId = fadingOverrideRef.current;
+  const overrideReasonTaskId = filterOverrideId || fadingOverrideId;
+
+  // Compute descriptive reason for focus-override badge (e.g. "outside Now filter").
+  // Only computed for the single override task (at most one at a time), not per-task.
+  const filterOverrideReason = useMemo(() => {
+    if (!overrideReasonTaskId) return undefined;
+    const task = tasks.find(t => t.id === overrideReasonTaskId);
+    if (!task) return undefined;
+    const reasons: string[] = [];
+    const isDone = task.status === 'done';
+    if (isDone && !showCompleted && phaseFilter !== 'COMPLETE') reasons.push('hidden by completed filter');
+    if (priorityFilter && effectivePriority(task.priority) !== priorityFilter) reasons.push(`priority ≠ ${priorityFilter}`);
+    if (phaseFilter && task.phase !== phaseFilter) reasons.push(`phase ≠ ${phaseFilter}`);
+    if (sessionFilter && task.phase !== sessionFilter) reasons.push(`session ≠ ${sessionFilter}`);
+    if (sourceFilter !== 'all' && (task.source || 'ms-todo') !== sourceFilter) reasons.push(`source ≠ ${sourceFilter}`);
+    if (dateFilter && !isDone && !matchesDateFilter(task, dateFilter, tasks)) reasons.push(`outside "${DATE_LABELS[dateFilter] || dateFilter}" date filter`);
+    if (tagFilter && (!task.tags || !task.tags.includes(tagFilter))) reasons.push(`missing tag "${tagFilter}"`);
+    return reasons.length > 0 ? reasons.join(' · ') : undefined;
+  }, [overrideReasonTaskId, tasks, showCompleted, phaseFilter, priorityFilter, sessionFilter, sourceFilter, dateFilter, tagFilter]);
 
   // --- Search filtering: intersect search results with active filters ---
   // Search bypasses category tab so results span ALL categories (the whole
@@ -3107,20 +3190,20 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
           categoryCounts={categoryCounts}
           hasStarredContent={hasStarredContent}
           phaseFilter={phaseFilter}
-          onPhaseFilterChange={setPhaseFilter}
+          onPhaseFilterChange={(v) => { setPhaseFilter(v); clearFocusOverride(); }}
           priorityFilter={priorityFilter}
-          onPriorityFilterChange={setPriorityFilter}
+          onPriorityFilterChange={(v) => { setPriorityFilter(v); clearFocusOverride(); }}
           tagFilter={tagFilter}
-          onTagFilterChange={setTagFilter}
+          onTagFilterChange={(v) => { setTagFilter(v); clearFocusOverride(); }}
           availableTags={availableTags}
           dateFilter={dateFilter}
-          onDateFilterChange={(v) => { setDateFilter(v); persistDateFilter(v); }}
+          onDateFilterChange={(v) => { setDateFilter(v); persistDateFilter(v); clearFocusOverride(); }}
           sortBy={sortBy}
           onSortByChange={(v) => { setSortBy(v); persistSortBy(v); }}
           groupBy={groupBy}
           onGroupByChange={(v) => { setGroupBy(v); persistGroupBy(v); }}
           showCompleted={showCompleted}
-          onShowCompletedChange={setShowCompleted}
+          onShowCompletedChange={(v) => { setShowCompleted(v); clearFocusOverride(); }}
           onClearAll={() => {
             setActiveCategory(''); persistTab(''); onCategoryChange?.('');
             setPhaseFilter('');
@@ -3129,6 +3212,7 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
             setDateFilter(''); persistDateFilter('');
             setSessionFilter('');
             setSourceFilter('all');
+            clearFocusOverride();
           }}
         />
       </div>
@@ -3370,6 +3454,8 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
                     searchScore={searchMeta.get(task.id)?.score}
                     searchKeywordScore={searchMeta.get(task.id)?.keywordScore}
                     searchSemanticScore={searchMeta.get(task.id)?.semanticScore}
+                    filterOverrideReason={(task.id === filterOverrideId || task.id === fadingOverrideId) ? filterOverrideReason : undefined}
+                    isFadingOverride={fadingOverrideId === task.id}
                   />
                   </Fragment>
                 );
@@ -3407,6 +3493,8 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
                   onUnpinTask={onUnpinTask}
                   isPinned={pinnedTaskIds?.has(task.id)}
                   searchContext={`${task.category}${task.project && task.project !== task.category ? ` / ${task.project}` : ''}`}
+                  filterOverrideReason={(task.id === filterOverrideId || task.id === fadingOverrideId) ? filterOverrideReason : undefined}
+                  isFadingOverride={fadingOverrideId === task.id}
                 />
               );
             })}
@@ -3482,6 +3570,8 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
                                   onSetTier={onSetTier}
                     isPinned={pinnedTaskIds?.has(task.id)}
                     pinnedTier={getTier(task.id)}
+                                  filterOverrideReason={(task.id === filterOverrideId || task.id === fadingOverrideId) ? filterOverrideReason : undefined}
+                                  isFadingOverride={fadingOverrideId === task.id}
                                 />
                               );
                             })}
@@ -3547,6 +3637,8 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
                                                 onSetTier={onSetTier}
                     isPinned={pinnedTaskIds?.has(task.id)}
                     pinnedTier={getTier(task.id)}
+                                                filterOverrideReason={(task.id === filterOverrideId || task.id === fadingOverrideId) ? filterOverrideReason : undefined}
+                                                isFadingOverride={fadingOverrideId === task.id}
                                               />
                                             );
                                           })}
