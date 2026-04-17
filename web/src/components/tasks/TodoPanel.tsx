@@ -230,6 +230,8 @@ interface SortableTaskItemProps {
   onUnpinTask?: (taskId: string) => void;
   onSetTier?: (taskId: string, tier: FocusTier, newPinnedOrder?: string[]) => void;
   onSetDate?: (taskId: string, date: string | null) => void;
+  onUnparent?: (taskId: string) => void;  // Remove parent_task_id (promote to top-level)
+  onMoveUp?: (taskId: string) => void;    // Swap with previous sibling
   isPinned?: boolean;
   pinnedTier?: FocusTier;
   searchContext?: string; // Category/Project context pill shown in search mode
@@ -241,7 +243,7 @@ interface SortableTaskItemProps {
   isFadingOverride?: boolean;     // Task is fading out after focus moved away
 }
 
-function SortableTaskItem({ task, isFocused, isDetailOpen, isRecentlyDone, depth = 0, childCount, isExpanded, onToggleExpand, onClick, onSetPhase, onStar, onDelete, onSetPriority, onUpdateTitle, onOpenSession, openSessionIds, onExpandDetail, onClearFocus, onPinTask, onUnpinTask, onSetTier, onSetDate, isPinned, pinnedTier, searchContext, searchMatchField, searchScore, searchKeywordScore, searchSemanticScore, filterOverrideReason, isFadingOverride }: SortableTaskItemProps) {
+function SortableTaskItem({ task, isFocused, isDetailOpen, isRecentlyDone, depth = 0, childCount, isExpanded, onToggleExpand, onClick, onSetPhase, onStar, onDelete, onSetPriority, onUpdateTitle, onOpenSession, openSessionIds, onExpandDetail, onClearFocus, onPinTask, onUnpinTask, onSetTier, onSetDate, onUnparent, onMoveUp, isPinned, pinnedTier, searchContext, searchMatchField, searchScore, searchKeywordScore, searchSemanticScore, filterOverrideReason, isFadingOverride }: SortableTaskItemProps) {
   const integrations = useIntegrations();
   const hookPhases = usePhaseHooks();
   const {
@@ -631,6 +633,8 @@ function SortableTaskItem({ task, isFocused, isDetailOpen, isRecentlyDone, depth
             onSetTier={onSetTier}
             onOpenSession={onOpenSession}
             onSetDate={onSetDate}
+            onUnparent={onUnparent}
+            onMoveUp={onMoveUp}
           />
         </div>
         {/* Filter override reason — shown below title when task is outside current filters */}
@@ -1423,10 +1427,10 @@ function SortableRecentCard({ task, isFocused, isDetailOpen, onClick, onPinTask,
     };
     const handleScroll = () => setPhaseMenuOpen(false);
     document.addEventListener('mousedown', handleClick);
-    window.addEventListener('scroll', handleScroll, true);
+    window.addEventListener('scroll', handleScroll);
     return () => {
       document.removeEventListener('mousedown', handleClick);
-      window.removeEventListener('scroll', handleScroll, true);
+      window.removeEventListener('scroll', handleScroll);
     };
   }, [phaseMenuOpen]);
 
@@ -1719,6 +1723,11 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
   // RAF handle for cancellation on unmount / new focus
   const scrollRafRef = useRef<number>(0);
 
+  // When set, a useEffect watching `tasks` scrolls this task into view after
+  // the next render. Used to preserve scroll position after reparent / move-up
+  // triggers a refetch (otherwise the list jumps to top).
+  const scrollAfterReparentRef = useRef<string | null>(null);
+
   // Scroll to a task by ID inside .todo-panel-list.
   // Uses double-RAF + retry to wait for React commit + browser paint + layout settle
   // after state changes (expand/filter-clear, detail panel open).
@@ -1773,6 +1782,16 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
   useEffect(() => {
     return () => { cancelAnimationFrame(scrollRafRef.current); clearTimeout(scrollTimerRef.current); };
   }, []);
+
+  // Scroll the just-moved task back into view after reparent / move-up causes
+  // the tasks array to refresh. Watches `tasks` so it fires after the refetch
+  // completes and React has re-rendered the new positions.
+  useEffect(() => {
+    const taskId = scrollAfterReparentRef.current;
+    if (!taskId) return;
+    scrollAfterReparentRef.current = null;
+    scrollToTask(taskId);
+  }, [tasks, scrollToTask]);
 
   // Auto-switch tab, expand groups, and scroll to task when focusedTaskId changes
   useEffect(() => {
@@ -2457,8 +2476,9 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
     if (!isSearchMode) return filtered;
 
     const applySearchFilters = (t: Task): boolean => {
-      // Show/hide completed (keep recently-completed visible briefly)
-      if (!showCompleted && t.status === 'done' && phaseFilter !== 'COMPLETE' && !recentlyCompletedRef.current.has(t.id)) return false;
+      // In search mode, always show completed tasks — the user is explicitly
+      // searching and wants to find tasks regardless of completion state.
+      // Only non-search filtered views respect showCompleted.
       // Priority
       if (priorityFilter && effectivePriority(t.priority) !== priorityFilter) return false;
       // Phase
@@ -2510,8 +2530,8 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
         if (!t) return false;
         return applySearchFilters(t);
       });
-  // eslint-disable-next-line react-hooks/exhaustive-deps -- activeCategory/favorites/isDescendantVisibleInStarred intentionally omitted: search bypasses category tab
-  }, [tasks, filtered, isSearchMode, searchQuery, searchResults, showCompleted, priorityFilter, phaseFilter, sessionFilter, sourceFilter, tagFilter]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- activeCategory/favorites/isDescendantVisibleInStarred intentionally omitted: search bypasses category tab; showCompleted intentionally omitted: search always shows completed tasks
+  }, [tasks, filtered, isSearchMode, searchQuery, searchResults, priorityFilter, phaseFilter, sessionFilter, sourceFilter, tagFilter]);
 
   // Count of search results (for display)
   const searchResultCount = isSearchMode ? searchFiltered.length : null;
@@ -3070,6 +3090,9 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
             return next;
           });
         }
+        // Preserve scroll position: mark the moved task so the post-refetch
+        // useEffect scrolls it back into view (otherwise list jumps to top).
+        scrollAfterReparentRef.current = activeId;
         onReparentTask(activeId, newParentId);
         return;
       }
@@ -3130,6 +3153,64 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
       onMoveTask(activeId, targetCategory, targetProject, insertNearTaskId);
     }
   }, [onReorder, onMoveTask, onReparentTask, ordering, taskGroupMap, grouped, fullGrouped, sorted, childParentMap, trueChildCountMap]);
+
+  // Kebab "Move left" — promote subtask to top-level via onReparentTask(id, null).
+  // Also primes scroll restoration so the task stays visible after refetch.
+  const handleUnparent = useCallback((taskId: string) => {
+    if (!onReparentTask) return;
+    scrollAfterReparentRef.current = taskId;
+    onReparentTask(taskId, null);
+  }, [onReparentTask]);
+
+  // Kebab "Move up" — map of taskId → handler that swaps the task with the
+  // previous sibling in its group. Siblings are grouped by parent_task_id so
+  // child tasks only move among their own siblings. Tasks that are already
+  // first among their siblings have no handler (button auto-hides).
+  const moveUpMap = useMemo((): Map<string, () => void> => {
+    const map = new Map<string, () => void>();
+    if (!onReorder) return map;
+
+    const processGroup = (groupTasks: Task[], fullGroupTasks: Task[], category: string, project: string) => {
+      // Group visible tasks by sibling-key (parent_task_id, resolved to full id)
+      const siblingGroups = new Map<string, Task[]>();
+      for (const t of groupTasks) {
+        const parentKey = t.parent_task_id
+          ? (groupTasks.find((p) => p.id.startsWith(t.parent_task_id!))?.id ?? `__orphan:${t.parent_task_id}`)
+          : '__root__';
+        if (!siblingGroups.has(parentKey)) siblingGroups.set(parentKey, []);
+        siblingGroups.get(parentKey)!.push(t);
+      }
+      for (const siblings of siblingGroups.values()) {
+        for (let i = 1; i < siblings.length; i++) {
+          const task = siblings[i];
+          const prev = siblings[i - 1];
+          map.set(task.id, () => {
+            // Work on the FULL (unfiltered) order so hidden tasks keep their slots
+            const fullIds = fullGroupTasks.map((t) => t.id);
+            const a = fullIds.indexOf(task.id);
+            const b = fullIds.indexOf(prev.id);
+            if (a === -1 || b === -1) return;
+            const newOrder = [...fullIds];
+            [newOrder[a], newOrder[b]] = [newOrder[b], newOrder[a]];
+            scrollAfterReparentRef.current = task.id;
+            onReorder(category, project, newOrder);
+          });
+        }
+      }
+    };
+
+    for (const { category, directTasks, projects } of grouped) {
+      const fullEntry = fullGrouped.get(category);
+      if (fullEntry) {
+        processGroup(directTasks, fullEntry.direct, category, category);
+        for (const { project, tasks: projTasks } of projects) {
+          const fullProj = fullEntry.projects.get(project);
+          if (fullProj) processGroup(projTasks, fullProj, category, project);
+        }
+      }
+    }
+    return map;
+  }, [grouped, fullGrouped, onReorder]);
 
   const draggedTask = activeDragId ? sorted.find((t) => t.id === activeDragId) : null;
 
@@ -3447,6 +3528,8 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
                     onPinTask={onPinTask}
                     onUnpinTask={onUnpinTask}
                     onSetTier={onSetTier}
+                    onUnparent={onReparentTask ? handleUnparent : undefined}
+                    onMoveUp={moveUpMap.get(task.id)}
                     isPinned={pinnedTaskIds?.has(task.id)}
                     pinnedTier={getTier(task.id)}
                     searchContext={`${task.category}${task.project && task.project !== task.category ? ` / ${task.project}` : ''}`}
@@ -3491,6 +3574,8 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
                   onClearFocus={onClearFocus}
                   onPinTask={onPinTask}
                   onUnpinTask={onUnpinTask}
+                  onUnparent={onReparentTask ? handleUnparent : undefined}
+                  onMoveUp={moveUpMap.get(task.id)}
                   isPinned={pinnedTaskIds?.has(task.id)}
                   searchContext={`${task.category}${task.project && task.project !== task.category ? ` / ${task.project}` : ''}`}
                   filterOverrideReason={(task.id === filterOverrideId || task.id === fadingOverrideId) ? filterOverrideReason : undefined}
@@ -3568,6 +3653,8 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
                                   onPinTask={onPinTask}
                                   onUnpinTask={onUnpinTask}
                                   onSetTier={onSetTier}
+                                  onUnparent={onReparentTask ? handleUnparent : undefined}
+                                  onMoveUp={moveUpMap.get(task.id)}
                     isPinned={pinnedTaskIds?.has(task.id)}
                     pinnedTier={getTier(task.id)}
                                   filterOverrideReason={(task.id === filterOverrideId || task.id === fadingOverrideId) ? filterOverrideReason : undefined}
@@ -3635,6 +3722,8 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
                                                 onPinTask={onPinTask}
                                                 onUnpinTask={onUnpinTask}
                                                 onSetTier={onSetTier}
+                                                onUnparent={onReparentTask ? handleUnparent : undefined}
+                                                onMoveUp={moveUpMap.get(task.id)}
                     isPinned={pinnedTaskIds?.has(task.id)}
                     pinnedTier={getTier(task.id)}
                                                 filterOverrideReason={(task.id === filterOverrideId || task.id === fadingOverrideId) ? filterOverrideReason : undefined}
