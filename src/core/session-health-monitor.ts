@@ -308,7 +308,6 @@ export class SessionHealthMonitor {
 
     for (const session of sessions) {
       if (session.process_status !== 'running') continue
-      if (session.host) continue  // remote sessions use different transport — skip for now
 
       // Skip team-active sessions — poll loop produces no Claude output, but is not hung
       if (runner.isTeamActive(session.claudeSessionId)) continue
@@ -739,6 +738,23 @@ export class SessionHealthMonitor {
               log.session.info('health monitor: auto-recovered connection-lost session (process dead)', {
                 sessionId: s.claudeSessionId, host: s.host, alive: false,
               })
+
+              // Phase sync: remote process died during connection loss — result may
+              // have been lost. Advance task phase so it doesn't stay stuck at IN_PROGRESS.
+              if (s.taskId) {
+                try {
+                  const { applySessionPhase } = await import('./phase.js')
+                  await applySessionPhase(
+                    s.taskId, 'session:result', 'health-monitor:remote-dead-recovery',
+                    { sessionId: s.claudeSessionId, processAlive: false },
+                  )
+                } catch (err) {
+                  log.session.warn('health monitor: phase sync failed on remote dead recovery', {
+                    sessionId: s.claudeSessionId, taskId: s.taskId,
+                    error: err instanceof Error ? err.message : String(err),
+                  })
+                }
+              }
             }
           } else {
             // Daemon not connected — update activity so UI shows "Reconnecting..." banner

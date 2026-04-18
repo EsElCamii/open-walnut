@@ -2168,7 +2168,20 @@ export class ClaudeCodeSession {
         const resultErrors = Array.isArray((result as Record<string, unknown>).errors)
           ? ((result as Record<string, unknown>).errors as string[])
           : undefined
-        if (result.is_error && resultErrors?.length) {
+
+        // Detect Claude Code "soft" is_error — the turn actually produced real output
+        // (fullText non-empty) and the only error marker is [ede_diagnostic], which fires
+        // when stop_reason=tool_use + last message.type=user in print-mode stream-json.
+        // This is NOT a real API failure — downgrade to a normal result so the task goes
+        // to AGENT_COMPLETE instead of AWAIT_HUMAN_ACTION.
+        const isSoftEdeError = result.is_error
+          && !!this.fullText
+          && this.fullText.trim().length > 0
+          && resultErrors !== undefined
+          && resultErrors.every(e => e.startsWith('[ede_diagnostic]'))
+        const effectiveIsError = result.is_error && !isSoftEdeError
+
+        if (result.is_error && resultErrors?.length && !isSoftEdeError) {
           let errorMsg = resultErrors.join('; ')
           // Add cwd hint — Claude CLI uses cwd to resolve session storage path,
           // so a renamed/moved project directory causes "No conversation found"
@@ -2183,6 +2196,8 @@ export class ClaudeCodeSession {
           taskId: this.taskId,
           cost: result.total_cost_usd,
           isError: result.is_error,
+          effectiveIsError,
+          ...(isSoftEdeError ? { softEdeDowngrade: true } : {}),
           hasFifo: this._transport?.hasPipe ?? false,
           ...(resultErrors?.length ? { errors: resultErrors } : {}),
         })
@@ -2220,7 +2235,7 @@ export class ClaudeCodeSession {
             this._activity = undefined
           }
           this.resultEmitted = false  // Ready for next turn
-        } else if (this._transport?.isRemote && !result.is_error) {
+        } else if (this._transport?.isRemote && !effectiveIsError) {
           // Remote daemon session: process exited (hasPipe was cleared by daemon exit
           // event or FIFO write failure), but daemon connection is still alive.
           // Show 'idle' so user can send follow-up messages (triggers --resume).
@@ -2279,7 +2294,7 @@ export class ClaudeCodeSession {
             result: resultText,
             totalCost: result.total_cost_usd,
             duration: result.duration_ms,
-            isError: result.is_error ?? false,
+            isError: effectiveIsError ?? false,
             teamActive: true,
           }, ['main-ai', 'session-runner'], { source: 'session-runner' })
 
@@ -2296,7 +2311,7 @@ export class ClaudeCodeSession {
             result: resultText,
             totalCost: result.total_cost_usd,
             duration: result.duration_ms,
-            isError: result.is_error ?? false,
+            isError: effectiveIsError ?? false,
           }, ['main-ai', 'session-runner'], { source: 'session-runner' })
         }
 
@@ -2464,13 +2479,14 @@ export class ClaudeCodeSession {
   /**
    * Send a control_response to Claude Code via the FIFO.
    * @param allow — true to allow, false to deny
+   * @returns true if the response was written (or at least attempted), false if no transport
    */
   private respondToControlRequest(
     requestId: string,
     request: { tool_name?: string; input?: Record<string, unknown> },
     allow: boolean,
     denyMessage?: string,
-  ): void {
+  ): boolean {
     const result = allow
       ? { behavior: 'allow' as const, updatedInput: request.input }
       : { behavior: 'deny' as const, message: denyMessage ?? 'User denied permission' }
@@ -2491,20 +2507,24 @@ export class ClaudeCodeSession {
       toolName: request.tool_name,
       mode: this._mode,
     })
-    if (this._transport) {
-      Promise.resolve(this._transport.writeRaw(response)).then((ok) => {
-        if (!ok) {
-          log.session.warn('control_response write failed — session may hang until idle timeout kills it', {
-            sessionId: this.claudeSessionId, taskId: this.taskId, requestId,
-          })
-        }
-      }).catch((err) => {
-        log.session.warn('control_response write error — session may hang until idle timeout kills it', {
-          sessionId: this.claudeSessionId, taskId: this.taskId, requestId,
-          error: err instanceof Error ? err.message : String(err),
-        })
+    if (!this._transport) {
+      log.session.warn('control_response dropped — no transport (session detached). Permission stays pending for recovery.', {
+        sessionId: this.claudeSessionId, taskId: this.taskId, requestId,
       })
+      return false
     }
+    Promise.resolve(this._transport.writeRaw(response)).then((ok) => {
+      if (!ok) {
+        log.session.warn('control_response write failed (broken pipe) — session may hang until idle timeout kills it', {
+          sessionId: this.claudeSessionId, taskId: this.taskId, requestId,
+        })
+      }
+    }).catch((err) => {
+      log.session.warn('control_response write error — session may hang until idle timeout kills it', {
+        sessionId: this.claudeSessionId, taskId: this.taskId, requestId,
+        error: err instanceof Error ? err.message : String(err),
+      })
+    })
     // Notify UI
     if (this.claudeSessionId) {
       bus.emit(EventNames.SESSION_SYSTEM_EVENT, {
@@ -2514,6 +2534,7 @@ export class ClaudeCodeSession {
         message: `Permission ${allow ? 'granted' : 'denied'}: ${request.tool_name}`,
       }, ['main-ai'], { source: 'session-runner' })
     }
+    return true
   }
 
   /**
@@ -2525,7 +2546,29 @@ export class ClaudeCodeSession {
     if (!pending) return false
     this._pendingPermissionRequests.delete(requestId)
     this._clearPermissionReEmitTimer(requestId)
-    this.respondToControlRequest(requestId, pending.request, allow, denyMessage)
+    const written = this.respondToControlRequest(requestId, pending.request, allow, denyMessage)
+
+    if (!written) {
+      // Transport gone — re-add so recovery / re-attach can retry the response.
+      // Don't emit resolved to UI; the permission stays visually pending.
+      this._pendingPermissionRequests.set(requestId, pending)
+      this._startPermissionReEmitTimer(requestId, pending.request)
+      log.session.warn('resolvePermissionRequest: transport unavailable, re-queued for recovery', {
+        sessionId: this.claudeSessionId, requestId,
+      })
+      return false
+    }
+
+    // Notify UI so stream buffer + frontend blocks update their status
+    if (this.claudeSessionId) {
+      bus.emit(EventNames.SESSION_PERMISSION_RESOLVED, {
+        sessionId: this.claudeSessionId,
+        taskId: this.taskId,
+        requestId,
+        toolName: pending.request.tool_name,
+        allowed: allow,
+      }, ['*'], { source: 'session-runner' })
+    }
 
     // Clear persisted pendingPermission from session record (best-effort)
     if (this.claudeSessionId) {
@@ -3656,7 +3699,7 @@ export class SessionRunner {
       }
     }
 
-    // Message is already enqueued by session:send RPC (or send_to_session agent tool).
+    // Message is already enqueued by session:send RPC (or session_send agent tool).
     // Trigger processing if not already active.
     if (!this.activeProcessing.has(sessionId)) {
       log.session.info('handleSend: triggering processNext', { sessionId, interrupt: !!interrupt })
@@ -3693,11 +3736,18 @@ export class SessionRunner {
       return
     }
 
-    // Guard: don't inject via FIFO while Claude is blocked on a permission prompt.
-    // Messages would be silently lost — Claude only reads control_response in that state.
+    // If Claude is blocked on a permission prompt, auto-deny it so the user's
+    // message can be processed. Without this, messages are silently lost.
     if (targetSession.hasPendingPermission) {
-      log.session.info('handleSend: session blocked on permission request, skipping mid-turn injection', { sessionId })
-      return
+      const pendingPerms = targetSession.getPendingPermissionRequests()
+      log.session.info('injectMidTurn: auto-denying pending permissions to unblock for user message', {
+        sessionId,
+        permissions: pendingPerms.map(p => p.toolName),
+      })
+      for (const p of pendingPerms) {
+        targetSession.resolvePermissionRequest(p.requestId, false, 'User sent a new message — permission auto-denied')
+      }
+      await new Promise(r => setTimeout(r, 200))
     }
 
     // Atomically move pending messages to processing state
@@ -3818,30 +3868,22 @@ export class SessionRunner {
 
       // Try stdin write first (stream-json mode — reuses running process)
       if (targetSession && !hasPendingSwitch) {
-        // Guard: if Claude Code is blocked waiting for a permission decision (control_request),
-        // writing user messages to FIFO is futile — Claude ignores everything except
-        // control_response while in that state. Revert messages to pending and re-emit
-        // the permission request so the UI can prompt the user.
+        // If Claude Code is blocked on a permission prompt (control_request), auto-deny
+        // the pending permissions so Claude unblocks and can process the user's new message.
+        // Previously this reverted messages to pending and re-emitted the permission UI,
+        // but users often don't see (or ignore) the prompt — causing the session to get
+        // permanently stuck with messages bouncing in the queue.
         if (targetSession.hasPendingPermission) {
-          log.session.warn('processNext: session blocked on permission request — keeping messages queued', {
+          const pendingPerms = targetSession.getPendingPermissionRequests()
+          log.session.info('processNext: auto-denying pending permissions to unblock session for user message', {
             sessionId,
-            pendingPermissions: targetSession.getPendingPermissionRequests().map(p => p.toolName),
+            permissions: pendingPerms.map(p => p.toolName),
           })
-          this.clearActiveProcessing(sessionId)
-          await revertToPending(msgs)
-
-          // Re-emit permission request to UI in case it was missed
-          for (const p of targetSession.getPendingPermissionRequests()) {
-            bus.emit(EventNames.SESSION_PERMISSION_REQUEST, {
-              sessionId,
-              taskId: targetSession.taskId,
-              requestId: p.requestId,
-              toolName: p.toolName,
-              input: p.input,
-              reason: p.reason,
-            }, ['*'], { source: 'session-runner', urgency: 'urgent' })
+          for (const p of pendingPerms) {
+            targetSession.resolvePermissionRequest(p.requestId, false, 'User sent a new message — permission auto-denied')
           }
-          return
+          // Small delay for Claude Code to process the denial before we write the new message
+          await new Promise(r => setTimeout(r, 200))
         }
 
         // Pre-flight liveness check: verify process is alive before writing to FIFO.
