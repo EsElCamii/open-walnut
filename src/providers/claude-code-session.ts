@@ -3356,8 +3356,32 @@ export class SessionRunner {
     if (taskId) {
       session.sessionReady.then(async (claudeSessionId) => {
         try {
-          const { linkSessionSlot, linkSession } = await import('../core/task-manager.js')
-          const slot = mode === 'plan' ? 'plan' : 'exec' as const
+          // Archived guard: do NOT write task session slots for archived sessions.
+          // handleStart is also the resume entry point; if the user sends a message to
+          // an archived session (archive is a soft flag), the session spawns and reaches
+          // sessionReady — without this guard we'd re-link the archived sessionId into
+          // task.session_id / plan_session_id / exec_session_id, poisoning the task slots
+          // so every UI entry point opens the archived session instead of the live one.
+          // Safe to query the record here: persistSessionRecord is awaited inside the
+          // handleStreamLine init handler (~line 1720) BEFORE sessionReady is resolved,
+          // so by the time this .then() runs the record is guaranteed to exist.
+          const { getSessionByClaudeId } = await import('../core/session-tracker.js')
+          const { addSessionToHistory, linkSessionSlot, linkSession } = await import('../core/task-manager.js')
+          const record = await getSessionByClaudeId(claudeSessionId)
+          if (record?.archived) {
+            await addSessionToHistory(taskId, claudeSessionId).catch((err) => {
+              log.session.debug('failed to add archived session to history', {
+                taskId, sessionId: claudeSessionId,
+                error: err instanceof Error ? err.message : String(err),
+              })
+            })
+            log.session.warn('skipping task slot link for archived session', {
+              taskId, sessionId: claudeSessionId, archiveReason: record.archive_reason,
+            })
+            return
+          }
+
+          const slot: 'plan' | 'exec' = mode === 'plan' ? 'plan' : 'exec'
           await linkSessionSlot(taskId, claudeSessionId, slot)
           // Use the task from linkSession (has session_id set) so the browser's
           // React state always receives session_id correctly populated.
@@ -3531,7 +3555,7 @@ export class SessionRunner {
     if (taskId) {
       try {
         const { linkSessionSlot, linkSession } = await import('../core/task-manager.js')
-        const slot = mode === 'plan' ? 'plan' : 'exec' as const
+        const slot: 'plan' | 'exec' = mode === 'plan' ? 'plan' : 'exec'
         await linkSessionSlot(taskId, claudeSessionId, slot)
         // Use the task from linkSession (has session_id set) so the browser's
         // React state always receives session_id correctly populated.

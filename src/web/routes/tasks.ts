@@ -128,11 +128,45 @@ async function enrichTasksWithSessionStatus(tasks: Task[]): Promise<Task[]> {
         }
       }
       // Backfill session_id with most recent non-archived session (iterate in reverse
-      // since allSessions is in insertion/chronological order)
-      if (!enriched.session_id) {
+      // since allSessions is in insertion/chronological order).
+      // Also heal when session_id points to an archived session — this happens when
+      // handleStart's link path wrote an archived sessionId back into the slot (see
+      // the guard in claude-code-session.ts). Treat it the same as missing.
+      // Note: sessionMap.get(...) returning undefined means "session record unknown" —
+      // we treat that as "not archived" (safe default) and keep whatever was there.
+      const currentSingle = enriched.session_id ? sessionMap.get(enriched.session_id) : undefined
+      if (!enriched.session_id || currentSingle?.archived) {
+        if (currentSingle?.archived) {
+          log.web.warn('healing archived session_id in enrichment — possible handleStart guard regression', {
+            taskId: t.id, archivedSessionId: enriched.session_id,
+          })
+        }
+        let replacement: string | undefined
         for (let i = taskSessions.length - 1; i >= 0; i--) {
           if (!taskSessions[i].archived) {
-            enriched.session_id = taskSessions[i].claudeSessionId
+            replacement = taskSessions[i].claudeSessionId
+            break
+          }
+        }
+        enriched.session_id = replacement
+      }
+
+      // Heal plan/exec slots if they point to archived sessions (same poisoning vector).
+      // plan_session_id is cleared but NOT backfilled: plan is a per-run artifact,
+      // and backfilling would surface stale plans as if they were the current plan.
+      if (enriched.plan_session_id && sessionMap.get(enriched.plan_session_id)?.archived) {
+        enriched.plan_session_id = undefined
+      }
+      if (enriched.exec_session_id && sessionMap.get(enriched.exec_session_id)?.archived) {
+        enriched.exec_session_id = undefined
+      }
+      // Backfill exec_session_id from most recent non-plan active session —
+      // exec is the default run-mode slot, so surfacing a live exec session is desired.
+      if (!enriched.exec_session_id) {
+        for (let i = taskSessions.length - 1; i >= 0; i--) {
+          const s = taskSessions[i]
+          if (!s.archived && s.mode !== 'plan') {
+            enriched.exec_session_id = s.claudeSessionId
             break
           }
         }
@@ -156,11 +190,13 @@ async function enrichTasksWithSessionStatus(tasks: Task[]): Promise<Task[]> {
       }
     }
 
-    // Enrich from explicit slot fields (strip mode before attaching) — backward compat
-    const planInfo = t.plan_session_id ? sessionMap.get(t.plan_session_id) : undefined
-    if (planInfo) enriched.plan_session_status = toSlotStatus(planInfo, 'plan')
-    const execInfo = t.exec_session_id ? sessionMap.get(t.exec_session_id) : undefined
-    if (execInfo) enriched.exec_session_status = toSlotStatus(execInfo, 'exec')
+    // Enrich from explicit slot fields (strip mode before attaching) — backward compat.
+    // Use enriched.* (healed) rather than t.* so archived sessions that were poisoning
+    // the slot don't surface as a live plan/exec status.
+    const planInfo = enriched.plan_session_id ? sessionMap.get(enriched.plan_session_id) : undefined
+    if (planInfo && !planInfo.archived) enriched.plan_session_status = toSlotStatus(planInfo, 'plan')
+    const execInfo = enriched.exec_session_id ? sessionMap.get(enriched.exec_session_id) : undefined
+    if (execInfo && !execInfo.archived) enriched.exec_session_status = toSlotStatus(execInfo, 'exec')
 
     // Infer missing slot statuses from session_ids + session mode.
     // Covers: from_plan fallback (SESSION_SEND doesn't call linkSessionSlot),
