@@ -71,6 +71,16 @@ export interface TransportStartOptions {
   onOutput: (event: OutputEvent) => void
   /** Callback when the Claude process exits. stderr is included for remote sessions (read from .jsonl.err on the remote host). */
   onExit: (code: number, stderr?: string) => void
+  /**
+   * When the initial Quick Start message was spilled to a local temp file,
+   * the authoritative pointer to that file. Remote transports upload it to
+   * the same absolute path on the remote host before the session starts.
+   *
+   * Note: `message` has already been rewritten to reference this path as a
+   * pointer prompt by the time it reaches here — this field is what drives
+   * the upload and avoids regex-scraping the message body.
+   */
+  spillFile?: { localPath: string }
 }
 
 // ── Attach Options ──

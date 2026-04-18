@@ -158,9 +158,10 @@ export const SKILL_SETTINGS_FILE = path.join(WALNUT_HOME, 'skill-settings.json')
 export const CLAUDE_SKILLS_DIR = path.join(CLAUDE_HOME, 'skills');
 export const CRON_FILE = path.join(WALNUT_HOME, 'cron-jobs.json');
 export const USAGE_DB_FILE = path.join(WALNUT_HOME, 'usage.sqlite');
-export const SESSION_STREAMS_DIR = path.join(WALNUT_HOME, 'sessions', 'streams');
+export const LOG_DIR = '/tmp/open-walnut';
+export const SESSION_STREAMS_DIR = path.join(LOG_DIR, 'streams');
 export const SESSION_QUEUE_FILE = path.join(WALNUT_HOME, 'session-message-queue.json');
-export const IMAGES_DIR = path.join(WALNUT_HOME, 'images');
+export const IMAGES_DIR = path.join(LOG_DIR, 'images');
 export const REMOTE_IMAGES_DIR = path.join(IMAGES_DIR, 'remote');
 export const HEARTBEAT_FILE = path.join(WALNUT_HOME, 'HEARTBEAT.md');
 export const COMMANDS_DIR = path.join(WALNUT_HOME, 'commands');
@@ -196,11 +197,28 @@ export const NOTES_AGENTS_FILE = path.join(NOTES_DIR, 'AGENTS.md');
 export const NOTES_CLAUDE_FILE = path.join(NOTES_DIR, 'CLAUDE.md');
 export const REPOSITORIES_DIR = path.join(WALNUT_HOME, 'repositories');
 export const REPOS_MEMORY_DIR = path.join(MEMORY_DIR, 'repos');
+export const TOPICS_DIR = path.join(MEMORY_DIR, 'topics');
+export const COMPACTION_DIR = path.join(MEMORY_DIR, 'compaction');
+export const MEMORY_INDEX_FILE = path.join(MEMORY_DIR, 'index.md');
+export const WORKING_MEMORY_FILE = path.join(MEMORY_DIR, 'working-memory.md');
 export const TIMELINE_DIR = path.join(WALNUT_HOME, 'timeline');
 export const RECORDINGS_DIR = path.join(WALNUT_HOME, 'recordings');
-export const LOG_DIR = '/tmp/open-walnut';
 export const LOG_PREFIX = 'open-walnut-';
 /** Directory containing pre-compiled daemon binaries (built by scripts/build-daemon.sh). */
+/**
+ * Quick Start: messages longer than this are spilled to a temp file on disk.
+ * 25K chars ≈ 6K tokens — comfortably below a single Claude turn budget, and
+ * large enough that typical paste-a-log / paste-a-stack-trace flows still
+ * inline without touching disk. Past this, the full content lands in a file
+ * and the session sees only a pointer prompt + preview.
+ */
+export const QUICK_START_MESSAGE_SPILL_LIMIT = 25_000;
+/**
+ * Quick Start: absolute max message size (DoS guard on the spill path).
+ * 2MB caps disk writes and daemon base64-payload uploads to remote hosts.
+ */
+export const QUICK_START_MESSAGE_HARD_LIMIT = 2_000_000;
+
 export const DAEMON_BINARIES_DIR = (() => {
   let dir = path.dirname(fileURLToPath(import.meta.url));
   for (let i = 0; i < 5; i++) {

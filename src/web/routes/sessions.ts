@@ -19,6 +19,8 @@ import type { SessionHistoryMessage } from '../../core/session-history.js'
 import { processAndSaveImages, buildSessionImageContext } from './images.js'
 import { sessionRunner } from '../../providers/claude-code-session.js'
 import type { ImagePayload } from './images.js'
+import { spillLargePromptToFile } from './quick-start-spill.js'
+import { QUICK_START_MESSAGE_HARD_LIMIT } from '../../constants.js'
 
 /** Diagnose message ordering — logs whether user text messages are interleaved or bunched at end. */
 function logMessageOrdering(phase: string, sessionId: string, messages: SessionHistoryMessage[], host?: string): void {
@@ -362,18 +364,33 @@ sessionsRouter.post('/quick-start', async (req: Request, res: Response, next: Ne
       res.status(400).json({ error: 'cwd too long (max 4096 chars)' })
       return
     }
-    if (message.length > 50000) {
-      res.status(400).json({ error: 'message too long (max 50000 chars)' })
+    if (message.length > QUICK_START_MESSAGE_HARD_LIMIT) {
+      res.status(400).json({ error: `message too long (max ${QUICK_START_MESSAGE_HARD_LIMIT} chars)` })
       return
     }
 
+    // Spill-to-disk: messages above the inline limit are saved to a temp file and
+    // replaced with a short pointer prompt so Claude reads the full context via the Read tool.
+    let spilledMessage = message
+    let largePromptFile: { localPath: string; originalLength: number } | undefined
+    const spill = spillLargePromptToFile(message)
+    if (spill) {
+      spilledMessage = spill.promptWithPointer
+      largePromptFile = { localPath: spill.filePath, originalLength: spill.originalLength }
+      log.web.info('quick-start: spilled large prompt to file', {
+        filePath: spill.filePath,
+        originalLength: spill.originalLength,
+        host,
+      })
+    }
+
     // Process attached images — save to disk and build session-friendly context
-    let sessionMessage = message
+    let sessionMessage = spilledMessage
     if (images && images.length > 0) {
       const processed = await processAndSaveImages(images)
       if (processed) {
         const imageContext = buildSessionImageContext(processed.savedImages)
-        sessionMessage = imageContext + message
+        sessionMessage = imageContext + spilledMessage
       }
     }
 
@@ -436,6 +453,7 @@ sessionsRouter.post('/quick-start', async (req: Request, res: Response, next: Ne
       model,
       host,
       appendSystemPrompt,
+      largePromptFile,
     }, ['session-runner'], { source: 'quick-start' })
 
     log.web.info('quick-start: created task + started session', { taskId: updatedTask.id, cwd, host, category: taskCategory, retry: !!existingTaskId })

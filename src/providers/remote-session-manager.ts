@@ -114,6 +114,14 @@ export class RemoteSessionManager implements SessionManager {
     this._sid = this.tmpId
     this.unsubscribeEvent = this.conn!.onEvent((event) => this.handleDaemonEvent(event))
 
+    // Quick Start spill file: upload to the same absolute path on the remote host
+    // before the session starts. The message already references this path as a
+    // pointer prompt, so no rewrite is needed. Failure here is fatal — the session
+    // would otherwise launch with Claude unable to Read the referenced context.
+    if (opts.spillFile) {
+      await this.uploadSpillFile(opts.spillFile.localPath)
+    }
+
     // Upload local images to remote host and rewrite paths before sending
     const preparedMessage = await this.prepareOutbound(opts.message)
 
@@ -432,14 +440,13 @@ export class RemoteSessionManager implements SessionManager {
   // ── Message Processing ──
 
   async prepareOutbound(message: string): Promise<string> {
-    // Upload local images to remote host via daemon
-    const localPaths = findLocalImagePaths(message)
-    if (localPaths.length === 0) return message
-
     if (!this.conn?.connected) return message
 
     let rewritten = message
-    for (const localPath of localPaths) {
+
+    // Upload local images to remote host via daemon (path rewritten to remote location)
+    const imagePaths = findLocalImagePaths(message)
+    for (const localPath of imagePaths) {
       try {
         const data = fs.readFileSync(localPath)
         const remotePath = `/tmp/open-walnut-images/${path.basename(localPath)}`
@@ -459,6 +466,27 @@ export class RemoteSessionManager implements SessionManager {
     }
 
     return rewritten
+  }
+
+  /**
+   * Upload a Quick Start spill file to the remote host at the same absolute path.
+   * Both local and remote use /tmp/ so the path identity holds. Throws on failure
+   * — callers (start()) treat a missing spill file as fatal because Claude's
+   * pointer prompt references it.
+   */
+  private async uploadSpillFile(localPath: string): Promise<void> {
+    if (!this.conn?.connected) {
+      throw new Error(`Cannot upload spill file: daemon not connected (host "${this.hostKey}")`)
+    }
+    const data = fs.readFileSync(localPath)
+    await this.conn.send('fs.write', {
+      path: localPath,
+      data: data.toString('base64'),
+      encoding: 'base64',
+    })
+    log.session.info('RemoteSessionManager: uploaded spill file to remote', {
+      path: localPath, size: data.length, host: this.hostKey,
+    })
   }
 
   processInbound(text: string, sessionId: string, cwd?: string): string {

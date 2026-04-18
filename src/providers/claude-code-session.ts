@@ -507,6 +507,7 @@ export class ClaudeCodeSession {
     sshTarget?: SshTarget,
     forkSession?: boolean,
     permissionPrompt?: boolean,
+    spillFile?: { localPath: string },
   ): void {
     const args = ['-p', '--output-format', 'stream-json', '--verbose']
 
@@ -616,6 +617,7 @@ export class ClaudeCodeSession {
       message,
       resume: isResume,
       fork: forkSession,
+      spillFile,
       onOutput: (event) => this.handleStreamLine(event.line),
       onExit: (code, stderr) => {
         this._exitCode = code
@@ -3150,11 +3152,19 @@ export class SessionRunner {
     host?: string
     fromPlanSessionId?: string
     forkedFromSessionId?: string
+    largePromptFile?: { localPath: string; originalLength: number }
   }): Promise<{ sessionReady: Promise<string>; title: string }> {
     const { taskId, project, mode, model } = data
     let cwd = data.cwd
     let { message } = data
     log.session.info('starting session', { taskId: taskId || '(taskless)', project, host: data.host })
+    if (data.largePromptFile) {
+      log.session.info('session start with spilled prompt', {
+        taskId, host: data.host,
+        spillFile: data.largePromptFile.localPath,
+        originalLength: data.largePromptFile.originalLength,
+      })
+    }
 
     // Resolve cwd if not provided — defense-in-depth for RPC/bus paths that
     // bypass the agent tool's resolveSessionContext().
@@ -3325,7 +3335,8 @@ export class SessionRunner {
     // For forks: pass source session ID as resumeSessionId with forkSession=true.
     // Claude Code's --resume + --fork-session creates a new session with full context.
     const resumeId = isFork ? data.forkedFromSessionId : undefined
-    session.send(message, cwd, resumeId, mode, resolvedModel, appendSystemPrompt, data.host, sshTarget, isFork, config.session?.permission_prompt)
+    const spillFile = data.largePromptFile ? { localPath: data.largePromptFile.localPath } : undefined
+    session.send(message, cwd, resumeId, mode, resolvedModel, appendSystemPrompt, data.host, sshTarget, isFork, config.session?.permission_prompt, spillFile)
 
     // Record directory usage for the frequent-dirs persistent store (fire-and-forget)
     if (cwd) {

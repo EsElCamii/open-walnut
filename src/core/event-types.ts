@@ -36,6 +36,12 @@ export interface SessionStartEvent {
   appendSystemPrompt?: string;
   fromPlanSessionId?: string;
   forkedFromSessionId?: string;
+  /**
+   * When the original user message was spilled to a temp file (Quick Start long paste),
+   * the pointer to that local file. For remote sessions, the file is uploaded to the
+   * same path on the remote host before the session starts.
+   */
+  largePromptFile?: { localPath: string; originalLength: number };
 }
 
 export interface SessionSendEvent {
