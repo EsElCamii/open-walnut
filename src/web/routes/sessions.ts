@@ -394,8 +394,12 @@ sessionsRouter.post('/quick-start', async (req: Request, res: Response, next: Ne
       }
     }
 
-    const config = await getConfig()
-    const taskCategory = category || config.defaults?.category || 'Inbox'
+    // Quick Start tasks always go to the built-in 'Local' category (source=local,
+    // hard-reserved via config.local.categories so no sync plugin can claim it).
+    // The session AI will move the task to the correct category/project after completion.
+    // Fixes the duplicate-task bug where Inbox's polluted storeCatSource flipped
+    // source=local to source=ms-todo, causing a round-trip that recreated orphans.
+    const taskCategory = 'Local'
 
     let updatedTask: Task
 
@@ -437,9 +441,9 @@ sessionsRouter.post('/quick-start', async (req: Request, res: Response, next: Ne
     // Build system prompt hint for session AI
     const appendSystemPrompt = [
       '<quick_start_task>',
-      'This task was created via Quick Start. When your work is complete:',
+      'This task was created via Quick Start in Local / Quick Start. When your work is complete:',
       '1. Update the task title to be descriptive (replace the generic "Session: ..." title) using update_task',
-      `2. If "${taskCategory} / Quick Start" is not the right project, move the task to the correct project within the same category "${taskCategory}" using update_task with the project field`,
+      '2. Move the task to the correct category and project using update_task (category + project fields)',
       '</quick_start_task>',
     ].join('\n')
 

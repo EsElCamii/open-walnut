@@ -390,6 +390,33 @@ function migrateSubtasksToChildTasks(store: TaskStore): boolean {
 }
 
 /**
+ * Seed built-in categories that must always exist (idempotent).
+ * 'Local' is reserved for local-only tasks (e.g. Quick Start) and must never be
+ * claimed by any sync plugin. Backfills for users whose store.categories was
+ * populated before 'Local' was introduced.
+ *
+ * If a lowercase variant ('local') exists with a non-'local' source, we don't
+ * rewrite it (respect user data); the hard reservation in config.local.categories
+ * will still cause validateCategorySource to reject non-local tasks in that slot.
+ */
+function ensureBuiltInCategories(store: TaskStore): boolean {
+  const categories = store.categories ?? {};
+  const existingKey = Object.keys(categories).find(k => k.toLowerCase() === 'local');
+  if (existingKey) {
+    if (categories[existingKey].source !== 'local') {
+      log.task.warn('built-in category "Local" has non-local source; leaving as-is', {
+        key: existingKey, source: categories[existingKey].source,
+      });
+    }
+    return false;
+  }
+  categories['Local'] = { source: 'local' };
+  store.categories = categories;
+  log.task.info('seeded built-in category', { name: 'Local' });
+  return true;
+}
+
+/**
  * No-op migration: bump version to 4 for forward-compat detection.
  * Existing tasks have no depends_on — the field is optional.
  */
@@ -416,6 +443,7 @@ async function readStore(): Promise<TaskStore> {
     changed = await migrateRemoveEmbeddedSessionIds(store) || changed;
     changed = migrateToSingleSessionSlot(store) || changed;
     changed = await migrateToV3Categories(store) || changed;
+    changed = ensureBuiltInCategories(store) || changed;
     changed = migrateToV4DependsOn(store) || changed;
     changed = migrateSubtasksToChildTasks(store) || changed;
     if (changed) {
@@ -527,7 +555,7 @@ export async function createProject(category: string, project: string): Promise<
   const catLower = category.toLowerCase();
   const catKey = Object.keys(categories).find(k => k.toLowerCase() === catLower);
   if (!catKey) {
-    throw new Error(`Category "${category}" does not exist. Create it first with create_task type=category.`);
+    throw new Error(`Category "${category}" does not exist. Create it first with task_create type=category.`);
   }
 
   const source = categories[catKey].source;

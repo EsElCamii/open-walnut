@@ -516,10 +516,11 @@ describe('addTask — inherits source from existing tasks in category (no config
 describe('updateTask — local task movement', () => {
   it('auto-migrates local task to a category with different source in store.categories', async () => {
     // Use store.categories directly to set up different sources
-    await createCategory('Local', 'local');
+    // 'Local' is seeded as a built-in category (ensureBuiltInCategories); use a different name here
+    await createCategory('LocalOnly', 'local');
     await createCategory('Synced', 'ms-todo');
 
-    const { task: localTask } = await addTask({ title: 'Local task', category: 'Local' });
+    const { task: localTask } = await addTask({ title: 'Local task', category: 'LocalOnly' });
     expect(localTask.source).toBe('local');
 
     // Create an ms-todo task in 'Synced' (via explicit source since store already has it)
@@ -730,6 +731,30 @@ describe('updateCategorySource', () => {
 
 // ── v3 migration ──
 
+describe('built-in Local category (DEFAULT_CONFIG + ensureBuiltInCategories)', () => {
+  it('seeds "Local" category with source=local on fresh store (no config file)', async () => {
+    // No config file written — getConfig falls back to DEFAULT_CONFIG which
+    // includes local.categories: ['Local']. readStore → ensureBuiltInCategories
+    // should seed store.categories['Local'] = { source: 'local' }.
+    const storeCategories = await getStoreCategories();
+    expect(storeCategories['Local']).toEqual({ source: 'local' });
+  });
+
+  it('addTask in Local category always lands as source=local (storeCatSource wins)', async () => {
+    // Defense-in-depth: even if a caller passes source='ms-todo', storeCatSource
+    // for 'Local' is 'local' (seeded by ensureBuiltInCategories), so the task
+    // is stored as source='local'. This is the exact inversion of the Quick Start
+    // duplicate bug — Inbox used to silently promote local→ms-todo; Local
+    // silently demotes ms-todo→local (safe direction — never pushed to sync plugins).
+    const { task } = await addTask({
+      title: 'Quick Start style', category: 'Local', project: 'Quick Start', source: 'ms-todo',
+    });
+    expect(task.source).toBe('local');
+    expect(task.category).toBe('Local');
+    expect(task.project).toBe('Quick Start');
+  });
+});
+
 describe('v3 migration — store.categories populated from config + tasks', () => {
   it('migrates config.local.categories to store.categories', async () => {
     await fs.mkdir(path.dirname(CONFIG_FILE), { recursive: true });
@@ -852,7 +877,12 @@ describe('v3 migration — store.categories populated from config + tasks', () =
     );
 
     const storeCategories = await getStoreCategories();
-    expect(storeCategories).toEqual({ 'Custom': { source: 'local' } });
+    // 'Local' is always seeded as a built-in category (ensureBuiltInCategories) on every store read,
+    // even when store.categories already exists — so it appears alongside the pre-existing 'Custom'.
+    expect(storeCategories).toEqual({
+      'Custom': { source: 'local' },
+      'Local': { source: 'local' },
+    });
   });
 });
 

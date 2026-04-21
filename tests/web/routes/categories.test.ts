@@ -131,7 +131,8 @@ describe('GET /api/categories', () => {
     const res = await request(app).get('/api/categories');
 
     expect(res.status).toBe(200);
-    expect(res.body).toHaveLength(2);
+    // Includes the built-in 'Local' category (seeded by ensureBuiltInCategories) + 'Life' + 'Work'
+    expect(res.body).toHaveLength(3);
 
     const life = res.body.find((c: { name: string }) => c.name === 'Life');
     expect(life).toBeDefined();
@@ -141,6 +142,10 @@ describe('GET /api/categories', () => {
     const work = res.body.find((c: { name: string }) => c.name === 'Work');
     expect(work).toBeDefined();
     expect(work.source).toBe('local');
+
+    const local = res.body.find((c: { name: string }) => c.name === 'Local');
+    expect(local).toBeDefined();
+    expect(local.source).toBe('local');
   });
 
   it('includes empty categories from store.categories (migrated from config)', async () => {

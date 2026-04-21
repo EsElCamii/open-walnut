@@ -10,7 +10,21 @@ const DEFAULT_CONFIG: Config = {
   user: {},
   defaults: { priority: 'none', category: 'personal' },
   provider: { type: 'claude-code' },
+  // 'Local' is a built-in category reserved for local-only tasks (e.g. Quick Start).
+  // Hard-reserved via validateCategorySource so no sync plugin can claim it.
+  local: { categories: ['Local'] },
 };
+
+/** Ensure the built-in 'Local' category stays reserved even when user config overrides `local`. */
+function ensureBuiltInLocalReservation(config: Config): void {
+  if (!config.local) config.local = {};
+  const cats = config.local.categories ?? [];
+  if (!cats.some(c => c.toLowerCase() === 'local')) {
+    config.local.categories = [...cats, 'Local'];
+  } else if (config.local.categories === undefined) {
+    config.local.categories = cats;
+  }
+}
 
 /**
  * Read config.yaml. Returns default config if file doesn't exist.
@@ -20,6 +34,7 @@ export async function getConfig(): Promise<Config> {
     const content = await fs.readFile(CONFIG_FILE, 'utf-8');
     const parsed = yaml.load(content) as Config;
     const config = { ...DEFAULT_CONFIG, ...parsed };
+    ensureBuiltInLocalReservation(config);
     // Sanitize legacy priority values to new 3-tier system
     if (config.defaults?.priority && !(VALID_PRIORITIES as readonly string[]).includes(config.defaults.priority)) {
       const p = config.defaults.priority as string;
