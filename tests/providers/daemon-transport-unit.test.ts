@@ -194,6 +194,112 @@ describe('B2: RemoteSessionManager.writeMessage guard (before start)', () => {
 })
 
 // ═══════════════════════════════════════════════════════════════════
+//  B2b: writeMessage must not short-circuit on stale _hasPipe cache.
+//
+//  Before fix: after a WS reconnect, `_hasPipe` stayed false → writeMessage
+//  short-circuited → session runner fell back to `--resume` spawn, producing
+//  synthetic `[Request interrupted by user]` + `No response requested.` in
+//  the transcript.
+//  This block locks in the "daemon is the arbiter of pipe liveness" property.
+// ═══════════════════════════════════════════════════════════════════
+
+describe('B2b: writeMessage asks daemon as source of truth (no stale cache short-circuit)', () => {
+  // Minimal DaemonConnection-shaped mock. RemoteSessionManager only uses
+  // `.connected` + `.send(...)` in writeMessage, so a plain object suffices.
+  function makeMockConn(sendImpl: (cmd: string, payload: Record<string, unknown>) => Promise<Record<string, unknown>>) {
+    return {
+      connected: true,
+      send: vi.fn(sendImpl),
+    }
+  }
+
+  // Simulates "session alive on daemon, local `_hasPipe` cache out-of-sync"
+  // (e.g. after WS disconnect/reconnect). Bypassing `start()` is intentional:
+  // these tests isolate the writeMessage gate, not the startup path.
+  function injectState(
+    transport: RemoteSessionManager,
+    conn: { connected: boolean; send: unknown },
+    sid: string | null,
+    hasPipe: boolean,
+  ) {
+    const internal = transport as unknown as {
+      conn: unknown
+      _sid: string | null
+      _hasPipe: boolean
+    }
+    internal.conn = conn
+    internal._sid = sid
+    internal._hasPipe = hasPipe
+  }
+
+  it('calls daemon send even when _hasPipe=false (bug scenario: cache desynced after WS reconnect)', async () => {
+    const transport = new RemoteSessionManager('daemon-b2b-001', 'testhost', testSshTarget)
+    const mockConn = makeMockConn(async () => ({ ok: true }))
+
+    // Simulate post-WS-reconnect state: session alive on daemon, but local
+    // _hasPipe cache was cleared and never restored. This is the exact
+    // condition that previously caused every send to fall through to --resume.
+    injectState(transport, mockConn, 'session-abc', false)
+
+    // writeMessage is optimistic — returns true synchronously, actual send is
+    // fire-and-forget via promise chain.
+    const result = transport.writeMessage('hello')
+    expect(result).toBe(true)
+
+    // Wait for the fire-and-forget conn.send() to be invoked.
+    await vi.waitFor(() => expect(mockConn.send).toHaveBeenCalledTimes(1))
+
+    // Exact payload match — prepareOutbound is identity for plain text. If it
+    // ever starts rewriting messages, this assertion should catch it.
+    expect(mockConn.send).toHaveBeenCalledWith('send', { sid: 'session-abc', message: 'hello' })
+  })
+
+  it('still returns false when WS is disconnected (conn.connected=false)', () => {
+    const transport = new RemoteSessionManager('daemon-b2b-002', 'testhost', testSshTarget)
+    const mockConn = { connected: false, send: vi.fn(async () => ({ ok: true })) }
+    injectState(transport, mockConn, 'session-def', true)
+
+    const result = transport.writeMessage('hello')
+
+    expect(result).toBe(false)
+    expect(mockConn.send).not.toHaveBeenCalled()
+  })
+
+  it('still returns false when session has no sid yet (start not completed)', () => {
+    const transport = new RemoteSessionManager('daemon-b2b-003', 'testhost', testSshTarget)
+    const mockConn = makeMockConn(async () => ({ ok: true }))
+    injectState(transport, mockConn, null, true)
+
+    const result = transport.writeMessage('hello')
+
+    expect(result).toBe(false)
+    expect(mockConn.send).not.toHaveBeenCalled()
+  })
+
+  it('clears _hasPipe and fires onExit when daemon reports ENXIO (remote process truly dead)', async () => {
+    const transport = new RemoteSessionManager('daemon-b2b-004', 'testhost', testSshTarget)
+    const mockConn = makeMockConn(async () => ({ ok: false, reason: 'ENXIO' }))
+    injectState(transport, mockConn, 'session-xyz', true)
+
+    let exitCode: number | null = null
+    ;(transport as unknown as { _onExit: (code: number) => void })._onExit = (code) => {
+      exitCode = code
+    }
+
+    const result = transport.writeMessage('hello')
+    expect(result).toBe(true) // optimistic return still true
+
+    // Wait for the fire-and-forget promise chain to handle the ENXIO response.
+    // Daemon-reported dead pipe: cache should be cleared and onExit fired so
+    // session runner falls back to --resume spawn on the next processNext.
+    await vi.waitFor(() => {
+      expect(transport.hasPipe).toBe(false)
+      expect(exitCode).toBe(1)
+    })
+  })
+})
+
+// ═══════════════════════════════════════════════════════════════════
 //  B3: DaemonConnection.disconnect cleanup
 // ═══════════════════════════════════════════════════════════════════
 

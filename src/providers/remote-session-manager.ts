@@ -296,10 +296,12 @@ export class RemoteSessionManager implements SessionManager {
   // ── Messaging ──
 
   writeMessage(message: string): boolean {
-    // hasPipe is cleared when the daemon reports process exit. Without this check,
-    // writeMessage optimistically returns true but the daemon's FIFO write fails
-    // silently → message lost → caller never gets a result → timeout.
-    if (!this.conn?.connected || !this._sid || !this._hasPipe) return false
+    // Daemon's `cmdSend` is the atomic source of truth for pipe liveness — it
+    // attempts the FIFO write and returns `{ok:false, reason:'ENXIO'|'EAGAIN'}`
+    // when the remote process is gone (handled below). We intentionally do NOT
+    // gate on `_hasPipe` here; it's kept as a liveness breadcrumb read by other
+    // call sites (see claude-code-session.ts) but must not short-circuit sends.
+    if (!this.conn?.connected || !this._sid) return false
 
     // Capture conn/sid synchronously — they may change during the async image upload
     // (e.g. renameForSession(), detach(), or a concurrent start() call).
@@ -321,8 +323,12 @@ export class RemoteSessionManager implements SessionManager {
         // Covers: 'not found' (session unknown), 'ENXIO' (no reader on pipe),
         // 'EAGAIN' (pipe buffer full, nobody draining).
         if (reason.includes('not found') || reason === 'ENXIO' || reason === 'EAGAIN') {
-          this._hasPipe = false
-          this._onExit?.(1)
+          // Guard against double-fire: a stale daemon `exit` event may have
+          // already cleared _hasPipe and called _onExit(1).
+          if (this._hasPipe) {
+            this._hasPipe = false
+            this._onExit?.(1)
+          }
         }
       }
     }).catch((err) => {
