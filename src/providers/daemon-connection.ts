@@ -98,6 +98,8 @@ export class DaemonConnection {
   private _controlPath: string | null = null
   /** ControlMaster SSH process — kept alive for the lifetime of this DaemonConnection. */
   private _controlMaster: ChildProcess | null = null
+  /** Tracks whether the last deploy used source (not binary) — affects startDaemon() command. */
+  private _deployedViaSource = false
 
   constructor(hostKey: string, sshTarget: SshTarget) {
     this.hostKey = hostKey
@@ -322,10 +324,17 @@ export class DaemonConnection {
   }
 
   private get baseSshArgs(): string[] {
+    return this.buildSshArgs({ useControlMaster: true })
+  }
+
+  /**
+   * Build SSH args. Set useControlMaster=false for commands that pipe large data
+   * through stdin — ControlMaster multiplexed connections don't reliably forward stdin.
+   */
+  private buildSshArgs(opts: { useControlMaster: boolean } = { useControlMaster: true }): string[] {
     const args = ['-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=no']
     if (this.sshTarget.port) args.push('-p', String(this.sshTarget.port))
-    // Use ControlMaster socket if available — multiplexes all SSH through one connection
-    if (this._controlPath) {
+    if (opts.useControlMaster && this._controlPath) {
       args.push('-o', `ControlPath=${this._controlPath}`)
     }
     return args
@@ -384,6 +393,42 @@ export class DaemonConnection {
   }
 
   /**
+   * Pipe a data chunk to a remote file via SSH stdin.
+   * Writes to a per-chunk file (overwrite, not append) so retries don't produce duplicates.
+   * Verifies the remote file size matches the data length.
+   * Returns true on success, false if the connection was killed or data was truncated.
+   */
+  private async pipeChunk(data: Buffer, remoteDir: string, chunkIndex: number): Promise<boolean> {
+    const chunkFile = `${remoteDir}/chunk_${String(chunkIndex).padStart(4, '0')}`
+    // Write data then echo the byte count for verification
+    const args = [...this.buildSshArgs({ useControlMaster: false }), this.sshHostString, `cat > ${chunkFile} && wc -c < ${chunkFile}`]
+    const proc = spawn('ssh', args, { stdio: ['pipe', 'pipe', 'pipe'] })
+    proc.stdin!.on('error', () => {})  // swallow EPIPE if SSH dies mid-write
+
+    let stdout = ''
+    proc.stdout!.on('data', (d: Buffer) => { stdout += d.toString() })
+
+    const ok = await new Promise<boolean>((resolve) => {
+      proc.on('error', () => resolve(false))
+      const timer = setTimeout(() => { proc.kill('SIGTERM'); resolve(false) }, 30_000)
+      proc.on('close', (code) => { clearTimeout(timer); resolve(code === 0) })
+      proc.stdin!.end(data)
+    })
+
+    if (!ok) return false
+
+    // Verify size — proxy can kill mid-write but SSH may still exit 0
+    const remoteSize = parseInt(stdout.trim(), 10)
+    if (remoteSize !== data.length) {
+      log.session.warn('DaemonConnection: chunk size mismatch', {
+        host: this.hostKey, chunkIndex, expected: data.length, got: remoteSize,
+      })
+      return false
+    }
+    return true
+  }
+
+  /**
    * Execute a command on the remote host via SSH and return stdout.
    * Uses ControlMaster if available (single TCP connection for all commands).
    */
@@ -412,6 +457,11 @@ export class DaemonConnection {
       const result = await this.sshExec(`${remotePath} --status 2>/dev/null`)
       const status = JSON.parse(result)
       if (status.running && status.port) {
+        // Auto-upgrade: compare local binary version with running remote daemon.
+        // If they differ, stop the old daemon so the caller triggers deployDaemon().
+        if (await this.shouldUpgradeDaemon(remotePath)) {
+          return null
+        }
         log.session.info('DaemonConnection: daemon already running (binary)', {
           host: this.hostKey, port: status.port, pid: status.pid,
         })
@@ -436,6 +486,35 @@ export class DaemonConnection {
   }
 
   /**
+   * Compare local binary .version sidecar with remote daemon --version.
+   * If they differ, stop the remote daemon and return true (caller should redeploy).
+   */
+  private async shouldUpgradeDaemon(remotePath: string): Promise<boolean> {
+    try {
+      const localBinary = await this.getLocalBinaryPath()
+      if (!localBinary) return false
+
+      const versionFile = localBinary + '.version'
+      const localVersion = fs.readFileSync(versionFile, 'utf-8').trim()
+      if (!localVersion) return false
+
+      const remoteVersion = await this.sshExec(`${remotePath} --version 2>/dev/null`, 5_000)
+      if (!remoteVersion) return false
+
+      if (localVersion === remoteVersion.trim()) return false
+
+      log.session.info('DaemonConnection: daemon version mismatch — stopping for upgrade', {
+        host: this.hostKey, localVersion, remoteVersion: remoteVersion.trim(),
+      })
+      await this.sshExec(`${remotePath} --stop 2>/dev/null`, 5_000)
+      return true
+    } catch {
+      // Version check failed — don't block, just reuse existing daemon
+      return false
+    }
+  }
+
+  /**
    * Deploy daemon to the remote host.
    *
    * Prefers binary deployment (fast, no runtime deps) when pre-compiled binaries
@@ -446,13 +525,25 @@ export class DaemonConnection {
     const localBinary = await this.getLocalBinaryPath()
 
     if (localBinary) {
-      await this.deployBinary(localBinary)
+      try {
+        await this.deployBinary(localBinary)
+        this._deployedViaSource = false
+        return
+      } catch (err) {
+        // Binary deploy failed (e.g. SSH proxy killed the transfer).
+        // Fall back to lightweight source deploy (~44KB, always passes).
+        log.session.warn('DaemonConnection: binary deploy failed, falling back to source deploy', {
+          host: this.hostKey, error: err instanceof Error ? err.message : String(err),
+        })
+      }
     } else {
       log.session.info('DaemonConnection: no binary found, falling back to source deploy', {
         host: this.hostKey, binaryDir: DAEMON_BINARIES_DIR,
       })
-      await this.deploySource()
     }
+
+    await this.deploySource()
+    this._deployedViaSource = true
   }
 
   /**
@@ -486,10 +577,12 @@ export class DaemonConnection {
       } catch { /* version check failed — deploy fresh */ }
 
       if (needsDeploy) {
-        // Deploy via reverse SSH tunnel + curl.
-        // Many corporate hosts kill large SSH data transfers (SCP/pipe >10MB).
-        // Instead: start a temporary HTTP server locally, create a reverse SSH
-        // tunnel so the remote can reach it, then curl the compressed binary.
+        // Deploy via chunked SSH stdin pipe.
+        // Corporate SSH proxies (WSSH) kill connections that transfer >5-10MB.
+        // We split the gzipped binary into 1MB chunks, pipe each through a
+        // separate SSH connection, then reassemble on the remote host.
+        // If a chunk fails (proxy kills it), we wait 5s and retry (max 2 retries),
+        // then fall back to source deploy (~44KB) which always passes.
         const remotePath = await this.getRemoteDaemonPath()
         const gzPath = localBinaryPath + '.gz'
 
@@ -505,47 +598,64 @@ export class DaemonConnection {
           })
         }
 
-        // Start temporary HTTP server on random port
-        const { createServer: createHttpServer } = await import('node:http')
         const gzData = fs.readFileSync(gzPath)
-        const httpServer = createHttpServer((req, res) => {
-          res.writeHead(200, { 'Content-Type': 'application/octet-stream', 'Content-Length': gzData.length })
-          res.end(gzData)
-        })
-        await new Promise<void>(resolve => httpServer.listen(0, '127.0.0.1', resolve))
-        const httpPort = (httpServer.address() as { port: number }).port
+        const gzSize = gzData.length
+        const CHUNK_SIZE = 1_048_576  // 1MB — well under WSSH's ~5MB kill threshold
+        const totalChunks = Math.ceil(gzSize / CHUNK_SIZE)
+        const chunkDir = '/tmp/open-walnut/deploy_chunks'
 
-        try {
-          // Use reverse tunnel: remote:httpPort → local:httpPort, then curl
-          const args = [
-            ...this.baseSshArgs,
-            '-R', `${httpPort}:127.0.0.1:${httpPort}`,
-            this.sshHostString,
-            `curl -sf http://127.0.0.1:${httpPort}/ -o ${remotePath}.gz && gunzip -f ${remotePath}.gz && chmod +x ${remotePath}`,
-          ]
-          const proc = spawn('ssh', args, { stdio: ['pipe', 'pipe', 'pipe'] })
+        // Clean any partial previous transfer
+        await this.sshExec(`rm -rf ${chunkDir} && mkdir -p ${chunkDir}`, 5_000).catch(() => {})
 
-          let stderr = ''
-          proc.stderr?.on('data', (d: Buffer) => { stderr += d.toString() })
+        let retries = 0
+        const MAX_RETRIES = 2  // fail fast — source deploy (44KB, <2s) makes retrying binary (38MB) a waste of time
+        for (let i = 0; i < totalChunks; i++) {
+          const offset = i * CHUNK_SIZE
+          const chunk = gzData.subarray(offset, offset + CHUNK_SIZE)
 
-          const exitCode = await new Promise<number>((resolve, reject) => {
-            proc.on('close', resolve)
-            proc.on('error', reject)
-            setTimeout(() => { proc.kill('SIGTERM'); reject(new Error('deploy timeout (60s)')) }, 60_000)
-          })
-
-          if (exitCode !== 0) {
-            throw new Error(`binary deploy failed (exit ${exitCode}): ${stderr.slice(0, 300)}`)
+          // Each chunk writes to its own file (overwrite) — retries are safe
+          const ok = await this.pipeChunk(chunk, chunkDir, i)
+          if (!ok) {
+            retries++
+            if (retries > MAX_RETRIES) {
+              throw new Error(`binary deploy failed: SSH proxy killed ${retries} chunks (will fall back to source deploy)`)
+            }
+            log.session.info('DaemonConnection: chunk transfer killed by proxy, retrying', {
+              host: this.hostKey, chunk: i + 1, totalChunks, retries,
+            })
+            await new Promise(r => setTimeout(r, 5_000))
+            i-- // retry same chunk
+            continue
           }
 
-          const remoteBinaryName = await this.getRemoteBinaryName()
-          log.session.info('DaemonConnection: binary deployed via reverse tunnel', {
-            host: this.hostKey, deployMs: Date.now() - t0,
-            bytes: binarySize, gzBytes: gzData.length, binary: remoteBinaryName,
-          })
-        } finally {
-          httpServer.close()
+          // Brief pause between chunks to avoid triggering rate limits
+          if (i < totalChunks - 1) {
+            await new Promise(r => setTimeout(r, 1_000))
+          }
         }
+
+        // Reassemble chunks and verify size before unpacking
+        const remoteSize = parseInt(
+          await this.sshExec(`cat ${chunkDir}/chunk_* > ${remotePath}.gz && wc -c < ${remotePath}.gz`, 30_000),
+          10,
+        )
+        if (remoteSize !== gzSize) {
+          await this.sshExec(`rm -rf ${chunkDir} ${remotePath}.gz`, 5_000).catch(() => {})
+          throw new Error(`binary deploy size mismatch: remote=${remoteSize} local=${gzSize}`)
+        }
+
+        // Unpack and make executable
+        const unpackResult = await this.sshExec(
+          `rm -rf ${chunkDir} && gunzip -f ${remotePath}.gz && chmod +x ${remotePath} && ${remotePath} --version`,
+          30_000,
+        )
+
+        const remoteBinaryName = await this.getRemoteBinaryName()
+        log.session.info('DaemonConnection: binary deployed via chunked pipe', {
+          host: this.hostKey, deployMs: Date.now() - t0,
+          bytes: binarySize, gzBytes: gzSize, chunks: totalChunks, retries,
+          binary: remoteBinaryName, remoteVersion: unpackResult.trim(),
+        })
       }
     } catch (err) {
       throw new Error(`Failed to deploy daemon binary to ${this.hostKey}: ${err instanceof Error ? err.message : String(err)}`)
@@ -553,8 +663,8 @@ export class DaemonConnection {
   }
 
   /**
-   * Legacy source-based deploy: pipe daemon.js + npm install ws.
-   * Used as fallback when pre-compiled binaries aren't available.
+   * Source-based deploy: pipe daemon.cjs (~44KB) + npm install ws.
+   * Primary fallback when binary deploy fails (e.g. SSH proxy kills large transfers).
    */
   private async deploySource(): Promise<void> {
     const source = getDaemonSource()
@@ -567,6 +677,7 @@ export class DaemonConnection {
 
       const args = [...this.baseSshArgs, this.sshHostString, 'cat > /tmp/open-walnut/daemon.cjs']
       const proc = spawn('ssh', args, { stdio: ['pipe', 'pipe', 'pipe'] })
+      proc.stdin!.on('error', () => {})  // prevent EPIPE crash if SSH dies
 
       await new Promise<void>((resolve, reject) => {
         proc.on('close', (code) => {
@@ -578,8 +689,9 @@ export class DaemonConnection {
       })
 
       // Ensure 'ws' package is available for the daemon's WebSocket server.
+      // Remove any stale package.json that might cause EBADPLATFORM errors.
       try {
-        await this.sshExec(`${preamble}; cd /tmp/open-walnut && node -e "require('ws')" 2>/dev/null || npm install --prefix /tmp/open-walnut ws 2>/dev/null`, 30_000)
+        await this.sshExec(`${preamble}; cd /tmp/open-walnut && node -e "require('ws')" 2>/dev/null || (rm -f package.json && npm install --prefix /tmp/open-walnut ws 2>/dev/null)`, 30_000)
       } catch {
         log.session.debug('DaemonConnection: ws install skipped', { host: this.hostKey })
       }
@@ -603,7 +715,7 @@ export class DaemonConnection {
       // Determine the start command based on what was deployed.
       // Binary: direct execution. Source: needs node PATH discovery.
       let startCmd: string
-      if (await this.getLocalBinaryPath()) {
+      if (!this._deployedViaSource && await this.getLocalBinaryPath()) {
         // Binary deploy — run directly, no PATH setup needed
         const remotePath = await this.getRemoteDaemonPath()
         startCmd = `nohup ${remotePath} --start > /tmp/open-walnut/daemon-start.log 2>&1 & ` +
@@ -852,6 +964,10 @@ export class DaemonConnection {
 
     log.session.info('DaemonConnection: attempting reconnect', { host: this.hostKey })
 
+    // Reset deploy flag — if daemon is still alive we skip deploy entirely;
+    // if daemon died, deployDaemon() will set this correctly.
+    this._deployedViaSource = false
+
     // Kill old tunnel if any
     if (this.tunnel) {
       try { this.tunnel.kill('SIGTERM') } catch {}
@@ -896,9 +1012,18 @@ export class DaemonConnection {
 
       for (const s of sessions) {
         if (s.host !== this.hostKey) continue
-        if (s.process_status !== 'error') continue
-        if (!s.errorMessage?.includes('Connection lost')) continue
         if (s.archived) continue
+
+        // Two failure shapes to recover:
+        //  (1) 'error' + "Connection lost" — disconnect propagated to session record
+        //  (2) 'running' — WebSocket died silently mid-turn, session record never got
+        //      the error (tailer read-end broke, CLI completed turn remotely, terminal
+        //      result event never reached walnut). These sessions remain 'running'
+        //      forever until next reconnect probes them here.
+        const isErroredByDisconnect = s.process_status === 'error'
+          && !!s.errorMessage?.includes('Connection lost')
+        const isPotentiallyStuckRunning = s.process_status === 'running'
+        if (!isErroredByDisconnect && !isPotentiallyStuckRunning) continue
 
         // Ask daemon if this session's process is still alive
         try {
@@ -919,10 +1044,14 @@ export class DaemonConnection {
             }, ['*'], { source: 'daemon-reconnect', urgency: 'urgent' })
             log.session.info('DaemonConnection: auto-recovered session after reconnect', {
               sessionId: s.claudeSessionId, host: this.hostKey,
+              priorStatus: s.process_status,
             })
           } else {
             // Process died during disconnect — mark stopped so session is resumable.
             // Don't inject a message; user's next message will trigger --resume naturally.
+            // For stuck-running case: emitting 'stopped' triggers server.ts
+            // belt-and-suspenders → sessionStreamBuffer.markDone+clear → UI Streaming
+            // badge clears. JSONL history API serves full turn content independently.
             await updateSessionRecord(s.claudeSessionId, {
               process_status: 'stopped',
               errorMessage: undefined,
@@ -938,6 +1067,7 @@ export class DaemonConnection {
             }, ['*'], { source: 'daemon-reconnect', urgency: 'urgent' })
             log.session.info('DaemonConnection: cleared error on dead session after reconnect', {
               sessionId: s.claudeSessionId, host: this.hostKey,
+              priorStatus: s.process_status,
             })
           }
         } catch (err) {

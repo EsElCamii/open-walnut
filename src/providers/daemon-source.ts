@@ -1033,6 +1033,8 @@ function scanIdleSessions() {
 }
 
 function cleanupOrphanedProcessGroups() {
+  // Adopt live sessions from a previous daemon (graceful upgrade).
+  // Only kill sessions whose process is dead (truly orphaned).
   try {
     const files = fs.readdirSync(STREAMS_DIR);
     for (const f of files) {
@@ -1042,8 +1044,27 @@ function cleanupOrphanedProcessGroups() {
         const pid = parseInt(fs.readFileSync(path.join(STREAMS_DIR, f), 'utf-8').trim(), 10);
         if (isNaN(pid) || pid <= 0) continue;
         if (isProcessGroupAlive(pid)) {
-          logMsg('warn', 'startup cleanup: killing orphaned process group', { sid, pid });
-          killSessionProcessGroup(pid, sid);
+          // Process still alive — adopt it into our sessions map
+          logMsg('info', 'startup: adopting live session from previous daemon', { sid, pid });
+          const jsonlPath = path.join(STREAMS_DIR, sid + '.jsonl');
+          const pipePath = path.join(STREAMS_DIR, sid + '.pipe');
+          const pgidPath = path.join(STREAMS_DIR, f);
+          sessions.set(sid, {
+            proc: null,  // no handle — process was started by old daemon.
+            // No exit event fires for adopted sessions (proc is null).
+            // scanIdleSessions (60s) detects death via kill(pid, 0).
+            pipePath,
+            jsonlPath,
+            pgidPath,
+            pid,
+            offset: 0,
+            watchers: new Map(),
+            exitCode: null,
+          });
+        } else {
+          // Process dead — clean up pgid file
+          logMsg('info', 'startup cleanup: removing stale pgid for dead session', { sid, pid });
+          try { fs.unlinkSync(path.join(STREAMS_DIR, f)); } catch {}
         }
       } catch {}
     }
@@ -1052,41 +1073,24 @@ function cleanupOrphanedProcessGroups() {
 
 // ── Cleanup ──
 function cleanup() {
-  // Kill all tracked session process groups
-  for (const [sid, session] of sessions) {
-    if (session.pid && session.exitCode === null) {
-      logMsg('info', 'cleanup: killing session process group', { sid, pid: session.pid });
-      killProcessGroup(session.pid, 'SIGTERM');
-    }
+  // Graceful shutdown: leave session processes running so the next daemon
+  // can adopt them (via .pgid files). Only close watchers and agent subs.
+  logMsg('info', 'cleanup: daemon shutting down, leaving session processes alive for next daemon', {
+    activeSessions: [...sessions.entries()].filter(([, s]) => s.exitCode === null).length,
+  });
+  for (const [, session] of sessions) {
     for (const [, watcher] of session.watchers) {
       watcher.close();
     }
   }
-  // Also kill any process groups from .pgid files not in our sessions map
-  try {
-    const files = fs.readdirSync(STREAMS_DIR);
-    for (const f of files) {
-      if (!f.endsWith('.pgid')) continue;
-      try {
-        const pid = parseInt(fs.readFileSync(path.join(STREAMS_DIR, f), 'utf-8').trim(), 10);
-        if (!isNaN(pid) && pid > 0) killProcessGroup(pid, 'SIGTERM');
-      } catch {}
-    }
-  } catch {}
-  // Best-effort SIGKILL after 2s — this timer won't fire when cleanup() is called
-  // from signal handlers (process.exit() cancels pending timers). That's OK:
-  // cleanupOrphanedProcessGroups() catches survivors on next daemon startup.
-  setTimeout(() => {
-    for (const [, session] of sessions) {
-      if (session.pid) killProcessGroup(session.pid, 'SIGKILL');
-    }
-  }, 2000);
   // Stop all agent subs
   for (const [, sub] of agentSubs) {
     clearInterval(sub.timer);
     clearInterval(sub.rediscoverTimer);
   }
-  // Remove port/pid files
+  // Remove port/pid files (so new daemon knows to start fresh)
+  // IMPORTANT: Do NOT remove .pgid files here — cleanupOrphanedProcessGroups()
+  // on the next daemon needs them to adopt running sessions. See that function above.
   try { fs.unlinkSync(PORT_FILE); } catch {}
   try { fs.unlinkSync(PID_FILE); } catch {}
 }
@@ -1197,7 +1201,7 @@ if (action === '--start') {
   process.on('SIGTERM', () => { cleanup(); process.exit(0); });
   process.on('SIGINT', () => { cleanup(); process.exit(0); });
 
-  // Detach from terminal (close stdin so SSH doesn't hold)
+  // Prevent daemon from exiting when SSH disconnects (stdin EOF would otherwise cause exit)
   if (process.stdin.isTTY === false) {
     process.stdin.resume();
     process.stdin.on('end', () => {}); // Don't exit on stdin close
