@@ -87,7 +87,10 @@ const TaskAwareLink = Link.extend({
   renderHTML({ HTMLAttributes }) {
     const href = HTMLAttributes.href || '';
     const taskPath = extractTaskPath(href);
-    if (!taskPath) return ['a', HTMLAttributes, 0];
+    if (!taskPath) {
+      // External link — force new-tab open with noopener/noreferrer
+      return ['a', { ...HTMLAttributes, target: '_blank', rel: 'noopener noreferrer nofollow' }, 0];
+    }
     // Normalize to relative path + strip target/rel — we handle navigation ourselves
     const attrs = { ...HTMLAttributes, href: taskPath, class: 'task-link' };
     delete attrs.target;
@@ -325,9 +328,14 @@ export function NotesEditor({ content, onDirty, placeholder, className, autoFocu
         transformCopiedText: true,
       }),
       TaskAwareLink.configure({
-        openOnClick: false, // we handle clicks ourselves
-        autolink: false,
-        linkOnPaste: false,
+        openOnClick: false, // we handle clicks ourselves (task-link SPA routing + external new-tab)
+        autolink: true, // auto-detect typed URLs as links
+        linkOnPaste: true, // pasted URLs become links (including wrap-selection)
+        defaultProtocol: 'https',
+        HTMLAttributes: {
+          target: '_blank',
+          rel: 'noopener noreferrer nofollow',
+        },
       }),
       SlashCommandExtension.configure({
         onStateChange: setSlashState,
@@ -345,7 +353,7 @@ export function NotesEditor({ content, onDirty, placeholder, className, autoFocu
       onDirty(editor);
     },
     editorProps: {
-      // Intercept clicks on task-link anchors at the ProseMirror level
+      // Intercept clicks on anchors at the ProseMirror level
       handleClick: (view, pos, event) => {
         const target = event.target as HTMLElement;
         const anchor = target.closest('a');
@@ -357,9 +365,15 @@ export function NotesEditor({ content, onDirty, placeholder, className, autoFocu
           if (taskId) onTaskClickRef.current(taskId);
           return true; // tell ProseMirror we handled it
         }
+        // External link — open in new tab (openOnClick is disabled so we do it manually)
+        if (href && isUrl(href)) {
+          event.preventDefault();
+          window.open(href, '_blank', 'noopener,noreferrer');
+          return true;
+        }
         return false;
       },
-      handlePaste: (view, event) => {
+      handlePaste: (_view, event) => {
         // Image paste (takes priority over URL detection)
         const items = event.clipboardData?.items;
         if (items) {
@@ -374,16 +388,8 @@ export function NotesEditor({ content, onDirty, placeholder, className, autoFocu
             }
           }
         }
-        // Paste URL over selected text → wrap selection as hyperlink
-        if (!view.state.selection.empty) {
-          const clipText = event.clipboardData?.getData('text/plain')?.trim();
-          if (clipText && isUrl(clipText) && editorRef.current) {
-            event.preventDefault();
-            editorRef.current.chain().focus().setLink({ href: clipText }).run();
-            return true;
-          }
-        }
         // Paste text containing entity refs → convert to markdown links
+        // (URL auto-linking on paste is handled natively by TaskAwareLink's linkOnPaste)
         {
           const clipText = event.clipboardData?.getData('text/plain') ?? '';
           if ((clipText.includes('<task-ref') || clipText.includes('<session-ref')) && editorRef.current) {
