@@ -66,7 +66,13 @@ class SessionStreamBuffer {
 
   appendTextDelta(sessionId: string, delta: string): void {
     const entry = this.getOrCreate(sessionId)
-    this.streaming.add(sessionId)
+    // ⚠️  DO NOT add `this.streaming.add(sessionId)` here. This is "Root Cause 5"
+    // of the stuck-Streaming-badge bug: JSONL replay / late events re-populated the
+    // streaming Set *after* markDone had cleared it, leaving the badge stuck forever.
+    // Four prior attempts (resultEmitted guard, belt-and-suspenders cleanup, stale
+    // subscribe backstop, daemon recovery) all fought the symptom — the architectural
+    // fix is to keep data events out of the streaming flag entirely. The flag is
+    // driven exclusively by lifecycle events via markStreaming/markDone.
     entry.textAccumulator += delta
     entry.lastActivity = Date.now()
 
@@ -80,7 +86,8 @@ class SessionStreamBuffer {
 
   appendToolUse(sessionId: string, toolUseId: string, name: string, input?: Record<string, unknown>, planContent?: string, parentToolUseId?: string): void {
     const entry = this.getOrCreate(sessionId)
-    this.streaming.add(sessionId)
+    // ⚠️  DO NOT add `this.streaming.add(sessionId)` here — see appendTextDelta
+    // for the Root Cause 5 explanation. Data events must never flip the lifecycle flag.
     // Tool call interrupts text flow — reset text accumulator
     entry.textAccumulator = ''
     entry.lastActivity = Date.now()
@@ -106,6 +113,24 @@ class SessionStreamBuffer {
     entry.textAccumulator = ''  // system event breaks text flow
     entry.lastActivity = Date.now()
     entry.blocks.push({ type: 'system', variant, message, ...(detail ? { detail } : {}) } as StreamingSystemBlock)
+  }
+
+  /**
+   * SOLE "on"-path for the streaming flag. Must be called ONLY from lifecycle events
+   * (currently just the `session:status-changed` handler in server.ts with
+   * process_status='running'). If you are tempted to call this from a data handler
+   * (appendTextDelta / appendToolUse / appendSystem), STOP — you are re-introducing
+   * Root Cause 5 (stuck-badge bug where JSONL replay/late events re-populated the
+   * streaming Set after markDone cleared it). The invariant that makes this fix
+   * work is: data events append blocks only; lifecycle events flip the flag.
+   *
+   * Paired "off"-paths: markDone (result/error/idle/stopped/error status-changed)
+   * and clear (session reaped / terminal status).
+   */
+  markStreaming(sessionId: string): void {
+    const had = this.streaming.has(sessionId)
+    this.streaming.add(sessionId)
+    if (!had) log.ws.info('stream buffer markStreaming', { sessionId })
   }
 
   markDone(sessionId: string): void {

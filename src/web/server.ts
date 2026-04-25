@@ -1067,17 +1067,30 @@ export async function startServer(options: ServerOptions = {}): Promise<HttpServ
         }
       }
 
-      // Belt-and-suspenders: clean up stream buffer on terminal status-changed.
-      // session:result/session:error is the primary cleanup path, but sessions can
-      // terminate without emitting those events (health monitor timeout, kill,
-      // server restart, process crash). session:status-changed with ['*'] destinations
-      // always fires for ANY termination path, so use it as a fallback.
-      // markDone + clear are idempotent — safe to call even if result already cleaned up.
-      if (event.name === 'session:status-changed') {
-        const { sessionId: sid, process_status: ps } = event.data as { sessionId?: string; process_status?: string }
-        if (sid && (ps === 'stopped' || ps === 'error')) {
+    }
+
+    // session:status-changed drives the stream buffer's lifecycle state.
+    // Must live OUTSIDE the outer `if (!isSubagentSessionResult && (...))` guard:
+    // that guard whitelists only started/result/error/batch-completed/message-queued/
+    // messages-delivered and would silently skip status-changed events (the original
+    // Root-Cause-5 bug: belt-and-suspenders cleanup never fired → stuck badge).
+    if (event.name === 'session:status-changed') {
+      const { sessionId: sid, process_status: ps } = event.data as { sessionId?: string; process_status?: string }
+      if (sid) {
+        // This handler is the single authority for the streaming flag:
+        //   - running  → markStreaming  (sole "on"-path; see session-stream-buffer.ts
+        //                for Root Cause 5 explanation of why data events never flip it)
+        //   - idle     → markDone       (FIFO between turns; keep blocks for cross-turn view)
+        //   - stopped  → markDone + clear
+        //   - error    → markDone + clear
+        // markDone/clear are idempotent; safe even if session:result already cleaned up above.
+        if (ps === 'running') {
+          sessionStreamBuffer.markStreaming(sid)
+        } else if (ps === 'stopped' || ps === 'error') {
           sessionStreamBuffer.markDone(sid)
           sessionStreamBuffer.clear(sid)
+        } else if (ps === 'idle') {
+          sessionStreamBuffer.markDone(sid)
         }
       }
     }

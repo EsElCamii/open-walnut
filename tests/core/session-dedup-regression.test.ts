@@ -185,14 +185,39 @@ describe('Category A: History API dedup regression', () => {
 // ═══════════════════════════════════════════════════════════════════
 
 describe('Category B: Stream Buffer contract', () => {
-  it('B1: normal text accumulation', () => {
+  it('B1: normal text accumulation (data events do NOT flip streaming)', () => {
     sessionStreamBuffer.appendTextDelta('b1', 'Hello ');
     sessionStreamBuffer.appendTextDelta('b1', 'world');
 
     const snap = sessionStreamBuffer.getSnapshot('b1');
     expect(snap.blocks).toHaveLength(1);
     expect(snap.blocks[0]).toMatchObject({ type: 'text', content: 'Hello world' });
-    expect(snap.isStreaming).toBe(true);
+    // Architectural invariant: data events (appendTextDelta/appendToolUse) must
+    // NOT set isStreaming. Only markStreaming (driven by lifecycle events) does.
+    // This prevents replay/late events from re-polluting state after markDone.
+    expect(snap.isStreaming).toBe(false);
+  });
+
+  it('B1b: markStreaming flips isStreaming; markDone clears it; data events never re-pollute', () => {
+    sessionStreamBuffer.markStreaming('b1b');
+    expect(sessionStreamBuffer.getSnapshot('b1b').isStreaming).toBe(true);
+
+    sessionStreamBuffer.markDone('b1b');
+    expect(sessionStreamBuffer.getSnapshot('b1b').isStreaming).toBe(false);
+
+    // Late text-delta after markDone must NOT re-set streaming (core Root Cause 5 invariant)
+    sessionStreamBuffer.appendTextDelta('b1b', 'replay');
+    expect(sessionStreamBuffer.getSnapshot('b1b').isStreaming).toBe(false);
+
+    // Same invariant for tool-use events (second data-event path)
+    sessionStreamBuffer.appendToolUse('b1b', 'tu_replay', 'Read', { file: 'x.ts' });
+    expect(sessionStreamBuffer.getSnapshot('b1b').isStreaming).toBe(false);
+
+    // After clear() + late data events, streaming must remain false
+    sessionStreamBuffer.clear('b1b');
+    sessionStreamBuffer.appendTextDelta('b1b', 'post-clear');
+    sessionStreamBuffer.appendToolUse('b1b', 'tu_post', 'Edit', {});
+    expect(sessionStreamBuffer.getSnapshot('b1b').isStreaming).toBe(false);
   });
 
   it('B2: tool_use interrupts text flow', () => {
