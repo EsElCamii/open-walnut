@@ -12200,6 +12200,83 @@ a.task-kebab-info:hover {
 }
 .sps-error { color: var(--error); }
 
+/* Task metadata footer — Star / Needs attention / Pin tier / Priority */
+.sps-meta-footer {
+  flex-shrink: 0;
+  border-top: 1px solid var(--border);
+  padding: 8px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  background: var(--bg-secondary, transparent);
+}
+.sps-meta-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.sps-meta-label {
+  font-size: 11px;
+  color: var(--fg-muted);
+  width: 60px;
+  flex-shrink: 0;
+}
+.sps-meta-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 10px;
+  border-radius: 12px;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--fg-muted);
+  font-size: 11px;
+  cursor: pointer;
+  transition: all 0.12s;
+}
+.sps-meta-toggle:hover { background: var(--bg); }
+.sps-meta-toggle.active {
+  background: var(--accent-subtle);
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.sps-meta-toggle.active.attention {
+  background: #fdecea;
+  border-color: var(--error);
+  color: var(--error);
+}
+[data-theme="dark"] .sps-meta-toggle.active.attention {
+  background: #3a1e1b;
+}
+.sps-meta-toggle-icon {
+  font-size: 12px;
+  line-height: 1;
+}
+
+.sps-meta-tier-options,
+.sps-meta-priority-options {
+  display: flex;
+  gap: 4px;
+  align-items: center;
+}
+.sps-tier-btn {
+  padding: 2px 10px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: transparent;
+  font-size: 11px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.12s, border-color 0.12s;
+}
+.sps-tier-btn:hover { background: var(--accent-subtle); }
+.sps-tier-btn.active {
+  border-color: currentColor;
+  background: color-mix(in srgb, currentColor 12%, transparent);
+  font-weight: 600;
+}
+
 /* ===== Quick Start Bar (context pill above chat input) ===== */
 
 .quick-start-bar {

@@ -6,7 +6,7 @@ import { Router, type Request, type Response, type NextFunction } from 'express'
 import { log } from '../../logging/index.js'
 import { listSessions, getRecentSessions, getSessionSummaries, getSessionsForTask, getSessionByClaudeId, updateSessionRecord, isTriageSession } from '../../core/session-tracker.js'
 import { readSessionHistory, readSingleSubagentHistory, extractPlanContent, rewriteHistoryRemoteImages } from '../../core/session-history.js'
-import { listTasks, getTask, addTask, updateTask } from '../../core/task-manager.js'
+import { listTasks, getTask, addTask, updateTask, togglePin, setFocusTier } from '../../core/task-manager.js'
 import { getConfig } from '../../core/config-manager.js'
 import { bus, EventNames, eventData } from '../../core/event-bus.js'
 import fsp from 'node:fs/promises'
@@ -331,7 +331,7 @@ sessionsRouter.get('/list-dirs', async (req: Request, res: Response, next: NextF
 // POST /api/sessions/quick-start — create task + start session in one step
 sessionsRouter.post('/quick-start', async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const { cwd, host, message, category, model, mode, images, taskId: existingTaskId } = req.body as {
+    const { cwd, host, message, category, model, mode, images, taskId: existingTaskId, taskMeta } = req.body as {
       cwd: string
       host?: string
       message: string
@@ -340,6 +340,12 @@ sessionsRouter.post('/quick-start', async (req: Request, res: Response, next: Ne
       mode?: string
       images?: ImagePayload[]
       taskId?: string // retry mode: reuse existing task instead of creating a new one
+      taskMeta?: {
+        starred?: boolean
+        needs_attention?: boolean
+        priority?: 'immediate' | 'important' | 'backlog' | 'none'
+        pinTier?: 'focus' | 'next' | 'satellite'
+      }
     }
 
     if (!cwd || typeof cwd !== 'string') {
@@ -355,6 +361,23 @@ sessionsRouter.post('/quick-start', async (req: Request, res: Response, next: Ne
       const validModes = ['bypass', 'accept', 'default', 'plan']
       if (!validModes.includes(mode)) {
         res.status(400).json({ error: `Invalid mode: ${mode}. Must be one of: ${validModes.join(', ')}` })
+        return
+      }
+    }
+
+    // Whitelist enum values from taskMeta — these flow into updateTask/setFocusTier
+    // and would corrupt task state if arbitrary strings were accepted.
+    if (taskMeta?.priority !== undefined && taskMeta.priority !== null) {
+      const validPriorities = ['immediate', 'important', 'backlog', 'none']
+      if (!validPriorities.includes(taskMeta.priority)) {
+        res.status(400).json({ error: `Invalid taskMeta.priority: ${taskMeta.priority}. Must be one of: ${validPriorities.join(', ')}` })
+        return
+      }
+    }
+    if (taskMeta?.pinTier !== undefined && taskMeta.pinTier !== null) {
+      const validTiers = ['focus', 'next', 'satellite']
+      if (!validTiers.includes(taskMeta.pinTier)) {
+        res.status(400).json({ error: `Invalid taskMeta.pinTier: ${taskMeta.pinTier}. Must be one of: ${validTiers.join(', ')}` })
         return
       }
     }
@@ -404,7 +427,9 @@ sessionsRouter.post('/quick-start', async (req: Request, res: Response, next: Ne
     let updatedTask: Task
 
     if (existingTaskId) {
-      // Retry mode: reuse existing task, archive error sessions
+      // Retry mode: reuse existing task, archive error sessions.
+      // Note: footer taskMeta picks (starred/needs_attention/priority/pinTier) are
+      // intentionally IGNORED on retry — we preserve the original task's metadata.
       updatedTask = await getTask(existingTaskId)
       if (!updatedTask) {
         res.status(404).json({ error: `Task "${existingTaskId}" not found` })
@@ -430,7 +455,39 @@ sessionsRouter.post('/quick-start', async (req: Request, res: Response, next: Ne
         category: taskCategory,
         project: 'Quick Start',
       })
-      await updateTask(task.id, { starred: true, cwd }, { source: 'quick-start' })
+      // Merge taskMeta into initial update; `starred` defaults to true for quick-start.
+      const updates: Partial<Task> = {
+        starred: taskMeta?.starred ?? true,
+        cwd,
+      }
+      if (taskMeta?.needs_attention) updates.needs_attention = true
+      // 'none' is a sentinel meaning "don't write priority" — lets a future retry
+      // branch or other caller omit the field without clearing an existing value.
+      // For freshly-created tasks the distinction is moot, but we keep the contract
+      // consistent across code paths.
+      if (taskMeta?.priority && taskMeta.priority !== 'none') updates.priority = taskMeta.priority
+      await updateTask(task.id, updates, { source: 'quick-start' })
+      // Pin + tier — only for new tasks, only when user picked a tier.
+      //
+      // Sequencing matters: setFocusTier() throws if the task isn't pinned, so
+      // togglePin() MUST run first. The two calls are separate write-lock
+      // operations (non-atomic), but that's safe here because the task was just
+      // created above and no other code references it yet.
+      //
+      // Best-effort: if either call fails, we log and let the session start anyway
+      // rather than rolling back the task — the user can pin manually later.
+      if (taskMeta?.pinTier) {
+        try {
+          await togglePin(task.id)
+          await setFocusTier(task.id, taskMeta.pinTier)
+        } catch (err) {
+          log.web.warn('quick-start: failed to apply pin/tier', {
+            taskId: task.id,
+            tier: taskMeta.pinTier,
+            error: err instanceof Error ? err.message : String(err),
+          })
+        }
+      }
       updatedTask = await getTask(task.id)
     }
 

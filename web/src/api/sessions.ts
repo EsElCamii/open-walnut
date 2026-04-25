@@ -140,6 +140,13 @@ fetchWorkingDirs().then(dirs => {
   for (const [host, cwd] of bestPerHost) { listDirs(cwd, host).catch(() => {}); }
 }).catch(() => {});
 
+export interface QuickStartTaskMeta {
+  starred?: boolean;
+  needs_attention?: boolean;
+  priority?: 'immediate' | 'important' | 'backlog' | 'none';
+  pinTier?: 'focus' | 'next' | 'satellite';
+}
+
 export async function quickStartSession(opts: {
   cwd: string;
   host?: string;
@@ -149,6 +156,7 @@ export async function quickStartSession(opts: {
   mode?: string;
   images?: ImageAttachment[];
   taskId?: string; // retry mode: reuse existing task
+  taskMeta?: QuickStartTaskMeta;
 }): Promise<{ taskId: string; task: unknown }> {
   // Convert ImageAttachment[] to the backend ImagePayload format (data + mediaType only)
   const payload: Record<string, unknown> = { ...opts };

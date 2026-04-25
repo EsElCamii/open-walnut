@@ -17,7 +17,7 @@ import { ChatInput } from '@/components/chat/ChatInput';
 import { TodoPanel } from '@/components/tasks/TodoPanel';
 import { SessionPanel } from '@/components/sessions/SessionPanel';
 import { PendingSessionPanel } from '@/components/sessions/PendingSessionPanel';
-import { SessionPathSelector, type QuickStartPath } from '@/components/sessions/SessionPathSelector';
+import { SessionPathSelector, type QuickStartPath, type QuickStartTaskMeta } from '@/components/sessions/SessionPathSelector';
 import { QuestionPopover, parseAskQuestionInput } from '@/components/chat/QuestionPopover';
 import { TriagePanel } from '@/components/triage/TriagePanel';
 import { fetchSession, fetchSessionsForTask, quickStartSession } from '@/api/sessions';
@@ -247,6 +247,14 @@ export function MainPage({ visible = true, navigateRef }: MainPageProps) {
   // Session quick-start state (opened via /session command)
   const [pathSelectorOpen, setPathSelectorOpen] = useState(false);
   const [quickStartPath, setQuickStartPath] = useState<QuickStartPath | null>(null);
+  // Task metadata picked in the launcher footer; applied to the new task on quick-start.
+  // Using a ref (not state) for two reasons — same pattern as `quickStartPathRef` above:
+  //   (1) Avoid re-renders on every keystroke/toggle inside the popover. Meta lives in
+  //       SessionPathSelector's local state; the parent only needs the final snapshot
+  //       at send-time.
+  //   (2) Avoid stale-closure bugs in the async `handleSendMessage` — a ref always
+  //       reads the latest value without needing to be in the effect's dep array.
+  const quickStartMetaRef = useRef<QuickStartTaskMeta | null>(null);
 
   // Set of session IDs currently open in columns — for active pill indicators
   const openSessionIdSet = useMemo(() => new Set(sessionColumns), [sessionColumns]);
@@ -542,8 +550,9 @@ export function MainPage({ visible = true, navigateRef }: MainPageProps) {
   const pendingForkTaskRef = useRef<string | null>(null);
 
   // Path selector → select handler
-  const handlePathSelect = useCallback((path: QuickStartPath) => {
+  const handlePathSelect = useCallback((path: QuickStartPath, taskMeta: QuickStartTaskMeta) => {
     setQuickStartPath(path);
+    quickStartMetaRef.current = taskMeta;
     setPathSelectorOpen(false);
   }, []);
 
@@ -786,12 +795,24 @@ export function MainPage({ visible = true, navigateRef }: MainPageProps) {
       // Store pending metadata for rendering
       pendingQuickStartMetaRef.current = { id: pendingColId, cwd: qsp.cwd, host: qsp.host ?? undefined, hostLabel: qsp.hostLabel ?? undefined, message: text, category: qsp.category };
 
+      // Snapshot + clear meta ref BEFORE the async call so a subsequent /session
+      // doesn't pick up the stale meta while this one is in flight.
+      const metaSnapshot = quickStartMetaRef.current;
+      quickStartMetaRef.current = null;
+      const taskMeta = metaSnapshot ? {
+        starred: metaSnapshot.starred,
+        needs_attention: metaSnapshot.needs_attention,
+        priority: metaSnapshot.priority,
+        pinTier: metaSnapshot.pinTier,
+      } : undefined;
+
       quickStartSession({
         cwd: qsp.cwd,
         host: qsp.host ?? undefined,
         message: text,
         category: qsp.category,
         images,
+        taskMeta,
       }).then((result) => {
         // Update ref with real taskId (WS events use this to match)
         if (pendingQuickStartRef.current === tempTaskId) {
@@ -1045,7 +1066,7 @@ export function MainPage({ visible = true, navigateRef }: MainPageProps) {
               <span className="qsb-label">Quick Start</span>
               <span className="qsb-path" title={quickStartPath.cwd}>{quickStartPath.cwd}</span>
               {quickStartPath.host && <span className="qsb-host">{quickStartPath.hostLabel ?? quickStartPath.host}</span>}
-              <button className="qsb-close" onClick={() => setQuickStartPath(null)} aria-label="Cancel quick start">&times;</button>
+              <button className="qsb-close" onClick={() => { setQuickStartPath(null); quickStartMetaRef.current = null; }} aria-label="Cancel quick start">&times;</button>
             </div>
           )}
 

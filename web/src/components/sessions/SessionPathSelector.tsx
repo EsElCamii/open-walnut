@@ -5,12 +5,25 @@
  */
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { fetchWorkingDirs, listDirs, type WorkingDirEntry } from '@/api/sessions';
+import type { TaskPriority } from '@open-walnut/core';
+import type { FocusTier } from '@/api/focus';
+import { TIER_OPTIONS, TIER_COLORS, PRIORITY_OPTIONS } from './task-meta-constants';
 
 export interface QuickStartPath {
   cwd: string;
   host: string | null;
   hostLabel?: string;
   category: string;
+}
+
+/** Task metadata the user sets in the session-launcher footer. Applied to the new task on quick-start.
+ *  This is the UI state shape (all fields required so React controlled inputs stay stable).
+ *  The wire-format counterpart in `@/api/sessions` has every field optional — see that file. */
+export interface QuickStartTaskMeta {
+  starred: boolean;
+  needs_attention: boolean;
+  priority: TaskPriority;
+  pinTier: FocusTier | undefined;
 }
 
 function timeAgo(iso: string): string {
@@ -54,8 +67,15 @@ interface ListItem {
 interface Props {
   open: boolean;
   onClose: () => void;
-  onSelect: (path: QuickStartPath) => void;
+  onSelect: (path: QuickStartPath, taskMeta: QuickStartTaskMeta) => void;
 }
+
+const DEFAULT_META: QuickStartTaskMeta = {
+  starred: true,         // mirrors existing quick-start behavior (task.starred = true)
+  needs_attention: false,
+  priority: 'none',
+  pinTier: undefined,
+};
 
 export function SessionPathSelector({ open, onClose, onSelect }: Props) {
   const [dirs, setDirs] = useState<WorkingDirEntry[]>([]);
@@ -71,6 +91,9 @@ export function SessionPathSelector({ open, onClose, onSelect }: Props) {
   const [liveError, setLiveError] = useState<string | null>(null);
   // For "All" mode: live dirs tagged with their source host
   const [liveTaggedDirs, setLiveTaggedDirs] = useState<Array<{ cwd: string; host: string | null; hostLabel?: string }>>([]);
+
+  // Task metadata the user picks in the footer — applied to the new task when the session starts.
+  const [meta, setMeta] = useState<QuickStartTaskMeta>(DEFAULT_META);
 
   const searchRef = useRef<HTMLInputElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
@@ -89,6 +112,7 @@ export function SessionPathSelector({ open, onClose, onSelect }: Props) {
     setEditingPath('');
     setLiveDirs([]);
     setLiveTaggedDirs([]);
+    setMeta(DEFAULT_META);
     // fetchWorkingDirs returns from cache if already prefetched on page load
     fetchWorkingDirs()
       .then(d => { setDirs(d); setLoading(false); })
@@ -262,8 +286,8 @@ export function SessionPathSelector({ open, onClose, onSelect }: Props) {
   }, [selectedIdx]);
 
   const handleSelect = useCallback((d: ListItem) => {
-    onSelect({ cwd: d.cwd, host: d.host, hostLabel: d.hostLabel, category: d.category });
-  }, [onSelect]);
+    onSelect({ cwd: d.cwd, host: d.host, hostLabel: d.hostLabel, category: d.category }, meta);
+  }, [onSelect, meta]);
 
   // Confirm the current editingPath (Shift+Enter or Go button)
   const handleConfirm = useCallback(() => {
@@ -275,8 +299,8 @@ export function SessionPathSelector({ open, onClose, onSelect }: Props) {
       host: match?.host ?? currentHost,
       hostLabel: match?.hostLabel ?? currentHostLabel,
       category: match?.category ?? 'Inbox',
-    });
-  }, [editingPath, dirs, onSelect, currentHost, currentHostLabel]);
+    }, meta);
+  }, [editingPath, dirs, onSelect, currentHost, currentHostLabel, meta]);
 
   const enterEditMode = useCallback((d: ListItem) => {
     setEditMode(true);
@@ -479,6 +503,65 @@ export function SessionPathSelector({ open, onClose, onSelect }: Props) {
             )}
           </div>
         ))}
+      </div>
+
+      {/* Task metadata footer — applied to the new task on quick-start */}
+      <div className="sps-meta-footer">
+        <div className="sps-meta-row">
+          <button
+            type="button"
+            className={`sps-meta-toggle${meta.starred ? ' active' : ''}`}
+            onClick={() => setMeta(m => ({ ...m, starred: !m.starred }))}
+            title="Star this task"
+          >
+            <span className="sps-meta-toggle-icon">{meta.starred ? '★' : '☆'}</span>
+            <span>Star</span>
+          </button>
+          <button
+            type="button"
+            className={`sps-meta-toggle${meta.needs_attention ? ' active attention' : ''}`}
+            onClick={() => setMeta(m => ({ ...m, needs_attention: !m.needs_attention }))}
+            title="Flag as needs attention"
+          >
+            <span className="sps-meta-toggle-icon">●</span>
+            <span>Needs attention</span>
+          </button>
+        </div>
+
+        <div className="sps-meta-row">
+          <span className="sps-meta-label">Pin to</span>
+          <div className="sps-meta-tier-options">
+            {TIER_OPTIONS.map(t => (
+              <button
+                key={t.value}
+                type="button"
+                className={`sps-tier-btn${meta.pinTier === t.value ? ' active' : ''}`}
+                style={{ color: TIER_COLORS[t.value] }}
+                onClick={() => setMeta(m => ({ ...m, pinTier: m.pinTier === t.value ? undefined : t.value }))}
+                title={t.label}
+              >
+                {t.label}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        <div className="sps-meta-row">
+          <span className="sps-meta-label">Priority</span>
+          <div className="sps-meta-priority-options">
+            {PRIORITY_OPTIONS.map(p => (
+              <button
+                key={p.value}
+                type="button"
+                className={`badge badge-${p.value}${meta.priority === p.value ? ' badge-active' : ''} badge-clickable`}
+                onClick={() => setMeta(m => ({ ...m, priority: p.value }))}
+                title={p.label}
+              >
+                {p.icon}
+              </button>
+            ))}
+          </div>
+        </div>
       </div>
     </div>
   );

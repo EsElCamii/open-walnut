@@ -16,6 +16,7 @@ import * as ICONS from '@/components/common/Icons';
 import type { FocusTier } from '@/api/focus';
 import { getIntegrationMeta, useIntegrations } from '@/hooks/useIntegrations';
 import { DatePicker, formatDateDisplay } from '@/components/common/DatePicker';
+import { TIER_OPTIONS, TIER_COLORS, PRIORITY_OPTIONS } from './task-meta-constants';
 
 /* ── Phase constants ─────────────────────────────────────────────── */
 
@@ -43,25 +44,6 @@ const PHASE_ORDER: string[] = [
   'TODO', 'IN_PROGRESS', 'AGENT_COMPLETE', 'AWAIT_HUMAN_ACTION',
   'HUMAN_VERIFIED', 'POST_WORK_COMPLETED',
   'COMPLETE',
-];
-
-const TIER_OPTIONS: { value: FocusTier; label: string }[] = [
-  { value: 'focus', label: 'Focus' },
-  { value: 'next', label: 'Next' },
-  { value: 'satellite', label: 'Satellite' },
-];
-
-const TIER_COLORS: Record<FocusTier, string> = {
-  focus: 'var(--accent)',
-  next: '#FF9500',
-  satellite: 'var(--fg-muted)',
-};
-
-const PRIORITY_OPTIONS: { value: TaskPriority; icon: string; label: string }[] = [
-  { value: 'immediate', icon: '!!', label: 'Immediate' },
-  { value: 'important', icon: '!', label: 'Important' },
-  { value: 'backlog', icon: '~', label: 'Backlog' },
-  { value: 'none', icon: '--', label: 'None' },
 ];
 
 /* ── Component ───────────────────────────────────────────────────── */
