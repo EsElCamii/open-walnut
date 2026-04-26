@@ -3788,12 +3788,7 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
         />
       ) : null}
 
-      {operationError && (
-        <div className="todo-panel-add-error" role="alert">
-          {operationError}
-          {onClearOperationError && <button className="todo-panel-error-dismiss" onClick={onClearOperationError} aria-label="Dismiss">&times;</button>}
-        </div>
-      )}
+      {/* operationError is now surfaced globally via <OperationErrorToast /> in AppShell. */}
       <form className="todo-panel-add" onSubmit={handleAdd}>
         <input
           type="text"

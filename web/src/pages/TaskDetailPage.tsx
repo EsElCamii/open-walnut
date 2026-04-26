@@ -18,12 +18,14 @@ import { ChatInput } from '@/components/chat/ChatInput';
 import { useSessionSend } from '@/hooks/useSessionSend';
 import type { ImageAttachment } from '@/api/chat';
 import { useIntegrations, getIntegrationMeta } from '@/hooks/useIntegrations';
+import { useTasksContext } from '@/contexts/TasksContext';
 
 export function TaskDetailPage() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const location = useLocation();
   const integrations = useIntegrations();
+  const { showOperationError } = useTasksContext();
   const [task, setTask] = useState<Task | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -191,8 +193,14 @@ export function TaskDetailPage() {
 
   const handleComplete = async () => {
     if (!id) return;
-    const updated = await toggleCompleteTask(id);
-    setTask(updated);
+    try {
+      const updated = await toggleCompleteTask(id);
+      setTask(updated);
+    } catch (err) {
+      // Surface 4xx errors (e.g. 409 active children guard) as a global toast.
+      // Without this, the promise rejection is silently swallowed.
+      showOperationError(err instanceof Error ? err.message : String(err));
+    }
   };
 
   const handleStar = async () => {

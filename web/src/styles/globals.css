@@ -11132,6 +11132,52 @@ a.task-kebab-info:hover {
   word-break: break-word;
 }
 
+/* ===== Operation Error Toast ===== */
+
+.operation-error-toast-container {
+  position: fixed;
+  bottom: 24px;
+  right: 24px;
+  z-index: 9998;
+  max-width: 420px;
+  pointer-events: none;
+}
+
+.operation-error-toast {
+  pointer-events: auto;
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  background: var(--card-bg);
+  border: 1px solid var(--danger, #d94a38);
+  border-left: 3px solid var(--danger, #d94a38);
+  border-radius: var(--radius-md);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.14), 0 2px 8px rgba(0, 0, 0, 0.08);
+  padding: 12px 14px;
+  animation: cron-toast-in 0.25s ease-out;
+}
+
+.operation-error-toast-body {
+  flex: 1;
+  font-size: 13px;
+  line-height: 1.45;
+  color: var(--fg);
+  word-break: break-word;
+}
+
+.operation-error-toast-close {
+  background: none;
+  border: none;
+  color: var(--fg-muted);
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0 2px;
+  flex-shrink: 0;
+}
+
+.operation-error-toast-close:hover { color: var(--fg); }
+
 /* ===== Agent Management ===== */
 
 .agent-list {
