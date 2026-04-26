@@ -5,9 +5,17 @@
  * They can be overridden or disabled via config.
  */
 
+import fs from 'node:fs';
+import path from 'node:path';
 import { bus } from '../event-bus.js';
 import { log } from '../../logging/index.js';
-import type { SessionHookDefinition, OnTurnCompletePayload, OnTurnErrorPayload, OnMessageSendPayload } from './types.js';
+import type {
+  SessionHookDefinition,
+  OnTurnCompletePayload,
+  OnTurnErrorPayload,
+  OnMessageSendPayload,
+  OnToolUsePayload,
+} from './types.js';
 
 // ── Triage dedup state ──
 // Prevents burst triage dispatches when daemon replays old JSONL events after
@@ -185,9 +193,130 @@ export const sessionErrorNotifyHook: SessionHookDefinition = {
   },
 };
 
+// ── CWD rename detector ──
+// Escape a string for use inside a RegExp character class / pattern.
+function escapeRegExp(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+// Conservative: absolute `mv` / `git mv` where the first operand equals task.cwd.
+// We intentionally don't try to parse relative paths or shell pipelines —
+// false positives would be worse than the Layer-2 tail check catching it.
+function detectCwdRename(command: string, cwd: string): string | null {
+  const escaped = escapeRegExp(cwd.replace(/\/+$/, ''));
+  // Match: optional leading whitespace, (git )?mv, optional flags, then <cwd>(/)? <dest>
+  const re = new RegExp(
+    `^\\s*(?:git\\s+)?mv\\s+(?:-[-\\w]+\\s+)*${escaped}/?\\s+("[^"]+"|'[^']+'|\\S+)`,
+  );
+  const m = command.match(re);
+  if (!m) return null;
+  let dst = m[1];
+  if ((dst.startsWith('"') && dst.endsWith('"')) || (dst.startsWith("'") && dst.endsWith("'"))) {
+    dst = dst.slice(1, -1);
+  }
+  // Relative dest resolves against the Bash tool's cwd, which is task.cwd — not its parent.
+  if (!path.isAbsolute(dst)) {
+    dst = path.resolve(cwd, dst);
+  }
+  return dst;
+}
+
+/**
+ * Session CWD rename defense — Layers 1 + 2.
+ *
+ * Why this exists: Claude Code stores session JSONL at
+ * `~/.claude/projects/<sanitize(cwd)>/<sid>.jsonl` where
+ * `sanitize = replace(/[^a-zA-Z0-9]/g, '-')`. `claude --resume` is strictly
+ * cwd-scoped with no fallback search. If a session renames its own cwd
+ * mid-work, subsequent resumes silently lose all history.
+ *
+ *  - Layer 1 (onToolUse, here): regex-match `mv`/`git mv` of task.cwd in Bash
+ *    calls → updateTask({cwd: new}) which triggers JSONL migration to the new
+ *    encoded dir. Regex is intentionally conservative (absolute paths only).
+ *  - Layer 2 (onTurnComplete, here): existsSync tail-check for renames the
+ *    regex missed (Node fs.renameSync, IDE drives, rsync, external deletes)
+ *    → flag task.cwd_missing + notify once (dedup on transition).
+ *  - Layer 3 (providers/cwd-check.ts): pre-spawn existsSync guard — aborts
+ *    spawn with SESSION_ERROR instead of "session created and running" when
+ *    the spawn would ENOENT.
+ */
+export const cwdRenameDetectorHook: SessionHookDefinition = {
+  id: 'cwd-rename-detector',
+  name: 'CWD Rename Detector',
+  description: 'Auto-updates task.cwd when a session renames its own working directory, and flags missing cwds at turn end.',
+  hooks: ['onToolUse', 'onTurnComplete'],
+  priority: 40,
+  source: 'builtin',
+  enabled: true,
+  handler: async (payload) => {
+    const ctx = payload as OnToolUsePayload & OnTurnCompletePayload;
+    const taskId = ctx.taskId;
+    const cwd = ctx.session?.cwd ?? ctx.task?.cwd;
+    // Skip remote sessions — migration happens on a different filesystem.
+    if (ctx.session?.host) return;
+    if (!taskId || !cwd) return;
+
+    // Phase discriminator: `toolName` is a required field on OnToolUsePayload
+    // and absent from OnTurnCompletePayload. Gating here ensures the turn-end
+    // existsSync check does NOT run on every Edit/Write/Read tool call.
+    if ('toolName' in payload) {
+      // Branch 1 (Layer 1): onToolUse(Bash) — detect session-initiated renames.
+      if ((ctx as OnToolUsePayload).toolName !== 'Bash') return;
+      const cmd = ((ctx as OnToolUsePayload).input?.command ?? '') as string;
+      if (!cmd) return;
+      const newCwd = detectCwdRename(cmd, cwd);
+      if (!newCwd) return;
+      log.session.info('cwd-rename-detector: matched mv pattern', {
+        sessionId: ctx.sessionId, taskId, oldCwd: cwd, newCwd, cmd: cmd.slice(0, 200),
+      });
+      try {
+        const { updateTask } = await import('../task-manager.js');
+        // updateTask triggers JSONL migration + session-record cwd sync (see task-manager.ts).
+        await updateTask(taskId, { cwd: newCwd }, { source: 'cwd-rename-detector' });
+      } catch (err) {
+        log.session.warn('cwd-rename-detector: updateTask failed', {
+          sessionId: ctx.sessionId, taskId, error: err instanceof Error ? err.message : String(err),
+        });
+      }
+      return;
+    }
+
+    // Branch 2 (Layer 2): onTurnComplete — tail check for missed renames / external deletes.
+    try {
+      if (fs.existsSync(cwd)) return;
+      log.session.warn('cwd-rename-detector: cwd missing at turn end', {
+        sessionId: ctx.sessionId, taskId, cwd,
+      });
+      // Dedup notification: only emit when the flag transitions false→true so
+      // a persistently-broken cwd doesn't spam the UI on every turn.
+      const { getTask, updateTask } = await import('../task-manager.js');
+      let wasMissing = false;
+      try {
+        const existing = await getTask(taskId);
+        wasMissing = existing.cwd_missing === true;
+      } catch {
+        // Task may have been archived/deleted between turns — treat as "not flagged yet".
+      }
+      await updateTask(taskId, { cwd_missing: true }, { source: 'cwd-rename-detector' });
+      if (!wasMissing) {
+        bus.emit('notification', {
+          taskId,
+          message: `Working directory no longer exists: ${cwd}. Update the task's working directory to resume.`,
+          severity: 'warning',
+        }, ['web-ui', 'main-agent'], { source: 'cwd-rename-detector' });
+      }
+    } catch (err) {
+      log.session.warn('cwd-rename-detector: turn-end check failed', {
+        sessionId: ctx.sessionId, taskId, error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  },
+};
+
 /** All built-in hook definitions. */
 export const builtinHooks: SessionHookDefinition[] = [
   turnCompleteTriageHook,
   messageSendTriageHook,
   sessionErrorNotifyHook,
+  cwdRenameDetectorHook,
 ];

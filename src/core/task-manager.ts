@@ -1283,6 +1283,7 @@ export interface UpdateTaskInput {
   remove_depends_on?: string[];   // Remove specific dependency IDs
   set_depends_on?: string[];      // Replace all dependencies (overwrite)
   cwd?: string;                   // Task-level cwd override. Empty string clears.
+  cwd_missing?: boolean;          // Flag when the cwd no longer exists on disk.
 }
 
 // ── Cross-source migration ──
@@ -1508,8 +1509,20 @@ export async function updateTask(
   }
 
   // Task-level cwd override
+  const oldCwd = task.cwd;
+  let cwdChanged = false;
   if (updates.cwd !== undefined) {
-    task.cwd = updates.cwd || undefined;  // empty string clears
+    const newCwd = updates.cwd || undefined;  // empty string clears
+    if (newCwd !== oldCwd) {
+      task.cwd = newCwd;
+      cwdChanged = true;
+      // If cwd is being set to a new value, clear the stale cwd_missing flag.
+      // The spawn-time pre-flight will re-flag it if the new path also doesn't exist.
+      if (task.cwd_missing && newCwd) task.cwd_missing = undefined;
+    }
+  }
+  if (updates.cwd_missing !== undefined) {
+    task.cwd_missing = updates.cwd_missing || undefined;
   }
 
   // Intercept sprint:* convention tags → redirect to task.sprint field
@@ -1635,6 +1648,50 @@ export async function updateTask(
   // etc.) also auto-emit internally. Only updateTaskRaw() is silent (by design).
   const targets = ['web-ui', ...(eventOptions?.extraTargets ?? [])];
   bus.emit(EventNames.TASK_UPDATED, { task }, targets, { source: eventOptions?.source ?? 'internal' });
+
+  // When a task's cwd changes, migrate JSONL history for each linked session so
+  // `claude --resume` still finds the conversation under the new cwd-encoded dir.
+  // Fire-and-forget: session hooks + UI callers don't await updateTask's internal
+  // side-effects, and blocking on filesystem moves would stall unrelated TASK_UPDATED
+  // propagation. Remote sessions skipped — their JSONL lives on the remote host and
+  // requires a daemon-side fs.rename RPC (future work).
+  if (cwdChanged && oldCwd && task.cwd) {
+    const capturedOldCwd = oldCwd;
+    const capturedNewCwd = task.cwd;
+    const capturedTaskId = task.id;
+    (async () => {
+      try {
+        const { getSessionsForTask } = await import('./session-tracker.js');
+        const { migrateSessionJsonlForCwd } = await import('./session-jsonl-migration.js');
+        const { updateSessionRecord } = await import('./session-tracker.js');
+        const sessions = await getSessionsForTask(capturedTaskId);
+        for (const s of sessions) {
+          if (s.archived) continue;
+          if (s.host) continue;
+          if (!s.claudeSessionId) continue;
+          await migrateSessionJsonlForCwd(
+            s.claudeSessionId, capturedOldCwd, capturedNewCwd,
+          ).catch(err => log.task.warn('session JSONL migration failed', {
+            sessionId: s.claudeSessionId, taskId: capturedTaskId,
+            error: err instanceof Error ? err.message : String(err),
+          }));
+          // Keep SessionRecord.cwd in sync so resume uses the new path.
+          if (s.cwd === capturedOldCwd) {
+            await updateSessionRecord(s.claudeSessionId, { cwd: capturedNewCwd })
+              .catch(err => log.task.warn('session-record cwd sync failed', {
+                sessionId: s.claudeSessionId, taskId: capturedTaskId,
+                error: err instanceof Error ? err.message : String(err),
+              }));
+          }
+        }
+      } catch (err) {
+        log.task.warn('post-cwd-change JSONL migration failed', {
+          taskId: capturedTaskId,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    })();
+  }
 
   return { task };
   });

@@ -68,6 +68,9 @@ export interface Task {
   last_session_update?: string;
   /** Task-level working directory override. Takes precedence over project default_cwd in session resolution. */
   cwd?: string;
+  /** Set by the cwd rename detector / turn-end check when task.cwd no longer exists on disk.
+   *  UI surfaces a warning; cleared when cwd is updated to a valid path. */
+  cwd_missing?: boolean;
   /** ISO timestamp — server-side lastModified from last successful push response.
    *  Used for echo detection on pull. Local-only, never pushed to remote. */
   _syncedAt?: string;

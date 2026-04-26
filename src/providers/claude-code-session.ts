@@ -37,6 +37,7 @@ import { markProcessing, removeProcessed, revertToPending, loadQueue, getAllSess
 import type { SshTarget } from './session-io.js'
 import { createSessionManager, registerSessionManager, unregisterSessionManager } from './session-manager.js'
 import type { SessionManager } from './session-manager.js'
+import { checkCwdExists } from './cwd-check.js'
 import { recoverStateFromJsonl, extractImageFilePathFromInput } from '../core/session-history.js'
 import type { SessionRecord, SessionMode, ProcessStatus, TaskPhase } from '../core/types.js'
 import type { SessionServerClient } from './session-server-client.js'
@@ -610,10 +611,24 @@ export class ClaudeCodeSession {
     const transport = createSessionManager(tmpId, host ?? undefined, sshTarget, undefined, this.cliCommand, this._testDaemonUrl)
     this._transport = transport
 
-    // Start asynchronously — transport.start() handles FIFO, spawn, and tailing
-    transport.start({
+    const resolvedCwd = cwd ?? process.cwd()
+
+    // Layer 3 — CWD existence pre-flight. Cheap safety net so we don't spawn
+    // `claude` into a nonexistent directory and report "session created and running"
+    // when the spawn will definitely fail (ENOENT). Soft-fails on remote errors
+    // to avoid blocking on flaky connectivity.
+    const startSpawn = async (): Promise<{ pid: number | null; outputFile: string; fileSize: number }> => {
+      const cwdCheck = await checkCwdExists(resolvedCwd, host, sshTarget)
+      if (!cwdCheck.ok) {
+        const errMsg = cwdCheck.error ?? 'Working directory not available'
+        log.session.warn('cwd pre-flight failed — aborting spawn', {
+          taskId: this.taskId, host: host ?? 'local', cwd: resolvedCwd, error: errMsg,
+        })
+        throw new Error(errMsg)
+      }
+      return transport.start({
       args,
-      cwd: cwd ?? process.cwd(),
+      cwd: resolvedCwd,
       message,
       resume: isResume,
       fork: forkSession,
@@ -658,7 +673,10 @@ export class ClaudeCodeSession {
           this.handleRemoteProcessExit(code, stderr)
         }
       },
-    }).then((result) => {
+      })
+    }
+
+    startSpawn().then((result) => {
       this.pid = result.pid
       this._outputFile = result.outputFile
       this._turnStartOffset = result.fileSize
