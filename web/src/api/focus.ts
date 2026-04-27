@@ -1,12 +1,13 @@
 import { apiGet, apiPost, apiPut, apiDelete } from './client';
 
-export type FocusTier = 'focus' | 'next' | 'satellite';
+export type FocusTier = 'focus' | 'next' | 'satellite' | 'wait';
 
 export interface FocusBarData {
   pinned_tasks: string[];
   focus_tasks: string[];
   next_tasks: string[];
   satellite_tasks: string[];
+  wait_tasks: string[];
 }
 
 export async function fetchPinnedTasks(): Promise<FocusBarData> {

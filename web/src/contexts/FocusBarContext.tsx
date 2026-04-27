@@ -15,7 +15,7 @@ export function FocusBarProvider({ children }: { children: ReactNode }) {
   // Consumers that need fresh task data already get it from TasksContext.
   const value = useMemo<UseFocusBarReturn>(() => focusBar,
     // eslint-disable-next-line react-hooks/exhaustive-deps -- only IDs + visible + tierLimits trigger context update
-    [focusBar.pinnedIds, focusBar.focusIds, focusBar.nextIds, focusBar.satelliteIds,
+    [focusBar.pinnedIds, focusBar.focusIds, focusBar.nextIds, focusBar.satelliteIds, focusBar.waitIds,
      focusBar.visible, focusBar.tierLimits]);
   return <FocusBarContext.Provider value={value}>{children}</FocusBarContext.Provider>;
 }

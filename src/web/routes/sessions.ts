@@ -344,7 +344,7 @@ sessionsRouter.post('/quick-start', async (req: Request, res: Response, next: Ne
         starred?: boolean
         needs_attention?: boolean
         priority?: 'immediate' | 'important' | 'backlog' | 'none'
-        pinTier?: 'focus' | 'next' | 'satellite'
+        pinTier?: 'focus' | 'next' | 'satellite' | 'wait'
       }
     }
 
@@ -375,7 +375,7 @@ sessionsRouter.post('/quick-start', async (req: Request, res: Response, next: Ne
       }
     }
     if (taskMeta?.pinTier !== undefined && taskMeta.pinTier !== null) {
-      const validTiers = ['focus', 'next', 'satellite']
+      const validTiers = ['focus', 'next', 'satellite', 'wait']
       if (!validTiers.includes(taskMeta.pinTier)) {
         res.status(400).json({ error: `Invalid taskMeta.pinTier: ${taskMeta.pinTier}. Must be one of: ${validTiers.join(', ')}` })
         return

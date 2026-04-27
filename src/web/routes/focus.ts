@@ -20,6 +20,7 @@ focusRouter.get('/tasks', async (_req: Request, res: Response, next: NextFunctio
       focus_tasks: pinned.filter((t) => t.focus_tier === 'focus').map((t) => t.id),
       next_tasks: pinned.filter((t) => t.focus_tier === 'next').map((t) => t.id),
       satellite_tasks: pinned.filter((t) => !t.focus_tier).map((t) => t.id),
+      wait_tasks: pinned.filter((t) => t.focus_tier === 'wait').map((t) => t.id),
     })
   } catch (err) {
     next(err)
@@ -80,9 +81,9 @@ focusRouter.put('/reorder', async (req: Request, res: Response, next: NextFuncti
   }
 })
 
-const VALID_TIERS = ['focus', 'next', 'satellite'] as const
+const VALID_TIERS = ['focus', 'next', 'satellite', 'wait'] as const
 
-// PUT /api/focus/tasks/:id/tier — set tier (focus / next / satellite)
+// PUT /api/focus/tasks/:id/tier — set tier (focus / next / satellite / wait)
 focusRouter.put('/tasks/:id/tier', async (req: Request, res: Response, next: NextFunction) => {
   try {
     const taskId = req.params.id as string

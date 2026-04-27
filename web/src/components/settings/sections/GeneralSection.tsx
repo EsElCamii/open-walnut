@@ -81,7 +81,7 @@ export function GeneralSection({ config, onSave }: Props) {
       <div className="form-group">
         <label>Tier visible limits</label>
         <div style={{ display: 'flex', gap: 12, alignItems: 'center', flexWrap: 'wrap' }}>
-          {(['focus', 'next', 'satellite'] as const).map((tier) => (
+          {(['focus', 'next', 'satellite', 'wait'] as const).map((tier) => (
             <label key={tier} style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 13 }}>
               <span style={{ textTransform: 'capitalize' }}>{tier}</span>
               <input

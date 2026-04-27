@@ -144,7 +144,7 @@ export interface QuickStartTaskMeta {
   starred?: boolean;
   needs_attention?: boolean;
   priority?: 'immediate' | 'important' | 'backlog' | 'none';
-  pinTier?: 'focus' | 'next' | 'satellite';
+  pinTier?: 'focus' | 'next' | 'satellite' | 'wait';
 }
 
 export async function quickStartSession(opts: {

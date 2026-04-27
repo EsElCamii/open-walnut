@@ -2738,13 +2738,14 @@ export async function getPinnedTasks(): Promise<Task[]> {
 
 // Focus tiers: focus (current sprint) → next (queued sprint) → satellite (backlog).
 // No cap — users decide how many tasks per tier.
-type FocusTier = 'focus' | 'next' | 'satellite';
+type FocusTier = 'focus' | 'next' | 'satellite' | 'wait';
 
 export interface TierResult {
   pinned_tasks: string[];
   focus_tasks: string[];
   next_tasks: string[];
   satellite_tasks: string[];
+  wait_tasks: string[];
 }
 
 /** Helper: split pinned tasks into tier arrays (includes pinned_tasks for full state sync). */
@@ -2757,12 +2758,13 @@ function splitTiers(store: TaskStore): TierResult {
     focus_tasks: pinned.filter((t) => t.focus_tier === 'focus').map((t) => t.id),
     next_tasks: pinned.filter((t) => t.focus_tier === 'next').map((t) => t.id),
     satellite_tasks: pinned.filter((t) => !t.focus_tier).map((t) => t.id),
+    wait_tasks: pinned.filter((t) => t.focus_tier === 'wait').map((t) => t.id),
   };
 }
 
 /**
  * Set the focus tier for a pinned task.
- * 'focus' = current sprint, 'next' = queued sprint, 'satellite' = backlog.
+ * 'focus' = current sprint, 'next' = queued sprint, 'satellite' = backlog, 'wait' = parked.
  */
 export async function setFocusTier(taskId: string, tier: FocusTier): Promise<TierResult> {
   return withWriteLock(async () => {
@@ -2771,7 +2773,7 @@ export async function setFocusTier(taskId: string, tier: FocusTier): Promise<Tie
     if (!task) throw new Error(`Task not found: ${taskId}`);
     if (!task.pinned) throw new Error(`Task is not pinned: ${task.title}`);
 
-    if (tier === 'focus' || tier === 'next') {
+    if (tier === 'focus' || tier === 'next' || tier === 'wait') {
       task.focus_tier = tier;
     } else {
       delete task.focus_tier;
