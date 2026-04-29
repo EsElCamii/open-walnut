@@ -10,7 +10,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { isProcessAlive } from '../../src/utils/process.js';
+import { isProcessAlive, isProcessAliveAsync } from '../../src/utils/process.js';
 
 describe('isProcessAlive', () => {
   it('returns true for the current process (no binary check)', () => {
@@ -44,5 +44,38 @@ describe('isProcessAlive', () => {
     // On POSIX, process.kill(-1, 0) sends to all processes in the group (doesn't throw).
     // But the ps binary check with expectedBinary should still return false.
     expect(isProcessAlive(-1, 'nonexistent-binary-xyz')).toBe(false);
+  });
+});
+
+describe('isProcessAliveAsync — local-only semantics (regression)', () => {
+  // These tests document why `isProcessAliveAsync` MUST NOT be used as a
+  // pre-flight liveness check for REMOTE sessions. `process.kill(pid, 0)`
+  // and `ps -p <pid>` are both local syscalls — they look up the local PID
+  // table, which has nothing to do with a PID living on a remote host.
+  //
+  // Previously `claude-code-session.ts` did:
+  //   isProcessAliveAsync(remotePid, 'ssh')
+  // expecting it to test SSH-tunnel liveness. It doesn't — it tests the
+  // local PID table for an ssh binary, which almost always returns false
+  // even when the remote Claude CLI is healthy. The result was that every
+  // send to a remote session short-circuited to `--resume spawn`, which
+  // caused Claude Code to synthesize `[Request interrupted by user]`
+  // markers to reconcile orphaned tool_uses.
+  //
+  // Remote liveness must come from the daemon (cmdSend ENXIO / cmdStatus).
+
+  it('returns false for a PID that does not exist locally (simulated remote PID)', async () => {
+    // A random high PID — treat as "a PID from a remote host". Unlikely to
+    // exist in the local PID table; even if it did, binary won't match 'ssh'.
+    const remotePidLike = 987654;
+    const result = await isProcessAliveAsync(remotePidLike, 'ssh');
+    expect(result).toBe(false);
+  });
+
+  it('local-only: returns true for the current process with matching binary', async () => {
+    // Sanity check that the function DOES work for the local case (which
+    // is the only case it's still called for in processNext after the fix).
+    const result = await isProcessAliveAsync(process.pid, 'node');
+    expect(result).toBe(true);
   });
 });

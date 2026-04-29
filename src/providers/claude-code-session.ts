@@ -3939,13 +3939,24 @@ export class SessionRunner {
           await new Promise(r => setTimeout(r, 200))
         }
 
-        // Pre-flight liveness check: verify process is alive before writing to FIFO.
-        // Without this, a dead process leaves a stale FIFO on disk — writes succeed
-        // (kernel buffers them) but nobody reads, so messages are silently lost.
+        // Pre-flight liveness check — LOCAL sessions only.
+        //
+        // For a local session, a dead CLI process can leave the FIFO on disk —
+        // writes succeed into the kernel buffer but nobody reads, so the message
+        // is silently lost. `process.kill(pid, 0)` on the local PID catches this.
+        //
+        // For REMOTE sessions the PID is on the remote host; running
+        // `process.kill` locally is a nonsensical syscall against the local
+        // PID table and almost always returns false even when the remote
+        // Claude is fine. The daemon's `cmdSend` is the atomic source of
+        // truth for remote pipe liveness (opens FIFO O_WRONLY|O_NONBLOCK →
+        // ENXIO the moment nobody is reading) and `writeMessage` already
+        // consults it, so skip the bogus local check for remote sessions.
         const pid = targetSession.processPid
-        if (pid && !await isProcessAliveAsync(pid, targetSession.host ? 'ssh' : 'claude')) {
+        const isRemote = !!targetSession.host
+        if (!isRemote && pid && !await isProcessAliveAsync(pid, 'claude')) {
           log.session.warn('processNext: process dead before FIFO write — clearing pipe for --resume', {
-            sessionId, pid, host: targetSession.host,
+            sessionId, pid,
           })
           targetSession.markProcessDead()
           // Fall through to --resume spawn path below
