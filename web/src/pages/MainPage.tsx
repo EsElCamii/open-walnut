@@ -37,6 +37,14 @@ import { getErrorSuggestion } from '@/utils/error-suggestions';
 import { ErrorSuggestionLink } from '@/components/common/ErrorSuggestionLink';
 import type { SlashCommand } from '@/commands/types';
 import type { CommandContext } from '@/commands/types';
+import {
+  type SessionSlot,
+  trimUnlockedToMax,
+  addSessionColumn,
+  removeSessionColumn,
+  replaceSessionColumn,
+  toggleLockSlot,
+} from './sessionColumns';
 
 // ── Compact chat header with dropdown menu ──
 
@@ -117,43 +125,46 @@ const SS_TODO_VISIBLE_KEY = 'open-walnut-home-todo-visible';
 const SS_SESSION_KEY_LEGACY = 'open-walnut-home-session-panel';
 
 // ── Session column queue helpers ──
+// Pure column-queue operations live in ./sessionColumns.ts so they can be
+// unit-tested without React. See that file for the layout invariant rationale.
 
 const SESSION_WIDTH_BY_COUNT = [0, 65, 65]; // 1=65%, 2=65% (max width)
 
-function addSessionColumn(cols: string[], id: string, triageOpen: boolean, maxColumns: number): string[] {
-  const max = triageOpen ? maxColumns - 1 : maxColumns;
-  // Deduplicate: remove existing, then insert at leftmost (closest to todo panel)
-  const filtered = cols.filter(c => c !== id);
-  const next = [id, ...filtered];
-  // Evict rightmost if over max
-  return next.length > max ? next.slice(0, max) : next;
-}
-
-function removeSessionColumn(cols: string[], id: string): string[] {
-  return cols.filter(c => c !== id);
-}
-
-function replaceSessionColumn(cols: string[], oldId: string, newId: string): string[] {
-  const idx = cols.indexOf(oldId);
-  if (idx === -1) return cols;
-  const next = [...cols];
-  next[idx] = newId;
-  return next;
-}
-
 /** Load session columns from sessionStorage, with migration from legacy single-session key */
-function loadSessionColumns(): string[] {
+function loadSessionColumns(): SessionSlot[] {
   const saved = sessionStorage.getItem(SS_SESSION_COLUMNS_KEY);
   if (saved) {
-    try { return JSON.parse(saved); } catch { /* fall through */ }
+    try {
+      const parsed = JSON.parse(saved);
+      if (Array.isArray(parsed)) {
+        // Accept legacy string[] and current SessionSlot[].
+        return parsed.map((entry: unknown) =>
+          typeof entry === 'string'
+            ? { id: entry, locked: false }
+            : { id: (entry as SessionSlot).id, locked: !!(entry as SessionSlot).locked }
+        );
+      }
+    } catch { /* fall through */ }
   }
   // Migrate from legacy single-session key
   const legacy = sessionStorage.getItem(SS_SESSION_KEY_LEGACY);
   if (legacy) {
     sessionStorage.removeItem(SS_SESSION_KEY_LEGACY);
-    return [legacy];
+    return [{ id: legacy, locked: false }];
   }
   return [];
+}
+
+/** Wrap a state update in View Transitions API when available (with reduced-motion opt-out). */
+function withViewTransition(update: () => void): void {
+  const prefersReduced = typeof window !== 'undefined'
+    && window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
+  const api = (document as Document & { startViewTransition?: (cb: () => void) => unknown });
+  if (!prefersReduced && typeof api.startViewTransition === 'function') {
+    api.startViewTransition(update);
+  } else {
+    update();
+  }
 }
 
 interface MainPageProps {
@@ -198,16 +209,27 @@ export function MainPage({ visible = true, navigateRef }: MainPageProps) {
   );
 
   // Session columns state — up to 2 sessions displayed side by side
-  const [sessionColumns, setSessionColumns] = useState<string[]>(loadSessionColumns);
+  const [sessionColumns, setSessionColumns] = useState<SessionSlot[]>(loadSessionColumns);
+  // Lock state changes and reorder are wrapped in View Transitions for a smooth slide.
+  const updateSessionColumns = useCallback((updater: (prev: SessionSlot[]) => SessionSlot[]) => {
+    withViewTransition(() => setSessionColumns(updater));
+  }, []);
+  // sessionColumns ref — lets handlers predicate on current state synchronously,
+  // necessary because updateSessionColumns may defer the actual update inside
+  // startViewTransition (async from the event-handler's POV).
+  const sessionColumnsRef = useRef(sessionColumns);
+  sessionColumnsRef.current = sessionColumns;
 
   // Active category tab — mirrors TodoPanel's tab for URL sync.
   // Initialize from the same localStorage key so the URL reflects the initial tab.
   const [activeCategory, setActiveCategory] = useState<string | undefined>(() => {
     try { return localStorage.getItem('open-walnut-todo-active-tab') ?? undefined; } catch { return undefined; }
   });
+  // String[] projection for URL sync (doesn't need lock state — URL carries ids only).
+  const sessionColumnIds = useMemo(() => sessionColumns.map(c => c.id), [sessionColumns]);
   const urlSync = useUrlSync({
     focusedTaskId: focusedTask?.id,
-    sessionColumns,
+    sessionColumns: sessionColumnIds,
     activeCategory,
     visible,
   });
@@ -235,12 +257,13 @@ export function MainPage({ visible = true, navigateRef }: MainPageProps) {
   const maxPanelsRef = useRef(effectiveMaxPanels);
   maxPanelsRef.current = effectiveMaxPanels;
 
-  // Auto-evict excess session columns when effectiveMaxPanels shrinks (e.g. auto mode + window resize)
+  // Auto-evict excess session columns when effectiveMaxPanels shrinks (e.g. auto mode + window resize).
+  // Not wrapped in withViewTransition: the resize itself already animates layout,
+  // so an extra view transition on top feels noisy.
   useEffect(() => {
     setSessionColumns(prev => {
       const max = triageOpenRef.current ? effectiveMaxPanels - 1 : effectiveMaxPanels;
-      // Keep leftmost panels (primary); evict from right — matches addSessionColumn logic
-      return prev.length > max ? prev.slice(0, max) : prev;
+      return trimUnlockedToMax(prev, max);
     });
   }, [effectiveMaxPanels]);
 
@@ -257,7 +280,7 @@ export function MainPage({ visible = true, navigateRef }: MainPageProps) {
   const quickStartMetaRef = useRef<QuickStartTaskMeta | null>(null);
 
   // Set of session IDs currently open in columns — for active pill indicators
-  const openSessionIdSet = useMemo(() => new Set(sessionColumns), [sessionColumns]);
+  const openSessionIdSet = useMemo(() => new Set(sessionColumns.map(c => c.id)), [sessionColumns]);
 
   // Detect pending ask_question tool call from chat messages
   const pendingQuestion = useMemo(() => {
@@ -353,7 +376,14 @@ export function MainPage({ visible = true, navigateRef }: MainPageProps) {
         const task = tasks.find(t => t.id === p.taskId);
         if (task) setFocusedTask(task);
       }
-      if (p.sessionIds.length > 0) setSessionColumns(p.sessionIds.slice(0, maxPanelsRef.current));
+      if (p.sessionIds.length > 0) {
+        // URL carries ids only — preserve lock state from sessionStorage where ids match.
+        const saved = loadSessionColumns();
+        const lockedById = new Map(saved.map(s => [s.id, s.locked]));
+        setSessionColumns(
+          p.sessionIds.slice(0, maxPanelsRef.current).map(id => ({ id, locked: lockedById.get(id) ?? false }))
+        );
+      }
       if (p.category !== null) setActiveCategory(p.category);
       urlSync.clearPending();
       return;
@@ -401,7 +431,7 @@ export function MainPage({ visible = true, navigateRef }: MainPageProps) {
 
   useEffect(() => {
     // Only persist real session IDs (not pending: placeholders) to sessionStorage
-    const persistable = sessionColumns.filter(s => !s.startsWith('pending:'));
+    const persistable = sessionColumns.filter(s => !s.id.startsWith('pending:'));
     if (persistable.length > 0) sessionStorage.setItem(SS_SESSION_COLUMNS_KEY, JSON.stringify(persistable));
     else sessionStorage.removeItem(SS_SESSION_COLUMNS_KEY);
   }, [sessionColumns]);
@@ -424,7 +454,7 @@ export function MainPage({ visible = true, navigateRef }: MainPageProps) {
       const { taskId, sessionId } = (e as CustomEvent).detail as { taskId: string; sessionId?: string };
       const task = taskMapRef.current.get(taskId);
       if (task) setFocusedTask(task);
-      if (sessionId) setSessionColumns(prev => addSessionColumn(prev, sessionId, triageOpenRef.current, maxPanelsRef.current));
+      if (sessionId) openSessionOrToast(sessionId);
     };
     const handleDockChat = () => {
       // Toggle main chat panel visibility
@@ -468,14 +498,30 @@ export function MainPage({ visible = true, navigateRef }: MainPageProps) {
 
   // ── Session column handlers ──
   // Clicking a session pill always opens/moves to rightmost — use close button to dismiss
-  const handleToggleSession = useCallback((sessionId: string) => {
-    setSessionColumns(prev => addSessionColumn(prev, sessionId, triageOpenRef.current, maxPanelsRef.current));
-  }, []);
+  // Single path for "open a session, with toast if fully locked" — shared by pill
+  // clicks, dock events, chat session-link clicks. Uses sessionColumnsRef so the
+  // rejection decision is made synchronously, before View Transitions defer commit.
+  const openSessionOrToast = useCallback((sessionId: string) => {
+    const current = sessionColumnsRef.current;
+    const next = addSessionColumn(current, sessionId, triageOpenRef.current, maxPanelsRef.current);
+    if (next === current && !current.some(c => c.id === sessionId)) {
+      showOperationError('All session panels are locked. Unlock one to open a new session.');
+      return;
+    }
+    updateSessionColumns(() => next);
+  }, [updateSessionColumns, showOperationError]);
+
+  const handleToggleSession = openSessionOrToast;
 
   // Per-column close handler factory
   const handleCloseSession = useCallback((sessionId: string) => {
-    setSessionColumns(prev => removeSessionColumn(prev, sessionId));
-  }, []);
+    updateSessionColumns(prev => removeSessionColumn(prev, sessionId));
+  }, [updateSessionColumns]);
+
+  // Per-column lock toggle — reorders slot (slide animation via View Transitions)
+  const handleToggleLockSession = useCallback((sessionId: string) => {
+    updateSessionColumns(prev => toggleLockSlot(prev, sessionId));
+  }, [updateSessionColumns]);
 
   // Per-column session-replaced handler factory (plan→exec transitions)
   const handleSessionReplaced = useCallback((oldId: string, newId: string) => {
@@ -487,7 +533,7 @@ export function MainPage({ visible = true, navigateRef }: MainPageProps) {
     const d = data as { sessionId?: string; fromPlanSessionId?: string };
     if (d.fromPlanSessionId && d.sessionId) {
       setSessionColumns(prev =>
-        prev.includes(d.fromPlanSessionId!)
+        prev.some(c => c.id === d.fromPlanSessionId)
           ? replaceSessionColumn(prev, d.fromPlanSessionId!, d.sessionId!)
           : prev
       );
@@ -529,10 +575,9 @@ export function MainPage({ visible = true, navigateRef }: MainPageProps) {
   const handleOpenTriageForTask = useCallback((taskId: string) => {
     setTriagePanelOpen(true);
     setTriageTaskId(taskId);
-    // Trim sessions to max-1 if triage is opening
-    const mp = maxPanelsRef.current;
-    // Keep leftmost panels (primary); evict from right — matches addSessionColumn logic
-    setSessionColumns(prev => prev.length > mp - 1 ? prev.slice(0, mp - 1) : prev);
+    // Triage consumes one slot — evict unlocked slots first, keep locked.
+    // Not wrapped in withViewTransition: TriagePanel has its own open animation.
+    setSessionColumns(prev => trimUnlockedToMax(prev, maxPanelsRef.current - 1));
   }, []);
 
   const handleCloseTriage = useCallback(() => {
@@ -603,7 +648,7 @@ export function MainPage({ visible = true, navigateRef }: MainPageProps) {
   }, []);
   // Start polling when a pending column exists
   useEffect(() => {
-    const hasPending = sessionColumns.some(s => s.startsWith('pending:'));
+    const hasPending = sessionColumns.some(s => s.id.startsWith('pending:'));
     if (!hasPending || pendingPollRef.current) return;
     pendingPollRef.current = setInterval(async () => {
       // Try quick-start pending
@@ -1126,7 +1171,8 @@ export function MainPage({ visible = true, navigateRef }: MainPageProps) {
             />
           </div>
         )}
-        {sessionColumns.map((sid, idx) => {
+        {sessionColumns.map((slot, idx) => {
+          const sid = slot.id;
           const needsDivider = idx > 0 || triagePanelOpen;
           const isPending = sid.startsWith('pending:');
           const qsMeta = isPending ? pendingQuickStartMetaRef.current : null;
@@ -1136,12 +1182,18 @@ export function MainPage({ visible = true, navigateRef }: MainPageProps) {
           // Column split: when 2+ columns, first gets splitPct%, rest share remainder
           const totalCols = sessionColumns.length + (triagePanelOpen ? 1 : 0);
           const colIdx = idx + (triagePanelOpen ? 1 : 0);
-          const colStyle: React.CSSProperties = totalCols >= 2
-            ? { flex: `0 0 ${colIdx === 0 ? colSplitPct : (100 - colSplitPct)}%` }
-            : {};
+          const colStyle: React.CSSProperties = {
+            ...(totalCols >= 2 ? { flex: `0 0 ${colIdx === 0 ? colSplitPct : (100 - colSplitPct)}%` } : {}),
+            // Per-panel view-transition-name so the browser morphs each panel's DOM subtree
+            // when the slot order changes (lock/unlock/evict). view-transition-name must be
+            // a CSS <custom-ident> — strip characters outside [A-Za-z0-9_-]. In practice
+            // sessionIds are UUIDs + optional `pending:` prefix, so collisions after
+            // sanitization are vanishingly unlikely.
+            viewTransitionName: `session-panel-${sid.replace(/[^a-zA-Z0-9_-]/g, '_')}`,
+          } as React.CSSProperties;
           return (<Fragment key={sid}>
             {needsDivider && <div className="session-col-resize-handle" onMouseDown={handleColSplitStart} />}
-            <div className="main-page-session-column" style={colStyle}>
+            <div className={`main-page-session-column${slot.locked ? ' is-locked' : ''}`} style={colStyle}>
               {isPending && pendingMeta ? (
                 <PendingSessionPanel
                   taskId={sid}
@@ -1157,6 +1209,8 @@ export function MainPage({ visible = true, navigateRef }: MainPageProps) {
               ) : (
                 <SessionPanel
                   sessionId={sid}
+                  locked={slot.locked}
+                  onToggleLock={handleToggleLockSession}
                   onClose={handleCloseSession}
                   onTaskClick={handleFocusTaskById}
                   onSessionClick={handleSessionClick}

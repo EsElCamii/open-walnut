@@ -3,7 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { SessionChatHistory } from './SessionChatHistory';
 import { SessionNotes } from './SessionNotes';
 import { FileViewer } from '../common/FileViewer';
-import { ICON_ROBOT, ICON_EXPAND, ICON_COLLAPSE, ICON_CLOSE } from '../common/Icons';
+import { ICON_ROBOT, ICON_EXPAND, ICON_COLLAPSE, ICON_CLOSE, ICON_LOCK, ICON_UNLOCK } from '../common/Icons';
 import { UserMessagesSummary } from './UserMessagesSummary';
 // PlanPreviewSection replaced by inline plan popover in meta bar
 import { ChatInput } from '@/components/chat/ChatInput';
@@ -100,6 +100,10 @@ interface SessionPanelProps {
   sessionId: string;
   /** Stable close handler — receives the sessionId so parent can identify which panel to close. */
   onClose: (sessionId: string) => void;
+  /** Whether this panel is locked — pinned to the rightmost region, not evicted by new sessions. */
+  locked?: boolean;
+  /** Toggle the lock state. Parent re-orders slots so locked panels sit on the right. */
+  onToggleLock?: (sessionId: string) => void;
   onTaskClick?: (taskId: string) => void;
   onSessionClick?: (sessionId: string) => void;
   /** Called when "Clear Context & Execute" creates a new session — receives (oldId, newId). */
@@ -112,7 +116,7 @@ interface SessionPanelProps {
   onForkFailed?: (errorMessage?: string) => void;
 }
 
-export const SessionPanel = memo(function SessionPanel({ sessionId, onClose, onTaskClick, onSessionClick, onSessionReplaced, onForkPending, onForkResolved, onForkFailed }: SessionPanelProps) {
+export const SessionPanel = memo(function SessionPanel({ sessionId, onClose, locked, onToggleLock, onTaskClick, onSessionClick, onSessionReplaced, onForkPending, onForkResolved, onForkFailed }: SessionPanelProps) {
   const navigate = useNavigate();
   const enabledModes = useEnabledModes();
   const [session, setSession] = useState<SessionRecord | null>(null);
@@ -541,6 +545,17 @@ export const SessionPanel = memo(function SessionPanel({ sessionId, onClose, onT
               {loading && <span className="session-panel-badge" style={{ color: 'var(--fg-muted)' }}>Loading...</span>}
             </div>
             <div style={{ display: 'flex', alignItems: 'center', gap: '3px', flexShrink: 0 }}>
+              {onToggleLock && (
+                <button
+                  className={`task-action-btn session-panel-lock${locked ? ' is-locked' : ''}`}
+                  onClick={() => onToggleLock(sessionId)}
+                  title={locked ? 'Unlock — panel will rejoin the rotation' : 'Pin to right — panel stays when new sessions open'}
+                  aria-label={locked ? 'Unlock session panel' : 'Lock session panel to the right'}
+                  aria-pressed={locked}
+                >
+                  {locked ? ICON_LOCK : ICON_UNLOCK}
+                </button>
+              )}
               <button
                 className="task-action-btn session-panel-expand"
                 onClick={isFullscreen ? exitFullscreen : enterFullscreen}
