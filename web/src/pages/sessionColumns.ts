@@ -1,9 +1,15 @@
 // Pure helpers for the home-page SessionPanel column queue.
 // Extracted from MainPage.tsx so they can be unit-tested without React.
 //
-// Layout invariant: unlocked slots on the left, locked slots on the right.
-// Lock/unlock always lands at the boundary between the two regions — the
-// user's gaze stays anchored to where they just clicked.
+// Layout invariant:
+//   [ unlocked ... ][ newly-locked ... first-locked ]
+//    ↑ left                              ↑ rightmost = pin anchor
+//
+// Unlocked slots occupy the left; locked slots occupy the right. Within the
+// locked region, the FIRST slot the user locked sits rightmost (acts as a
+// visual anchor), and subsequently-locked slots slide in from the left edge of
+// the locked region. Unlock symmetrically drops the slot at the right edge of
+// the unlocked region, next to the boundary the user just crossed.
 
 export interface SessionSlot {
   id: string;
@@ -40,6 +46,10 @@ export function addSessionColumn(cols: SessionSlot[], id: string, triageOpen: bo
   if (existing) {
     const filtered = cols.filter(c => c.id !== id);
     const { unlocked, locked } = splitByLock(filtered);
+    // Locked branch re-uses the existing object reference on purpose — preserves
+    // React key+memo identity so the locked panel's subtree doesn't remount
+    // when the user clicks its pill. Unlocked branch constructs fresh because
+    // the slot is moving to leftmost; no stability benefit worth the branch cost.
     return existing.locked
       ? [...unlocked, existing, ...locked]              // locked: left edge of locked region
       : [{ id, locked: false }, ...unlocked, ...locked]; // unlocked: leftmost

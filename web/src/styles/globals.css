@@ -6674,34 +6674,8 @@ img[data-lightbox-src],
   box-shadow: inset -2px 0 0 color-mix(in srgb, var(--accent) 40%, transparent);
 }
 
-/* View Transitions — Apple-style slide/morph when session panel slots reorder (lock/unlock/close).
-   ::view-transition-*(*) targets ALL view transitions (the pseudo only accepts <custom-ident> or *),
-   but we're the only site calling startViewTransition today, so in practice this only fires for
-   session panel reorders.
-
-   Design choices:
-   - 420ms — long enough to read the motion as a physical slide, not a flicker
-   - cubic-bezier(0.32, 0.72, 0, 1) — Apple's "standard" easing (iOS/macOS), soft start + settle
-   - Opacity pinned to 1 throughout — panels should feel like solid cards being rearranged,
-     not cross-fading ghosts. The default browser keyframes fade old→0 and new 0→1 for ~700ms,
-     which produced the "flicker" users reported. */
-@media (prefers-reduced-motion: no-preference) {
-  /* view-transition-group(*) is where the browser interpolates the panel's
-     position/size between old and new layout — this is the actual "slide" and
-     MUST share the same duration as the old/new snapshots to feel unified. */
-  ::view-transition-group(*),
-  ::view-transition-old(*),
-  ::view-transition-new(*) {
-    animation-duration: 420ms;
-    animation-timing-function: cubic-bezier(0.32, 0.72, 0, 1);
-  }
-  ::view-transition-old(*) { animation-name: session-panel-vt-out; }
-  ::view-transition-new(*) { animation-name: session-panel-vt-in; }
-}
-
-/* Keep cards opaque during the transition so translation reads as a physical slide. */
-@keyframes session-panel-vt-out { from { opacity: 1; } to { opacity: 1; } }
-@keyframes session-panel-vt-in  { from { opacity: 1; } to { opacity: 1; } }
+/* Session panel reorder animation is handled by @formkit/auto-animate attached
+   to .main-page-sessions-area — no CSS needed for that. */
 
 /* --- CSS-promotion fullscreen (used by SessionPanel + DockTaskCard) --- */
 .open-walnut-fullscreen-backdrop {

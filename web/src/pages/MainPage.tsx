@@ -45,6 +45,7 @@ import {
   replaceSessionColumn,
   toggleLockSlot,
 } from './sessionColumns';
+import { useAutoAnimate } from '@formkit/auto-animate/react';
 
 // ── Compact chat header with dropdown menu ──
 
@@ -116,6 +117,7 @@ function ChatHeaderRow({ title, stats, connectionState, inspectorOpen, onToggleI
 }
 
 const SS_TASK_KEY = 'open-walnut-home-focused-task';
+const SS_SUPPRESS_DETAIL_KEY = 'open-walnut-home-suppress-detail';
 const SS_SESSION_COLUMNS_KEY = 'open-walnut-home-session-columns';
 const SS_TODO_SCROLL_KEY = 'walnut-home-todo-scroll';
 const SS_CHAT_VISIBLE_KEY = 'open-walnut-home-chat-visible';
@@ -155,18 +157,6 @@ function loadSessionColumns(): SessionSlot[] {
   return [];
 }
 
-/** Wrap a state update in View Transitions API when available (with reduced-motion opt-out). */
-function withViewTransition(update: () => void): void {
-  const prefersReduced = typeof window !== 'undefined'
-    && window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
-  const api = (document as Document & { startViewTransition?: (cb: () => void) => unknown });
-  if (!prefersReduced && typeof api.startViewTransition === 'function') {
-    api.startViewTransition(update);
-  } else {
-    update();
-  }
-}
-
 interface MainPageProps {
   /** Whether MainPage is currently visible (route is /) */
   visible?: boolean;
@@ -180,12 +170,13 @@ export function MainPage({ visible = true, navigateRef }: MainPageProps) {
   const { health, setupComplete } = useSystemHealth();
   const { mode: chatMode, toggleMode, getPlanPayload } = usePlanMode();
   const { connectionState } = useWebSocket();
-  const { tasks, loading, toggleComplete, setPhase, star, create, update, reorder, moveTask, reparentTask, deleteTask, operationError, clearOperationError, showOperationError } = useTasksContext();
+  const { tasks, loading, toggleComplete, setPhase, star, create, update, reorder, moveTask, reparentTask, deleteTask, bakeOrder, operationError, clearOperationError, showOperationError } = useTasksContext();
   const favorites = useFavorites();
   const focusBar = useFocusBarContext();
   const pinnedTaskIdSet = useMemo(() => new Set(focusBar.pinnedIds), [focusBar.pinnedIds]);
   const focusTaskIdSet = useMemo(() => new Set(focusBar.focusIds), [focusBar.focusIds]);
   const nextTaskIdSet = useMemo(() => new Set(focusBar.nextIds), [focusBar.nextIds]);
+  const waitTaskIdSet = useMemo(() => new Set(focusBar.waitIds), [focusBar.waitIds]);
   const ordering = useOrdering();
   const [focusedTask, setFocusedTask] = useState<Task | null>(null);
   // Nonce that increments on every focus action — forces re-scroll even for same task
@@ -210,15 +201,17 @@ export function MainPage({ visible = true, navigateRef }: MainPageProps) {
 
   // Session columns state — up to 2 sessions displayed side by side
   const [sessionColumns, setSessionColumns] = useState<SessionSlot[]>(loadSessionColumns);
-  // Lock state changes and reorder are wrapped in View Transitions for a smooth slide.
-  const updateSessionColumns = useCallback((updater: (prev: SessionSlot[]) => SessionSlot[]) => {
-    withViewTransition(() => setSessionColumns(updater));
-  }, []);
-  // sessionColumns ref — lets handlers predicate on current state synchronously,
-  // necessary because updateSessionColumns may defer the actual update inside
-  // startViewTransition (async from the event-handler's POV).
-  const sessionColumnsRef = useRef(sessionColumns);
-  sessionColumnsRef.current = sessionColumns;
+  // auto-animate attaches to the sessions container and animates child reorder/add/remove
+  // with the FLIP technique — same feel as a drag-drop settle, without the jank of
+  // View Transitions snapshotting live chat content at the wrong scale.
+  const [sessionsAreaAutoAnimateRef] = useAutoAnimate<HTMLDivElement>({
+    // 320ms — long enough to read as a physical slide, short enough that rapid
+    // lock/unlock still feels responsive. auto-animate's default (250ms) felt
+    // slightly snappy against the panel width; 320 lands closer to macOS window
+    // shuffle tempo. Easing is iOS "standard" (soft-start, settle).
+    duration: 320,
+    easing: 'cubic-bezier(0.32, 0.72, 0, 1)',
+  });
 
   // Active category tab — mirrors TodoPanel's tab for URL sync.
   // Initialize from the same localStorage key so the URL reflects the initial tab.
@@ -258,8 +251,6 @@ export function MainPage({ visible = true, navigateRef }: MainPageProps) {
   maxPanelsRef.current = effectiveMaxPanels;
 
   // Auto-evict excess session columns when effectiveMaxPanels shrinks (e.g. auto mode + window resize).
-  // Not wrapped in withViewTransition: the resize itself already animates layout,
-  // so an extra view transition on top feels noisy.
   useEffect(() => {
     setSessionColumns(prev => {
       const max = triageOpenRef.current ? effectiveMaxPanels - 1 : effectiveMaxPanels;
@@ -288,7 +279,7 @@ export function MainPage({ visible = true, navigateRef }: MainPageProps) {
       const msg = chat.messages[i]
       if (msg.role !== 'assistant' || !msg.blocks) continue
       for (const block of msg.blocks) {
-        if (block.type === 'tool_call' && block.name === 'ask_question' && block.status === 'calling') {
+        if (block.type === 'tool_call' && block.name === 'user_ask' && block.status === 'calling') {
           return parseAskQuestionInput((block as { input?: Record<string, unknown> }).input)
         }
       }
@@ -305,6 +296,16 @@ export function MainPage({ visible = true, navigateRef }: MainPageProps) {
   // Resizable panels
   const todoPanel = useResizablePanel('open-walnut-todo-width', 25, 'left');
   const sessionPanel = useResizablePanel('walnut-session-panel-width-v2', 35);
+
+  // Merge sessionPanel.panelRef (for width resize observer) with auto-animate's
+  // callback ref on the sessions container. Must be stable — a new function
+  // identity on every render would remount the container and wipe animations,
+  // and in React 18 a changing ref callback re-runs with null then the element,
+  // which has caused infinite loops in the past.
+  const sessionsAreaCombinedRef = useCallback((el: HTMLDivElement | null) => {
+    (sessionPanel.panelRef as React.MutableRefObject<HTMLDivElement | null>).current = el;
+    sessionsAreaAutoAnimateRef(el);
+  }, [sessionPanel.panelRef, sessionsAreaAutoAnimateRef]);
 
   // Column split ratio: left column gets splitPct%, right gets (100-splitPct)%
   const [colSplitPct, setColSplitPct] = useState(() => {
@@ -419,6 +420,8 @@ export function MainPage({ visible = true, navigateRef }: MainPageProps) {
       const restored = loadSessionColumns();
       if (restored.length > 0) setSessionColumns(restored.slice(0, maxPanelsRef.current));
     }
+    // visible/tasks/focusedTask/sessionColumns are intentional — this effect only fires
+    // when the page becomes visible again, not on every sessionColumns tick.
   }, [visible, tasks, focusedTask, sessionColumns]);
 
   // Persist focusedTask.id to sessionStorage
@@ -496,11 +499,15 @@ export function MainPage({ visible = true, navigateRef }: MainPageProps) {
     return () => { el.removeEventListener('scroll', onScroll); clearTimeout(timer); };
   }, [loading]);
 
+  // Session columns ref — lets handlers peek at current state synchronously
+  // (e.g. to decide whether a new-session request should toast instead of commit).
+  const sessionColumnsRef = useRef(sessionColumns);
+  sessionColumnsRef.current = sessionColumns;
+
   // ── Session column handlers ──
-  // Clicking a session pill always opens/moves to rightmost — use close button to dismiss
+  // Clicking a session pill always opens/moves to rightmost — use close button to dismiss.
   // Single path for "open a session, with toast if fully locked" — shared by pill
-  // clicks, dock events, chat session-link clicks. Uses sessionColumnsRef so the
-  // rejection decision is made synchronously, before View Transitions defer commit.
+  // clicks, dock events, chat session-link clicks.
   const openSessionOrToast = useCallback((sessionId: string) => {
     const current = sessionColumnsRef.current;
     const next = addSessionColumn(current, sessionId, triageOpenRef.current, maxPanelsRef.current);
@@ -508,20 +515,19 @@ export function MainPage({ visible = true, navigateRef }: MainPageProps) {
       showOperationError('All session panels are locked. Unlock one to open a new session.');
       return;
     }
-    updateSessionColumns(() => next);
-  }, [updateSessionColumns, showOperationError]);
+    setSessionColumns(next);
+  }, [showOperationError]);
 
   const handleToggleSession = openSessionOrToast;
 
-  // Per-column close handler factory
   const handleCloseSession = useCallback((sessionId: string) => {
-    updateSessionColumns(prev => removeSessionColumn(prev, sessionId));
-  }, [updateSessionColumns]);
+    setSessionColumns(prev => removeSessionColumn(prev, sessionId));
+  }, []);
 
-  // Per-column lock toggle — reorders slot (slide animation via View Transitions)
+  // Lock toggle — reorders slot; auto-animate handles the smooth slide.
   const handleToggleLockSession = useCallback((sessionId: string) => {
-    updateSessionColumns(prev => toggleLockSlot(prev, sessionId));
-  }, [updateSessionColumns]);
+    setSessionColumns(prev => toggleLockSlot(prev, sessionId));
+  }, []);
 
   // Per-column session-replaced handler factory (plan→exec transitions)
   const handleSessionReplaced = useCallback((oldId: string, newId: string) => {
@@ -552,7 +558,6 @@ export function MainPage({ visible = true, navigateRef }: MainPageProps) {
       cwd: meta.cwd,
       host: meta.host,
       message: meta.message,
-      category: meta.category,
       taskId: meta.realTaskId, // reuse existing task if we have one
     }).then((result) => {
       // Update refs with (possibly new) taskId
@@ -567,7 +572,7 @@ export function MainPage({ visible = true, navigateRef }: MainPageProps) {
       if (pendingQuickStartMetaRef.current?.id === meta.id) {
         pendingQuickStartMetaRef.current = { ...pendingQuickStartMetaRef.current, httpError: errMsg };
       }
-      setSessionColumns(prev => [...prev]); // force re-render
+      setSessionColumns(prev => [...prev]); // force re-render (identity change)
     });
   }, []);
 
@@ -576,7 +581,6 @@ export function MainPage({ visible = true, navigateRef }: MainPageProps) {
     setTriagePanelOpen(true);
     setTriageTaskId(taskId);
     // Triage consumes one slot — evict unlocked slots first, keep locked.
-    // Not wrapped in withViewTransition: TriagePanel has its own open animation.
     setSessionColumns(prev => trimUnlockedToMax(prev, maxPanelsRef.current - 1));
   }, []);
 
@@ -588,7 +592,7 @@ export function MainPage({ visible = true, navigateRef }: MainPageProps) {
   // Quick-start: track pending taskId, auto-open session panel when it starts
   const pendingQuickStartRef = useRef<string | null>(null);
   // Metadata for the pending session panel (cwd, host, etc.)
-  const pendingQuickStartMetaRef = useRef<{ id: string; cwd: string; host?: string; hostLabel?: string; realTaskId?: string; message?: string; category?: string; httpError?: string } | null>(null);
+  const pendingQuickStartMetaRef = useRef<{ id: string; cwd: string; host?: string; hostLabel?: string; realTaskId?: string; message?: string; httpError?: string } | null>(null);
 
   // Fork: pending panel metadata (same pattern as quick-start)
   const pendingForkMetaRef = useRef<{ id: string; cwd: string; host?: string; realTaskId?: string; httpError?: string } | null>(null);
@@ -717,7 +721,7 @@ export function MainPage({ visible = true, navigateRef }: MainPageProps) {
         ...pendingForkMetaRef.current,
         httpError: errorMessage || 'Fork failed',
       };
-      setSessionColumns(prev => [...prev]); // force re-render
+      setSessionColumns(prev => [...prev]); // force re-render (identity change)
     }
   }, []);
 
@@ -735,21 +739,39 @@ export function MainPage({ visible = true, navigateRef }: MainPageProps) {
     } catch { /* non-critical */ }
   }, []);
 
-  const handleCreate = useCallback(async (input: { title: string; priority: string; category?: string; project?: string }) => {
+  const handleCreate = useCallback(async (input: { title: string; priority: string; category?: string; project?: string; starred?: boolean; pinnedTier?: 'focus' | 'next' | 'satellite' | 'wait' }) => {
     const task = await create({
       title: input.title,
       priority: input.priority as 'high' | 'low' | 'none',
       category: input.category,
       project: input.project,
     });
+    try {
+      if (input.starred && task?.id) star(task.id);
+      if (input.pinnedTier && task?.id) {
+        await focusBar.pin(task.id);
+        if (input.pinnedTier !== 'focus') {
+          setTimeout(() => focusBar.setTier(task.id, input.pinnedTier!), 100);
+        }
+      }
+    } catch (err) {
+      console.warn('Quick add post-create side-effect failed', err);
+    }
     return task;
-  }, [create]);
+  }, [create, star, focusBar]);
 
   // Ref to avoid re-creating handleFocusTask on every focus change (which defeats React.memo on TodoPanel)
   const focusedTaskRef = useRef(focusedTask);
   focusedTaskRef.current = focusedTask;
 
-  const [suppressDetail, setSuppressDetail] = useState(false);
+  const [suppressDetail, setSuppressDetail] = useState(() => {
+    try { return sessionStorage.getItem(SS_SUPPRESS_DETAIL_KEY) === '1'; } catch { return false; }
+  });
+
+  // Persist suppressDetail so the detail panel open/closed state survives refresh.
+  useEffect(() => {
+    sessionStorage.setItem(SS_SUPPRESS_DETAIL_KEY, suppressDetail ? '1' : '0');
+  }, [suppressDetail]);
 
   const handleFocusTask = useCallback((task: Task, opts?: { openDetail?: boolean }) => {
     const isRefocus = focusedTaskRef.current?.id === task.id;
@@ -838,7 +860,7 @@ export function MainPage({ visible = true, navigateRef }: MainPageProps) {
       const pendingColId = `pending:${tempTaskId}`;
       setSessionColumns(prev => addSessionColumn(prev, pendingColId, triageOpenRef.current, maxPanelsRef.current));
       // Store pending metadata for rendering
-      pendingQuickStartMetaRef.current = { id: pendingColId, cwd: qsp.cwd, host: qsp.host ?? undefined, hostLabel: qsp.hostLabel ?? undefined, message: text, category: qsp.category };
+      pendingQuickStartMetaRef.current = { id: pendingColId, cwd: qsp.cwd, host: qsp.host ?? undefined, hostLabel: qsp.hostLabel ?? undefined, message: text };
 
       // Snapshot + clear meta ref BEFORE the async call so a subsequent /session
       // doesn't pick up the stale meta while this one is in flight.
@@ -855,7 +877,6 @@ export function MainPage({ visible = true, navigateRef }: MainPageProps) {
         cwd: qsp.cwd,
         host: qsp.host ?? undefined,
         message: text,
-        category: qsp.category,
         images,
         taskMeta,
       }).then((result) => {
@@ -872,12 +893,12 @@ export function MainPage({ visible = true, navigateRef }: MainPageProps) {
           `[Quick Start] Session created and running.`,
           `- Task ID: ${result.taskId}`,
           `- Path: ${qsp.cwd}`,
-          `- Category: ${qsp.category} / Quick Start`,
+          `- Category: Inbox / Quick Start`,
           `- User prompt: "${text}"`,
           ``,
           `Please update the task:`,
           `1. Set a descriptive title (replace "Session: ...")`,
-          `2. Move from "Quick Start" to the correct project if needed`,
+          `2. Move to the correct category and project if needed`,
         ].join('\n');
         // Images already sent to the session via quickStartSession() — don't duplicate
         chat.sendMessage(agentMsg, undefined, undefined, 'quick-start');
@@ -925,12 +946,12 @@ export function MainPage({ visible = true, navigateRef }: MainPageProps) {
         subtasks: focusedTask.subtasks?.map(s => ({ id: s.id, title: s.title, done: s.done })),
       };
       const plan = getPlanPayload();
-      chat.sendMessage(text, taskContext, images, undefined, plan.mode, plan.planModeFirst);
+      chat.sendMessage(text, taskContext, images, undefined, plan.mode, plan.planModeFirst, plan.planModeOff);
       // Clear task quote after sending — quote is bound to the message, not persistent
       setFocusedTask(null);
     } else {
       const plan = getPlanPayload();
-      chat.sendMessage(text, undefined, images, undefined, plan.mode, plan.planModeFirst);
+      chat.sendMessage(text, undefined, images, undefined, plan.mode, plan.planModeFirst, plan.planModeOff);
     }
   }, [chat, focusedTask, getPlanPayload]);
 
@@ -978,6 +999,7 @@ export function MainPage({ visible = true, navigateRef }: MainPageProps) {
           onReorder={reorder}
           onMoveTask={moveTask}
           onReparentTask={reparentTask}
+          onBakeOrder={bakeOrder}
           onOpenSession={handleToggleSession}
           onTaskClick={handleFocusTaskById}
           openSessionIds={openSessionIdSet}
@@ -989,6 +1011,7 @@ export function MainPage({ visible = true, navigateRef }: MainPageProps) {
           pinnedTaskIds={pinnedTaskIdSet}
           focusTaskIds={focusTaskIdSet}
           nextTaskIds={nextTaskIdSet}
+          waitTaskIds={waitTaskIdSet}
           suppressDetail={suppressDetail}
           operationError={operationError}
           onClearOperationError={clearOperationError}
@@ -1155,9 +1178,11 @@ export function MainPage({ visible = true, navigateRef }: MainPageProps) {
         <div className="session-resize-handle" onMouseDown={sessionPanel.handleResizeStart} />
       )}
 
-      {/* Sessions Area — triage (first slot) + session columns */}
+      {/* Sessions Area — triage (first slot) + session columns.
+          Combined ref: sessionPanel.panelRef (width resize observer) + auto-animate
+          (FLIP reorder on lock/unlock/close/evict). */}
       <div
-        ref={sessionPanel.panelRef}
+        ref={sessionsAreaCombinedRef}
         className={`main-page-sessions-area${sessionColumns.length === 0 && !triagePanelOpen ? ' collapsed' : ''}`}
         style={sessionColumns.length > 0 || triagePanelOpen ? { width: sessionPanel.width } : undefined}
       >
@@ -1171,6 +1196,10 @@ export function MainPage({ visible = true, navigateRef }: MainPageProps) {
             />
           </div>
         )}
+        {/* Note: key={sid} means a pending→real id swap (quick-start/fork) remounts
+            the column, which auto-animate will show as a remove+insert. Harmless
+            visually (the panel swaps from PendingSessionPanel → SessionPanel anyway)
+            but worth knowing if someone later investigates "panel pops on session start". */}
         {sessionColumns.map((slot, idx) => {
           const sid = slot.id;
           const needsDivider = idx > 0 || triagePanelOpen;
@@ -1182,15 +1211,9 @@ export function MainPage({ visible = true, navigateRef }: MainPageProps) {
           // Column split: when 2+ columns, first gets splitPct%, rest share remainder
           const totalCols = sessionColumns.length + (triagePanelOpen ? 1 : 0);
           const colIdx = idx + (triagePanelOpen ? 1 : 0);
-          const colStyle: React.CSSProperties = {
-            ...(totalCols >= 2 ? { flex: `0 0 ${colIdx === 0 ? colSplitPct : (100 - colSplitPct)}%` } : {}),
-            // Per-panel view-transition-name so the browser morphs each panel's DOM subtree
-            // when the slot order changes (lock/unlock/evict). view-transition-name must be
-            // a CSS <custom-ident> — strip characters outside [A-Za-z0-9_-]. In practice
-            // sessionIds are UUIDs + optional `pending:` prefix, so collisions after
-            // sanitization are vanishingly unlikely.
-            viewTransitionName: `session-panel-${sid.replace(/[^a-zA-Z0-9_-]/g, '_')}`,
-          } as React.CSSProperties;
+          const colStyle: React.CSSProperties = totalCols >= 2
+            ? { flex: `0 0 ${colIdx === 0 ? colSplitPct : (100 - colSplitPct)}%` }
+            : {};
           return (<Fragment key={sid}>
             {needsDivider && <div className="session-col-resize-handle" onMouseDown={handleColSplitStart} />}
             <div className={`main-page-session-column${slot.locked ? ' is-locked' : ''}`} style={colStyle}>
