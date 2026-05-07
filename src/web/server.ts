@@ -49,6 +49,7 @@ import { SessionHealthMonitor } from '../core/session-health-monitor.js'
 import { SessionReaper } from '../core/session-reaper.js'
 import { subagentRunner } from '../providers/subagent-runner.js'
 import { getTask, listTasks } from '../core/task-manager.js'
+import type { Task } from '../core/types.js'
 import { log } from '../logging/index.js'
 import { usageTracker } from '../core/usage/index.js'
 import * as chatHistory from '../core/chat-history.js'
@@ -59,6 +60,7 @@ import type { SyncPollContext } from '../core/integration-types.js'
 import { syncReconciler } from '../core/sync-reconciler.js'
 import { integrationsRouter } from './routes/integrations.js'
 import { systemRouter } from './routes/system.js'
+import { qmdRouter } from './routes/qmd.js'
 import { notesRouter } from './routes/notes.js'
 import { notesV2Router } from './routes/notes-v2.js'
 import { repositoriesRouter } from './routes/repositories.js'
@@ -104,15 +106,25 @@ export interface ServerOptions {
 }
 
 let httpServer: HttpServer | null = null
-let pluginSyncTimers: ReturnType<typeof setInterval>[] = []
+// Self-rescheduling timers — one active timer per plugin, replaced on each tick.
+// Stored as an array of stop-callbacks so stopServer() can cancel the in-flight one.
+// Each stop() returns a Promise that resolves once any in-flight tick has settled,
+// so stopServer() can `await` it and guarantee no plugin writes happen after shutdown.
+let pluginSyncStops: Array<() => Promise<void>> = []
 let cronServiceInstance: CronService | null = null
 let healthMonitor: SessionHealthMonitor | null = null
 let sessionReaper: SessionReaper | null = null
 let heartbeatHandle: HeartbeatRunnerHandle | null = null
 let recordingReaperHandle: { stop: () => void } | null = null
-let memoryWatcherHandle: { stop: () => void } | null = null
 let qmdWatcherHandle: { stop: () => void } | null = null
 let gitAutoCommitHandle: { stop: () => void; health: GitAutoCommitHealth } | null = null
+let dreamTimerHandle: ReturnType<typeof setInterval> | null = null
+let dreamInitialHandle: ReturnType<typeof setTimeout> | null = null
+// Pending deferred-markDone timers from the session:status-changed handler.
+// Hoisted to module scope so stopServer() can cancel them before teardown,
+// otherwise a late-firing timer could mutate sessionStreamBuffer after the
+// server has already stopped serving.
+const deferredMarkDoneTimers: Set<ReturnType<typeof setTimeout>> = new Set()
 
 // ── Git auto-commit health state ──
 
@@ -142,24 +154,15 @@ export function drainPendingCronNotifications(): PendingCronNotification[] {
   return pendingCronNotifications.splice(0, pendingCronNotifications.length)
 }
 
-// ── System health state (embedding, etc.) ──
+// ── System health state ──
 
 export interface SystemHealthState {
-  embedding: {
-    total: number;
-    indexed: number;
-    unindexed: number;
-    ollamaAvailable: boolean;
-    lastReconcileAt?: string;
-    lastError?: string;
-  };
   daemons?: Array<{ host: string; label: string; connected: boolean }>;
   claudeCliAvailable: boolean;
   hasReadyProvider: boolean;
 }
 
 const systemHealth: SystemHealthState = {
-  embedding: { total: 0, indexed: 0, unindexed: 0, ollamaAvailable: true },
   claudeCliAvailable: false,
   hasReadyProvider: false,
 }
@@ -252,6 +255,20 @@ export async function startServer(options: ServerOptions = {}): Promise<HttpServ
 
   // Recover orphaned user messages from a previous crash
   await chatHistory.recoverOrphanedUserMessage()
+
+  // Start local daemon for session management. All sessions (local + remote)
+  // go through a daemon — local uses the daemon on this machine, remote uses
+  // a daemon on the SSH target. Must be running before any createSessionManager().
+  try {
+    const { localDaemon } = await import('../providers/local-daemon.js')
+    await localDaemon.ensureRunning()
+    log.web.info('local daemon ready', { port: localDaemon.port })
+  } catch (err) {
+    log.web.error('failed to start local daemon — local sessions will fail', {
+      error: err instanceof Error ? err.message : String(err),
+    })
+    // Don't throw — remote sessions may still work, and user can fix daemon issues
+  }
 
   const port = options.port ?? DEFAULT_PORT
   const dev = options.dev ?? false
@@ -485,6 +502,7 @@ export async function startServer(options: ServerOptions = {}): Promise<HttpServ
   app.use('/api/plugins', pluginRouter)
 
   app.use('/api/system', systemRouter)
+  app.use('/api/qmd', qmdRouter)
   app.use('/api/push', pushRouter)
   app.use('/api/auth', authRouter)
   app.use('/api/browser-logs', browserLogsRouter)
@@ -545,6 +563,18 @@ export async function startServer(options: ServerOptions = {}): Promise<HttpServ
   // -- Register RPC methods on the WebSocket handler --
   registerChatRpc()
   registerSessionChatRpc()
+
+  // Reset working memory updater state on server startup to clear stale state
+  {
+    const { resetUpdaterState } = await import('../agent/working-memory-updater.js')
+    resetUpdaterState()
+  }
+
+  // Reset QMD route state to clear stale downloading/indexing status from a previous run
+  {
+    const { resetQmdRouteState } = await import('./routes/qmd.js')
+    resetQmdRouteState()
+  }
   registerAuthRpc()
   registerBrowserLogsRpc()
 
@@ -642,41 +672,149 @@ export async function startServer(options: ServerOptions = {}): Promise<HttpServ
     })
   }
 
-  // -- Start memory file watcher (FTS5 reindex + chunk embedding on .md changes) --
+  // -- Ensure dream directories + memory index exist --
   try {
-    const { startMemoryWatcher } = await import('../core/memory-watcher.js')
-    const { indexMemoryFiles } = await import('../core/memory-index.js')
-    // Ensure FTS index is populated on startup
-    indexMemoryFiles()
-    memoryWatcherHandle = startMemoryWatcher()
-    log.memory.info('memory watcher started')
+    const { ensureDreamDirectories } = await import('../core/dream.js')
+    ensureDreamDirectories()
   } catch (err) {
-    log.memory.warn('memory watcher startup failed', {
+    log.memory.warn('dream directory init failed', {
       error: err instanceof Error ? err.message : String(err),
     })
   }
 
-  // -- QMD hybrid search stores (runs alongside legacy watcher) --
+  // -- QMD hybrid search stores --
   try {
     const { initQmdStores } = await import('../core/qmd-store.js')
     const { startQmdWatcher } = await import('../core/qmd-watcher.js')
+    const { setQmdRouteStatus } = await import('./routes/qmd.js')
     // Non-blocking: init stores in background (update + embed can be slow)
-    initQmdStores().catch(err => {
-      log.memory.warn('QMD store init failed', {
-        error: err instanceof Error ? err.message : String(err),
+    setQmdRouteStatus('indexing')
+    initQmdStores()
+      .then(() => { setQmdRouteStatus('ready') })
+      .catch(err => {
+        const msg = err instanceof Error ? err.message : String(err)
+        setQmdRouteStatus('error', msg)
+        log.memory.warn('QMD store init failed', { error: msg })
       })
-    })
     qmdWatcherHandle = startQmdWatcher()
     log.memory.info('QMD watcher started')
+
+    // Delay the initial bulk QMD sync by 60s so startup doesn't starve the event loop
+    // with a fs.stat storm across ~2600 tasks + all sessions. Incremental sync via
+    // bus.subscribe('qmd-task-sync') / ('qmd-session-sync') continues to run normally
+    // for live writes — this only defers the startup backfill.
+    setTimeout(() => {
+      Promise.all([
+        import('../core/qmd-task-sync.js').then(m => m.syncAllTasks()),
+        import('../core/qmd-session-sync.js').then(m => m.syncAllSessions()),
+      ]).then(() => {
+        log.memory.info('Task + session QMD sync complete')
+      }).catch(err => {
+        log.memory.warn('Task/session QMD sync failed', { error: err instanceof Error ? err.message : String(err) })
+      })
+    }, 60_000)
+
+    // ── Incremental QMD sync via event bus (debounced) ──
+    // Collect changed task/session IDs in Sets, flush after 2s idle.
+    // embed() is called once per flush (not per event) to avoid thrashing.
+    {
+      const pendingTaskIds = new Set<string>();
+      const pendingDeletedTaskIds = new Set<string>();
+      const pendingSessionIds = new Set<string>();
+      let taskFlushTimer: ReturnType<typeof setTimeout> | null = null;
+      let sessionFlushTimer: ReturnType<typeof setTimeout> | null = null;
+      const DEBOUNCE_MS = 2000;
+
+      async function flushTasks(): Promise<void> {
+        taskFlushTimer = null;
+        const toSync = [...pendingTaskIds];
+        const toDelete = [...pendingDeletedTaskIds];
+        pendingTaskIds.clear();
+        pendingDeletedTaskIds.clear();
+        if (toSync.length === 0 && toDelete.length === 0) return;
+        try {
+          const { syncTask, removeTask, flushTaskEmbeddings } = await import('../core/qmd-task-sync.js');
+          const { getTask } = await import('../core/task-manager.js');
+          for (const id of toDelete) {
+            await removeTask(id).catch(() => {});
+          }
+          for (const id of toSync) {
+            try {
+              const task = await getTask(id);
+              await syncTask(task);
+            } catch { /* task may have been deleted between event and flush */ }
+          }
+          await flushTaskEmbeddings();
+          log.memory.info('QMD incremental task sync', { synced: toSync.length, deleted: toDelete.length });
+        } catch (err) {
+          log.memory.warn('QMD incremental task sync failed', { error: err instanceof Error ? err.message : String(err) });
+        }
+      }
+
+      async function flushSessions(): Promise<void> {
+        sessionFlushTimer = null;
+        const toSync = [...pendingSessionIds];
+        pendingSessionIds.clear();
+        if (toSync.length === 0) return;
+        try {
+          const { syncSession, flushSessionEmbeddings } = await import('../core/qmd-session-sync.js');
+          const { getSessionByClaudeId } = await import('../core/session-tracker.js');
+          for (const id of toSync) {
+            try {
+              const session = await getSessionByClaudeId(id);
+              if (session) await syncSession(session);
+            } catch { /* session may have been removed */ }
+          }
+          await flushSessionEmbeddings();
+          log.memory.info('QMD incremental session sync', { synced: toSync.length });
+        } catch (err) {
+          log.memory.warn('QMD incremental session sync failed', { error: err instanceof Error ? err.message : String(err) });
+        }
+      }
+
+      function scheduleTaskFlush(): void {
+        if (taskFlushTimer) clearTimeout(taskFlushTimer);
+        taskFlushTimer = setTimeout(() => { flushTasks().catch(() => {}) }, DEBOUNCE_MS);
+      }
+
+      function scheduleSessionFlush(): void {
+        if (sessionFlushTimer) clearTimeout(sessionFlushTimer);
+        sessionFlushTimer = setTimeout(() => { flushSessions().catch(() => {}) }, DEBOUNCE_MS);
+      }
+
+      bus.subscribe('qmd-task-sync', (event) => {
+        if (event.name === EventNames.TASK_CREATED || event.name === EventNames.TASK_UPDATED || event.name === EventNames.TASK_COMPLETED) {
+          const taskId = (event.data as { task?: { id?: string } })?.task?.id;
+          if (taskId) {
+            pendingTaskIds.add(taskId);
+            scheduleTaskFlush();
+          }
+        } else if (event.name === EventNames.TASK_DELETED) {
+          const taskId = (event.data as { task?: { id?: string } })?.task?.id;
+          if (taskId) {
+            pendingDeletedTaskIds.add(taskId);
+            pendingTaskIds.delete(taskId);
+            scheduleTaskFlush();
+          }
+        }
+      }, { global: true })
+
+      bus.subscribe('qmd-session-sync', (event) => {
+        if (event.name === EventNames.SESSION_STARTED || event.name === EventNames.SESSION_RESULT
+          || event.name === EventNames.SESSION_ERROR || event.name === EventNames.SESSION_STATUS_CHANGED) {
+          const sessionId = (event.data as { sessionId?: string })?.sessionId;
+          if (sessionId) {
+            pendingSessionIds.add(sessionId);
+            scheduleSessionFlush();
+          }
+        }
+      }, { global: true })
+    }
   } catch (err) {
     log.memory.warn('QMD startup failed', {
       error: err instanceof Error ? err.message : String(err),
     })
   }
-
-  // -- Reconcile embeddings (non-blocking background task) --
-  // Runs after FTS index so chunk embeddings have data to work with.
-  reconcileEmbeddingsBackground()
 
   // -- Git auto-commit polling (30s interval) --
   // Skip for ephemeral servers — they use a temp copy of data, no need to backup
@@ -827,124 +965,6 @@ export async function startServer(options: ServerOptions = {}): Promise<HttpServ
     }
   }, { global: true })
 
-  // -- Incremental embedding: re-embed tasks on create/update --
-  let embeddingDebounce: ReturnType<typeof setTimeout> | null = null
-  const pendingEmbedTaskIds = new Set<string>()
-  const failedEmbedTaskIds = new Set<string>() // retry queue for failed embeddings
-  let embeddingRetryTimer: ReturnType<typeof setTimeout> | null = null
-  let embeddingRetryDelay = 60_000 // starts at 60s, doubles each failure, caps at 5min
-
-  bus.subscribe('embedding-sync', async (event) => {
-    if (event.name !== EventNames.TASK_CREATED && event.name !== EventNames.TASK_UPDATED) return
-    const { task } = eventData<'task:created'>(event)
-    if (!task?.id) return
-
-    pendingEmbedTaskIds.add(task.id)
-    if (embeddingDebounce) clearTimeout(embeddingDebounce)
-    embeddingDebounce = setTimeout(async () => {
-      const ids = [...pendingEmbedTaskIds]
-      pendingEmbedTaskIds.clear()
-
-      let failedCount = 0
-      let embeddedCount = 0
-      const succeededIds = new Set<string>()
-      try {
-        const { embedSingleTask } = await import('../core/embedding/pipeline.js')
-        const { getTask: getTaskById } = await import('../core/task-manager.js')
-        for (const id of ids) {
-          try {
-            const t = await getTaskById(id)
-            const result = await embedSingleTask(t)
-            if (result === 'failed') {
-              failedCount++
-              failedEmbedTaskIds.add(id)
-            } else if (result === 'embedded') {
-              embeddedCount++
-              succeededIds.add(id)
-              failedEmbedTaskIds.delete(id) // clear from retry queue on success
-            }
-          } catch (err) {
-            // Task may have been deleted between event and embedding
-            const msg = err instanceof Error ? err.message : String(err)
-            log.memory.debug(`embedSingleTask skipped task ${id}: ${msg}`)
-          }
-        }
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err)
-        log.memory.warn(`Embedding pipeline error: ${msg}`)
-        failedCount = ids.length - embeddedCount
-        for (const id of ids) {
-          if (!succeededIds.has(id)) failedEmbedTaskIds.add(id)
-        }
-      }
-
-      if (embeddedCount > 0) {
-        log.memory.debug(`Incremental embedding: ${embeddedCount} task(s) embedded`)
-      }
-
-      // Update health if incremental embedding failed
-      if (failedCount > 0) {
-        log.memory.warn(`Incremental embedding: ${failedCount} task(s) failed — queued for retry`)
-        systemHealth.embedding.unindexed = failedEmbedTaskIds.size
-        systemHealth.embedding.ollamaAvailable = false
-        broadcastEvent('system:health', systemHealth)
-        scheduleEmbeddingRetry()
-      }
-    }, 500) // 500ms debounce
-  }, { global: true }) // global: true — receives events with destinations:[] (plugin sync individual events)
-
-  // Retry failed embeddings with exponential backoff (60s -> 120s -> 240s -> 300s cap)
-  function scheduleEmbeddingRetry(): void {
-    if (embeddingRetryTimer) return // already scheduled
-    embeddingRetryTimer = setTimeout(async () => {
-      embeddingRetryTimer = null
-      if (failedEmbedTaskIds.size === 0) return
-
-      const ids = [...failedEmbedTaskIds]
-      log.memory.info(`Retrying embedding for ${ids.length} task(s) (delay was ${embeddingRetryDelay / 1000}s)...`)
-
-      try {
-        const { embedSingleTask } = await import('../core/embedding/pipeline.js')
-        const { getTask: getTaskById } = await import('../core/task-manager.js')
-        let retrySuccess = 0
-        let retryFail = 0
-
-        for (const id of ids) {
-          try {
-            const t = await getTaskById(id)
-            const result = await embedSingleTask(t)
-            if (result === 'failed') {
-              retryFail++
-            } else {
-              failedEmbedTaskIds.delete(id)
-              if (result === 'embedded') retrySuccess++
-            }
-          } catch {
-            failedEmbedTaskIds.delete(id) // task deleted, remove from retry
-          }
-        }
-
-        if (retrySuccess > 0) {
-          log.memory.info(`Embedding retry: ${retrySuccess} task(s) recovered`)
-          // Update health — run full reconcile count
-          reconcileEmbeddingsBackground()
-          embeddingRetryDelay = 60_000 // reset backoff on success
-        }
-        if (retryFail > 0) {
-          log.memory.warn(`Embedding retry: ${retryFail} task(s) still failing — scheduling another retry`)
-          embeddingRetryDelay = Math.min(embeddingRetryDelay * 2, 300_000) // double delay, cap at 5min
-          scheduleEmbeddingRetry()
-        }
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err)
-        log.memory.warn(`Embedding retry failed: ${msg}`)
-        // Outer failure (e.g. dynamic import failed) — also retry with backoff
-        embeddingRetryDelay = Math.min(embeddingRetryDelay * 2, 300_000)
-        scheduleEmbeddingRetry()
-      }
-    }, embeddingRetryDelay)
-  }
-
   // -- Heartbeat config reload: restart runner when heartbeat config changes --
   bus.subscribe('heartbeat-config', async (event) => {
     if (event.name !== EventNames.CONFIG_CHANGED) return
@@ -986,6 +1006,26 @@ export async function startServer(options: ServerOptions = {}): Promise<HttpServ
     } catch { /* non-critical */ }
   })
 
+  // Last-markStreaming timestamp per sessionId — used to suppress stale
+  // session:status-changed{idle|stopped|error} events from old transports that
+  // race with a just-started new turn. Without this guard, the 22ms window we
+  // observed between markStreaming(new turn) and markDone(old transport's
+  // flush) can flip the server-side buffer's isStreaming off and cause a
+  // downstream RPC snapshot to return isStreaming=false mid-live-turn.
+  //
+  // Cleaned up at terminal lifecycle events (session:result/error below) so the
+  // map cannot grow unbounded across long-lived servers with many sessions.
+  const lastMarkStreamingAt = new Map<string, number>()
+  // 500ms: 25× the observed ~20ms race window (markStreaming → markDone within
+  // 18-24ms during remote session resume). Tight enough that real terminations
+  // aren't held up noticeably; loose enough to absorb DB-write lag from
+  // session-tracker.ts persisting status changes asynchronously.
+  const MARK_DONE_DEDUP_MS = 500
+
+  // deferredMarkDoneTimers lives at module scope (above) so stopServer() can
+  // cancel it during teardown. No per-startServer reset needed: entries
+  // always self-remove in their own callback (line in handler below).
+
   // -- Main AI triage: process session results with AI judgment --
   // All session events now route through main-ai first; forward to web-ui for display.
   bus.subscribe('main-ai', async (event) => {
@@ -1014,9 +1054,44 @@ export async function startServer(options: ServerOptions = {}): Promise<HttpServ
         sessionStreamBuffer.appendSystem(sessionId, variant, message, detail)
         sendStreamEvent(sessionId, event.name, event.data)
       }
-    } else if (event.name === 'session:permission-request') {
-      const { sessionId } = event.data as { sessionId?: string }
+    } else if (event.name === 'session:thinking-delta') {
+      const { sessionId, delta } = eventData<'session:thinking-delta'>(event)
       if (sessionId) {
+        sessionStreamBuffer.appendThinkingDelta(sessionId, delta)
+        sendStreamEvent(sessionId, event.name, event.data)
+      }
+    } else if (event.name === 'session:unknown-event') {
+      const { sessionId, scope, eventType, snippet } = eventData<'session:unknown-event'>(event)
+      if (sessionId) {
+        sessionStreamBuffer.appendSystem(
+          sessionId,
+          'info',
+          `Unknown Claude event: ${scope}:${eventType}`,
+          snippet,
+        )
+        sendStreamEvent(sessionId, event.name, event.data)
+      }
+    } else if (event.name === 'session:permission-request') {
+      const { sessionId, requestId, toolName, input, reason } = event.data as {
+        sessionId?: string; requestId?: string; toolName?: string;
+        input?: Record<string, unknown>; reason?: string;
+      }
+      if (sessionId) {
+        // Buffer the permission block so stream-subscribe snapshots include it
+        if (requestId && toolName) {
+          sessionStreamBuffer.appendPermission(sessionId, requestId, toolName, input, reason)
+        }
+        sendStreamEvent(sessionId, event.name, event.data)
+      }
+    } else if (event.name === 'session:permission-resolved') {
+      const { sessionId, requestId, allowed } = event.data as {
+        sessionId?: string; requestId?: string; allowed?: boolean;
+      }
+      if (sessionId) {
+        // Update the buffered permission block status
+        if (requestId) {
+          sessionStreamBuffer.resolvePermission(sessionId, requestId, allowed ? 'allowed' : 'denied')
+        }
         sendStreamEvent(sessionId, event.name, event.data)
       }
     } else if (event.name === 'session:usage-update') {
@@ -1059,6 +1134,12 @@ export async function startServer(options: ServerOptions = {}): Promise<HttpServ
         const sid = eventData<'session:result'>(event).sessionId
         if (sid) {
           sessionStreamBuffer.markDone(sid)
+          // Release dedup-timestamp entry so lastMarkStreamingAt cannot grow
+          // unbounded across long-lived servers. (Handled here, not only in the
+          // status-changed 'stopped'/'error' branch, because session:result is
+          // the primary end-of-turn signal and fires even when the session
+          // stays 'running' for a subsequent turn.)
+          lastMarkStreamingAt.delete(sid)
           setTimeout(() => sessionStreamBuffer.clear(sid), 2000)
           // Cleanup team poller for this session
           import('./routes/session-chat.js').then(({ cleanupTeamPoller }) => {
@@ -1069,11 +1150,22 @@ export async function startServer(options: ServerOptions = {}): Promise<HttpServ
 
     }
 
-    // session:status-changed drives the stream buffer's lifecycle state.
+    // Belt-and-suspenders: clean up stream buffer on terminal status-changed.
+    // session:result/session:error is the primary cleanup path, but sessions can
+    // terminate without emitting those events (health-monitor idle_timeout, kill,
+    // server restart, process crash). session:status-changed with ['*'] destinations
+    // always fires for ANY termination path, so use it as a fallback.
+    //
     // Must live OUTSIDE the outer `if (!isSubagentSessionResult && (...))` guard:
     // that guard whitelists only started/result/error/batch-completed/message-queued/
     // messages-delivered and would silently skip status-changed events (the original
-    // Root-Cause-5 bug: belt-and-suspenders cleanup never fired → stuck badge).
+    // bug that left `isStreaming=true` in the buffer after health-monitor timeout →
+    // stale snapshot on client reload → stuck Streaming badge).
+    //
+    // 'idle' = FIFO between turns (process alive, not streaming) → markDone only,
+    //   keep blocks for cross-turn viewing.
+    // 'stopped'/'error' = process terminated → markDone + clear.
+    // markDone + clear are idempotent → safe even if result path already cleaned up.
     if (event.name === 'session:status-changed') {
       const { sessionId: sid, process_status: ps } = event.data as { sessionId?: string; process_status?: string }
       if (sid) {
@@ -1084,13 +1176,71 @@ export async function startServer(options: ServerOptions = {}): Promise<HttpServ
         //   - stopped  → markDone + clear
         //   - error    → markDone + clear
         // markDone/clear are idempotent; safe even if session:result already cleaned up above.
+        // Asymmetric handling of running vs stopped/error is intentional:
+        // - 'running' applies markStreaming immediately because it's the sole
+        //   on-path (see session-stream-buffer.ts) and must race-win against
+        //   any stale in-flight stopped/error events.
+        // - 'stopped'/'error' defer within the dedup window because during
+        //   remote session resume the daemon may emit a brief stopped→running
+        //   flicker as the old transport flushes; applying markDone eagerly
+        //   would clobber the fresh stream (the exact bug this handler fixes).
         if (ps === 'running') {
           sessionStreamBuffer.markStreaming(sid)
+          lastMarkStreamingAt.set(sid, Date.now())
         } else if (ps === 'stopped' || ps === 'error') {
-          sessionStreamBuffer.markDone(sid)
-          sessionStreamBuffer.clear(sid)
+          const lastRun = lastMarkStreamingAt.get(sid)
+          const ageMs = lastRun != null ? Date.now() - lastRun : Infinity
+          if (ageMs < MARK_DONE_DEDUP_MS) {
+            log.ws.info('markDone deferred (stale stopped/error within dedup window)', {
+              sessionId: sid, ageMs, dedupMs: MARK_DONE_DEDUP_MS, process_status: ps,
+            })
+            // Re-read the DB after the window, not the in-memory map: the map
+            // only tracks WHEN markStreaming fired, not WHETHER the session
+            // truly recovered. The session record is authoritative.
+            const timer = setTimeout(() => {
+              deferredMarkDoneTimers.delete(timer)
+              void (async () => {
+                try {
+                  const { getSessionByClaudeId } = await import('../core/session-tracker.js')
+                  const rec = await getSessionByClaudeId(sid)
+                  if (rec?.process_status === 'stopped' || rec?.process_status === 'error') {
+                    sessionStreamBuffer.markDone(sid)
+                    sessionStreamBuffer.clear(sid)
+                    lastMarkStreamingAt.delete(sid)
+                    log.ws.info('markDone applied after deferral (session is truly terminal)', {
+                      sessionId: sid, process_status: rec.process_status,
+                    })
+                  } else {
+                    log.ws.info('markDone skipped after deferral (session recovered)', {
+                      sessionId: sid, process_status: rec?.process_status,
+                    })
+                  }
+                } catch (err) {
+                  log.ws.warn('deferred markDone check failed', {
+                    sessionId: sid, error: err instanceof Error ? err.message : String(err),
+                  })
+                }
+              })()
+            }, MARK_DONE_DEDUP_MS)
+            deferredMarkDoneTimers.add(timer)
+          } else {
+            sessionStreamBuffer.markDone(sid)
+            sessionStreamBuffer.clear(sid)
+            lastMarkStreamingAt.delete(sid)
+          }
         } else if (ps === 'idle') {
-          sessionStreamBuffer.markDone(sid)
+          // Dedup: if the session just went 'running' (<MARK_DONE_DEDUP_MS ago),
+          // this 'idle' is almost certainly an old-transport flush racing with
+          // the new turn. Ignore it — the real end-of-turn will fire via
+          // session:result or a later status-changed.
+          const lastRun = lastMarkStreamingAt.get(sid)
+          if (lastRun != null && Date.now() - lastRun < MARK_DONE_DEDUP_MS) {
+            log.ws.info('markDone suppressed (stale idle within dedup window)', {
+              sessionId: sid, ageMs: Date.now() - lastRun, dedupMs: MARK_DONE_DEDUP_MS,
+            })
+          } else {
+            sessionStreamBuffer.markDone(sid)
+          }
         }
       }
     }
@@ -1180,7 +1330,7 @@ export async function startServer(options: ServerOptions = {}): Promise<HttpServ
         // server.ts must NOT overwrite process_status — it lacks process state info.
 
         // Do NOT clear session slot here — turn_completed means the session
-        // can still be resumed via send_to_session. The slot stays linked so the
+        // can still be resumed via session_send. The slot stays linked so the
         // UI shows which tasks have sessions. Slots are cleared only when:
         //   1. Task phase reaches COMPLETE (user sets via PhasePicker)
         //   2. process_status transitions to 'error' (handled above in isError branch)
@@ -1575,6 +1725,24 @@ export async function startServer(options: ServerOptions = {}): Promise<HttpServ
     log.heartbeat.error('failed to start heartbeat', { error: err instanceof Error ? err.message : String(err) })
   })
 
+  // -- Dream consolidation — check periodically (every 2 hours) --
+  dreamTimerHandle = setInterval(async () => {
+    try {
+      const { executeDream } = await import('../core/dream.js')
+      await executeDream()
+    } catch (err) {
+      log.memory.debug('dream check failed', { error: String(err) })
+    }
+  }, 2 * 60 * 60 * 1000)
+
+  // Initial dream check after a delay (avoid running during startup)
+  dreamInitialHandle = setTimeout(async () => {
+    try {
+      const { executeDream } = await import('../core/dream.js')
+      await executeDream()
+    } catch { /* best-effort */ }
+  }, 5 * 60 * 1000)
+
   startupPhase('ALL DONE — server fully initialized')
   return httpServer!
 }
@@ -1805,97 +1973,159 @@ export function getHeartbeatHandle(): HeartbeatRunnerHandle | null {
   return heartbeatHandle
 }
 
-/**
- * Run embedding reconciliation in the background (non-blocking).
- * Safe to call on startup — logs errors but never throws.
- */
-function reconcileEmbeddingsBackground(): void {
-  ;(async () => {
-    try {
-      const { reconcileAllEmbeddings } = await import('../core/embedding/pipeline.js')
-      const result = await reconcileAllEmbeddings()
-
-      // Update system health state
-      systemHealth.embedding = {
-        total: result.totalTasks,
-        indexed: result.indexedTasks,
-        unindexed: result.totalTasks - result.indexedTasks,
-        ollamaAvailable: result.ollamaAvailable,
-        lastReconcileAt: new Date().toISOString(),
-      }
-
-      // Broadcast to frontend if there are issues
-      if (result.indexedTasks < result.totalTasks || !result.ollamaAvailable) {
-        broadcastEvent('system:health', systemHealth)
-      }
-    } catch (err) {
-      const errMsg = err instanceof Error ? err.message : String(err)
-      log.memory.warn('embedding reconciliation failed', { error: errMsg })
-
-      systemHealth.embedding.ollamaAvailable = false
-      systemHealth.embedding.lastError = errMsg
-      systemHealth.embedding.lastReconcileAt = new Date().toISOString()
-      broadcastEvent('system:health', systemHealth)
-    }
-  })()
+/** Cooperative yield — give the event loop a chance to run pending I/O / handlers. */
+function yieldToEventLoop(): Promise<void> {
+  return new Promise(resolve => setImmediate(resolve))
 }
 
 /**
  * Start generic plugin sync polling.
- * Iterates all registered plugins (except 'local') and creates an interval timer
- * for each. Each tick: retry unsynced tasks, then call plugin.sync.syncPoll(ctx).
+ * Iterates all registered plugins (except 'local') and creates a self-rescheduling
+ * timer for each. Each tick: retry unsynced tasks, then call plugin.sync.syncPoll(ctx).
+ *
+ * Uses setTimeout + self-reschedule (not setInterval) so:
+ *   - The first tick is delayed by FIRST_TICK_DELAY_MS, avoiding boot-time pile-up
+ *     (sync reconciler + session recovery + health monitor all fire around boot).
+ *   - If a tick runs slow, the next tick starts intervalMs AFTER completion, not
+ *     at the next wall-clock interval — prevents overlap / back-to-back churn.
+ *
+ * Inside the unsynced/retry loops we `await yieldToEventLoop()` every few iterations
+ * so HTTP handlers, WS broadcasts, and session I/O don't starve while we await
+ * dozens of serial plugin.sync.createTask() Graph calls.
  */
 function startPluginSyncPolling(): void {
   const plugins = registry.getAll().filter(p => p.id !== 'local')
+  const FIRST_TICK_DELAY_MS = 60_000 // boot grace — let startup quiet down first
+  // Yield to the event loop every N sync iterations — a compromise between two
+  // failure modes: N=1 adds needless loop overhead on every Graph call, while
+  // N≥20 recreates the original event-loop starvation that wedged the server at
+  // ~985 sessions. N=5 is small enough to keep HTTP/WS handlers responsive and
+  // large enough that the setImmediate cost is amortized across multiple awaits.
+  const YIELD_EVERY = 5
 
   for (const plugin of plugins) {
     let syncing = false
     let consecutiveFailures = 0
     const intervalMs = (plugin.config.sync_interval_ms as number) ?? SYNC_INTERVAL_MS
 
-    const timer = setInterval(async () => {
-      if (syncing) return
+    let timer: ReturnType<typeof setTimeout> | null = null
+    let stopped = false
+    // Tracks the Promise for the currently-executing tick (if any), so stopServer()
+    // can await it and guarantee no plugin writes happen after shutdown returns.
+    let currentTickPromise: Promise<void> | null = null
+    const scheduleNext = (delayMs: number) => {
+      if (stopped) return
+      timer = setTimeout(() => { currentTickPromise = tick() }, delayMs)
+    }
+    // Register a stop-callback so stopServer() can cancel the pending timer
+    // without needing to know which specific setTimeout handle is live right now.
+    // The callback returns a Promise that resolves once the in-flight tick (if any)
+    // has settled — stopServer() awaits it to prevent post-shutdown writes.
+    pluginSyncStops.push(async () => {
+      stopped = true
+      if (timer) clearTimeout(timer)
+      if (currentTickPromise) {
+        try { await currentTickPromise } catch { /* tick errors already logged */ }
+      }
+    })
+
+    const tick = async () => {
+      if (syncing) {
+        scheduleNext(intervalMs)
+        return
+      }
       syncing = true
       const syncT0 = Date.now()
       let changeCount = 0 // captured by ctx closures — accumulates across delta pull + reconciler.tick
       try {
-        const { listTasks, updateTaskRaw, addTaskFull, deleteTask, autoPushIfConfigured } = await import('../core/task-manager.js')
-        const localTasks = await listTasks()
+        const {
+          listTasks,
+          listUnsyncedTasks,
+          listSyncErrorTasks,
+          updateTaskRaw,
+          updateTasksBulk,
+          addTaskFull,
+          deleteTask,
+          autoPushIfConfigured,
+        } = await import('../core/task-manager.js')
 
-        // Step 1: Retry unsynced tasks (source matches plugin but no ext data yet)
-        const unsynced = localTasks.filter(
-          (t) => t.source === plugin.id && (!t.ext || !t.ext[plugin.id]) && t.status !== 'done',
-        )
+        // Step 1: Retry unsynced tasks (source matches plugin but no ext data yet).
+        // Was `listTasks().filter(...)` — now pushed into SQL so we don't
+        // materialize 6000+ rows just to pluck a handful of unsynced ones.
+        const unsynced = await listUnsyncedTasks(plugin.id)
+        if (unsynced.length > 0) {
+          log.web.info('sync: unsynced tasks pending create', {
+            pluginId: plugin.id,
+            count: unsynced.length,
+            // Sample up to 5 to spot if the same taskId keeps showing up across ticks
+            sampleTaskIds: unsynced.slice(0, 5).map((t) => t.id),
+          })
+        }
+        let unsyncedCounter = 0
+        let unsyncedSuccesses = 0
+        let unsyncedFailures = 0
+        // Accumulate ext-merge patches across the loop and commit them in one
+        // bulk transaction after all network calls finish. Each createTask() is
+        // still awaited serially (network + per-item yield) — only the DB write
+        // is batched to avoid N sequential SQLite transactions on large backlogs.
+        const extUpdates: Array<{ id: string; patch: Partial<Task> }> = []
         for (const task of unsynced) {
+          // Yield to the event loop periodically so HTTP/WS handlers don't starve
+          // while we await dozens of serial Graph calls (each ~500ms).
+          if (unsyncedCounter > 0 && unsyncedCounter % YIELD_EVERY === 0) {
+            await yieldToEventLoop()
+          }
+          unsyncedCounter++
           try {
             const ext = await plugin.sync.createTask(task)
             if (ext) {
               // ext is already scoped: { 'ms-todo': { id, list_id } } — spread to merge
               const mergedExt = { ...task.ext, ...ext as Record<string, unknown> }
-              const { changed } = await updateTaskRaw(task.id, { ext: mergedExt })
+              extUpdates.push({ id: task.id, patch: { ext: mergedExt } })
               Object.assign(task, { ext: mergedExt })
-              // Only emit if fields actually changed — avoids flooding WS with no-op task:updated events on each sync cycle
-              // destinations: [] — only global subscribers (embedding-sync) receive individual events; web-ui gets one bulk signal at end of sync cycle
-              if (changed) {
-                bus.emit(EventNames.TASK_UPDATED, { task }, [], { source: `${plugin.id}-sync` })
-                changeCount++
-              }
+              unsyncedSuccesses++
             }
           } catch (err) {
-            log.web.debug(`${plugin.id} sync: retry push failed`, {
+            unsyncedFailures++
+            // Promoted from debug → warn so ghost-producing repro stays visible
+            log.web.warn(`${plugin.id} sync: unsynced retry create failed`, {
               taskId: task.id,
+              title: task.title,
               error: err instanceof Error ? err.message : String(err),
             })
           }
         }
+        if (unsynced.length > 0) {
+          log.web.info('sync: unsynced batch done', {
+            pluginId: plugin.id,
+            attempted: unsynced.length,
+            succeeded: unsyncedSuccesses,
+            failed: unsyncedFailures,
+          })
+        }
+        if (extUpdates.length > 0) {
+          const { changed } = await updateTasksBulk(extUpdates)
+          // destinations: [] — only global subscribers (embedding-sync) receive
+          // individual events; web-ui gets one bulk signal at end of sync cycle.
+          for (const updatedTask of changed) {
+            bus.emit(EventNames.TASK_UPDATED, { task: updatedTask }, [], { source: `${plugin.id}-sync` })
+            changeCount++
+          }
+        }
 
         // Step 1.5: Retry tasks with sync_error that already have ext data
-        // These are tasks that were created successfully but had a subsequent push failure
+        // These are tasks that were created successfully but had a subsequent push failure.
+        // SQL-filtered (listSyncErrorTasks) so we don't re-scan the whole task set.
         const MAX_ERROR_RETRIES_PER_CYCLE = 5
-        const errorRetries = localTasks.filter(
-          (t) => t.source === plugin.id && t.sync_error && t.ext && t.ext[plugin.id] && t.status !== 'done',
-        ).slice(0, MAX_ERROR_RETRIES_PER_CYCLE)
+        const errorRetries = (await listSyncErrorTasks(plugin.id)).slice(0, MAX_ERROR_RETRIES_PER_CYCLE)
+        let errorRetryCounter = 0
         for (const task of errorRetries) {
+          // Same reason as the unsynced loop — yield periodically so the event loop
+          // isn't starved while we await serial autoPushIfConfigured calls.
+          if (errorRetryCounter > 0 && errorRetryCounter % YIELD_EVERY === 0) {
+            await yieldToEventLoop()
+          }
+          errorRetryCounter++
           try {
             await autoPushIfConfigured(task)
           } catch (err) {
@@ -1906,7 +2136,15 @@ function startPluginSyncPolling(): void {
           }
         }
 
-        // Step 2: Build SyncPollContext and run delta pull
+        // Step 2: Build SyncPollContext and run delta pull.
+        // `listTasks()` is intentionally deferred to this step — Step 1/1.5
+        // now go through targeted SQL (listUnsyncedTasks / listSyncErrorTasks).
+        // We still need a snapshot here because SyncPollContext.getTasks() is
+        // synchronous (plugins + reconciler can't await inside their diff loops),
+        // and ctx.updateTask uses the array as a per-tick cache that it mutates
+        // in-place so subsequent getTasks() calls in the same tick see the
+        // just-applied change.
+        const localTasks = await listTasks()
         const ctx: SyncPollContext = {
           getTasks: () => localTasks,
           updateTask: async (id, updates) => {
@@ -1994,11 +2232,14 @@ function startPluginSyncPolling(): void {
           log.web.warn(`${plugin.id} sync: bulk emit failed`, { error: emitErr instanceof Error ? emitErr.message : String(emitErr) })
         }
         syncing = false
+        scheduleNext(intervalMs)
       }
-    }, intervalMs)
+    }
 
-    pluginSyncTimers.push(timer)
-    log.web.info('started sync polling for plugin', { pluginId: plugin.id, intervalMs })
+    // First tick is delayed to avoid boot-time pile-up with health monitor /
+    // session recovery / reconciler, all of which fire around server start.
+    scheduleNext(FIRST_TICK_DELAY_MS)
+    log.web.info('started sync polling for plugin', { pluginId: plugin.id, intervalMs, firstTickDelayMs: FIRST_TICK_DELAY_MS })
   }
 }
 
@@ -2010,10 +2251,27 @@ export async function stopServer(): Promise<void> {
     heartbeatHandle.stop()
     heartbeatHandle = null
   }
-  for (const timer of pluginSyncTimers) {
-    clearInterval(timer)
+  if (dreamTimerHandle) {
+    clearInterval(dreamTimerHandle)
+    dreamTimerHandle = null
   }
-  pluginSyncTimers = []
+  if (dreamInitialHandle) {
+    clearTimeout(dreamInitialHandle)
+    dreamInitialHandle = null
+  }
+  // Cancel pending deferred-markDone callbacks so they don't mutate
+  // sessionStreamBuffer after shutdown.
+  for (const timer of deferredMarkDoneTimers) {
+    clearTimeout(timer)
+  }
+  deferredMarkDoneTimers.clear()
+  // Await each stop() so any in-flight plugin tick completes before we tear down
+  // the registry and other dependencies. Otherwise a mid-tick ctx.updateTask /
+  // ctx.addTask / bus.emit could fire after shutdown.
+  await Promise.all(
+    pluginSyncStops.map(stop => stop().catch(() => { /* best-effort shutdown */ })),
+  )
+  pluginSyncStops = []
   registry.clear()
   if (healthMonitor) {
     healthMonitor.stop()
@@ -2056,10 +2314,6 @@ export async function stopServer(): Promise<void> {
   // Always detach — sessions are detached child processes and must survive
   // server shutdown. Never kill session PIDs from stopServer().
   sessionRunner.destroy()
-  if (memoryWatcherHandle) {
-    memoryWatcherHandle.stop()
-    memoryWatcherHandle = null
-  }
   if (qmdWatcherHandle) {
     qmdWatcherHandle.stop()
     qmdWatcherHandle = null
@@ -2077,6 +2331,8 @@ export async function stopServer(): Promise<void> {
   bus.unsubscribe('heartbeat-config')
   bus.unsubscribe('embedding-sync')
   bus.unsubscribe('setup-health')
+  bus.unsubscribe('qmd-task-sync')
+  bus.unsubscribe('qmd-session-sync')
   closeWss()
 
   if (httpServer) {

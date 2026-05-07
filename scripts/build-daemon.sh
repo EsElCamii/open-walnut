@@ -1,5 +1,5 @@
 #!/bin/bash
-# Build cross-compiled daemon binaries for remote Linux hosts.
+# Build cross-compiled daemon binaries for remote Linux hosts and local macOS.
 # Requires Bun (https://bun.sh).
 #
 # Usage:
@@ -9,25 +9,73 @@
 # Output:
 #   dist/daemon-binaries/daemon-linux-x64
 #   dist/daemon-binaries/daemon-linux-arm64
+#   dist/daemon-binaries/daemon-darwin-arm64
+#
+# Version strategy: hash of daemon source files. Immune to git dirty state,
+# forgotten commits, or branch switches — if any byte of the sources changes
+# the version string changes, which forces the remote host to redeploy on
+# next connect (see DaemonConnection.shouldUpgradeDaemon).
 set -e
 
-VERSION=$(git rev-parse --short HEAD 2>/dev/null || echo "dev")
+cd "$(dirname "$0")/.."
+
+SOURCES=(
+  src/providers/daemon-standalone.ts
+  src/providers/daemon-core.ts
+  src/providers/daemon-source.ts
+)
+
+# sha256 of daemon source files, per-file path + NUL + content + NUL, then
+# truncated to 12 hex chars (48 bits) — enough uniqueness for this small file
+# set, short in logs. The NUL separators prevent boundary collisions between
+# files (shifting bytes between file A and B should yield a different hash).
+#
+# Keep in sync with daemon-version-check.ts:computeExpectedDaemonVersion().
+# Both must hash the SAME bytes in the SAME order.
+if command -v sha256sum >/dev/null 2>&1; then
+  HASHER="sha256sum"
+else
+  HASHER="shasum -a 256"
+fi
+HASH=$(
+  for f in "${SOURCES[@]}"; do
+    # Fail loudly if a source file is missing.
+    if [ ! -f "$f" ]; then
+      echo "build-daemon.sh: missing source file: $f" >&2
+      exit 1
+    fi
+    printf '%s\0' "$f"
+    cat "$f"
+    printf '\0'
+  done | $HASHER | cut -c1-12
+)
+VERSION="walnut-daemon-${HASH}"
 OUTDIR="dist/daemon-binaries"
 mkdir -p "$OUTDIR"
 
-echo "Building daemon binaries (version: walnut-daemon-$VERSION)..."
+echo "Building daemon binaries (version: $VERSION)..."
 
 bun build --compile --target=bun-linux-x64 --minify \
-  --define "process.env.DAEMON_VERSION='walnut-daemon-$VERSION'" \
+  --define "process.env.DAEMON_VERSION='$VERSION'" \
   --outfile "$OUTDIR/daemon-linux-x64" \
   src/providers/daemon-standalone.ts
-echo "walnut-daemon-$VERSION" > "$OUTDIR/daemon-linux-x64.version"
+echo "$VERSION" > "$OUTDIR/daemon-linux-x64.version"
 
 bun build --compile --target=bun-linux-arm64 --minify \
-  --define "process.env.DAEMON_VERSION='walnut-daemon-$VERSION'" \
+  --define "process.env.DAEMON_VERSION='$VERSION'" \
   --outfile "$OUTDIR/daemon-linux-arm64" \
   src/providers/daemon-standalone.ts
-echo "walnut-daemon-$VERSION" > "$OUTDIR/daemon-linux-arm64.version"
+echo "$VERSION" > "$OUTDIR/daemon-linux-arm64.version"
+
+bun build --compile --target=bun-darwin-arm64 --minify \
+  --define "process.env.DAEMON_VERSION='$VERSION'" \
+  --outfile "$OUTDIR/daemon-darwin-arm64" \
+  src/providers/daemon-standalone.ts
+echo "$VERSION" > "$OUTDIR/daemon-darwin-arm64.version"
+
+# Invalidate stale .gz caches — DaemonConnection.deployBinary reuses them
+# if present, which would ship an old binary under a new version label.
+rm -f "$OUTDIR"/daemon-linux-*.gz
 
 echo "Done. Binaries:"
-ls -lh "$OUTDIR"/daemon-linux-*
+ls -lh "$OUTDIR"/daemon-*

@@ -4,7 +4,7 @@
  * Delegates all operations to a DaemonConnection (WebSocket → remote daemon).
  * The daemon manages the Claude CLI process on the remote machine.
  *
- * KEY DIFFERENCES from LocalSessionManager:
+ * KEY DIFFERENCES from a hypothetical local-only manager:
  * - No local JSONL file — daemon streams events via WebSocket, we track lastEventAt in memory
  * - No local FIFO — daemon writes to remote FIFO
  * - No PID monitoring — daemon sends exit events
@@ -36,7 +36,7 @@ import type {
 
 export class RemoteSessionManager implements SessionManager {
   private conn: DaemonConnection | null = null
-  private sshTarget: SshTarget
+  private sshTarget: SshTarget | null
   private hostKey: string
   private _pid: number | null = null
   private _remoteOutputFile: string | null = null
@@ -54,8 +54,16 @@ export class RemoteSessionManager implements SessionManager {
    */
   private _prevSid: string | null = null
   private _lastEventAt = 0
+  // UUIDs of JSONL events already delivered to downstream. Used to dedup
+  // events arriving via two paths — the daemon's realtime push, or any
+  // future catch-up / resync mechanism (daemon's attach replay, full
+  // periodic pull). Claude Code assigns each message a uuid in its JSONL
+  // output; collisions across different sources are intentional (same
+  // logical event). No uuid (e.g. `system.init` synthesized by daemon or
+  // walnut) means always deliver.
+  private _seenUuids: Set<string> = new Set()
 
-  readonly isRemote = true
+  get isRemote(): boolean { return this.hostKey !== '__local__' }
   readonly processName = 'daemon'
 
   private _directWsUrl: string | undefined
@@ -63,7 +71,7 @@ export class RemoteSessionManager implements SessionManager {
   constructor(
     private tmpId: string,
     hostKey: string,
-    sshTarget: SshTarget,
+    sshTarget: SshTarget | null,
     directWsUrl?: string,
   ) {
     this.hostKey = hostKey
@@ -86,15 +94,17 @@ export class RemoteSessionManager implements SessionManager {
   // ── Connection ──
 
   /**
-   * Establish connection to the daemon. Uses direct WebSocket in test mode,
-   * SSH tunnel in production.
+   * Establish connection to the daemon. Uses direct WebSocket for local daemon
+   * or test mode, SSH tunnel for remote production hosts.
    */
   private async ensureConnected(): Promise<DaemonConnection> {
     if (this._directWsUrl) {
       this.conn = new DaemonConnection(this.hostKey, this.sshTarget)
       await this.conn.connectDirect(this._directWsUrl)
-    } else {
+    } else if (this.sshTarget) {
       this.conn = await getDaemonConnection(this.hostKey, this.sshTarget)
+    } else {
+      throw new Error(`RemoteSessionManager: no directWsUrl and no sshTarget for host "${this.hostKey}"`)
     }
     return this.conn
   }
@@ -118,7 +128,8 @@ export class RemoteSessionManager implements SessionManager {
     // before the session starts. The message already references this path as a
     // pointer prompt, so no rewrite is needed. Failure here is fatal — the session
     // would otherwise launch with Claude unable to Read the referenced context.
-    if (opts.spillFile) {
+    // Skip for local daemon — same filesystem, file already exists at that path.
+    if (opts.spillFile && this.isRemote) {
       await this.uploadSpillFile(opts.spillFile.localPath)
     }
 
@@ -131,6 +142,7 @@ export class RemoteSessionManager implements SessionManager {
       cwd: opts.cwd,
       message: preparedMessage,
       resume: opts.resume ?? false,
+      mode: opts.mode,
     }
 
     let result: Record<string, unknown>
@@ -247,6 +259,7 @@ export class RemoteSessionManager implements SessionManager {
     const attachPayload = {
       sid: opts.sessionId,
       fromOffset: opts.fromOffset ?? 0,
+      mode: opts.mode,
     }
 
     let result: Record<string, unknown>
@@ -286,21 +299,76 @@ export class RemoteSessionManager implements SessionManager {
       alive,
     })
 
+    const pendingCtrl = result.pendingCtrl as { reqId: string; toolName: string; request: Record<string, unknown>; receivedAt: number } | null | undefined
+
     return {
       pid: this._pid ?? 0,
       alive,
       outputFile: `remote://${this.hostKey}/${this._sid}`,
+      pendingCtrl: pendingCtrl ?? null,
+    }
+  }
+
+  // ── Re-attach after daemon reconnect ──
+  //
+  // When the SSH tunnel / daemon WebSocket drops, the daemon's close handler
+  // calls stopWatching() for every session this connection was watching (see
+  // daemon-source.ts:1438). After reconnect, the daemon has no watcher for
+  // this session's JSONL file, so newly-produced events never reach walnut —
+  // `_lastEventAt` stops advancing, and SessionHealthMonitor eventually kills
+  // the session even though the CLI is still producing output remotely.
+  //
+  // Call this on every successful reconnect to tell the daemon "I want JSONL
+  // events for <sid> again, starting from byte offset X". The daemon's
+  // cmdAttach will installStartWatching(ws, sid, offset) → new watcher for
+  // the new ws. The onEvent listener is also re-bound to the new connection
+  // so JSONL events reach this.handleDaemonEvent() again.
+  async reattachWatcher(): Promise<boolean> {
+    if (!this._sid || !this._onOutput) return false
+    try {
+      await this.ensureConnected()
+      // Rebind event listener on the (possibly new) DaemonConnection instance.
+      if (this.unsubscribeEvent) {
+        this.unsubscribeEvent()
+        this.unsubscribeEvent = null
+      }
+      this.unsubscribeEvent = this.conn!.onEvent((event) => this.handleDaemonEvent(event))
+
+      // Resume from the last byte walnut has processed — avoids replaying
+      // content the UI has already rendered (would cause duplicate blocks).
+      const result = await this.conn!.send('attach', {
+        sid: this._sid,
+        fromOffset: this._fileSize || 0,
+      })
+      if (result.ok) {
+        log.session.info('RemoteSessionManager: reattached watcher after reconnect', {
+          host: this.hostKey, sid: this._sid, fromOffset: this._fileSize || 0,
+        })
+        return true
+      }
+      log.session.warn('RemoteSessionManager: reattach failed', {
+        host: this.hostKey, sid: this._sid, error: result.error,
+      })
+      return false
+    } catch (err) {
+      log.session.warn('RemoteSessionManager: reattach exception', {
+        host: this.hostKey, sid: this._sid,
+        error: err instanceof Error ? err.message : String(err),
+      })
+      return false
     }
   }
 
   // ── Messaging ──
 
-  writeMessage(message: string): boolean {
-    // Daemon's `cmdSend` is the atomic source of truth for pipe liveness — it
-    // attempts the FIFO write and returns `{ok:false, reason:'ENXIO'|'EAGAIN'}`
-    // when the remote process is gone (handled below). We intentionally do NOT
-    // gate on `_hasPipe` here; it's kept as a liveness breadcrumb read by other
-    // call sites (see claude-code-session.ts) but must not short-circuit sends.
+  async writeMessage(message: string): Promise<boolean> {
+    // Strict ack: we await the daemon's `cmdSend` reply and return false on any
+    // failure (FIFO write ENXIO/EAGAIN, session not found, transport error).
+    // Caller (SessionRunner.processNext) takes the false and falls through to
+    // gracefulStop + --resume respawn, so the current message is not drained
+    // from the queue until delivery is truly confirmed. Previously this method
+    // returned true optimistically and the fire-and-forget daemon reply only
+    // logged a warning — any ENXIO silently lost the message.
     if (!this.conn?.connected || !this._sid) return false
 
     // Capture conn/sid synchronously — they may change during the async image upload
@@ -308,43 +376,74 @@ export class RemoteSessionManager implements SessionManager {
     const conn = this.conn
     const sid = this._sid
 
-    // Fire-and-forget: upload local images then send rewritten message via daemon
-    this.prepareOutbound(message).then((prepared) => {
-      return conn.send('send', { sid, message: prepared })
-    }).then((result) => {
-      if (!result.ok) {
-        const reason = String(result.reason || result.error || '')
-        log.session.warn('RemoteSessionManager: send failed', {
-          host: this.hostKey, sid, reason,
-        })
-        // FIFO write failed — CLI process is dead or pipe is broken.
-        // Clear hasPipe and trigger onExit so session runner falls through
-        // to --resume on the next processNext call.
-        // Covers: 'not found' (session unknown), 'ENXIO' (no reader on pipe),
-        // 'EAGAIN' (pipe buffer full, nobody draining).
-        if (reason.includes('not found') || reason === 'ENXIO' || reason === 'EAGAIN') {
-          // Guard against double-fire: a stale daemon `exit` event may have
-          // already cleared _hasPipe and called _onExit(1).
-          if (this._hasPipe) {
-            this._hasPipe = false
-            this._onExit?.(1)
-          }
+    try {
+      const prepared = await this.prepareOutbound(message)
+      const result = await conn.send('send', { sid, message: prepared })
+      if (result.ok) {
+        // Bump lastEventAt on successful delivery. Without this, the
+        // SessionHealthMonitor idle-timeout check (default 30 min) uses a
+        // stale last-JSONL-event timestamp and can kill a session that was
+        // idle for >30 min but just received a fresh user message — the
+        // remote CLI is actively working on the new turn, but health monitor
+        // sees no inbound JSONL event yet and assumes the session is dead.
+        // (Local sessions don't hit this because their lastEventAt is derived
+        // from file mtime, and the FIFO write updates the file.)
+        this._lastEventAt = Date.now()
+        return true
+      }
+
+      const reason = String(result.reason || result.error || '')
+      log.session.warn('RemoteSessionManager: send failed', {
+        host: this.hostKey, sid, reason,
+      })
+      // FIFO write failed — CLI process is dead or pipe is broken.
+      // Fire onExit once per transport death so downstream cleanup runs; the
+      // `_hasPipe` flag guards against double-fire if the daemon already pushed
+      // an `exit` event. Returning false (below) is independent of that guard
+      // so a stopped session still gets respawned on the next send.
+      if (reason.includes('not found') || reason === 'ENXIO' || reason === 'EAGAIN') {
+        if (this._hasPipe) {
+          this._hasPipe = false
+          this._onExit?.(1)
         }
       }
-    }).catch((err) => {
+      return false
+    } catch (err) {
       log.session.warn('RemoteSessionManager: send error', {
         host: this.hostKey, error: err instanceof Error ? err.message : String(err),
       })
-    })
-
-    return true // Optimistic — actual delivery status comes via daemon events
+      return false
+    }
   }
 
-  writeRaw(_json: string): boolean {
-    // TODO: Remote permission-prompt-tool support requires daemon protocol extension.
-    // For now, remote sessions don't support --permission-prompt-tool stdio.
-    log.session.debug('RemoteSessionManager: writeRaw not supported (remote sessions)')
-    return false
+  async writeRaw(json: string): Promise<boolean> {
+    // control_response for --permission-prompt-tool stdio. Routed through the
+    // daemon's `sendRaw` command (daemon-core.handleSendRawCommand), which
+    // writes the line to the session FIFO without the `{type:"user",...}`
+    // wrapping that cmdSend applies.
+    if (!this.conn?.connected || !this._sid) return false
+    const conn = this.conn
+    const sid = this._sid
+    try {
+      const result = await conn.send('sendRaw', { sid, raw: json })
+      if (result.ok) return true
+      const reason = String(result.reason || result.error || '')
+      log.session.warn('RemoteSessionManager: writeRaw failed', {
+        host: this.hostKey, sid, reason,
+      })
+      if (reason.includes('not found') || reason === 'ENXIO' || reason === 'EAGAIN') {
+        if (this._hasPipe) {
+          this._hasPipe = false
+          this._onExit?.(1)
+        }
+      }
+      return false
+    } catch (err) {
+      log.session.warn('RemoteSessionManager: writeRaw error', {
+        host: this.hostKey, error: err instanceof Error ? err.message : String(err),
+      })
+      return false
+    }
   }
 
   writeSyntheticUserEvent(_message: string, _walnutMessageId: string): void {
@@ -354,25 +453,62 @@ export class RemoteSessionManager implements SessionManager {
     // The canonical JSONL on the remote host is the source of truth for history.
   }
 
+  async setMode(mode: string): Promise<boolean> {
+    if (!this.conn?.connected || !this._sid) return false
+    try {
+      const result = await this.conn.send('setMode', { sid: this._sid, mode })
+      return result.ok === true
+    } catch {
+      return false
+    }
+  }
+
   // ── Process Control ──
 
   async stop(): Promise<void> {
-    if (!this.conn?.connected || !this._sid) return
+    if (!this.conn?.connected || !this._sid) {
+      log.session.info('RemoteSessionManager.stop: skipped', {
+        host: this.hostKey, sid: this._sid,
+        connConnected: !!this.conn?.connected, hasSid: !!this._sid,
+      })
+      return
+    }
 
+    log.session.info('RemoteSessionManager.stop: sending stop cmd to daemon', { host: this.hostKey, sid: this._sid })
     try {
-      await this.conn.send('stop', { sid: this._sid })
+      const result = await this.conn.send('stop', { sid: this._sid })
+      log.session.info('RemoteSessionManager.stop: daemon acked', {
+        host: this.hostKey, sid: this._sid, result,
+      })
     } catch (err) {
       log.session.warn('RemoteSessionManager: stop error', {
-        host: this.hostKey, error: err instanceof Error ? err.message : String(err),
+        host: this.hostKey, sid: this._sid,
+        error: err instanceof Error ? err.message : String(err),
       })
     }
   }
 
   kill(): void {
-    if (!this.conn?.connected || !this._sid) return
+    if (!this.conn?.connected || !this._sid) {
+      log.session.info('RemoteSessionManager.kill: skipped', {
+        host: this.hostKey, sid: this._sid,
+        connConnected: !!this.conn?.connected, hasSid: !!this._sid,
+      })
+      return
+    }
 
-    // Fire-and-forget
-    this.conn.send('stop', { sid: this._sid }).catch(() => {})
+    log.session.info('RemoteSessionManager.kill: sending stop cmd to daemon (fire-and-forget)', {
+      host: this.hostKey, sid: this._sid,
+    })
+    // Fire-and-forget — but log the outcome so we can tell if daemon actually received it
+    this.conn.send('stop', { sid: this._sid })
+      .then(result => log.session.info('RemoteSessionManager.kill: daemon acked', {
+        host: this.hostKey, sid: this._sid, result,
+      }))
+      .catch(err => log.session.warn('RemoteSessionManager.kill: daemon error', {
+        host: this.hostKey, sid: this._sid,
+        error: err instanceof Error ? err.message : String(err),
+      }))
     this._hasPipe = false
   }
 
@@ -446,6 +582,8 @@ export class RemoteSessionManager implements SessionManager {
   // ── Message Processing ──
 
   async prepareOutbound(message: string): Promise<string> {
+    // Local daemon: same filesystem — no path rewriting needed
+    if (!this.isRemote) return message
     if (!this.conn?.connected) return message
 
     let rewritten = message
@@ -496,6 +634,9 @@ export class RemoteSessionManager implements SessionManager {
   }
 
   processInbound(text: string, sessionId: string, cwd?: string): string {
+    // Local daemon: same filesystem — no path rewriting needed
+    if (!this.isRemote) return text
+
     // Download remote images and rewrite paths to local
     const remotePaths = findRemoteImagePaths(text)
     let rewritten = text
@@ -567,6 +708,26 @@ export class RemoteSessionManager implements SessionManager {
           this._lastEventAt = Date.now()
           this._fileSize += Buffer.byteLength(event.line + '\n', 'utf-8') // feeds fromOffset in retryStartAfterReconnect()
 
+          // UUID-based dedup. The daemon's cmdAttach catch-up may replay
+          // bytes that were already delivered via realtime push before a
+          // tunnel flap; and any future fullResync path will also replay.
+          // Skip lines whose uuid we've already forwarded. Lines without a
+          // uuid (e.g. system/init) always pass through — they're rare and
+          // usually idempotent at the UI layer anyway.
+          try {
+            const parsed = JSON.parse(event.line) as { uuid?: unknown }
+            const uuid = typeof parsed.uuid === 'string' ? parsed.uuid : null
+            if (uuid) {
+              if (this._seenUuids.has(uuid)) {
+                return
+              }
+              this._seenUuids.add(uuid)
+            }
+          } catch {
+            // Non-JSON or malformed line — pass through. Downstream parser
+            // will log and skip; we don't second-guess it.
+          }
+
           // Forward to handler
           this._onOutput?.({ line: event.line })
         }
@@ -577,6 +738,35 @@ export class RemoteSessionManager implements SessionManager {
           this._lastEventAt = Date.now()
           this._hasPipe = false
           this._onExit?.(event.code ?? 1, event.stderr)
+        }
+        break
+
+      case 'session_state':
+        // Daemon-authoritative state broadcast (running | dead). On dead,
+        // fire onExit so the session runner transitions to stopped. This is
+        // a backstop for cases where the `exit` event is lost (rare) and also
+        // the single entry point for daemon-side reap detection (idle scan,
+        // reconcile, ENXIO pre-check, orphan poll).
+        if (event.sid === this._sid || event.sid === this._prevSid) {
+          const state = event.state as string | undefined
+          if (state === 'dead') {
+            this._lastEventAt = Date.now()
+            if (this._hasPipe) {
+              this._hasPipe = false
+              this._onExit?.((event.exitCode as number | undefined) ?? 1)
+            }
+          }
+        }
+        break
+
+      case 'stderr_tail':
+        // Emitted by daemon on every `result` JSONL record. Log-only for now —
+        // grep this when a stuck/empty-result turn happens to see what the remote
+        // Claude CLI wrote to stderr (MCP init errors, validation failures, etc).
+        if ((event.sid === this._sid || event.sid === this._prevSid) && typeof event.tail === 'string') {
+          log.session.info('RemoteSessionManager: CLI stderr tail', {
+            sessionId: this._sid, sid: event.sid, tail: event.tail,
+          })
         }
         break
 

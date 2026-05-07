@@ -379,7 +379,7 @@ describe('ClaudeCodeSession', () => {
     expect(rd.result).toContain('[permission-mode:bypassPermissions]');
   });
 
-  it('no mode = no --permission-mode flag in CLI args', async () => {
+  it('no mode defaults to bypassPermissions', async () => {
     const collected = collectEvents();
     const session = new ClaudeCodeSession('task-default', 'proj', MOCK_CLI);
     session.send('default mode test');
@@ -387,8 +387,9 @@ describe('ClaudeCodeSession', () => {
     const result = await waitForResult(collected);
     expect(result.name).toBe(EventNames.SESSION_RESULT);
     const rd = result.data as { result: string };
-    // Result should NOT contain any permission-mode marker
-    expect(rd.result).not.toContain('[permission-mode:');
+    // No mode → Walnut now defaults to bypassPermissions (users shouldn't be
+    // prompted to approve every edit; plan mode must be explicitly requested).
+    expect(rd.result).toContain('[permission-mode:bypassPermissions]');
   });
 
   it('send() with cwd passes working directory to spawned process', async () => {
@@ -550,7 +551,7 @@ describe('SessionRunner', () => {
     expect(rd.result).toContain('[permission-mode:bypassPermissions]');
   });
 
-  it('no mode in session:start = no permission flag in result', async () => {
+  it('no mode in session:start defaults to bypassPermissions', async () => {
     const collected = collectEvents();
 
     bus.emit(EventNames.SESSION_START, {
@@ -562,7 +563,7 @@ describe('SessionRunner', () => {
     const result = await waitForResult(collected);
     expect(result.name).toBe(EventNames.SESSION_RESULT);
     const rd = result.data as { result: string };
-    expect(rd.result).not.toContain('[permission-mode:');
+    expect(rd.result).toContain('[permission-mode:bypassPermissions]');
   });
 
   it('emits session:error for session:send with unknown session ID', async () => {
@@ -1083,6 +1084,118 @@ describe('ClaudeCodeSession.attachToExisting', () => {
     expect(session.host).toBeNull();
 
     session.detach();
+  });
+});
+
+// ══════════════════════════════════════════════════════════════════
+//  Layer 7b: isSessionStillAlive (rehydrate decision)
+// ══════════════════════════════════════════════════════════════════
+
+describe('SessionRunner.isSessionStillAlive', () => {
+  it('returns true for a local record whose PID is the current process', async () => {
+    const runner = new SessionRunner(MOCK_CLI);
+    try {
+      const record = {
+        claudeSessionId: 'alive-test',
+        taskId: 't',
+        project: 'p',
+        process_status: 'running',
+        mode: 'default',
+        startedAt: new Date().toISOString(),
+        lastActiveAt: new Date().toISOString(),
+        messageCount: 0,
+        pid: process.pid,
+      } as any;
+      const result = await (runner as any).isSessionStillAlive(record);
+      expect(result).toBe(true);
+    } finally {
+      runner.destroy();
+    }
+  });
+
+  it('returns false for a local record with an obviously dead PID', async () => {
+    const runner = new SessionRunner(MOCK_CLI);
+    try {
+      const record = {
+        claudeSessionId: 'dead-test',
+        taskId: 't',
+        project: 'p',
+        process_status: 'running',
+        mode: 'default',
+        startedAt: new Date().toISOString(),
+        lastActiveAt: new Date().toISOString(),
+        messageCount: 0,
+        pid: 2 ** 22, // absurdly high PID that won't exist
+      } as any;
+      const result = await (runner as any).isSessionStillAlive(record);
+      expect(result).toBe(false);
+    } finally {
+      runner.destroy();
+    }
+  });
+
+  it('returns false for a local record with no PID', async () => {
+    const runner = new SessionRunner(MOCK_CLI);
+    try {
+      const record = {
+        claudeSessionId: 'nopid-test',
+        taskId: 't',
+        project: 'p',
+        process_status: 'running',
+        mode: 'default',
+        startedAt: new Date().toISOString(),
+        lastActiveAt: new Date().toISOString(),
+        messageCount: 0,
+      } as any;
+      const result = await (runner as any).isSessionStillAlive(record);
+      expect(result).toBe(false);
+    } finally {
+      runner.destroy();
+    }
+  });
+
+  it('routes remote records through probeDaemonSession', async () => {
+    vi.resetModules();
+    const probeMock = vi.fn().mockResolvedValue({ alive: true });
+    vi.doMock('../../src/providers/daemon-connection.js', () => ({
+      probeDaemonSession: probeMock,
+      isDaemonConnected: () => false,
+      getDaemonDisconnectedSince: () => null,
+      getDaemonConnection: vi.fn(),
+      DaemonConnection: class {},
+    }));
+
+    const { SessionRunner: FreshRunner } = await import('../../src/providers/claude-code-session.js');
+    const runner = new FreshRunner(MOCK_CLI);
+    try {
+      const record = {
+        claudeSessionId: 'remote-test',
+        taskId: 't',
+        project: 'p',
+        process_status: 'running',
+        mode: 'default',
+        startedAt: new Date().toISOString(),
+        lastActiveAt: new Date().toISOString(),
+        messageCount: 0,
+        host: 'clouddev',
+        pid: 12345,
+      } as any;
+      const result = await (runner as any).isSessionStillAlive(record);
+      expect(result).toBe(true);
+      expect(probeMock).toHaveBeenCalledWith('clouddev', 'remote-test');
+
+      probeMock.mockResolvedValueOnce({ alive: false });
+      const result2 = await (runner as any).isSessionStillAlive(record);
+      expect(result2).toBe(false);
+
+      probeMock.mockResolvedValueOnce(null); // daemon unreachable
+      const result3 = await (runner as any).isSessionStillAlive(record);
+      expect(result3).toBe(false);
+    } finally {
+      runner.destroy();
+      vi.doUnmock('../../src/providers/daemon-connection.js');
+      vi.resetModules();
+    }
   });
 });
 

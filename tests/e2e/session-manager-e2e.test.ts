@@ -17,7 +17,7 @@
  *  10. Health API: daemon status, session counts
  *
  * What's real: Express server, WebSocket, event bus, session tracker, SessionManager,
- *   LocalSessionManager, RemoteSessionManager, DaemonConnection, health monitor.
+ *   RemoteSessionManager, DaemonConnection, health monitor.
  * What's mocked: constants.js (temp dir), Claude CLI (mock-claude.mjs),
  *   SSH (bypassed via directWsUrl for remote sessions).
  */

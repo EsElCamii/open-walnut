@@ -22,7 +22,7 @@
  * Client sends JSON commands, daemon sends JSON events.
  * Commands: start, attach, send, stop, status, rename, read-history,
  *   subscribe-agent, unsubscribe-agent, write-inbox, fs.read, fs.write,
- *   fs.ls, fs.find, list, ping
+ *   fs.ls, fs.find, fs.stat, list, ping
  * Events: jsonl (JSONL line), exit (process exited), agent (subagent data),
  *   ok (command response), error (command error)
  */
@@ -37,8 +37,30 @@
  * - Provides file system operations
  * - Never auto-exits; kills idle sessions after 2hr with no watchers
  */
+import { REQUIRED_DAEMON_CAPABILITIES } from './daemon-capabilities.js'
+
 export function getDaemonSource(): string {
-  return DAEMON_SOURCE
+  // Inject capability list so the fallback node daemon answers `hello` with
+  // the same list as the compiled binary.
+  //
+  // Placeholder substitution (rather than import) because DAEMON_SOURCE is a
+  // raw string executed via `node -e ...` on the remote host — imports can't
+  // resolve there, so the caps list must be inlined at string-build time on
+  // the local machine.
+  //
+  // replaceAll + count check defends against two regressions: (1) someone
+  // adds a second placeholder copy and forgets it, (2) someone typos the
+  // placeholder so no substitution happens and the daemon ships with a
+  // literal `__DAEMON_CAPABILITIES__` that crashes at parse time.
+  const capsLiteral = JSON.stringify([...REQUIRED_DAEMON_CAPABILITIES])
+  const placeholder = '__DAEMON_CAPABILITIES__'
+  const matches = DAEMON_SOURCE.split(placeholder).length - 1
+  if (matches !== 1) {
+    throw new Error(
+      `daemon-source: expected exactly 1 '${placeholder}' placeholder in DAEMON_SOURCE, found ${matches}`,
+    )
+  }
+  return DAEMON_SOURCE.replaceAll(placeholder, capsLiteral)
 }
 
 // ── Daemon source code ──
@@ -70,7 +92,8 @@ const { spawn, execSync } = require('child_process');
 const crypto = require('crypto');
 
 // ── Constants ──
-const DAEMON_DIR = '/tmp/open-walnut';
+// DAEMON_DIR default is /tmp/open-walnut; tests override via env var.
+const DAEMON_DIR = process.env.WALNUT_DAEMON_DIR || '/tmp/open-walnut';
 const STREAMS_DIR = '/tmp/open-walnut-streams';
 const PORT_FILE = path.join(DAEMON_DIR, 'daemon.port');
 const PID_FILE = path.join(DAEMON_DIR, 'daemon.pid');
@@ -92,8 +115,283 @@ function logMsg(level, msg, data) {
 }
 
 // ── Managed Sessions ──
-// Each session has: { proc, pipe, jsonlPath, watchers, offset, onExit }
+// Each session has: { proc, pipe, jsonlPath, watcher, subscribers, offset,
+//   state: 'running' | 'dead', exitCode, exitReason, exitedAt, parented,
+//   startTime, cwd, args, orphanPollTimer }
+//
+// watcher: { pollTimer, offset } | null — session-bound file tailer.
+//   Lives exactly as long as the session process. NOT tied to any WebSocket.
+// subscribers: Set<WebSocket> — clients receiving push events for this session.
+//   Add on cmdAttach / cmdStart, remove on ws.close. watcher is unaffected.
+//
+// Historical (pre-2026-05): watcher was Map<ws, perWsWatcher>. That tied
+// watcher lifetime to WebSocket lifetime — when the ws dropped (SSH tunnel
+// flap, network blip), watchers were cleared and new ws had no push until it
+// explicitly re-attached. Produced the long-running "no watchers" bug where
+// remote sessions silently lost streaming after any reconnect. Fixed by
+// splitting into session-bound watcher + ws-bound subscribers set.
+//
+// state is authoritative — daemon is the single source of truth for CLI/FIFO
+// lifecycle. See reapSession() below.
 const sessions = new Map();
+
+// ── Write-ahead Registry (Phase C) ──
+const REGISTRY_FILE = path.join(DAEMON_DIR, 'sessions.json');
+function readRegistry() {
+  try {
+    const raw = fs.readFileSync(REGISTRY_FILE, 'utf-8');
+    const data = JSON.parse(raw);
+    if (data && typeof data === 'object' && data.sessions && typeof data.sessions === 'object') {
+      return data.sessions;
+    }
+  } catch {}
+  return {};
+}
+function persistRegistry() {
+  const out = {};
+  for (const [sid, s] of sessions) {
+    if (s.state !== 'running' || !s.pid) continue;
+    out[sid] = {
+      pid: s.pid,
+      startTime: s.startTime,
+      pipePath: s.pipePath,
+      jsonlPath: s.jsonlPath,
+      pgidPath: s.pgidPath,
+      cwd: s.cwd,
+      args: s.args,
+      spawnedAt: new Date().toISOString(),
+      parented: s.parented,
+      mode: s.mode,
+      pendingCtrl: s.pendingCtrl || undefined,
+    };
+  }
+  const body = JSON.stringify({ version: 1, sessions: out });
+  const tmp = REGISTRY_FILE + '.tmp';
+  try {
+    fs.writeFileSync(tmp, body);
+    try {
+      const fd = fs.openSync(tmp, 'r+');
+      try { fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
+    } catch {}
+    fs.renameSync(tmp, REGISTRY_FILE);
+  } catch (err) {
+    logMsg('warn', 'registry persist failed', { error: err.message });
+  }
+}
+
+/** Read /proc/<pid>/stat field 22 (start_time) on Linux. */
+function readStartTime(pid) {
+  try {
+    const raw = fs.readFileSync('/proc/' + pid + '/stat', 'utf-8');
+    const rparen = raw.lastIndexOf(')');
+    if (rparen < 0) return null;
+    const fields = raw.slice(rparen + 2).split(' ');
+    return fields[19] || null;
+  } catch {
+    return null;
+  }
+}
+
+// ── Session state broadcast (Phase B) ──
+function broadcastSessionState(sid, state, extra) {
+  const payload = Object.assign({ sid, state }, extra || {});
+  for (const client of wsClients) {
+    try { client.send(JSON.stringify(Object.assign({ ev: 'session_state' }, payload))); } catch {}
+  }
+}
+
+// ── Clean turn-complete detector ──
+// claude -p writes a final {"type":"result","stop_reason":"end_turn"} line
+// and exits 0 after every turn. Every death path here (orphan-poll, send-
+// precheck, send-enxio) can't see the true exit code because the process
+// was adopted or died between SIGCHLD and our poll. Tail the JSONL as the
+// authoritative signal — clean completion should not be reported as error.
+function isTurnCompleteExit(jsonlPath) {
+  try {
+    const stat = fs.statSync(jsonlPath);
+    if (stat.size === 0) return false;
+    const readLen = Math.min(stat.size, 8192);
+    const start = Math.max(0, stat.size - readLen);
+    const fd = fs.openSync(jsonlPath, 'r');
+    const buf = Buffer.alloc(readLen);
+    fs.readSync(fd, buf, 0, readLen, start);
+    fs.closeSync(fd);
+    const text = buf.toString('utf-8');
+    const lines = text.split('\n').map(l => l.trim()).filter(Boolean);
+    if (lines.length === 0) return false;
+    const last = lines[lines.length - 1];
+    const parsed = JSON.parse(last);
+    if (parsed.type !== 'result') return false;
+    if (parsed.subtype === 'error_max_turns' || parsed.subtype === 'error_during_execution') return false;
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// ── Idempotent Reaper (Phase B, primitive P1) ──
+function reapSession(sid, code, reason) {
+  const session = sessions.get(sid);
+  if (!session) return;
+  if (session.state === 'dead') return;  // idempotent guard
+
+  // Normalize code=-1 from poll-based death paths to 0 when the CLI finished
+  // a turn cleanly. Prevents spurious "exited with code -1" errors in the UI
+  // every time claude -p naturally exits at the end of a turn.
+  if (code !== 0 && isTurnCompleteExit(session.jsonlPath)) {
+    logMsg('info', 'reapSession: turn-complete detected, normalizing exit code', {
+      sid, pid: session.pid, originalCode: code, originalReason: reason,
+    });
+    code = 0;
+    reason = reason + '+turn-complete';
+  }
+
+  session.state = 'dead';
+  session.exitCode = code;
+  session.exitReason = reason;
+  session.exitedAt = Date.now();
+
+  logMsg('info', 'reapSession', { sid, pid: session.pid, code, reason });
+
+  if (session.orphanPollTimer) {
+    try { clearInterval(session.orphanPollTimer); } catch {}
+    session.orphanPollTimer = null;
+  }
+
+  try { fs.unlinkSync(session.pipePath); } catch {}
+
+  if (session.pid) {
+    try { killProcessGroup(session.pid, 'SIGTERM'); } catch {}
+    setTimeout(() => {
+      if (session.pid) { try { killProcessGroup(session.pid, 'SIGKILL'); } catch {} }
+    }, 2000);
+  }
+
+  let stderrTail;
+  try {
+    const errStat = fs.statSync(session.jsonlPath + '.err');
+    if (errStat.size > 0) {
+      const readLen = Math.min(errStat.size, 4096);
+      const start = Math.max(0, errStat.size - readLen);
+      const fd = fs.openSync(session.jsonlPath + '.err', 'r');
+      const buf = Buffer.alloc(readLen);
+      fs.readSync(fd, buf, 0, readLen, start);
+      fs.closeSync(fd);
+      stderrTail = buf.toString('utf-8').trim() || undefined;
+    }
+  } catch {}
+
+  try { persistRegistry(); } catch {}
+
+  // Stop the session-bound watcher first (no more pushes after this point).
+  stopSessionWatcher(sid);
+
+  // Notify all subscribers the session exited, then clear the set.
+  for (const client of session.subscribers) {
+    try { client.send(JSON.stringify({ ev: 'exit', sid, code, stderr: stderrTail })); } catch {}
+  }
+  session.subscribers.clear();
+  broadcastSessionState(sid, 'dead', { exitCode: code, reason, stderr: stderrTail });
+}
+
+// ── Orphan poll (Phase D, layer 3.2) ──
+const ORPHAN_POLL_INTERVAL_MS = 1000;
+function startOrphanPoll(sid) {
+  const session = sessions.get(sid);
+  if (!session || session.state !== 'running' || !session.pid || session.orphanPollTimer) return;
+  const pid = session.pid;
+  session.orphanPollTimer = setInterval(() => {
+    const s = sessions.get(sid);
+    if (!s || s.state !== 'running') {
+      if (s && s.orphanPollTimer) {
+        try { clearInterval(s.orphanPollTimer); } catch {}
+        s.orphanPollTimer = null;
+      }
+      return;
+    }
+    try { process.kill(pid, 0); } catch {
+      reapSession(sid, -1, 'orphan-poll-dead');
+      return;
+    }
+    if (s.startTime) {
+      const current = readStartTime(pid);
+      if (current && current !== s.startTime) {
+        reapSession(sid, -1, 'pid-recycled');
+      }
+    }
+  }, ORPHAN_POLL_INTERVAL_MS);
+}
+
+// ── Startup reconcile (Phase C, primitive P4) ──
+function reconcileRegistry() {
+  const registry = readRegistry();
+  for (const sid of Object.keys(registry)) {
+    const entry = registry[sid];
+    const pid = entry.pid;
+    if (!pid || pid <= 0) continue;
+
+    // Re-entrant guard: skip if already adopted (prevents timer leak on
+    // repeated reconcile calls).
+    if (sessions.has(sid)) continue;
+
+    const session = {
+      proc: null,
+      pipePath: entry.pipePath,
+      jsonlPath: entry.jsonlPath,
+      pgidPath: entry.pgidPath,
+      pid,
+      offset: 0,
+      watcher: null,
+      subscribers: new Set(),
+      exitCode: null,
+      state: 'running',
+      exitReason: null,
+      exitedAt: null,
+      parented: false,
+      startTime: entry.startTime,
+      cwd: entry.cwd || '',
+      args: entry.args || [],
+      orphanPollTimer: null,
+      mode: entry.mode || 'default',
+      pendingCtrl: entry.pendingCtrl || null,
+    };
+    sessions.set(sid, session);
+
+    let alive = false;
+    try { process.kill(pid, 0); alive = true; } catch (err) {
+      if (err && err.code === 'EPERM') {
+        reapSession(sid, -1, 'reconcile-not-ours');
+        continue;
+      }
+      reapSession(sid, -1, 'reconcile-dead');
+      continue;
+    }
+
+    if (alive && entry.startTime) {
+      const current = readStartTime(pid);
+      if (current && current !== entry.startTime) {
+        reapSession(sid, -1, 'reconcile-pid-recycled');
+        continue;
+      }
+    }
+
+    logMsg('info', 'reconcile: adopted orphan session', { sid, pid });
+    startOrphanPoll(sid);
+    broadcastSessionState(sid, 'running', { pid, adopted: true });
+  }
+
+  // Zombie FIFO sweep
+  try {
+    const files = fs.readdirSync(STREAMS_DIR);
+    for (const f of files) {
+      if (!f.endsWith('.pipe')) continue;
+      const sid = f.replace('.pipe', '');
+      if (!sessions.has(sid)) {
+        try { fs.unlinkSync(path.join(STREAMS_DIR, f)); } catch {}
+      }
+    }
+  } catch {}
+}
 
 // ── Process group helpers ──
 // Claude is spawned with detached:true, so pid === PGID.
@@ -312,7 +610,9 @@ function handleCommand(ws, msg) {
     case 'start': return cmdStart(ws, id, cmd);
     case 'attach': return cmdAttach(ws, id, cmd);
     case 'send': return cmdSend(ws, id, cmd);
+    case 'sendRaw': return cmdSendRaw(ws, id, cmd);
     case 'stop': return cmdStop(ws, id, cmd);
+    case 'setMode': return cmdSetMode(ws, id, cmd);
     case 'status': return cmdStatus(ws, id, cmd);
     case 'rename': return cmdRename(ws, id, cmd);
     case 'read-history': return cmdReadHistory(ws, id, cmd);
@@ -323,15 +623,20 @@ function handleCommand(ws, msg) {
     case 'fs.write': return cmdFsWrite(ws, id, cmd);
     case 'fs.ls': return cmdFsLs(ws, id, cmd);
     case 'fs.find': return cmdFsFind(ws, id, cmd);
+    case 'fs.stat': return cmdFsStat(ws, id, cmd);
     case 'list': return cmdList(ws, id);
     case 'ping': return sendOk(ws, id, { pong: true });
+    case 'hello': return sendOk(ws, id, {
+      version: process.env.DAEMON_VERSION || 'dev-source',
+      capabilities: __DAEMON_CAPABILITIES__,
+    });
     default: return sendError(ws, id, 'unknown command: ' + cmd.cmd);
   }
 }
 
 // ── Start a Claude session ──
 function cmdStart(ws, id, cmd) {
-  const { sid, args, cwd, message, resume } = cmd;
+  const { sid, args, cwd, message, resume, mode } = cmd;
   if (!sid || !args || !cwd || !message) {
     return sendError(ws, id, 'start: missing required fields (sid, args, cwd, message)');
   }
@@ -400,85 +705,193 @@ function cmdStart(ws, id, cmd) {
     pgidPath,
     pid,
     offset,
-    watchers: new Map(), // ws → watcher
+    watcher: null,           // session-bound file tailer (see ensureWatcher)
+    subscribers: new Set(),  // ws clients receiving push events
     exitCode: null,
+    state: 'running',
+    exitReason: null,
+    exitedAt: null,
+    parented: true,
+    startTime: readStartTime(pid),
+    cwd,
+    args,
+    orphanPollTimer: null,
+    mode: mode || 'default',
+    pendingCtrl: null,
   };
 
   proc.on('exit', (code) => {
-    sessionData.exitCode = code;
-    logMsg('info', 'session process exited', { sid, pid, code });
-
-    // Clean up MCP child processes that may survive Claude's exit
-    killProcessGroup(pid, 'SIGTERM');
-    setTimeout(() => killProcessGroup(pid, 'SIGKILL'), 2000);
-
-    // Broadcast exit to all connected clients watching this session
-    for (const client of sessionData.watchers.keys()) {
-      sendEvent(client, 'exit', { sid, code: code ?? 1 });
-    }
+    reapSession(sid, code == null ? 1 : code, 'proc-exit');
   });
 
   sessions.set(sid, sessionData);
+  try { persistRegistry(); } catch {}
 
-  // Start watching JSONL for this client
-  startWatching(ws, sid, offset);
+  broadcastSessionState(sid, 'running', { pid });
+  // Session-bound watcher: lives for the session lifetime, independent of ws.
+  // addSubscriber both ensures the watcher exists and adds this ws to the
+  // subscribers set; fromOffset=offset replays nothing (fresh file).
+  addSubscriber(ws, sid, offset);
 
   sendOk(ws, id, { pid, outputFile: jsonlPath, offset });
 }
 
+// ── Permission policy helpers ──
+
+function shouldAutoRespond(mode, toolName) {
+  if (mode === 'bypass') return true;
+  if (mode === 'plan') return toolName !== 'ExitPlanMode';
+  return false;
+}
+
+function buildControlResponse(requestId, request, allow, message) {
+  const result = allow
+    ? { behavior: 'allow', updatedInput: request.input || {} }
+    : { behavior: 'deny', message: message || 'Permission denied by daemon policy' };
+  return JSON.stringify({
+    type: 'control_response',
+    response: { subtype: 'success', request_id: requestId, response: result },
+  });
+}
+
+function writeFifoRaw(pipePath, raw) {
+  try {
+    const buf = Buffer.from(raw.endsWith('\\n') ? raw : raw + '\\n');
+    const fd = fs.openSync(pipePath, fs.constants.O_WRONLY | fs.constants.O_NONBLOCK);
+    try { fs.writeSync(fd, buf); } finally { fs.closeSync(fd); }
+    return true;
+  } catch { return false; }
+}
+
 // ── File watching for JSONL streaming ──
-function startWatching(ws, sid, fromOffset) {
+//
+// Watcher lifecycle is bound to the session, not to any WebSocket. A single
+// poll timer per session reads the JSONL file and fans out new lines to all
+// currently-subscribed ws clients. ws connects/disconnects do not affect the
+// watcher.
+
+// Idempotent: if the session already has a watcher, does nothing.
+function ensureWatcher(sid) {
   const session = sessions.get(sid);
   if (!session) return;
+  if (session.watcher) return; // already running
+  if (session.state !== 'running') return;
 
-  // If already watching, stop first
-  const existingWatcher = session.watchers.get(ws);
-  if (existingWatcher) {
-    existingWatcher.close();
-  }
+  let offset = session.offset || 0;
 
-  let offset = fromOffset || 0;
-
-  // Poll-based watcher (more reliable than fs.watch across filesystems)
-  const pollInterval = setInterval(() => {
+  const pollTimer = setInterval(() => {
+    const s = sessions.get(sid);
+    if (!s || s.state !== 'running') return; // reapSession will clean up
     try {
-      const stat = fs.statSync(session.jsonlPath);
-      if (stat.size > offset) {
-        const fd = fs.openSync(session.jsonlPath, 'r');
-        const bytesToRead = stat.size - offset;
-        const buf = Buffer.alloc(bytesToRead);
-        fs.readSync(fd, buf, 0, bytesToRead, offset);
-        fs.closeSync(fd);
-        offset = stat.size;
+      const stat = fs.statSync(s.jsonlPath);
+      if (stat.size <= offset) return;
 
-        const text = buf.toString('utf-8');
-        const lines = text.split('\\n');
-        for (const line of lines) {
-          if (line.trim()) {
-            sendEvent(ws, 'jsonl', { sid, line });
+      const fd = fs.openSync(s.jsonlPath, 'r');
+      const bytesToRead = stat.size - offset;
+      const buf = Buffer.alloc(bytesToRead);
+      fs.readSync(fd, buf, 0, bytesToRead, offset);
+      fs.closeSync(fd);
+      offset = stat.size;
+      s.watcher.offset = offset; // expose for catch-up
+
+      const text = buf.toString('utf-8');
+      const lines = text.split('\\n');
+      for (const line of lines) {
+        if (!line.trim()) continue;
+
+        // ── Permission policy intercept ──
+        if (line.includes('"control_request"') || line.includes('"control_response"')) {
+          try {
+            const parsed = JSON.parse(line);
+            if (parsed.type === 'control_request' && parsed.request_id
+              && parsed.request && parsed.request.subtype === 'can_use_tool') {
+              const toolName = parsed.request.tool_name;
+              if (shouldAutoRespond(s.mode, toolName)) {
+                const resp = buildControlResponse(parsed.request_id, parsed.request, true);
+                writeFifoRaw(s.pipePath, resp);
+                s.pendingCtrl = null;
+                logMsg('info', 'auto-allowed control_request', { sid, tool: toolName, mode: s.mode });
+                continue;
+              }
+              s.pendingCtrl = { reqId: parsed.request_id, toolName: toolName || 'unknown', request: parsed.request, receivedAt: Date.now() };
+            } else if (parsed.type === 'control_response' && s.pendingCtrl) {
+              if (parsed.response && parsed.response.request_id === s.pendingCtrl.reqId) {
+                s.pendingCtrl = null;
+              }
+            }
+          } catch {}
+        }
+
+        for (const ws of s.subscribers) {
+          if (ws.readyState === 1) {
+            try { sendEvent(ws, 'jsonl', { sid, line }); } catch {}
+          } else {
+            s.subscribers.delete(ws);
           }
         }
       }
     } catch {}
   }, 100); // 100ms poll interval — low latency, minimal CPU
 
-  const watcher = { close: () => clearInterval(pollInterval) };
-  session.watchers.set(ws, watcher);
+  session.watcher = { pollTimer, offset };
 }
 
-function stopWatching(ws, sid) {
+// Stop the session-bound watcher. Only called from reapSession (session died)
+// or daemon shutdown. NEVER called from ws.close.
+function stopSessionWatcher(sid) {
+  const session = sessions.get(sid);
+  if (!session || !session.watcher) return;
+  // Save offset back to session so a subsequent ensureWatcher() resumes from
+  // here instead of re-streaming the entire jsonl file from byte 0. Matters
+  // for cmdRename, where we intentionally tear down + re-create the watcher.
+  session.offset = session.watcher.offset;
+  try { clearInterval(session.watcher.pollTimer); } catch {}
+  session.watcher = null;
+}
+
+// Add a ws to a session's subscribers and do a catch-up push from fromOffset
+// to the watcher's current offset. Idempotent w.r.t. the subscriber set.
+function addSubscriber(ws, sid, fromOffset) {
+  const session = sessions.get(sid);
+  if (!session) return false;
+  session.subscribers.add(ws);
+  ensureWatcher(sid); // idempotent
+
+  // Catch-up: replay bytes [fromOffset, currentOffset) to this one ws.
+  const currentOffset = session.watcher ? session.watcher.offset : 0;
+  const start = typeof fromOffset === 'number' && fromOffset >= 0 ? fromOffset : 0;
+  if (start < currentOffset) {
+    try {
+      const fd = fs.openSync(session.jsonlPath, 'r');
+      const bytesToRead = currentOffset - start;
+      const buf = Buffer.alloc(bytesToRead);
+      fs.readSync(fd, buf, 0, bytesToRead, start);
+      fs.closeSync(fd);
+      const text = buf.toString('utf-8');
+      for (const line of text.split('\\n')) {
+        if (line.trim() && ws.readyState === 1) {
+          try { sendEvent(ws, 'jsonl', { sid, line }); } catch {}
+        }
+      }
+    } catch {}
+  }
+  return true;
+}
+
+// Remove a ws from a session's subscribers. The watcher is NOT touched — it
+// keeps reading the JSONL as long as the session process is alive. If the ws
+// was the only subscriber, the watcher simply has no one to fan out to (the
+// file still gets read and offset advances, which is fine — next attach
+// resumes from that offset with no replay needed).
+function removeSubscriber(ws, sid) {
   const session = sessions.get(sid);
   if (!session) return;
-  const watcher = session.watchers.get(ws);
-  if (watcher) {
-    watcher.close();
-    session.watchers.delete(ws);
-  }
+  session.subscribers.delete(ws);
 }
 
 // ── Attach to existing session ──
 function cmdAttach(ws, id, cmd) {
-  const { sid, fromOffset } = cmd;
+  const { sid, fromOffset, mode } = cmd;
   if (!sid) return sendError(ws, id, 'attach: missing sid');
 
   let session = sessions.get(sid);
@@ -508,21 +921,48 @@ function cmdAttach(ws, id, cmd) {
       pgidPath,
       pid,
       offset: fromOffset || 0,
-      watchers: new Map(),
+      watcher: null,
+      subscribers: new Set(),
       exitCode: alive ? null : 0,
+      state: alive ? 'running' : 'dead',
+      exitReason: alive ? null : 'attach-discovered-dead',
+      exitedAt: alive ? null : Date.now(),
+      parented: false,
+      startTime: pid && alive ? readStartTime(pid) : null,
+      cwd: '',
+      args: [],
+      orphanPollTimer: null,
+      mode: mode || 'default',
+      pendingCtrl: null,
     };
     sessions.set(sid, session);
+    if (alive && pid) startOrphanPoll(sid);
+  }
+
+  // Update mode if provided (walnut re-sends mode on reconnect)
+  if (mode && session.state === 'running') {
+    session.mode = mode;
   }
 
   const offset = fromOffset || 0;
-  const alive = session.pid !== null && session.exitCode === null;
+  let alive = session.state === 'running' && session.pid !== null;
+  if (alive && session.pid) {
+    try { process.kill(session.pid, 0); } catch {
+      reapSession(sid, -1, 'attach-kill-check');
+      alive = false;
+    }
+  }
 
-  startWatching(ws, sid, offset);
+  if (alive) addSubscriber(ws, sid, offset);
 
   sendOk(ws, id, {
     pid: session.pid,
     alive,
+    state: session.state,
+    exitCode: session.exitCode,
     outputFile: session.jsonlPath,
+    currentOffset: session.watcher ? session.watcher.offset : 0,
+    pendingCtrl: session.pendingCtrl,
   });
 }
 
@@ -532,7 +972,17 @@ function cmdSend(ws, id, cmd) {
   if (!sid || !message) return sendError(ws, id, 'send: missing sid or message');
 
   const session = sessions.get(sid);
-  if (!session) return sendError(ws, id, 'send: session not found: ' + sid);
+  if (!session) return sendOk(ws, id, { ok: false, reason: 'not_found' });
+  if (session.state === 'dead') {
+    return sendOk(ws, id, { ok: false, reason: 'session_dead', exitCode: session.exitCode });
+  }
+
+  if (session.pid) {
+    try { process.kill(session.pid, 0); } catch {
+      reapSession(sid, -1, 'send-precheck-dead');
+      return sendOk(ws, id, { ok: false, reason: 'session_dead', exitCode: session.exitCode });
+    }
+  }
 
   const payload = JSON.stringify({
     type: 'user',
@@ -553,12 +1003,77 @@ function cmdSend(ws, id, cmd) {
     sendOk(ws, id, { ok: true });
   } catch (err) {
     const code = err.code;
-    if (code === 'ENXIO' || code === 'EAGAIN') {
-      sendOk(ws, id, { ok: false, reason: code });
+    if (code === 'ENXIO') {
+      reapSession(sid, -1, 'send-enxio');
+      sendOk(ws, id, { ok: false, reason: 'ENXIO', exitCode: session.exitCode });
+    } else if (code === 'EAGAIN') {
+      sendOk(ws, id, { ok: false, reason: 'EAGAIN', retriable: true });
     } else {
       sendError(ws, id, 'send failed: ' + err.message);
     }
   }
+}
+
+// Send raw (permission-prompt-tool control_response passthrough)
+// Writes 'raw' verbatim to the FIFO, no user-message wrapping.
+function cmdSendRaw(ws, id, cmd) {
+  const { sid, raw } = cmd;
+  if (!sid || !raw) return sendError(ws, id, 'sendRaw: missing sid or raw');
+
+  const session = sessions.get(sid);
+  if (!session) return sendOk(ws, id, { ok: false, reason: 'not_found' });
+  if (session.state === 'dead') {
+    return sendOk(ws, id, { ok: false, reason: 'session_dead', exitCode: session.exitCode });
+  }
+
+  if (session.pid) {
+    try { process.kill(session.pid, 0); } catch {
+      reapSession(sid, -1, 'sendRaw-precheck-dead');
+      return sendOk(ws, id, { ok: false, reason: 'session_dead', exitCode: session.exitCode });
+    }
+  }
+
+  try {
+    const buf = Buffer.from(raw.endsWith('\\n') ? raw : raw + '\\n');
+    const fd = fs.openSync(session.pipePath, fs.constants.O_WRONLY | fs.constants.O_NONBLOCK);
+    try {
+      const written = fs.writeSync(fd, buf);
+      if (written !== buf.length) {
+        return sendOk(ws, id, { ok: false, reason: 'partial write' });
+      }
+    } finally {
+      fs.closeSync(fd);
+    }
+    sendOk(ws, id, { ok: true });
+  } catch (err) {
+    const code = err.code;
+    if (code === 'ENXIO') {
+      reapSession(sid, -1, 'sendRaw-enxio');
+      sendOk(ws, id, { ok: false, reason: 'ENXIO', exitCode: session.exitCode });
+    } else if (code === 'EAGAIN') {
+      sendOk(ws, id, { ok: false, reason: 'EAGAIN', retriable: true });
+    } else {
+      sendError(ws, id, 'sendRaw failed: ' + err.message);
+    }
+  }
+}
+
+// ── Set session mode ──
+function cmdSetMode(ws, id, cmd) {
+  const { sid, mode } = cmd;
+  if (!sid || !mode) return sendError(ws, id, 'setMode: missing sid or mode');
+  const session = sessions.get(sid);
+  if (!session) return sendError(ws, id, 'setMode: session not found: ' + sid);
+  const oldMode = session.mode;
+  session.mode = mode;
+  if (session.pendingCtrl && shouldAutoRespond(mode, session.pendingCtrl.toolName)) {
+    const resp = buildControlResponse(session.pendingCtrl.reqId, session.pendingCtrl.request, true);
+    writeFifoRaw(session.pipePath, resp);
+    logMsg('info', 'setMode: auto-allowed pending control_request', { sid, tool: session.pendingCtrl.toolName, mode });
+    session.pendingCtrl = null;
+  }
+  try { persistRegistry(); } catch {}
+  sendOk(ws, id, { oldMode, newMode: mode });
 }
 
 // ── Stop session ──
@@ -567,10 +1082,15 @@ function cmdStop(ws, id, cmd) {
   if (!sid) return sendError(ws, id, 'stop: missing sid');
 
   const session = sessions.get(sid);
-  if (!session || !session.pid) return sendOk(ws, id, { stopped: true });
+  if (!session || !session.pid) {
+    logMsg('info', 'cmdStop: session not in registry (nothing to kill)', {
+      sid, hasSession: !!session, hasPid: session ? !!session.pid : false,
+    });
+    return sendOk(ws, id, { stopped: true, noop: true, reason: 'not_in_registry' });
+  }
 
   const pid = session.pid;
-  logMsg('info', 'stopping session (process group kill)', { sid, pid });
+  logMsg('info', 'cmdStop: stopping session (process group kill)', { sid, pid });
 
   // 3-phase process group kill: SIGINT → SIGTERM → SIGKILL
   try {
@@ -608,9 +1128,12 @@ function cmdStatus(ws, id, cmd) {
   const session = sessions.get(sid);
   if (!session) return sendOk(ws, id, { exists: false });
 
-  let alive = false;
-  if (session.pid) {
-    try { process.kill(session.pid, 0); alive = true; } catch {}
+  let alive = session.state === 'running';
+  if (alive && session.pid) {
+    try { process.kill(session.pid, 0); } catch {
+      reapSession(sid, -1, 'status-kill-check');
+      alive = false;
+    }
   }
 
   let mtime = null, size = 0;
@@ -620,7 +1143,17 @@ function cmdStatus(ws, id, cmd) {
     size = stat.size;
   } catch {}
 
-  sendOk(ws, id, { exists: true, alive, pid: session.pid, mtime, size });
+  sendOk(ws, id, {
+    exists: true,
+    alive,
+    pid: session.pid,
+    mtime,
+    size,
+    state: session.state,
+    exitCode: session.exitCode,
+    exitReason: session.exitReason,
+    pendingCtrl: session.pendingCtrl,
+  });
 }
 
 // ── Rename session files ──
@@ -643,8 +1176,20 @@ function cmdRename(ws, id, cmd) {
     session.pipePath = newBase + '.pipe';
     session.pgidPath = newBase + '.pgid';
 
+    // The session-bound watcher's pollTimer closure captured the OLD sid and
+    // looks up sessions.get(oldSid) each tick. After the re-key below, that
+    // lookup returns undefined and the watcher silently stops fanning out
+    // jsonl lines — users see the session "go deaf" mid-turn (UI stuck on
+    // "Walnut is working…" until the whole session ends). Fix: stop the old
+    // watcher before re-keying, then re-create it against the new sid so its
+    // closure captures the right key. Subscribers stay put — they only hold
+    // ws refs, not sid — so no re-attach is needed from the client side.
+    stopSessionWatcher(oldSid);
+
     sessions.delete(oldSid);
     sessions.set(newSid, session);
+
+    ensureWatcher(newSid);
 
     sendOk(ws, id, { renamed: true });
     logMsg('info', 'session renamed', { oldSid, newSid });
@@ -819,7 +1364,10 @@ function cmdWriteInbox(ws, id, cmd) {
 }
 
 // ── File system operations ──
-function cmdFsRead(ws, id, cmd) {
+// NOTE: use fs.promises.* instead of sync calls — a large file read (e.g. a
+// 50MB session JSONL) would otherwise block every queued RPC on this daemon
+// until it completes.
+async function cmdFsRead(ws, id, cmd) {
   let filePath = cmd.path;
   const encoding = cmd.encoding;
   if (!filePath) return sendError(ws, id, 'fs.read: missing path');
@@ -831,33 +1379,35 @@ function cmdFsRead(ws, id, cmd) {
 
   try {
     const enc = encoding || 'base64';
-    const data = fs.readFileSync(filePath);
+    const data = await fs.promises.readFile(filePath);
     if (enc === 'base64') {
       sendOk(ws, id, { data: data.toString('base64'), encoding: 'base64' });
     } else {
       sendOk(ws, id, { data: data.toString('utf-8'), encoding: 'utf-8' });
     }
   } catch (err) {
-    sendError(ws, id, 'fs.read failed: ' + err.message);
+    // Tag ENOENT so the server can distinguish "file not found" from transport failure.
+    const code = err.code || '';
+    sendError(ws, id, 'fs.read failed: ' + err.message + (code ? ' (' + code + ')' : ''));
   }
 }
 
-function cmdFsWrite(ws, id, cmd) {
+async function cmdFsWrite(ws, id, cmd) {
   const { path: filePath, data, encoding } = cmd;
   if (!filePath || !data) return sendError(ws, id, 'fs.write: missing path or data');
 
   try {
-    fs.mkdirSync(path.dirname(filePath), { recursive: true });
+    await fs.promises.mkdir(path.dirname(filePath), { recursive: true });
     const enc = encoding || 'base64';
     const buf = enc === 'base64' ? Buffer.from(data, 'base64') : Buffer.from(data, 'utf-8');
-    fs.writeFileSync(filePath, buf);
+    await fs.promises.writeFile(filePath, buf);
     sendOk(ws, id, { written: true, size: buf.length });
   } catch (err) {
     sendError(ws, id, 'fs.write failed: ' + err.message);
   }
 }
 
-function cmdFsLs(ws, id, cmd) {
+async function cmdFsLs(ws, id, cmd) {
   let dirPath = cmd.path;
   if (!dirPath) return sendError(ws, id, 'fs.ls: missing path');
 
@@ -867,7 +1417,7 @@ function cmdFsLs(ws, id, cmd) {
   }
 
   try {
-    const entries = fs.readdirSync(dirPath, { withFileTypes: true });
+    const entries = await fs.promises.readdir(dirPath, { withFileTypes: true });
     const result = entries.map(e => ({
       name: e.name,
       type: e.isDirectory() ? 'dir' : e.isFile() ? 'file' : 'other',
@@ -878,7 +1428,7 @@ function cmdFsLs(ws, id, cmd) {
   }
 }
 
-function cmdFsFind(ws, id, cmd) {
+async function cmdFsFind(ws, id, cmd) {
   let basePath = cmd.path || '~/.claude/projects';
   const name = cmd.name;
   const maxDepth = cmd.maxDepth || 3;
@@ -891,25 +1441,49 @@ function cmdFsFind(ws, id, cmd) {
 
   try {
     const found = [];
-    function walk(dir, depth) {
+    async function walk(dir, depth) {
       if (depth > maxDepth || found.length >= 10) return;
+      let entries;
       try {
-        const entries = fs.readdirSync(dir, { withFileTypes: true });
-        for (const e of entries) {
-          const full = path.join(dir, e.name);
-          if (e.isFile() && e.name.includes(name)) {
-            found.push(full);
-            if (found.length >= 10) return;
-          } else if (e.isDirectory()) {
-            walk(full, depth + 1);
-          }
+        entries = await fs.promises.readdir(dir, { withFileTypes: true });
+      } catch {
+        return;
+      }
+      for (const e of entries) {
+        if (found.length >= 10) return;
+        const full = path.join(dir, e.name);
+        if (e.isFile() && e.name.includes(name)) {
+          found.push(full);
+          if (found.length >= 10) return;
+        } else if (e.isDirectory()) {
+          await walk(full, depth + 1);
         }
-      } catch {}
+      }
     }
-    walk(basePath, 0);
+    await walk(basePath, 0);
     sendOk(ws, id, { files: found });
   } catch (err) {
     sendError(ws, id, 'fs.find failed: ' + err.message);
+  }
+}
+
+async function cmdFsStat(ws, id, cmd) {
+  let filePath = cmd.path;
+  if (!filePath) return sendError(ws, id, 'fs.stat: missing path');
+
+  if (filePath === '~' || filePath.startsWith('~/')) {
+    filePath = (process.env.HOME || '/root') + filePath.slice(1);
+  }
+
+  try {
+    const st = await fs.promises.stat(filePath);
+    sendOk(ws, id, { exists: true, mtimeMs: st.mtimeMs, size: st.size });
+  } catch (err) {
+    if (err.code === 'ENOENT') {
+      sendOk(ws, id, { exists: false });
+      return;
+    }
+    sendError(ws, id, 'fs.stat failed: ' + err.message);
   }
 }
 
@@ -940,17 +1514,20 @@ function cmdList(ws, id) {
     }
   } catch {}
 
-  // Also include in-memory sessions not yet persisted
+  // Also include in-memory sessions not yet persisted. Prefer authoritative
+  // state: if reaper has marked session dead, report alive=false without probing.
   for (const [sid, session] of sessions) {
     if (!result.find(r => r.sid === sid)) {
       let alive = false;
-      if (session.pid) {
+      if (session.state === 'running' && session.pid) {
         try { process.kill(session.pid, 0); alive = true; } catch {}
       }
       result.push({
         sid,
         pid: session.pid,
         alive,
+        state: session.state || (alive ? 'running' : 'dead'),
+        exitCode: session.exitCode,
         mtime: null,
         size: 0,
       });
@@ -1003,16 +1580,12 @@ function scanIdleSessions() {
     try { process.kill(pid, 0); alive = true; } catch {}
     if (!alive) {
       logMsg('info', 'idle scan: process dead (missed exit)', { sid, pid });
-      session.exitCode = -1;
-      killProcessGroup(pid, 'SIGKILL');
-      for (const client of session.watchers.keys()) {
-        sendEvent(client, 'exit', { sid, code: -1 });
-      }
+      reapSession(sid, -1, 'idle-scan-missed-exit');
       continue;
     }
 
-    // 2. Has client watching? Skip
-    if (session.watchers.size > 0) continue;
+    // 2. Has at least one subscribed ws? Skip idle check — someone cares.
+    if (session.subscribers.size > 0) continue;
 
     // 3. Check JSONL file mtime
     let mtimeMs = 0;
@@ -1023,10 +1596,10 @@ function scanIdleSessions() {
       continue;
     } else if (idleMs < SESSION_IDLE_KILL_MS) {
       const idleMinutes = Math.round(idleMs / 60000);
-      logMsg('warn', 'idle scan: session idle with no watchers', { sid, pid, idleMinutes, threshold: '2hr' });
+      logMsg('warn', 'idle scan: session idle with no subscribers', { sid, pid, idleMinutes, threshold: '2hr' });
     } else {
       const idleMinutes = Math.round(idleMs / 60000);
-      logMsg('warn', 'idle scan: killing idle session (no watchers, no output)', { sid, pid, idleMinutes });
+      logMsg('warn', 'idle scan: killing idle session (no subscribers, no output)', { sid, pid, idleMinutes });
       killSessionProcessGroup(pid, sid);
     }
   }
@@ -1035,54 +1608,90 @@ function scanIdleSessions() {
 function cleanupOrphanedProcessGroups() {
   // Adopt live sessions from a previous daemon (graceful upgrade).
   // Only kill sessions whose process is dead (truly orphaned).
+  let scanned = 0;
+  let skippedAdopted = 0;
+  let adoptedLegacy = 0;
+  let removedStale = 0;
   try {
     const files = fs.readdirSync(STREAMS_DIR);
     for (const f of files) {
       if (!f.endsWith('.pgid')) continue;
+      scanned++;
       const sid = f.replace('.pgid', '');
+      // Re-entrant guard: reconcileRegistry may have already adopted with
+      // authoritative state fields. Do not overwrite.
+      if (sessions.has(sid)) { skippedAdopted++; continue; }
       try {
         const pid = parseInt(fs.readFileSync(path.join(STREAMS_DIR, f), 'utf-8').trim(), 10);
         if (isNaN(pid) || pid <= 0) continue;
         if (isProcessGroupAlive(pid)) {
-          // Process still alive — adopt it into our sessions map
-          logMsg('info', 'startup: adopting live session from previous daemon', { sid, pid });
+          // Process still alive — adopt it into our sessions map (legacy path,
+          // no sessions.json entry).
+          logMsg('info', 'startup: adopting live session from previous daemon (legacy pgid-only)', { sid, pid });
           const jsonlPath = path.join(STREAMS_DIR, sid + '.jsonl');
           const pipePath = path.join(STREAMS_DIR, sid + '.pipe');
           const pgidPath = path.join(STREAMS_DIR, f);
           sessions.set(sid, {
             proc: null,  // no handle — process was started by old daemon.
-            // No exit event fires for adopted sessions (proc is null).
-            // scanIdleSessions (60s) detects death via kill(pid, 0).
             pipePath,
             jsonlPath,
             pgidPath,
             pid,
             offset: 0,
-            watchers: new Map(),
+            watcher: null,
+      subscribers: new Set(),
             exitCode: null,
+            state: 'running',
+            exitReason: null,
+            exitedAt: null,
+            parented: false,
+            startTime: readStartTime(pid),
+            cwd: '',
+            args: [],
+            orphanPollTimer: null,
+            mode: 'default',
+            pendingCtrl: null,
           });
+          startOrphanPoll(sid);
+          adoptedLegacy++;
         } else {
           // Process dead — clean up pgid file
           logMsg('info', 'startup cleanup: removing stale pgid for dead session', { sid, pid });
           try { fs.unlinkSync(path.join(STREAMS_DIR, f)); } catch {}
+          removedStale++;
         }
-      } catch {}
+      } catch (err) {
+        logMsg('warn', 'startup cleanup: error processing pgid file', { sid, error: err && err.message });
+      }
     }
-  } catch {}
+  } catch (err) {
+    logMsg('warn', 'startup cleanup: readdir failed', { streamsDir: STREAMS_DIR, error: err && err.message });
+  }
+  logMsg('info', 'startup cleanup: done', {
+    scanned, skippedAdopted, adoptedLegacy, removedStale,
+    sessionsAfter: sessions.size,
+  });
 }
 
 // ── Cleanup ──
 function cleanup() {
   // Graceful shutdown: leave session processes running so the next daemon
-  // can adopt them (via .pgid files). Only close watchers and agent subs.
+  // can adopt them (via sessions.json + .pgid files). Only close watchers
+  // and agent subs. Flush registry to disk so the successor daemon's
+  // reconcileRegistry() sees the current state.
   logMsg('info', 'cleanup: daemon shutting down, leaving session processes alive for next daemon', {
-    activeSessions: [...sessions.entries()].filter(([, s]) => s.exitCode === null).length,
+    activeSessions: [...sessions.entries()].filter(([, s]) => (s.state || 'running') === 'running').length,
   });
-  for (const [, session] of sessions) {
-    for (const [, watcher] of session.watchers) {
-      watcher.close();
+  for (const [sid, session] of sessions) {
+    // Stop orphan polls so we don't fire reapSession mid-shutdown
+    if (session.orphanPollTimer) {
+      clearInterval(session.orphanPollTimer);
+      session.orphanPollTimer = null;
     }
+    // Stop the session-bound watcher.
+    stopSessionWatcher(sid);
   }
+  try { persistRegistry(); } catch {}
   // Stop all agent subs
   for (const [, sub] of agentSubs) {
     clearInterval(sub.timer);
@@ -1136,8 +1745,21 @@ if (action === '--start') {
   fs.mkdirSync(DAEMON_DIR, { recursive: true });
   fs.mkdirSync(STREAMS_DIR, { recursive: true });
 
-  // Clean up orphaned process groups from a previous daemon crash
+  // Write-ahead registry reconcile: load sessions.json, probe liveness,
+  // adopt or reap. This is source-of-truth for cross-daemon handoff.
+  logMsg('info', 'startup: reconcile begin', { registryFile: REGISTRY_FILE, streamsDir: STREAMS_DIR });
+  reconcileRegistry();
+  logMsg('info', 'startup: reconcile done', {
+    adoptedFromRegistry: sessions.size,
+    sids: [...sessions.keys()],
+  });
+
+  // Legacy fallback: pgid-file-based adoption for pre-registry sessions
   cleanupOrphanedProcessGroups();
+  logMsg('info', 'startup: complete — sessions ready', {
+    totalSessions: sessions.size,
+    sids: [...sessions.keys()],
+  });
 
   const httpServer = http.createServer((req, res) => {
     res.writeHead(200);
@@ -1163,9 +1785,11 @@ if (action === '--start') {
       wsClients.delete(ws);
       clearInterval(pingTimer);
 
-      // Clean up watchers for this client
-      for (const [sid, session] of sessions) {
-        stopWatching(ws, sid);
+      // Remove this ws from every session's subscribers. The watcher (file
+      // tailer) stays alive — it's session-bound, not ws-bound. The next ws
+      // that attaches for the same session picks up where the file offset is.
+      for (const [, session] of sessions) {
+        session.subscribers.delete(ws);
       }
 
       // Clean up agent subs for this client

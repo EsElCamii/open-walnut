@@ -40,6 +40,7 @@ import type { SessionManager } from './session-manager.js'
 import { checkCwdExists } from './cwd-check.js'
 import { recoverStateFromJsonl, extractImageFilePathFromInput } from '../core/session-history.js'
 import type { SessionRecord, SessionMode, ProcessStatus, TaskPhase } from '../core/types.js'
+import { classifyStreamEvent, classifyDelta } from './claude-stream-event-map.js'
 import type { SessionServerClient } from './session-server-client.js'
 import { sanitizeInitModel, CONTEXT_WINDOW_DEFAULT } from '../agent/providers/defaults.js'
 
@@ -131,7 +132,27 @@ interface StreamResultEvent {
   usage?: { input_tokens: number; output_tokens: number }
 }
 
-type StreamEvent = StreamInitEvent | StreamStatusEvent | StreamMessageEvent | StreamResultEvent
+/** control_request for --permission-prompt-tool stdio protocol */
+interface StreamControlRequestEvent {
+  type: 'control_request'
+  request_id: string
+  request: Record<string, unknown>
+}
+
+/** stream_event: partial SSE events from --include-partial-messages */
+interface StreamPartialEvent {
+  type: 'stream_event'
+  event?: {
+    type?: string
+    message?: { id?: string }
+    index?: number
+    content_block?: { type?: string; id?: string; name?: string; input?: Record<string, unknown> }
+    delta?: { type?: string; text?: string; thinking?: string; partial_json?: string }
+  }
+  session_id?: string
+}
+
+type StreamEvent = StreamInitEvent | StreamStatusEvent | StreamMessageEvent | StreamResultEvent | StreamControlRequestEvent | StreamPartialEvent
 
 /**
  * Map CLI permissionMode string to our internal SessionMode.
@@ -240,6 +261,14 @@ export class ClaudeCodeSession {
    *  extraction. Claude Code writes multiple JSONL lines per message with accumulated
    *  text; we must emit only the NEW suffix, not the full snapshot. */
   private _lastEmittedText = new Map<string, string>()
+  /** Anthropic message.id of the current stream_event sequence. stream_event
+   *  path stores its accumulator under `${msgId}:${sseIndex}`; the `assistant`
+   *  branch dedups by prefix-matching any key with the same msgId prefix, so
+   *  index alignment between the two paths is no longer required. */
+  private _currentStreamMsgId: string | null = null
+  /** Scopes we've already warned about this turn (top_level / stream_event / delta
+   *  keyed by "scope:type"), so a burst of unknown events doesn't spam the UI. */
+  private _warnedUnknownTypes = new Set<string>()
   private claudeSessionId: string | null = null
   private _cwd: string | null = null
   private _active = false
@@ -509,23 +538,39 @@ export class ClaudeCodeSession {
     forkSession?: boolean,
     permissionPrompt?: boolean,
     spillFile?: { localPath: string },
+    streamPartialMessages?: boolean,
   ): void {
     const args = ['-p', '--output-format', 'stream-json', '--verbose']
 
-    // Store mode and set initial activity
-    if (mode === 'bypass') {
-      this._mode = 'bypass'
-      this._activity = 'implementing'
-      args.push('--permission-mode', 'bypassPermissions')
-    } else if (mode === 'accept') {
-      this._mode = 'accept'
-      args.push('--permission-mode', 'acceptEdits')
-    } else if (mode === 'plan') {
+    // Token-level streaming: emit Anthropic SSE stream_event records so assistant
+    // text streams into the UI character-by-character. Default on; falsy config
+    // (explicit false) disables for fallback to per-message delivery.
+    if (streamPartialMessages !== false) {
+      args.push('--include-partial-messages')
+    }
+
+    // Claude Code trace/debug log. On by default — writes to
+    // ~/.claude/debug/<claude-session-id>.txt on whichever host the CLI is
+    // running on (local or remote daemon), with a `latest` symlink. Disable
+    // with WALNUT_CLAUDE_DEBUG=0. See CLAUDE.md § Debugging.
+    if (process.env.WALNUT_CLAUDE_DEBUG !== '0') {
+      args.push('--debug')
+    }
+
+    // Store mode and set initial activity.
+    // Default (no mode, or explicit 'bypass'): bypassPermissions — users shouldn't
+    // be prompted to approve every edit. Plan mode must be explicitly requested.
+    if (mode === 'plan') {
       this._mode = 'plan'
       this._activity = 'planning'
       args.push('--permission-mode', 'plan')
+    } else if (mode === 'accept') {
+      this._mode = 'accept'
+      args.push('--permission-mode', 'acceptEdits')
     } else {
-      this._mode = 'default'
+      this._mode = 'bypass'
+      this._activity = 'implementing'
+      args.push('--permission-mode', 'bypassPermissions')
     }
     // Map picker short IDs → full CLI model identifiers.
     // The CLI understands [1m] suffix for 1M context window.
@@ -562,9 +607,10 @@ export class ClaudeCodeSession {
     args.push('--input-format', 'stream-json')
 
     // Permission prompt tool: intercepts sensitive-file and AskUserQuestion permission checks.
-    // Only for local sessions — remote sessions can't respond via FIFO.
+    // For remote sessions, control_response is routed through the daemon's `sendRaw`
+    // command (see RemoteSessionManager.writeRaw → daemon-core.handleSendRawCommand).
     // Controlled by config.session.permission_prompt (default: true).
-    if (!host && permissionPrompt !== false) {
+    if (permissionPrompt !== false) {
       args.push('--permission-prompt-tool', 'stdio')
     }
 
@@ -602,6 +648,8 @@ export class ClaudeCodeSession {
     this.fullText = ''
     this._emittedStreamKeys.clear()
     this._lastEmittedText.clear()
+    this._currentStreamMsgId = null
+    this._warnedUnknownTypes.clear()
     this._cwd = cwd ?? null
 
     const isResume = !!resumeSessionId && !forkSession
@@ -633,6 +681,7 @@ export class ClaudeCodeSession {
       resume: isResume,
       fork: forkSession,
       spillFile,
+      mode: this._mode as 'bypass' | 'plan' | 'accept' | 'default',
       onOutput: (event) => this.handleStreamLine(event.line),
       onExit: (code, stderr) => {
         this._exitCode = code
@@ -667,9 +716,10 @@ export class ClaudeCodeSession {
             fromPlanSessionId: this.fromPlanSessionId,
           }, ['main-ai', 'session-runner'], { source: 'session-runner' })
         }
-        // Post-init remote death: claudeSessionId IS set, so the block above is skipped.
+        // Post-init death: claudeSessionId IS set, so the block above is skipped.
         // Without this, the error is silently swallowed and the session drifts to 'idle'.
-        else if (this._transport?.isRemote && code !== 0 && !this.resultEmitted) {
+        // Applies to all daemon-backed sessions (both remote and local via __local__ daemon).
+        else if (code !== 0 && !this.resultEmitted) {
           this.handleRemoteProcessExit(code, stderr)
         }
       },
@@ -801,11 +851,9 @@ export class ClaudeCodeSession {
     session.resultEmitted = taskPhaseIsTerminal
       || record.process_status === 'error'
 
-    // Create the appropriate session manager for attach:
-    //   - Local sessions → LocalSessionManager (FIFO recovery + file tailing)
-    //   - Remote sessions → RemoteSessionManager (WebSocket to remote daemon)
+    // Create the session manager for attach (all sessions go through daemon now).
     //
-    // CRITICAL: Pass record.outputFile so LocalSessionManager uses the correct path from
+    // CRITICAL: Pass record.outputFile so the manager uses the correct path from
     // when the session was created. Without this, SESSION_STREAMS_DIR may point to a
     // different directory after server restart (e.g. if WALNUT_HOME changed).
     if (record.claudeSessionId) {
@@ -847,7 +895,7 @@ export class ClaudeCodeSession {
       // Register in the global session manager registry
       registerSessionManager(record.claudeSessionId, transport)
 
-      // Set PID on the transport before attach (LocalSessionManager needs it for liveness checks)
+      // Set PID on the transport before attach (needed for liveness checks)
       if (record.pid && 'setPid' in transport) {
         (transport as { setPid(pid: number): void }).setPid(record.pid)
       }
@@ -938,10 +986,10 @@ export class ClaudeCodeSession {
       })
     }
 
-    // ── Permission recovery: 3 layers, first one wins ──
+    // ── Permission recovery: 2 layers + daemon attach, first one wins ──
     // Layer 1 (canonical JSONL) — already checked above
     // Layer 2 (session record on disk) — most reliable, persisted atomically
-    // Layer 3 (stream JSONL scan) — fallback, reads STDOUT capture file
+    // Layer 3 (daemon attach response) — daemon returns pendingCtrl directly
     //
     // Must populate _pendingPermissionRequests BEFORE transport.attach() since
     // attach starts delivering live events that may reference these requests.
@@ -967,73 +1015,9 @@ export class ClaudeCodeSession {
       })
     }
 
-    // Layer 3: Scan stream JSONL TAIL for pending control_request events.
-    // control_request events appear ONLY in the STDOUT stream (Walnut's stream file),
-    // NOT in Claude Code's canonical JSONL (~/.claude/projects/.../*.jsonl).
-    // Only read the last 32KB — control_request is always near the end of the file.
-    // This avoids loading 50-200MB stream files for long sessions.
-    if (session._pendingPermissionRequests.size === 0 && record.outputFile
-      && !record.outputFile.startsWith('remote://')) {
-      try {
-        const TAIL_BYTES = 32768
-        const stat = await fsp.stat(record.outputFile)
-        const seekOffset = Math.max(0, stat.size - TAIL_BYTES)
-        let tailContent: string
-        if (seekOffset === 0) {
-          tailContent = await fsp.readFile(record.outputFile, 'utf-8')
-        } else {
-          const fh = await fsp.open(record.outputFile, 'r')
-          try {
-            const buf = Buffer.alloc(TAIL_BYTES)
-            const { bytesRead } = await fh.read(buf, 0, TAIL_BYTES, seekOffset)
-            tailContent = buf.subarray(0, bytesRead).toString('utf-8')
-          } finally {
-            await fh.close()
-          }
-        }
-        const lines = tailContent.split('\n')
-        // If we seeked into the middle of the file, the first line is likely partial — skip it.
-        if (seekOffset > 0 && lines.length > 1) lines.shift()
-        let pendingCtrl: { request_id: string; request: Record<string, unknown> } | undefined
-        for (const line of lines) {
-          if (!line) continue
-          let parsed: Record<string, unknown>
-          try { parsed = JSON.parse(line) } catch { continue }
-          if (parsed.type === 'control_request' && parsed.request_id && parsed.request) {
-            pendingCtrl = {
-              request_id: parsed.request_id as string,
-              request: parsed.request as Record<string, unknown>,
-            }
-          } else if (parsed.type === 'control_response') {
-            const resp = parsed as { response?: { request_id?: string } }
-            const respId = resp.response?.request_id
-            if (respId && pendingCtrl?.request_id === respId) {
-              pendingCtrl = undefined
-            } else if (!respId) {
-              pendingCtrl = undefined
-            }
-          }
-        }
-        if (pendingCtrl) {
-          session._pendingPermissionRequests.set(pendingCtrl.request_id, {
-            request_id: pendingCtrl.request_id,
-            request: pendingCtrl.request as { subtype: string; tool_name?: string; input?: Record<string, unknown>; decision_reason?: string },
-          })
-          log.session.info('recovered orphaned control_request from stream JSONL tail (Layer 3)', {
-            sessionId: record.claudeSessionId,
-            requestId: pendingCtrl.request_id,
-            toolName: (pendingCtrl.request as { tool_name?: string }).tool_name,
-            mode: session._mode,
-          })
-        }
-      } catch (err) {
-        log.session.debug('stream JSONL control_request scan failed (Layer 3)', {
-          sessionId: record.claudeSessionId,
-          outputFile: record.outputFile,
-          error: err instanceof Error ? err.message : String(err),
-        })
-      }
-    }
+    // Layer 3 (stream JSONL tail scan) — REMOVED.
+    // All sessions now go through daemon, which provides pendingCtrl directly in the
+    // attach response. The old Layer 3 only ran for local sessions (!remote://) anyway.
 
     // Start periodic re-emit timer for ALL recovered permissions (Layer 4 visibility net).
     // Re-emits every 60s so the UI picks it up. No auto-approve/deny — waits for human decision.
@@ -1060,19 +1044,36 @@ export class ClaudeCodeSession {
     if (session._transport && record.claudeSessionId) {
       const fromOffset = session._transport.fileSize || jsonlByteLength
       try {
-        await session._transport.attach({
+        const attachResult = await session._transport.attach({
           sessionId: record.claudeSessionId,
           fromOffset,
+          mode: session._mode as 'bypass' | 'plan' | 'accept' | 'default',
           onOutput: (event) => session.handleStreamLine(event.line),
           onExit: (code, stderr) => {
             session._exitCode = code
             session._exitStderr = stderr
-            // Post-init remote death — surface error instead of silent swallow
-            if (session._transport?.isRemote && code !== 0 && !session.resultEmitted) {
+            // Post-init death — surface error instead of silent swallow.
+            // Applies to all daemon-backed sessions (both remote and local via __local__ daemon).
+            if (code !== 0 && !session.resultEmitted) {
               session.handleRemoteProcessExit(code, stderr)
             }
           },
         })
+        // Recover pending permission from daemon attach response.
+        // The daemon tracks control_request state and returns it on attach.
+        if (attachResult?.pendingCtrl && session._pendingPermissionRequests.size === 0) {
+          const pc = attachResult.pendingCtrl
+          session._pendingPermissionRequests.set(pc.reqId, {
+            request_id: pc.reqId,
+            request: pc.request as { subtype: string; tool_name?: string; input?: Record<string, unknown>; decision_reason?: string },
+          })
+          session._startPermissionReEmitTimer(pc.reqId, pc.request as { subtype: string; tool_name?: string; input?: Record<string, unknown> })
+          log.session.info('recovered pendingCtrl from daemon attach response', {
+            sessionId: record.claudeSessionId,
+            requestId: pc.reqId,
+            toolName: pc.toolName,
+          })
+        }
       } catch (err) {
         log.session.warn('transport attach failed, session may not stream', {
           sessionId: record.claudeSessionId,
@@ -1177,6 +1178,8 @@ export class ClaudeCodeSession {
     this._toolInputFilePaths.clear()  // Fresh turn — clear stale cached tool input paths
     this._emittedStreamKeys.clear()   // Fresh turn — allow new events through dedup
     this._lastEmittedText.clear()     // Fresh turn — reset progressive delta tracking
+    this._currentStreamMsgId = null   // Fresh turn — stream_event message tracking
+    this._warnedUnknownTypes.clear()  // Fresh turn — reset unknown-event warn set
     this.emitStatusChanged('IN_PROGRESS')
     // Persist running state to session tracker so API consumers (frontend tree, etc.)
     // see the updated status immediately — not just WebSocket subscribers.
@@ -1387,6 +1390,7 @@ export class ClaudeCodeSession {
       } else if (resultErrorMessage) {
         // Result event exists but is_error:true — e.g. --resume "No conversation found".
         // Surface the error instead of silently treating it as success.
+        const conversationLost = resultErrorMessage.includes('No conversation found')
         this._activity = undefined
         this.emitStatusChanged('AGENT_COMPLETE', resultErrorMessage.slice(0, 500))
         log.session.error('session PID died — error result in output file', {
@@ -1394,11 +1398,27 @@ export class ClaudeCodeSession {
           sessionId: this.claudeSessionId,
           host: this._host,
           errorMessage: resultErrorMessage,
+          ...(conversationLost ? { conversationLost: true } : {}),
         })
+        // Auto-archive on conversation loss (same rationale as result-handler path).
+        if (conversationLost && this.claudeSessionId) {
+          const sid = this.claudeSessionId
+          const hint = `Remote JSONL missing (cwd=${this._cwd ?? 'unknown'}, host=${this._host ?? 'local'})`
+          import('../core/session-tracker.js').then(({ updateSessionRecord }) =>
+            updateSessionRecord(sid, {
+              archived: true,
+              archive_reason: 'remote_conversation_lost',
+              errorMessage: hint,
+            }),
+          ).catch((err) => {
+            log.session.warn('failed to auto-archive lost conversation (PID-death path)', { sessionId: sid, error: err instanceof Error ? err.message : String(err) })
+          })
+        }
         bus.emit(EventNames.SESSION_ERROR, {
           sessionId: this.claudeSessionId,
           taskId: this.taskId,
           error: resultErrorMessage,
+          ...(conversationLost ? { errorKind: 'conversation_lost' as const } : {}),
         }, ['main-ai', 'session-runner'], { source: 'session-runner' })
       } else {
         let stderr = ''
@@ -1588,6 +1608,35 @@ export class ClaudeCodeSession {
   }
 
   /**
+   * Catch-all for JSONL event types we don't know how to parse. Emits a single
+   * SESSION_UNKNOWN_EVENT per (scope, type) per turn so the UI always surfaces
+   * surprise events (future CLI additions like recap/away-summary/etc.) instead
+   * of silently dropping them. Dedup map is cleared on each new turn.
+   */
+  private emitUnknownEventOnce(
+    scope: 'top_level' | 'stream_event' | 'delta',
+    eventType: string,
+    line: string,
+  ): void {
+    const warnKey = `${scope}:${eventType}`
+    if (this._warnedUnknownTypes.has(warnKey)) return
+    this._warnedUnknownTypes.add(warnKey)
+    const snippet = line.slice(0, 500)
+    log.session.info('JSONL unknown event — surfacing to UI', {
+      sessionId: this.claudeSessionId, taskId: this.taskId,
+      scope, eventType,
+      linePreview: snippet,
+    })
+    bus.emit(EventNames.SESSION_UNKNOWN_EVENT, {
+      sessionId: this.claudeSessionId,
+      taskId: this.taskId,
+      scope,
+      eventType,
+      snippet,
+    }, ['main-ai'], { source: 'session-runner' })
+  }
+
+  /**
    * Handle a single JSONL line from the stream-json output.
    * Parses the JSON, extracts the event type, and emits bus events.
    */
@@ -1648,6 +1697,17 @@ export class ClaudeCodeSession {
               sessionId: this.claudeSessionId, taskId: this.taskId,
             })
             this._turnResultEmitted = false
+          }
+          if (this.resultEmitted) {
+            // Optimistic remote-exit (~line 2286) set this true, but the daemon is
+            // still feeding fresh turns — reset so the next result event isn't
+            // suppressed by the "replayed result" guard (~line 2145). Without this,
+            // subsequent SESSION_RESULT events get dropped, markDone never fires,
+            // and the UI's "Streaming" badge stays stuck.
+            log.session.warn('new init while resultEmitted=true — reverting optimistic remote-exit', {
+              sessionId: this.claudeSessionId, taskId: this.taskId,
+            })
+            this.resultEmitted = false
           }
           const newId = sys.session_id as string
           const expectedId = this._expectedSessionId
@@ -1763,6 +1823,9 @@ export class ClaudeCodeSession {
                 updateSessionRecord(this.claudeSessionId!, { mode: mapped }).catch(() => {}),
               )
             }
+            // Propagate mode change to daemon so it can auto-respond with new policy.
+            // All sessions (local + remote) now go through daemon.
+            this._transport?.setMode?.(mapped)
             this.emitStatusChanged('IN_PROGRESS')
             log.session.info('mode updated from JSONL system event', {
               sessionId: this.claudeSessionId, taskId: this.taskId,
@@ -1800,11 +1863,40 @@ export class ClaudeCodeSession {
               sessionId: sid, taskId: this.taskId,
               variant: 'info' as const, message: 'Operation succeeded',
             }, ['main-ai'], { source: 'session-runner' })
+          } else if (sys.subtype === 'api_retry') {
+            // Upstream API error — Claude Code is retrying with backoff.
+            // Surface so the user can tell "Anthropic throttle" from "Walnut stuck".
+            // CLI emits one api_retry per attempt; we mirror 1:1 (not urgent — routine throttles
+            // clear in <1s, only interesting in aggregate if retries keep piling up).
+            const attempt = sys.attempt as number | undefined
+            const max = sys.max_retries as number | undefined
+            const delayMs = sys.retry_delay_ms as number | undefined
+            const errStatus = sys.error_status as string | number | null | undefined
+            const errName = sys.error as string | undefined
+            const hasRealErrName = typeof errName === 'string' && errName.length > 0 && errName !== 'unknown'
+            const errLabel = errStatus ? `HTTP ${errStatus}` : (hasRealErrName ? errName : 'upstream error')
+            const delayLabel = typeof delayMs === 'number' ? `${Math.round(delayMs)}ms` : '?'
+            bus.emit(EventNames.SESSION_SYSTEM_EVENT, {
+              sessionId: sid, taskId: this.taskId,
+              variant: 'info' as const,
+              message: `Upstream retry ${attempt ?? '?'}/${max ?? '?'} — ${errLabel}, backoff ${delayLabel}`,
+              // Only attach errName as detail when it's additional info beyond errLabel
+              // (i.e. we already showed an HTTP status — errName adds the category).
+              detail: errStatus && hasRealErrName ? errName : undefined,
+            }, ['main-ai'], { source: 'session-runner' })
           } else if (sys.subtype && sys.subtype !== 'init' && sys.subtype !== 'status') {
-            // Catch-all: unknown future subtypes
+            // Catch-all: unknown future subtypes — forward full payload so we
+            // don't lose diagnostic info to a bare subtype name.
+            const payloadForDisplay = Object.fromEntries(
+              Object.entries(sys).filter(([k]) => k !== 'session_id' && k !== 'uuid' && k !== 'type' && k !== 'subtype')
+            )
+            const detail = Object.keys(payloadForDisplay).length > 0
+              ? JSON.stringify(payloadForDisplay).slice(0, 500)
+              : undefined
             bus.emit(EventNames.SESSION_SYSTEM_EVENT, {
               sessionId: sid, taskId: this.taskId,
               variant: 'info' as const, message: String(sys.subtype),
+              detail,
             }, ['main-ai'], { source: 'session-runner' })
           }
         }
@@ -1817,17 +1909,39 @@ export class ClaudeCodeSession {
         if (!Array.isArray(msg.message?.content)) break
         const msgId = msg.message?.id ?? ''
         const parentToolUseId = msg.parent_tool_use_id ?? undefined
-        let textBlockIdx = 0
+        // Dedup strategy: the `assistant` JSONL content array does NOT include
+        // thinking blocks, but the SSE stream at `inner.index` DOES. So an
+        // index-based key drifts — we've had real cases where SSE wrote
+        // `msgId:1` for text while assistant-loop wrote `msgId:0` and the
+        // whole text was emitted twice (extended-thinking models).
+        //
+        // Instead: find *any* previously-streamed text for this msgId that
+        // matches as a prefix, and use that as previousText. Works regardless
+        // of whether thinking preceded text.
+        let textBlocksSeen = 0
         for (const block of msg.message.content) {
           if (block.type === 'text' && block.text) {
-            // ── Progressive delta extraction ──
-            // Claude Code writes multiple JSONL lines per message (same message.id),
-            // each containing the ACCUMULATED text so far. We must emit only the NEW
-            // suffix since the last emission, not the full snapshot. Without this,
-            // the frontend/stream-buffer would accumulate "A" + "AB" + "ABC" = "AABABC".
-            const trackingKey = `${msgId}:${textBlockIdx}`
-            textBlockIdx++
-            const previousText = this._lastEmittedText.get(trackingKey) ?? ''
+            // Find the prefix-matching stream accumulator for this message.
+            // Falls back to the trackingKey we ourselves wrote last time
+            // the assistant branch ran (for non-stream_event mode).
+            let previousText = ''
+            let matchKey = ''
+            for (const [key, val] of this._lastEmittedText) {
+              if (!key.startsWith(`${msgId}:`)) continue
+              // Longest matching prefix wins — handles multiple text blocks
+              // per message by taking the one that best covers block.text.
+              if (val.length > previousText.length && block.text.startsWith(val)) {
+                previousText = val
+                matchKey = key
+              }
+            }
+            // Fallback for non-stream_event sessions: per-text-block-index key.
+            const fallbackKey = `${msgId}:assistant-text:${textBlocksSeen}`
+            textBlocksSeen++
+            const trackingKey = matchKey || fallbackKey
+            if (!matchKey) {
+              previousText = this._lastEmittedText.get(fallbackKey) ?? ''
+            }
 
             if (block.text === previousText) {
               continue // Exact duplicate — skip entirely
@@ -2151,19 +2265,24 @@ export class ClaudeCodeSession {
           break
         }
 
-        // Detect stale/replayed result events for remote sessions.
+        // Detect stale/replayed result events for daemon sessions (all sessions now).
         // If the cumulative cost is identical to the previous turn's cost, the CLI
         // didn't make an API call — the daemon replayed old JSONL events (e.g., after
         // a FIFO write to a stuck process that echoed the old result without processing).
         // Skip this check for the first result (no previous cost) and for error results.
-        if (this._transport?.isRemote
+        if (this._transport
           && this._lastResultCost !== undefined
           && result.total_cost_usd !== undefined
           && result.total_cost_usd === this._lastResultCost
           && !result.is_error) {
+          // Dump the full raw record so we can diagnose *why* the CLI made zero API calls.
+          // Fields to look at next time: subtype, stop_reason, num_turns, duration_api_ms,
+          // usage, mcp_servers. A `num_turns: 0` with `duration_api_ms: 0` means the CLI
+          // never entered the agent loop — typical of MCP init hang or pre-flight bailout.
           log.session.warn('stale result detected (cost unchanged) — forcing --resume on next message', {
             sessionId: this.claudeSessionId, taskId: this.taskId,
             cost: result.total_cost_usd, prevCost: this._lastResultCost,
+            rawResult: event,
           })
           // Mark pipe as dead so processNext falls through to --resume spawn
           // instead of writing to a potentially broken FIFO.
@@ -2201,14 +2320,37 @@ export class ClaudeCodeSession {
           && resultErrors.every(e => e.startsWith('[ede_diagnostic]'))
         const effectiveIsError = result.is_error && !isSoftEdeError
 
+        let conversationLost = false
         if (result.is_error && resultErrors?.length && !isSoftEdeError) {
           let errorMsg = resultErrors.join('; ')
           // Add cwd hint — Claude CLI uses cwd to resolve session storage path,
           // so a renamed/moved project directory causes "No conversation found"
           if (errorMsg.includes('No conversation found')) {
+            conversationLost = true
             errorMsg += ` (cwd: ${this._cwd ?? 'unknown'} — the project directory may have changed since this session was created)`
           }
           resultText = errorMsg
+        }
+
+        // Auto-archive on "No conversation found": the remote/local JSONL was wiped
+        // (typical on clouddev cleanup), so --resume will keep failing. Archive the
+        // stale record to free the task's single-slot and let the next session_send
+        // pre-flight detect the loss and start a fresh session.
+        if (conversationLost && this.claudeSessionId) {
+          const sid = this.claudeSessionId
+          const hint = `Remote JSONL missing (cwd=${this._cwd ?? 'unknown'}, host=${this._host ?? 'local'})`
+          log.session.warn('conversation lost — auto-archiving session', {
+            sessionId: sid, taskId: this.taskId, host: this._host, cwd: this._cwd,
+          })
+          import('../core/session-tracker.js').then(({ updateSessionRecord }) =>
+            updateSessionRecord(sid, {
+              archived: true,
+              archive_reason: 'remote_conversation_lost',
+              errorMessage: hint,
+            }),
+          ).catch((err) => {
+            log.session.warn('failed to auto-archive lost conversation', { sessionId: sid, error: err instanceof Error ? err.message : String(err) })
+          })
         }
 
         log.session.info('session result received', {
@@ -2275,6 +2417,13 @@ export class ClaudeCodeSession {
               updateSessionRecord(sid, { pid: undefined }),
             ).catch(() => {})
           }
+          // Broadcast status-change so server's belt-and-suspenders (web/server.ts
+          // on session:status-changed with process_status in {stopped,error,idle})
+          // calls sessionStreamBuffer.markDone(sid). Without this, a subsequent
+          // daemon replay wave that gets suppressed by the resultEmitted guard at
+          // line ~2145 never drives the stream buffer to isStreaming=false, and
+          // the UI's "Streaming" badge stays stuck until the next writeMessage.
+          this.emitStatusChanged('AGENT_COMPLETE')
         } else {
           // Process is exiting (SSH, interrupted, or natural exit)
           this.resultEmitted = true
@@ -2371,6 +2520,10 @@ export class ClaudeCodeSession {
         })
 
         if (request.subtype === 'can_use_tool') {
+          // NOTE: For daemon sessions (all sessions now), bypass/plan auto-approval is
+          // handled by the daemon itself — it `continue`s past auto-decided requests so
+          // walnut never sees them. The code below is retained as a safety fallback but
+          // is effectively dead code for daemon-backed sessions.
           if (this._mode === 'bypass') {
             // Bypass mode: check auto_approve_bypass config (default: true).
             // Config read is async — use .then() since handleStreamLine is sync.
@@ -2466,9 +2619,102 @@ export class ClaudeCodeSession {
         break
       }
 
-      default:
-        log.session.debug('ignoring unknown stream event type', { taskId: this.taskId, type: (event as { type: string }).type })
+      case 'stream_event': {
+        // Anthropic SSE partial events (--include-partial-messages). Enables
+        // token-level UI streaming. See claude-stream-event-map.ts for the
+        // parse/drop/unknown contract.
+        const se = event as unknown as {
+          event?: {
+            type?: string
+            message?: { id?: string }
+            index?: number
+            content_block?: { type?: string; id?: string; name?: string; input?: Record<string, unknown> }
+            delta?: { type?: string; text?: string; thinking?: string; partial_json?: string }
+          }
+        }
+        const inner = se.event
+        const innerType = inner?.type ?? ''
+        if (!innerType) break
+        const fate = classifyStreamEvent(innerType)
+        if (fate === 'drop') break
+        if (fate === 'unknown') {
+          this.emitUnknownEventOnce('stream_event', innerType, line)
+          break
+        }
+
+        // ── message_start: capture msg id for dedup tracking ──
+        if (innerType === 'message_start') {
+          this._currentStreamMsgId = inner?.message?.id ?? null
+          break
+        }
+
+        // ── message_delta: already handled for usage/stop_reason upstream ──
+        if (innerType === 'message_delta') break
+
+        // ── content_block_delta: real content streams here ──
+        if (innerType === 'content_block_delta') {
+          const delta = inner?.delta
+          const deltaType = delta?.type ?? ''
+          const deltaFate = classifyDelta(deltaType)
+          if (deltaFate === 'drop') break
+          if (deltaFate === 'unknown') {
+            this.emitUnknownEventOnce('delta', deltaType, line)
+            break
+          }
+
+          const msgId = this._currentStreamMsgId ?? ''
+          const sseIndex = inner?.index ?? 0
+
+          if (deltaType === 'text_delta') {
+            const text = delta?.text ?? ''
+            if (!text) break
+            // Stream path stores per-(msgId, SSE-index) accumulators. The
+            // `assistant` branch doesn't know our SSE index (Claude Code strips
+            // thinking blocks from the persisted content array), so it
+            // prefix-matches any `${msgId}:*` key — which works regardless of
+            // how indexes line up between the two paths.
+            const trackingKey = `${msgId}:${sseIndex}`
+            const previousText = this._lastEmittedText.get(trackingKey) ?? ''
+            this._lastEmittedText.set(trackingKey, previousText + text)
+
+            const rewritten = this.rewriteRemoteImages(text)
+            if (this.fullText.length < MAX_FULL_TEXT) {
+              this.fullText += rewritten
+            }
+            bus.emit(EventNames.SESSION_TEXT_DELTA, {
+              sessionId: this.claudeSessionId,
+              taskId: this.taskId,
+              delta: rewritten,
+            }, ['main-ai'], { source: 'session-runner', urgency: 'urgent' })
+          } else if (deltaType === 'thinking_delta') {
+            const text = delta?.thinking ?? ''
+            if (!text) break
+            bus.emit(EventNames.SESSION_THINKING_DELTA, {
+              sessionId: this.claudeSessionId,
+              taskId: this.taskId,
+              delta: text,
+            }, ['main-ai'], { source: 'session-runner', urgency: 'urgent' })
+          } else if (deltaType === 'citations_delta') {
+            // Surface citation as a text_delta with the reference mark so it
+            // appears in the normal text flow. More elaborate UI can come later.
+            const citation = JSON.stringify(delta)
+            bus.emit(EventNames.SESSION_TEXT_DELTA, {
+              sessionId: this.claudeSessionId,
+              taskId: this.taskId,
+              delta: ` ※${citation} `,
+            }, ['main-ai'], { source: 'session-runner', urgency: 'urgent' })
+          }
+          break
+        }
+
         break
+      }
+
+      default: {
+        const unknownType = (event as { type?: string }).type ?? 'null'
+        this.emitUnknownEventOnce('top_level', unknownType, line)
+        break
+      }
       }
     } catch (err) {
       log.session.warn('error processing stream event', {
@@ -2921,6 +3167,31 @@ export class SessionRunner {
             }
           }
 
+          // sessionId mismatch fixup: if the SESSION_RESULT carried a new sessionId
+          // (e.g. Claude Code --resume failed → new claudeSessionId), the frontend
+          // is still subscribed to the OLD sessionId and would filter out this event
+          // (sid !== sessionId). Emit a supplementary copy under resolvedSessionId
+          // directly to the web-ui subscriber so the frontend's useSessionStream
+          // clears isStreaming. Destination ['web-ui'] avoids re-entering this
+          // handler (session-runner won't receive it → no infinite loop) and bypasses
+          // the main-ai re-emit enrichment path (the frontend's result handler only
+          // needs sessionId).
+          if (resolvedSessionId !== sessionId) {
+            const rawData = eventData<'session:result'>(event)
+            // `reemit: true` marks this as a re-emit so global subscribers (event-bus.ts:228)
+            // skip it — they already processed the original under `sessionId`. Only the web-ui
+            // subscriber (destination-targeted) should forward this to the browser.
+            bus.emit(
+              EventNames.SESSION_RESULT,
+              { ...rawData, sessionId: resolvedSessionId },
+              ['web-ui'],
+              { source: 'sid-mismatch-fixup', reemit: true },
+            )
+            log.session.info('SESSION_RESULT: emitted fixup under resolvedSessionId', {
+              resolvedSessionId, rawSessionId: sessionId,
+            })
+          }
+
           const batchCount = this.batchCounts.get(resolvedSessionId) ?? 1
           this.clearActiveProcessing(resolvedSessionId)
 
@@ -3354,7 +3625,7 @@ export class SessionRunner {
     // Claude Code's --resume + --fork-session creates a new session with full context.
     const resumeId = isFork ? data.forkedFromSessionId : undefined
     const spillFile = data.largePromptFile ? { localPath: data.largePromptFile.localPath } : undefined
-    session.send(message, cwd, resumeId, mode, resolvedModel, appendSystemPrompt, data.host, sshTarget, isFork, config.session?.permission_prompt, spillFile)
+    session.send(message, cwd, resumeId, mode, resolvedModel, appendSystemPrompt, data.host, sshTarget, isFork, config.session?.permission_prompt, spillFile, config.session?.stream_partial_messages)
 
     // Record directory usage for the frequent-dirs persistent store (fire-and-forget)
     if (cwd) {
@@ -3539,11 +3810,11 @@ export class SessionRunner {
       }
     }
 
-    // Map session server mode to SDK permission mode
-    const sdkMode = mode === 'bypass' ? 'bypass'
+    // Map session server mode to SDK permission mode.
+    // Default (no mode): 'bypass' — matches CLI spawn semantics.
+    const sdkMode = mode === 'plan' ? 'plan'
       : mode === 'accept' ? 'accept'
-        : mode === 'plan' ? 'plan'
-          : 'default'
+        : 'bypass'
 
     // Start via session server client
     const result = await this.sdkClient.startSession({
@@ -3561,7 +3832,7 @@ export class SessionRunner {
     // Create session record
     const { createSessionRecord } = await import('../core/session-tracker.js')
     await createSessionRecord(claudeSessionId, taskId, project ?? '', cwd, {
-      mode: (mode as SessionMode) ?? 'default',
+      mode: (mode as SessionMode) ?? 'bypass',
       title: sessionTitle,
       description: message.slice(0, 500),
       host: data.host,
@@ -3601,6 +3872,47 @@ export class SessionRunner {
     }, ['main-ai'], { source: 'session-runner' })
 
     return { claudeSessionId, title: sessionTitle }
+  }
+
+  /**
+   * Check whether a session's underlying process is still live.
+   * Used by processNext to decide between rehydrating an existing process vs
+   * spawning a fresh `claude --resume` (which would kill the running turn).
+   *
+   * Intentionally NOT reusing `isSessionProcessAlive` in `src/utils/session-liveness.ts`:
+   *   - That util routes remote sessions through `isDaemonConnected(host)`, which only
+   *     tells us the SSH tunnel is up — not whether this specific sessionId is still
+   *     tracked by the daemon. It also applies a 5-min grace period desirable for the
+   *     health-monitor hot path but wrong here: we need authoritative "process alive"
+   *     at send time so we don't silently fall through to `--resume` and kill a turn.
+   *   - It also consults the SessionManager registry first; this helper is called
+   *     precisely when `this.sessions` is empty (no registered manager available).
+   *
+   * Strict `probe?.alive === true` guards against contract drift where `alive` might
+   * become truthy-non-boolean; daemon today returns `{ok:true,alive:true}` on live and
+   * `{ok:false}` otherwise (see `src/providers/daemon-connection.ts:probeDaemonSession`).
+   */
+  private async isSessionStillAlive(record: SessionRecord): Promise<boolean> {
+    if (record.host) {
+      try {
+        const { probeDaemonSession } = await import('./daemon-connection.js')
+        const probe = await probeDaemonSession(record.host, record.claudeSessionId)
+        return probe?.alive === true
+      } catch (err) {
+        log.session.debug('isSessionStillAlive: remote probe threw', {
+          host: record.host, sessionId: record.claudeSessionId,
+          error: err instanceof Error ? err.message : String(err),
+        })
+        return false
+      }
+    }
+    if (record.pid == null) return false
+    try {
+      process.kill(record.pid, 0)
+      return true
+    } catch {
+      return false
+    }
   }
 
   /**
@@ -3908,6 +4220,57 @@ export class SessionRunner {
         log.session.warn('processNext: failed to read pending model/mode', { sessionId, error: err instanceof Error ? err.message : String(err) })
       }
 
+      // Rehydrate: if this.sessions lost the entry (e.g. reconciler didn't flag the
+      // record as reconnectable on startup, so init() never populated the map), try
+      // to attach to the existing process before falling through to --resume spawn.
+      // Without this, sending a message to a healthy remote session would kill the
+      // running turn and emit the SDK's "[Request interrupted by user]" marker in
+      // the JSONL stream (that string is emitted by @anthropic-ai/claude-agent-sdk
+      // — not a Walnut string, don't grep locally — when its abortController is
+      // aborted with a non-"interrupt" reason, i.e. exactly what a --resume respawn
+      // does to the in-flight turn).
+      //
+      // Skip when a pending model/mode switch is in flight — that path must go
+      // through --resume (the CLI args change), so rehydrating would be wasted work.
+      if (!targetSession && !hasPendingSwitch) {
+        try {
+          const { getSessionByClaudeId } = await import('../core/session-tracker.js')
+          const record = await getSessionByClaudeId(sessionId)
+          if (record && await this.isSessionStillAlive(record)) {
+            log.session.info('processNext: rehydrating session via attachToExisting', {
+              sessionId, host: record.host, pid: record.pid, taskId: record.taskId,
+            })
+            const attached = await ClaudeCodeSession.attachToExisting(record, this.cliCommand, this._testDaemonUrl)
+            // Race guard: a concurrent path (startup init() phase 1, or a concurrent
+            // session:start for the same taskId) may have populated this.sessions
+            // while attachToExisting was awaiting. If so, discard ours — registering
+            // a second transport would overwrite the first's entry in the session
+            // manager registry (src/providers/session-manager.ts:296) and orphan its
+            // event listeners / tailer.
+            let collided: ClaudeCodeSession | undefined
+            for (const [, s] of this.sessions) {
+              if (s.sessionId === sessionId) { collided = s; break }
+            }
+            if (collided) {
+              log.session.info('processNext: rehydrate lost race — discarding attached, using existing', { sessionId })
+              attached.detach()
+              targetSession = collided
+            } else {
+              // mapKey mirrors the convention used by startup init() (~line 2860):
+              // taskId when available, else `reconnected-<claudeSessionId>` so taskless
+              // sessions don't collide under an undefined key.
+              const mapKey = record.taskId || `reconnected-${sessionId}`
+              this.sessions.set(mapKey, attached)
+              targetSession = attached
+            }
+          }
+        } catch (err) {
+          log.session.warn('processNext: rehydrate attempt failed, will fall back to --resume', {
+            sessionId, error: err instanceof Error ? err.message : String(err),
+          })
+        }
+      }
+
       // If pending model/mode switch, force --resume path (skip FIFO)
       if (hasPendingSwitch && targetSession) {
         log.session.info('processNext: forcing --resume for model/mode switch', { sessionId, model: resolvedModel, mode: resolvedMode })
@@ -3939,28 +4302,10 @@ export class SessionRunner {
           await new Promise(r => setTimeout(r, 200))
         }
 
-        // Pre-flight liveness check — LOCAL sessions only.
-        //
-        // For a local session, a dead CLI process can leave the FIFO on disk —
-        // writes succeed into the kernel buffer but nobody reads, so the message
-        // is silently lost. `process.kill(pid, 0)` on the local PID catches this.
-        //
-        // For REMOTE sessions the PID is on the remote host; running
-        // `process.kill` locally is a nonsensical syscall against the local
-        // PID table and almost always returns false even when the remote
-        // Claude is fine. The daemon's `cmdSend` is the atomic source of
-        // truth for remote pipe liveness (opens FIFO O_WRONLY|O_NONBLOCK →
-        // ENXIO the moment nobody is reading) and `writeMessage` already
-        // consults it, so skip the bogus local check for remote sessions.
-        const pid = targetSession.processPid
-        const isRemote = !!targetSession.host
-        if (!isRemote && pid && !await isProcessAliveAsync(pid, 'claude')) {
-          log.session.warn('processNext: process dead before FIFO write — clearing pipe for --resume', {
-            sessionId, pid,
-          })
-          targetSession.markProcessDead()
-          // Fall through to --resume spawn path below
-        } else if (await targetSession.writeMessage(combined)) {
+        // All sessions now go through daemon. The daemon's `cmdSend` does atomic
+        // FIFO liveness detection (O_WRONLY|O_NONBLOCK → ENXIO if nobody is reading).
+        // No local PID pre-flight check needed.
+        if (await targetSession.writeMessage(combined)) {
           log.session.info('processNext: message sent via stdin (no new process)', { sessionId })
 
           // Write synthetic user events to streams file so Phase 1 has user messages.
@@ -4044,7 +4389,7 @@ export class SessionRunner {
           // mode silently reverting to 'default' on --resume (send() treats undefined as default).
           const resumeMode = resolvedMode ?? mode ?? record.mode
           log.session.info('resuming session via CLI', { sessionId, taskId: record.taskId, messageLength: combined.length, model: resolvedModel, mode: resumeMode })
-          session.send(combined, record.cwd ?? undefined, sessionId, resumeMode, resolvedModel, undefined, record.host ?? undefined, sshTarget, undefined, resumeConfig.session?.permission_prompt)
+          session.send(combined, record.cwd ?? undefined, sessionId, resumeMode, resolvedModel, undefined, record.host ?? undefined, sshTarget, undefined, resumeConfig.session?.permission_prompt, undefined, resumeConfig.session?.stream_partial_messages)
 
           // Write synthetic user events — send() is sync, _outputFile is set immediately
           for (const wmId of walnutMessageIds) {
@@ -4098,9 +4443,9 @@ export class SessionRunner {
 
       // Resume the session with the combined message (with optional mode/model override).
       // Fall back to targetSession._mode to prevent mode silently reverting to 'default'.
-      const existingResumeMode = resolvedMode ?? mode ?? targetSession._mode
+      const existingResumeMode = resolvedMode ?? mode ?? targetSession.mode
       log.session.info('resuming session via CLI (existing target)', { sessionId, taskId: targetSession.taskId, messageLength: combined.length, host: resumeHost, model: resolvedModel, mode: existingResumeMode })
-      targetSession.send(combined, targetSession.cwd ?? undefined, sessionId, existingResumeMode, resolvedModel, undefined, resumeHost ?? undefined, resumeSshTarget, undefined, resumeConfig2.session?.permission_prompt)
+      targetSession.send(combined, targetSession.cwd ?? undefined, sessionId, existingResumeMode, resolvedModel, undefined, resumeHost ?? undefined, resumeSshTarget, undefined, resumeConfig2.session?.permission_prompt, undefined, resumeConfig2.session?.stream_partial_messages)
 
       // Write synthetic user events — send() is sync, _outputFile is set immediately
       for (const wmId of walnutMessageIds) {

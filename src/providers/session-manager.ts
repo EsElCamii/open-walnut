@@ -5,7 +5,7 @@
  * ClaudeCodeSession delegates ALL process lifecycle + I/O to a SessionManager.
  * The manager encapsulates HOW and WHERE the Claude CLI process runs:
  *
- *   LocalSessionManager  — Process on local machine (FIFO + file tailing)
+ *   Local daemon          — Process on local macOS via direct WebSocket
  *   RemoteSessionManager — Process on remote machine via walnut-daemon WebSocket
  *
  * WHY:
@@ -28,7 +28,7 @@
 
 import type { SshTarget } from './session-io.js'
 import { RemoteSessionManager } from './remote-session-manager.js'
-import { LocalSessionManager } from './local-session-manager.js'
+import { localDaemon } from './local-daemon.js'
 
 // ── Output Events ──
 
@@ -81,6 +81,8 @@ export interface TransportStartOptions {
    * the upload and avoids regex-scraping the message body.
    */
   spillFile?: { localPath: string }
+  /** Permission mode — daemon uses this to auto-respond to control_request. */
+  mode?: 'bypass' | 'plan' | 'accept' | 'default'
 }
 
 // ── Attach Options ──
@@ -94,6 +96,8 @@ export interface TransportAttachOptions {
   onOutput: (event: OutputEvent) => void
   /** Callback when the Claude process exits. stderr is included for remote sessions. */
   onExit: (code: number, stderr?: string) => void
+  /** Permission mode — daemon updates session mode on reattach. */
+  mode?: 'bypass' | 'plan' | 'accept' | 'default'
 }
 
 // ── Start Result ──
@@ -116,6 +120,8 @@ export interface TransportAttachResult {
   alive: boolean
   /** Path to the local JSONL output file */
   outputFile: string
+  /** Pending control_request the daemon is tracking (for remote sessions). */
+  pendingCtrl?: { reqId: string; toolName: string; request: Record<string, unknown>; receivedAt: number } | null
 }
 
 // ── SessionManager Interface ──
@@ -124,8 +130,8 @@ export interface TransportAttachResult {
  * Unified session manager. ClaudeCodeSession only depends on this interface.
  *
  * Implementations:
- *   LocalSessionManager  — Local filesystem + process spawn
- *   RemoteSessionManager — Remote WebSocket daemon
+ *   Local daemon (RemoteSessionManager w/ __local__ host) — Local WebSocket
+ *   RemoteSessionManager — Remote WebSocket daemon via SSH tunnel
  *
  * Lifecycle:
  *   start() → [send() | writeMessage()] → [stop() | interrupt() | kill()] → cleanup()
@@ -191,6 +197,13 @@ export interface SessionManager {
    * For local: PID check. For remote: daemon status query.
    */
   isAlive(): Promise<boolean>
+
+  /**
+   * Set the permission mode for this session on the daemon.
+   * Returns true if mode was set successfully, false on failure or no-op.
+   * Optional — only implemented by daemon-backed managers.
+   */
+  setMode?(mode: string): Promise<boolean>
 
   // ── Session Management ──
 
@@ -280,8 +293,8 @@ export interface SessionManager {
    * Timestamp (ms) of the last output event received.
    * Used by health monitor for idle timeout checks.
    *
-   * LocalSessionManager: derived from output file mtime (persistent on disk).
-   * RemoteSessionManager: in-memory timestamp updated on each daemon event.
+   * Local daemon: derived from output file mtime (persistent on disk).
+   * Remote daemon: in-memory timestamp updated on each daemon event.
    *
    * Returns 0 if no events have been received yet.
    */
@@ -323,22 +336,52 @@ export const getRegisteredTransport = getRegisteredSessionManager
 /**
  * Create the appropriate SessionManager based on whether this is local or remote.
  *
+ * Unified architecture: ALL sessions go through a daemon (local or remote).
+ * - Remote host with sshTarget: remote daemon via SSH tunnel
+ * - No host or '__local__': local daemon via direct WebSocket
+ *
  * @param tmpId — temporary ID for file naming (random hex or session ID on resume)
  * @param host — host key from config.hosts (null = local)
  * @param sshTarget — resolved SSH connection parameters
- * @param outputFileOverride — force a specific output file path (for attach)
+ * @param _outputFileOverride — unused (kept for API compat during migration)
+ * @param _cliCommand — unused (kept for API compat during migration)
+ * @param directWsUrl — override WebSocket URL (tests, or explicit local daemon URL)
  */
 export function createSessionManager(
   tmpId: string,
   host?: string,
   sshTarget?: SshTarget,
-  outputFileOverride?: string,
-  cliCommand?: string,
+  _outputFileOverride?: string,
+  _cliCommand?: string,
   directWsUrl?: string,
 ): SessionManager {
   if (host && sshTarget) {
     return new RemoteSessionManager(tmpId, host, sshTarget, directWsUrl)
   }
 
-  return new LocalSessionManager(tmpId, outputFileOverride, cliCommand)
+  // Unified architecture: all sessions (local + remote) go through a daemon.
+  // Local daemon runs on macOS, connected via direct WebSocket (no SSH tunnel).
+  // This ensures consistent permission policy, FIFO management, and session
+  // survival across Walnut restarts.
+  //
+  // Local session: route through local daemon.
+  // Lazy-start daemon if it wasn't bootstrapped at server startup — this
+  // catches cases where server startup bootstrap failed silently or a test
+  // harness created sessions without calling startServer() first.
+  const wsUrl = directWsUrl || localDaemon.wsUrl
+  if (!wsUrl) {
+    throw new Error('Local daemon not running. Call localDaemon.ensureRunning() before creating sessions.')
+  }
+  return new RemoteSessionManager(tmpId, '__local__', null, wsUrl)
+}
+
+/**
+ * Lazy bootstrap helper — ensures local daemon is running before session creation.
+ * Callers that create local sessions should await this first if startup bootstrap
+ * may not have run (e.g. in tests or after a failed server startup).
+ */
+export async function ensureLocalDaemon(): Promise<void> {
+  if (!localDaemon.wsUrl) {
+    await localDaemon.ensureRunning()
+  }
 }
