@@ -16,7 +16,7 @@ MS To-Do sync: all fields combine into a structured body (`description\n\n---\n\
 
 External sync plugins: each plugin decides how to map these fields to its platform (e.g., description field, comment body, etc.). See the plugin's own documentation for details.
 
-Conversation_log is tail-truncated (recent entries preserved) in Task Context (400 chars), session context (300 tokens), and get_task tool response (1500 chars).
+Conversation_log is tail-truncated (recent entries preserved) in Task Context (400 chars), session context (300 tokens), and task_get tool response (1500 chars).
 
 ### Task source routing
 
@@ -51,11 +51,11 @@ Store version: v4 (`migrateToV4DependsOn`). The `depends_on` field is optional.
 
 Each task has typed session fields instead of an unbounded array: `plan_session_id?: string` (current plan session) and `exec_session_id?: string` (current execution session). The old `active_session_ids: string[]` is removed; `session_ids: string[]` is retained as a historical log.
 
-`linkSessionSlot(taskId, sessionId, 'plan'|'exec')` and `clearSessionSlot(taskId, sessionId?, slotType?)` in `task-manager.ts` manage these fields. `start_session` in `tools.ts` checks slots pre-flight and returns a `blocked` response with the existing session info when a slot is occupied. `applyPhase('COMPLETE')` and `toggle-complete` clear both slots.
+`linkSessionSlot(taskId, sessionId, 'plan'|'exec')` and `clearSessionSlot(taskId, sessionId?, slotType?)` in `task-manager.ts` manage these fields. `session_start` in `tools.ts` checks slots pre-flight and returns a `blocked` response with the existing session info when a slot is occupied. `applyPhase('COMPLETE')` and `toggle-complete` clear both slots.
 
 ### Project metadata (`.metadata` tasks)
 
-Each project can have a hidden `.metadata` task whose `description` contains YAML config (e.g., `default_host: remote-dev\ndefault_cwd: /home/user/project`). Retrieved via `getProjectMetadata(category, project)` in `task-manager.ts`. `.metadata` tasks are filtered from `query_tasks`, REST endpoints, and the TodoPanel UI. Used by `start_session` for host/cwd resolution.
+Each project can have a hidden `.metadata` task whose `description` contains YAML config (e.g., `default_host: remote-dev\ndefault_cwd: /home/user/project`). Retrieved via `getProjectMetadata(category, project)` in `task-manager.ts`. `.metadata` tasks are filtered from `task_query`, REST endpoints, and the TodoPanel UI. Used by `session_start` for host/cwd resolution.
 
 **Session CWD resolution chain** (5 priorities, in `resolveSessionContext()` in `tools.ts`): ① explicit `working_directory` param → ② `task.cwd` → ③ parent task chain walk → ④ project metadata `default_cwd` → ⑤ project memory directory (`~/.open-walnut/memory/projects/{category}/{project}/`). The same chain runs in `handleStart()`/`handleStartSdk()` in `claude-code-session.ts` as defense-in-depth for the RPC/bus path. If all 5 priorities fail, the agent tool returns an actionable error message.
 
@@ -89,11 +89,11 @@ Legacy code (do not extend):
 
 ### Needs-attention notification
 
-`needs_attention?: boolean` — a synced flag that signals "this task needs human input." The AI triage agent sets it via `update_task` when a session completes — instruction #4 in all three triage prompts in `server.ts`.
+`needs_attention?: boolean` — a synced flag that signals "this task needs human input." The AI triage agent sets it via `task_update` when a session completes — instruction #4 in all three triage prompts in `server.ts`.
 
 Default behavior: set it unless the session clearly succeeded and the agent is resuming with obvious next steps. In the UI, flagged tasks show a red dot (`.task-attention-dot`). Clicking/focusing a task in MainPage auto-clears the flag via `PATCH { needs_attention: false }`. `applyPhase('COMPLETE')` also clears it.
 
-MS To-Do sync: roundtripped via `Attention: true` header line in body. External plugins may include it in their sync payload (typically push-only). The `query_tasks` tool includes it when truthy and supports `where.needs_attention` filter.
+MS To-Do sync: roundtripped via `Attention: true` header line in body. External plugins may include it in their sync payload (typically push-only). The `task_query` tool includes it when truthy and supports `where.needs_attention` filter.
 
 ## Session Monitoring — 3-Layer System
 
@@ -113,7 +113,7 @@ Sessions are monitored at three levels, from fastest to slowest:
 
 ## Session Start Steps
 
-1. Agent tool `start_session` validates the task and calls `sessionRunner.startSession()` directly (awaits the Claude session ID so the response can include a `<session-ref>` tag). Other callers (REST, CLI) still emit `SESSION_START` via the bus.
+1. Agent tool `session_start` validates the task and calls `sessionRunner.startSession()` directly (awaits the Claude session ID so the response can include a `<session-ref>` tag). Other callers (REST, CLI) still emit `SESSION_START` via the bus.
 2. `SessionRunner.handleStart()` builds session context via `buildSessionContext()` (task info, project memory)
 3. Creates `ClaudeCodeSession` instance and calls `.send(message, cwd, ...)`
 4. Detached child process is spawned, stdout redirected to a JSONL file in `SESSION_STREAMS_DIR`
@@ -160,8 +160,10 @@ Threshold is dynamic: 80% of the model's context window (160K for 200K models, 8
 2. **Summarize** (`buildCompactionInstruction()`): LLM call with full message history as `MessageParam[]` produces structured checkpoint summary (10-section format).
 3. **Parallel execution**: Steps 1 and 2 run concurrently via `Promise.all`.
 4. **Turn-boundary cutting**: `findTurnBoundaryIndex()` scans from end counting user messages to find where last 10 turns begin. Guarantees no split `tool_use`/`tool_result` pairs.
-5. Old AI entries marked `compacted: true` and slimmed. Kept entries also slimmed. Guard: must have >= 4 old messages.
+5. **Entries before the boundary are deleted** from `entries[]` — both old AI conversation and older UI notifications (triage/cron/subagent/session-error) are discarded together. Kept entries are slimmed. Guard: must have >= 4 old messages.
 6. Summary stored as `compactionSummary` and injected into system prompt.
+
+**Why delete instead of marking `compacted: true`?** The model never reads old entries (they're filtered out), and the UI notification source data always lives in each subagent's own JSONL file (`~/.open-walnut/sessions/streams/<runId>.jsonl`). Retaining them only grew `chat-history.json` unboundedly (35 MB observed before the switch) and froze the Node event loop on every turn. The `compacted: true` marker is still checked defensively in `getModelContext()` for backward compatibility with older data, but new compactions never produce it.
 
 **Defense layer**: `getModelContext()` strips any user message whose `tool_result` blocks have no matching `tool_use` in the preceding assistant message.
 

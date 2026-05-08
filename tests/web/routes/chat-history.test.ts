@@ -111,7 +111,7 @@ describe('GET /api/chat/history', () => {
       { role: 'user', content: 'search for something' },
       { role: 'assistant', content: [
         { type: 'text', text: 'Searching...' },
-        { type: 'tool_use', id: 'tu_1', name: 'search', input: { q: 'test' } },
+        { type: 'tool_use', id: 'tu_1', name: 'task_search', input: { q: 'test' } },
       ] },
       { role: 'user', content: [
         { type: 'tool_result', tool_use_id: 'tu_1', content: 'found it' },

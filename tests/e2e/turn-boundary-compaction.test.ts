@@ -103,7 +103,7 @@ describe('Turn-boundary compaction E2E', () => {
         allMsgs.push(
           ...toolChainTurn(
             `search task ${i}`,
-            'query_tasks',
+            'task_query',
             { query: `task ${i}` },
             `[{"id":"t${i}","title":"Task ${i}"}]`,
             `Found task ${i}`,
@@ -169,7 +169,7 @@ describe('Turn-boundary compaction E2E', () => {
       allMsgs.push(
         ...toolChainTurn(
           `big tool call ${i}`,
-          'read_file',
+          'file_read',
           { path: `/some/file_${i}.ts`, content: largeInput },
           largeResult,
           `File ${i} read successfully`,
@@ -181,35 +181,13 @@ describe('Turn-boundary compaction E2E', () => {
     await chatHistory.addAIMessages(allMsgs);
     await chatHistory.compact(async () => 'Slim test summary');
 
-    // ── Verify: ALL entries (compacted + kept) have slimmed tool payloads ──
+    // ── Verify: pre-boundary entries are deleted; kept entries are slimmed ──
     const entries = (await chatHistory.getDisplayEntries()).messages;
 
-    // Check compacted entries
-    const compactedWithTools = entries.filter(
-      (e) =>
-        e.compacted
-        && Array.isArray(e.content)
-        && (e.content as Array<{ type: string }>).some((b) => b.type === 'tool_use'),
-    );
-    expect(compactedWithTools.length).toBeGreaterThan(0);
-    for (const entry of compactedWithTools) {
-      for (const block of entry.content as Array<{
-        type: string;
-        input?: Record<string, unknown>;
-      }>) {
-        if (block.type === 'tool_use' && block.input) {
-          for (const val of Object.values(block.input)) {
-            if (typeof val === 'string' && val.length > 214) {
-              throw new Error(
-                `Compacted tool_use input not slimmed: ${val.length} chars`,
-              );
-            }
-          }
-        }
-      }
-    }
+    // Fresh compaction never produces compacted=true entries — they're deleted.
+    expect(entries.filter((e) => e.compacted)).toHaveLength(0);
 
-    // Check kept (non-compacted) entries — these should ALSO be slimmed
+    // Check kept (non-compacted) entries — tool payloads must be slimmed
     const keptWithToolResults = entries.filter(
       (e) =>
         !e.compacted
@@ -261,7 +239,7 @@ describe('Turn-boundary compaction E2E', () => {
           role: 'assistant',
           content: [
             { type: 'text', text: 'old reply' },
-            { type: 'tool_use', id: 'tu_old', name: 'search', input: {} },
+            { type: 'tool_use', id: 'tu_old', name: 'task_search', input: {} },
           ],
           timestamp: '2025-01-01T00:00:01Z',
           compacted: true,
@@ -343,13 +321,9 @@ describe('Turn-boundary compaction E2E', () => {
     const body = (await res.json()) as {
       messages: Array<{ compacted?: boolean }>;
     };
-    expect(body.messages).toHaveLength(30);
-
-    // Count compacted vs non-compacted in REST response
-    const compactedCount = body.messages.filter((m) => m.compacted).length;
-    const nonCompactedCount = body.messages.filter((m) => !m.compacted).length;
-    expect(compactedCount).toBe(10); // 5 old turns * 2
-    expect(nonCompactedCount).toBe(20); // 10 kept turns * 2
+    // 15 turns → keep last 10 turns × 2 entries each = 20; older 10 entries deleted.
+    expect(body.messages).toHaveLength(20);
+    expect(body.messages.filter((m) => m.compacted)).toHaveLength(0);
   });
 
   it('model context maintains proper role alternation after compaction', async () => {
@@ -360,7 +334,7 @@ describe('Turn-boundary compaction E2E', () => {
         allMsgs.push(
           ...toolChainTurn(
             `tool turn ${i}`,
-            'exec',
+            'shell_exec',
             { command: `ls ${i}` },
             `file_${i}.txt`,
             `Found file ${i}`,

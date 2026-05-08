@@ -295,9 +295,9 @@ describe('compact', () => {
     const summary = await getCompactionSummary();
     expect(summary).toBe('Summarized conversation about tasks');
 
-    // Display messages should be untouched (never compacted)
+    // Display history reflects the pruned store (pre-boundary entries deleted).
     const display = await getDisplayHistory();
-    expect(display).toHaveLength(40);
+    expect(display).toHaveLength(20);
   });
 
   it('replaces compaction summary on subsequent compactions (incremental mode)', async () => {
@@ -474,7 +474,7 @@ describe('findTurnBoundaryIndex', () => {
     const entries = [
       { tag: 'ai' as const, role: 'user' as const, content: 'search X', timestamp: '' },
       { tag: 'ai' as const, role: 'assistant' as const, content: [
-        { type: 'tool_use', id: 'tu_1', name: 'search', input: {} },
+        { type: 'tool_use', id: 'tu_1', name: 'task_search', input: {} },
       ], timestamp: '' },
       { tag: 'ai' as const, role: 'user' as const, content: [
         { type: 'tool_result', tool_use_id: 'tu_1', content: 'found' },
@@ -580,7 +580,7 @@ describe('serializeMessages', () => {
         role: 'assistant',
         content: [
           { type: 'text', text: 'Let me check.' },
-          { type: 'tool_use', id: 'tu_1', name: 'query_tasks', input: {} },
+          { type: 'tool_use', id: 'tu_1', name: 'task_query', input: {} },
         ],
       },
       {
@@ -592,7 +592,7 @@ describe('serializeMessages', () => {
     ];
     const result = serializeMessages(msgs);
     expect(result).toContain('Let me check.');
-    expect(result).toContain('[tool: query_tasks]');
+    expect(result).toContain('[tool: task_query]');
     expect(result).toContain('[tool result]');
   });
 });
@@ -679,7 +679,7 @@ describe('getModelContext', () => {
     // Simulate a corrupted store: assistant with text only, followed by user with tool_result
     await addAIMessages([
       { role: 'user', content: 'start' },
-      { role: 'assistant', content: [{ type: 'text', text: 'Let me search' }, { type: 'tool_use', id: 'tu1', name: 'search', input: {} }] },
+      { role: 'assistant', content: [{ type: 'text', text: 'Let me search' }, { type: 'tool_use', id: 'tu1', name: 'task_search', input: {} }] },
       { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'tu1', content: 'found it' }] },
       // Normal text turn
       { role: 'assistant', content: [{ type: 'text', text: 'Done with search' }] },
@@ -731,7 +731,7 @@ describe('getDisplayEntries', () => {
     expect(entries[2].source).toBe('cron');
   });
 
-  it('includes compacted entries for scroll-back', async () => {
+  it('deletes pre-boundary entries on compact (keeps only recent turns)', async () => {
     const apiMsgs: Array<{ role: string; content: string }> = [];
     const displayMsgs: DisplayMessage[] = [];
     for (let i = 0; i < 20; i++) {
@@ -743,13 +743,13 @@ describe('getDisplayEntries', () => {
     await addTurn(apiMsgs, displayMsgs);
     await compact(async () => 'summary');
 
-    // All entries still present (compacted ones remain for scroll-back)
+    // Pre-boundary entries are now deleted, not marked compacted.
+    // 20 turns → keep last 10 turns × 2 entries each = 20 kept.
     const entries = (await getDisplayEntries()).messages;
-    expect(entries).toHaveLength(40);
+    expect(entries).toHaveLength(20);
 
-    // Some should be compacted
-    const compacted = entries.filter(e => e.compacted);
-    expect(compacted.length).toBeGreaterThan(0);
+    // No entry should carry the compacted flag after a fresh compaction.
+    expect(entries.filter(e => e.compacted)).toHaveLength(0);
   });
 
   it('returns correct pagination metadata', async () => {
@@ -803,7 +803,7 @@ describe('getDisplayEntries', () => {
       { role: 'user', content: 'hello' },
       { role: 'assistant', content: [
         { type: 'text', text: 'Searching' },
-        { type: 'tool_use', id: 'tu_1', name: 'search', input: { q: 'test' } },
+        { type: 'tool_use', id: 'tu_1', name: 'task_search', input: { q: 'test' } },
       ] },
       { role: 'user', content: [
         { type: 'tool_result', tool_use_id: 'tu_1', content: 'result' },
@@ -938,7 +938,7 @@ describe('v1 → v2 migration', () => {
 });
 
 describe('compact (v2 behavior)', () => {
-  it('marks old entries as compacted instead of deleting them', async () => {
+  it('deletes pre-boundary entries instead of marking them compacted', async () => {
     const apiMsgs: Array<{ role: string; content: string }> = [];
     const displayMsgs: DisplayMessage[] = [];
     for (let i = 0; i < 20; i++) {
@@ -951,20 +951,19 @@ describe('compact (v2 behavior)', () => {
 
     await compact(async () => 'Test summary');
 
-    // All entries still exist
+    // Only the last 10 turns (20 entries) remain — older entries are deleted.
     const { messages: allEntries } = await getDisplayEntries();
-    expect(allEntries).toHaveLength(40);
+    expect(allEntries).toHaveLength(20);
 
-    // Compacted entries have the flag
-    const compacted = allEntries.filter(e => e.compacted);
-    expect(compacted.length).toBe(20); // 40 - 20 recent = 20 compacted
+    // Fresh compaction never produces `compacted=true` entries.
+    expect(allEntries.filter(e => e.compacted)).toHaveLength(0);
 
-    // Model context only has recent ones
+    // Model context matches the kept slice.
     const ctx = await getModelContext();
     expect(ctx).toHaveLength(20);
   });
 
-  it('slims tool content in compacted entries', async () => {
+  it('slims tool content in kept entries after compaction', async () => {
     // Create entries with tool_use blocks
     const longInput = 'x'.repeat(500);
     const longResult = 'y'.repeat(1000);
@@ -978,7 +977,7 @@ describe('compact (v2 behavior)', () => {
         role: 'assistant',
         content: [
           { type: 'text', text: `reply ${i}` },
-          { type: 'tool_use', id: `tu_${i}`, name: 'query_tasks', input: { query: longInput } },
+          { type: 'tool_use', id: `tu_${i}`, name: 'task_query', input: { query: longInput } },
         ],
       } as MessageParam);
       apiMsgs.push({
@@ -996,14 +995,15 @@ describe('compact (v2 behavior)', () => {
 
     await compact(async () => 'summary');
 
-    // Check that compacted tool entries have slimmed content
+    // Kept entries with tool_use should have their large inputs slimmed.
     const entries = (await getDisplayEntries()).messages;
-    const compactedToolEntries = entries.filter(
-      e => e.compacted && Array.isArray(e.content) && (e.content as Array<{ type: string }>).some(b => b.type === 'tool_use'),
+    const keptToolUseEntries = entries.filter(
+      e => !e.compacted && e.tag === 'ai' && Array.isArray(e.content)
+        && (e.content as Array<{ type: string }>).some(b => b.type === 'tool_use'),
     );
-    expect(compactedToolEntries.length).toBeGreaterThan(0);
+    expect(keptToolUseEntries.length).toBeGreaterThan(0);
 
-    for (const entry of compactedToolEntries) {
+    for (const entry of keptToolUseEntries) {
       const blocks = entry.content as Array<{ type: string; input?: Record<string, unknown> }>;
       for (const block of blocks) {
         if (block.type === 'tool_use' && block.input) {
@@ -1031,7 +1031,7 @@ describe('compact (v2 behavior)', () => {
         role: 'assistant',
         content: [
           { type: 'text', text: `reply ${i}` },
-          { type: 'tool_use', id: `tu_${i}`, name: 'read_file', input: { path: '/big.ts' } },
+          { type: 'tool_use', id: `tu_${i}`, name: 'file_read', input: { path: '/big.ts' } },
         ],
       } as MessageParam);
       apiMsgs.push({
@@ -1084,7 +1084,7 @@ describe('compact (v2 behavior)', () => {
           role: 'assistant',
           content: [
             { type: 'text', text: `Searching ${i}` },
-            { type: 'tool_use', id: `tu_${i}`, name: 'search', input: { q: `query ${i}` } },
+            { type: 'tool_use', id: `tu_${i}`, name: 'task_search', input: { q: `query ${i}` } },
           ],
         } as MessageParam);
         apiMsgs.push({

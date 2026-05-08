@@ -65,7 +65,7 @@ export function findTurnBoundaryIndex(aiEntries: ChatEntry[], turnsToKeep: numbe
 
 // ── Write lock: serializes all read-modify-write operations ──
 // Per-agent write locks: each console agent has its own promise chain so that
-// General's writes don't block Inner Space (and vice versa).
+// General's writes don't block Mentor (and vice versa).
 const writeLocks = new Map<string, Promise<void>>();
 
 function getWriteLock(agentId: string): Promise<void> {
@@ -1086,7 +1086,7 @@ implementation details (those → project memory).
 Think: "What would I need to recall 2 weeks from now?"
 
 ## Project memory — update with technical decisions
-## Global memory — update with any new user preferences
+## Global memory — update with new user preferences
 If nothing new → "Nothing to persist."`;
 
 /**
@@ -1167,8 +1167,14 @@ function slimContent(content: unknown, stripImageData = false): unknown {
  *   Produces a structured checkpoint summary stored as compactionSummary
  *   and injected into the system prompt on subsequent turns.
  *
- * Old AI entries are marked `compacted: true` and slimmed — they stay in
- * the array for scroll-back but are excluded from model context.
+ * All entries before the turn boundary are DELETED from `entries[]` — both
+ * old AI conversation and older UI notifications (triage/cron/subagent).
+ * Their context is preserved in `compactionSummary` (AI) and in each
+ * subagent's own JSONL file (notifications). Keeping them in chat-history
+ * only grows the file with no access benefit.
+ *
+ * Kept entries (the recent turns) are slimmed to prevent single large
+ * tool_results from bloating future turns.
  *
  * @param summarizer — function that takes the compaction prompt and returns AI summary
  * @param memoryFlusher — optional function that runs the memory flush agent turn
@@ -1225,94 +1231,121 @@ export async function compact(
     });
   }
 
-  // ── Try working memory as compaction summary (saves an LLM call) ──
-  const workingMemoryContent = getWorkingMemory();
-  const useWorkingMemory = workingMemoryContent != null && !isWorkingMemoryEmpty(workingMemoryContent);
+  // Prevent working memory updater from running during compaction
+  const { setCompacting } = await import('../agent/working-memory-updater.js');
+  setCompacting(true);
 
-  if (useWorkingMemory) {
-    log.agent.info('compaction: using working memory as summary (skipping summarizer)');
-    // Snapshot working memory to compaction archive
-    snapshotWorkingMemory();
-  }
+  try {
+    // ── Try working memory as compaction summary (saves an LLM call) ──
+    const workingMemoryContent = getWorkingMemory();
+    const useWorkingMemory = workingMemoryContent != null && !isWorkingMemoryEmpty(workingMemoryContent);
 
-  const [summary] = await Promise.all([
-    // Summarizer: skip if working memory is available
-    useWorkingMemory
-      ? Promise.resolve(truncateWorkingMemoryForCompact(workingMemoryContent))
-      : summarizer(instruction, aiMsgs),
-    // Memory flusher: runs in parallel if eligible, errors don't block summarizer
-    shouldFlush
-      ? memoryFlusher(aiMsgs)
-          .then(() => log.agent.info('compaction memory flush done'))
-          .catch((err) => log.agent.warn('Memory flush failed during compaction, continuing', { error: String(err) }))
-      : Promise.resolve(),
-  ]);
+    if (useWorkingMemory) {
+      log.agent.info('compaction: using working memory as summary (skipping summarizer)');
+      // Snapshot working memory to compaction archive
+      try { snapshotWorkingMemory(); } catch (err) {
+        log.agent.debug('working memory snapshot failed (non-critical)', { error: String(err) });
+      }
+    }
 
-  // Step A (memory flush) already writes to daily log via the agent's memory tool.
-  // Step B (summarizer) only produces a summary for chat-history.json — no daily log write needed.
+    const [summary] = await Promise.all([
+      // Summarizer: skip if working memory is available
+      useWorkingMemory
+        ? Promise.resolve(truncateWorkingMemoryForCompact(workingMemoryContent))
+        : summarizer(instruction, aiMsgs),
+      // Memory flusher: runs in parallel if eligible, errors don't block summarizer
+      shouldFlush
+        ? memoryFlusher(aiMsgs)
+            .then(() => log.agent.info('compaction memory flush done'))
+            .catch((err) => log.agent.warn('Memory flush failed during compaction, continuing', { error: String(err) }))
+        : Promise.resolve(),
+    ]);
 
-  // Final phase: re-read, mark compacted, write — all under write lock
-  // to prevent concurrent writes from being lost.
-  return withWriteLock(async () => {
-    // Re-read store to pick up any concurrent writes during the LLM calls.
-    // Recompute boundary on fresh data to avoid stale-index mismatches.
-    store = await readStore(agentId);
-    entries = store.entries ?? [];
-    aiEntries = entries.filter((e) => e.tag === 'ai' && !e.compacted);
-    const freshBoundaryIdx = findTurnBoundaryIndex(aiEntries, RECENT_TURNS_TO_KEEP);
+    // Step A (memory flush) already writes to daily log via the agent's memory tool.
+    // Step B (summarizer) only produces a summary for chat-history.json — no daily log write needed.
 
-    // If the fresh data no longer supports compaction, bail out (store the summary
-    // but don't mark anything compacted — unlikely but possible under heavy concurrency).
-    if (freshBoundaryIdx === null) {
+    // Final phase: re-read, mark compacted, write — all under write lock
+    // to prevent concurrent writes from being lost.
+    return withWriteLock(async () => {
+      // Re-read store to pick up any concurrent writes during the LLM calls.
+      // Recompute boundary on fresh data to avoid stale-index mismatches.
+      store = await readStore(agentId);
+      entries = store.entries ?? [];
+      aiEntries = entries.filter((e) => e.tag === 'ai' && !e.compacted);
+      const freshBoundaryIdx = findTurnBoundaryIndex(aiEntries, RECENT_TURNS_TO_KEEP);
+
+      // If the fresh data no longer supports compaction, bail out (store the summary
+      // but don't mark anything compacted — unlikely but possible under heavy concurrency).
+      if (freshBoundaryIdx === null) {
+        store.compactionSummary = summary;
+        store.compactionCount++;
+        await writeStore(store, agentId);
+        return { summary };
+      }
+
+      // Map the AI-only boundary index back to an entries[] index, then DELETE
+      // everything before it. Old AI conversation + older UI notifications
+      // (triage/cron/subagent) are discarded together — their context is
+      // preserved in compactionSummary (for AI) and in each subagent's JSONL
+      // (for notifications). This keeps the file small forever.
+      let aiSeen = 0;
+      let entriesCutoff = entries.length;
+      for (let i = 0; i < entries.length; i++) {
+        const e = entries[i];
+        if (e.tag === 'ai' && !e.compacted) {
+          if (aiSeen === freshBoundaryIdx) {
+            entriesCutoff = i;
+            break;
+          }
+          aiSeen++;
+        }
+      }
+      const prunedCount = entriesCutoff;
+      store.entries = entries.slice(entriesCutoff);
+
+      // Slim kept entries (fixes ~50K token bloat from huge tool_results),
+      // preserving image paths so they can be hydrated when sent to the API.
+      for (const e of store.entries) {
+        if (e.tag === 'ai' && !e.compacted) {
+          e.content = slimContent(e.content, /* stripImageData */ false);
+        }
+      }
+
       store.compactionSummary = summary;
       store.compactionCount++;
       await writeStore(store, agentId);
+
+      log.agent.info('compaction pruned entries', {
+        prunedCount,
+        remaining: store.entries.length,
+        agentId,
+      });
+
+      log.agent.info('compaction complete', {
+        compactionNumber: store.compactionCount,
+        summaryLength: summary.length,
+        agentId,
+      });
+
+      // Fire-and-forget: compact today's daily log if it's oversized.
+      // Threshold: 8K tokens (~32KB). The summarizer is provided by the caller
+      // or we skip if none available. This is a defense-in-depth measure.
+      compactDailyLog(formatDateKey(), DAILY_LOG_COMPACT_THRESHOLD, async (content) => {
+        // Use the same summarizer with a daily-log-specific instruction
+        const [compactedSummary] = await Promise.all([
+          summarizer(
+            'Compact this daily log into a concise summary. Preserve key decisions, outcomes, and action items. Remove redundant entries and verbose session recaps. Keep timestamps for important events. Output markdown.',
+            [{ role: 'user' as const, content }],
+          ),
+        ]);
+        return compactedSummary;
+      }).catch((err) => {
+        log.agent.warn('Daily log compaction failed (non-critical)', { error: String(err) });
+      });
+
       return { summary };
-    }
-
-    // Mark old AI entries as compacted (with full slimming including image data).
-    // Kept entries ARE also slimmed (to prevent 68KB tool_results from bloating context),
-    // but we preserve image paths so they can be hydrated when sent to the API.
-    let aiIdx = 0;
-    for (const entry of entries) {
-      if (entry.tag !== 'ai' || entry.compacted) continue;
-      if (aiIdx < freshBoundaryIdx) {
-        // Old entries: mark compacted + strip image data
-        entry.compacted = true;
-        entry.content = slimContent(entry.content, /* stripImageData */ true);
-      } else {
-        // Kept entries: slim but preserve image paths (fixes ~50K token bloat from huge tool_results)
-        entry.content = slimContent(entry.content, /* stripImageData */ false);
-      }
-      aiIdx++;
-    }
-
-    store.compactionSummary = summary;
-    store.compactionCount++;
-    await writeStore(store, agentId);
-
-    log.agent.info('compaction complete', {
-      compactionNumber: store.compactionCount,
-      summaryLength: summary.length,
-      agentId,
-    });
-
-    // Fire-and-forget: compact today's daily log if it's oversized.
-    // Threshold: 8K tokens (~32KB). The summarizer is provided by the caller
-    // or we skip if none available. This is a defense-in-depth measure.
-    compactDailyLog(formatDateKey(), DAILY_LOG_COMPACT_THRESHOLD, async (content) => {
-      // Use the same summarizer with a daily-log-specific instruction
-      const [compactedSummary] = await Promise.all([
-        summarizer(
-          'Compact this daily log into a concise summary. Preserve key decisions, outcomes, and action items. Remove redundant entries and verbose session recaps. Keep timestamps for important events. Output markdown.',
-          [{ role: 'user' as const, content }],
-        ),
-      ]);
-      return compactedSummary;
-    }).catch((err) => {
-      log.agent.warn('Daily log compaction failed (non-critical)', { error: String(err) });
-    });
-
-    return { summary };
-  }, agentId);
+    }, agentId);
+  } finally {
+    setCompacting(false);
+  }
 }

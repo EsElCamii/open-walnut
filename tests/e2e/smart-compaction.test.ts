@@ -95,15 +95,17 @@ Discussed 20 tasks with the user.
     const remaining = await chatHistory.getApiMessages();
     expect(remaining.length).toBe(20); // 10 turns * 2
 
-    // 4. Verify display messages are untouched
+    // 4. Pre-boundary entries are deleted (not marked compacted).
+    //    20 turns → keep last 10 turns × 2 entries each = 20 entries remain.
     const display = await chatHistory.getDisplayHistory();
-    expect(display).toHaveLength(40);
+    expect(display).toHaveLength(20);
 
     // 5. Verify the REST API returns correct compaction state
     const res = await fetch(apiUrl('/api/chat/history'));
     expect(res.ok).toBe(true);
-    const body = await res.json();
-    expect(body.messages).toHaveLength(40);
+    const body = await res.json() as { messages: Array<{ compacted?: boolean }> };
+    expect(body.messages).toHaveLength(20);
+    expect(body.messages.filter((m) => m.compacted)).toHaveLength(0);
   });
 
   it('step 1 memoryFlusher is called with conversation history', async () => {
