@@ -49,7 +49,7 @@ async function getExecConfig(): Promise<ToolExecConfig> {
 }
 
 export const execTool: ToolDefinition = {
-  name: 'exec',
+  name: 'shell_exec',
   description:
     'Execute a shell command and return stdout+stderr. ' +
     'Use for running scripts, checking system state, building projects, or any CLI operation. ' +

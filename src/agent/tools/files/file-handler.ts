@@ -62,7 +62,7 @@ export const fileHandler: IFileHandler = {
 
     // ── Directory check ──
     if (stat.isDirectory()) {
-      return `Error: "${filePath}" is a directory, not a file. Use files_list to list directory contents.`;
+      return `Error: "${filePath}" is a directory, not a file. Use file_list to list directory contents.`;
     }
 
     const ext = path.extname(filePath).toLowerCase();

@@ -232,14 +232,14 @@ describe('SessionHookDispatcher', () => {
       dispatcher.init([makeHook({ hooks: ['onToolUse'], handler })]);
 
       bus.emit(EventNames.SESSION_TOOL_USE, {
-        sessionId: 's1', toolName: 'read_file', toolUseId: 'tu-1', input: { path: '/foo' },
+        sessionId: 's1', toolName: 'file_read', toolUseId: 'tu-1', input: { path: '/foo' },
       }, ['*']);
 
       await tick();
 
       expect(handler).toHaveBeenCalledTimes(1);
       const payload = handler.mock.calls[0][0];
-      expect(payload.toolName).toBe('read_file');
+      expect(payload.toolName).toBe('file_read');
       expect(payload.toolUseId).toBe('tu-1');
     });
 
@@ -360,7 +360,7 @@ describe('SessionHookDispatcher', () => {
 
       // Tool use instead of text-delta should also trigger onTurnStart
       bus.emit(EventNames.SESSION_TOOL_USE, {
-        sessionId: 's1', toolName: 'read_file', toolUseId: 'tu-1',
+        sessionId: 's1', toolName: 'file_read', toolUseId: 'tu-1',
       }, ['*']);
       await tick();
 

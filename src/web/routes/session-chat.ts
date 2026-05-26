@@ -187,7 +187,7 @@ export function registerSessionChatRpc(): void {
     return { messages: await getQueue(data.sessionId) }
   })
 
-  registerMethod('session:stream-subscribe', (payload: unknown, _ws) => {
+  registerMethod('session:stream-subscribe', async (payload: unknown, _ws) => {
     if (typeof payload !== 'object' || payload === null) {
       throw new Error('session:stream-subscribe requires an object payload')
     }
@@ -197,7 +197,51 @@ export function registerSessionChatRpc(): void {
       throw new Error('session:stream-subscribe requires sessionId (string)')
     }
 
-    return sessionStreamBuffer.getSnapshot(data.sessionId)
+    // READ-ONLY path. Must NOT mutate sessionStreamBuffer.
+    //
+    // Prior versions called markDone() here as "defensive cleanup" when the DB
+    // record was terminal, to guard against stale isStreaming after server
+    // restart. That write-side defense raced with the markStreaming triggered by
+    // a fresh session:status-changed{running} during resume: the frontend
+    // re-subscribes on every status change, and the RPC was reading a session
+    // record that hadn't yet caught up to the new turn — clearing the just-
+    // marked-streaming buffer within ~20ms and stalling the UI until refresh.
+    //
+    // Fix: do read-time correction only. If DB says terminal but buffer still
+    // claims streaming, surface isStreaming=false to this caller WITHOUT
+    // touching the shared buffer. The authoritative markDone is driven by
+    // session:status-changed / session:result handlers in server.ts.
+    const sid = data.sessionId
+    const STALE_RUNNING_MS = 5 * 60 * 1000
+    const snapshot = sessionStreamBuffer.getSnapshot(sid)
+    let correctedIsStreaming = snapshot.isStreaming
+    try {
+      const record = await getSessionByClaudeId(sid)
+      if (record && (record.process_status === 'stopped' || record.process_status === 'error')) {
+        correctedIsStreaming = false
+      } else if (record && record.process_status === 'running') {
+        const lastChangeMs = record.last_status_change
+          ? Date.parse(record.last_status_change)
+          : 0
+        if (lastChangeMs > 0 && Date.now() - lastChangeMs > STALE_RUNNING_MS) {
+          log.web.warn('stale running on subscribe (read-only, no buffer mutation)', {
+            sessionId: sid,
+            staleMs: Date.now() - lastChangeMs,
+          })
+          correctedIsStreaming = false
+        }
+      }
+    } catch (err) {
+      // Non-fatal: if the DB lookup fails (e.g. transient storage error),
+      // return the uncorrected buffer snapshot. Logged at debug to aid
+      // troubleshooting without flooding warn-level output.
+      log.web.debug('session:stream-subscribe db lookup failed (non-fatal)', {
+        sessionId: sid,
+        error: err instanceof Error ? err.message : String(err),
+      })
+    }
+
+    return { ...snapshot, isStreaming: correctedIsStreaming }
   })
 
   // ── Team RPCs ──
@@ -222,24 +266,43 @@ export function registerSessionChatRpc(): void {
 
     // ── Remote session: read team config/JSONL from remote host ──
     if (isRemote && record.host) {
-      // Try reading team config from remote
-      const config = await readTeamConfigRemote(teamName, record.host)
-      if (config) {
-        const members = config.members.map(m => ({
+      // Read config and JSONL in parallel, then merge (same race condition fix as local)
+      const [remoteConfig, remoteTeams] = await Promise.all([
+        readTeamConfigRemote(teamName, record.host).catch(() => null),
+        extractTeamsFromLeadJsonlRemote(sessionId, record.host).catch(() => new Map<string, import('../../core/team-reader.js').ExtractedTeamAgent[]>()),
+      ])
+      const remoteJsonlAgents = remoteTeams.get(teamName)
+
+      if (remoteConfig) {
+        const membersByName = new Map(remoteConfig.members.map(m => [m.name, {
           name: m.name,
           agentType: m.agentType,
           model: m.model,
-          isLead: m.agentId === config.leadAgentId,
+          isLead: m.agentId === remoteConfig.leadAgentId,
           backendType: m.backendType,
-        }))
-        return { teamName, members }
+        }]))
+
+        // Merge JSONL agents missing from config
+        if (remoteJsonlAgents) {
+          for (const agent of remoteJsonlAgents) {
+            if (!membersByName.has(agent.name)) {
+              membersByName.set(agent.name, {
+                name: agent.name,
+                agentType: agent.agentType,
+                model: agent.model,
+                isLead: false,
+                backendType: undefined,
+              })
+            }
+          }
+        }
+
+        return { teamName, members: Array.from(membersByName.values()) }
       }
 
-      // Fallback: config deleted — extract from remote lead JSONL
-      const teams = await extractTeamsFromLeadJsonlRemote(sessionId, record.host)
-      const agents = teams.get(teamName)
-      if (agents && agents.length > 0) {
-        const members = agents.map(a => ({
+      // Fallback: config deleted — use JSONL-only extraction
+      if (remoteJsonlAgents && remoteJsonlAgents.length > 0) {
+        const members = remoteJsonlAgents.map(a => ({
           name: a.name,
           agentType: a.agentType,
           model: a.model,
@@ -255,42 +318,70 @@ export function registerSessionChatRpc(): void {
 
     // ── Local session: read from local filesystem ──
 
-    // Try reading team config from disk first
+    // Read team config from disk (may be incomplete due to Claude Code race condition
+    // when multiple agents are dispatched in parallel — concurrent read-modify-write
+    // to config.json can lose earlier writes).
     const config = readTeamConfig(teamName)
+
+    // Also extract agents from lead session JSONL — this is the authoritative source
+    // because each Agent tool_use is recorded in the JSONL regardless of config races.
+    let jsonlAgents: Map<string, { name: string; agentType: string; model: string }> | undefined
+    if (record?.cwd) {
+      const leadJsonlPath = getLeadSessionJsonlPath(sessionId, record.cwd)
+      const teams = extractTeamsFromLeadJsonl(leadJsonlPath)
+      const agents = teams.get(teamName)
+      if (agents && agents.length > 0) {
+        jsonlAgents = new Map(agents.map(a => [a.name, a]))
+      }
+    }
+
     if (config) {
-      const members = config.members.map(m => ({
+      // Start with config members
+      const membersByName = new Map(config.members.map(m => [m.name, {
         name: m.name,
         agentType: m.agentType,
         model: m.model,
         isLead: m.agentId === config.leadAgentId,
         backendType: m.backendType,
+      }]))
+
+      // Merge any agents found in JSONL but missing from config (race condition fix)
+      if (jsonlAgents) {
+        for (const [name, agent] of jsonlAgents) {
+          if (!membersByName.has(name)) {
+            membersByName.set(name, {
+              name: agent.name,
+              agentType: agent.agentType,
+              model: agent.model,
+              isLead: false,
+              backendType: undefined,
+            })
+          }
+        }
+        if (membersByName.size > config.members.length) {
+          log.web.info('team-info: merged JSONL agents missing from config (race condition)', {
+            teamName, configCount: config.members.length, mergedCount: membersByName.size,
+          })
+        }
+      }
+
+      return { teamName, members: Array.from(membersByName.values()) }
+    }
+
+    // Fallback: config deleted by TeamDelete — use JSONL-only extraction
+    if (jsonlAgents && jsonlAgents.size > 0) {
+      const members = Array.from(jsonlAgents.values()).map(a => ({
+        name: a.name,
+        agentType: a.agentType,
+        model: a.model,
+        isLead: false,
+        backendType: undefined,
       }))
+      log.web.info('team-info fallback: extracted from lead JSONL', { teamName, memberCount: members.length })
       return { teamName, members }
     }
 
-    // Fallback: config deleted by TeamDelete — extract from lead session JSONL
-    if (!record?.cwd) {
-      return { teamName, members: [] }
-    }
-
-    const leadJsonlPath = getLeadSessionJsonlPath(sessionId, record.cwd)
-    const teams = extractTeamsFromLeadJsonl(leadJsonlPath)
-    const agents = teams.get(teamName)
-
-    if (!agents || agents.length === 0) {
-      return { teamName, members: [] }
-    }
-
-    const members = agents.map(a => ({
-      name: a.name,
-      agentType: a.agentType,
-      model: a.model,
-      isLead: false,
-      backendType: undefined,
-    }))
-
-    log.web.info('team-info fallback: extracted from lead JSONL', { teamName, memberCount: members.length })
-    return { teamName, members }
+    return { teamName, members: [] }
   })
 
   registerMethod('session:team-agent-subscribe', async (payload: unknown) => {

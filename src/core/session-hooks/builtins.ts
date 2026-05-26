@@ -45,7 +45,7 @@ export const turnCompleteTriageHook: SessionHookDefinition = {
 
     // Cooldown: prevent burst dispatches from replayed events after server restart.
     // The daemon may replay N result events in milliseconds — without this guard,
-    // each one spawns a full triage subagent (get_task + update_task + notify_main_agent).
+    // each one spawns a full triage subagent (task_get + task_update + notify_main_agent).
     const dedupKey = `${p.sessionId}:${p.taskId}`;
     const now = Date.now();
 
@@ -97,7 +97,7 @@ export const turnCompleteTriageHook: SessionHookDefinition = {
       }
 
       const sessionType = p.isPlanSession ? 'plan-mode ' : '';
-      const triageTask = `A Claude Code ${sessionType}session just finished for task ${p.taskId}. Session ID: ${p.sessionId}. Turn index: ${p.turnIndex ?? 'unknown'}.\n\nThe <session_history> context below contains recent messages (User + Assistant) with [index] labels. Use these to determine the current phase. If you need full details of a specific message, call get_session_history with index=N.`;
+      const triageTask = `A Claude Code ${sessionType}session just finished for task ${p.taskId}. Session ID: ${p.sessionId}. Turn index: ${p.turnIndex ?? 'unknown'}.\n\nThe <session_history> context below contains recent messages (User + Assistant) with [index] labels. Use these to determine the current phase. If you need full details of a specific message, call session_history with index=N.`;
 
       bus.emit('subagent:start', {
         agentId: triageAgentId,

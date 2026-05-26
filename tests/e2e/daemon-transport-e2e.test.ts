@@ -293,8 +293,9 @@ describe('RemoteSessionManager disconnect handling', () => {
     // Inject disconnect fault — next message will trigger WS close
     isolatedDaemon.injectFault('disconnect')
 
-    // Send a command to trigger the disconnect
-    try { transport.writeMessage('trigger disconnect') } catch { /* expected */ }
+    // Send a command to trigger the disconnect — writeMessage resolves (not rejects)
+    // on transport error under the strict-ack contract, so no await/catch needed.
+    await transport.writeMessage('trigger disconnect').catch(() => {})
 
     // Wait for the disconnect to propagate
     await new Promise(r => setTimeout(r, 2000))
@@ -305,7 +306,7 @@ describe('RemoteSessionManager disconnect handling', () => {
     const alive = await transport.isAlive()
     expect(alive).toBe(true) // grace period — process may still be alive on remote
 
-    const sent = transport.writeMessage('should fail')
+    const sent = await transport.writeMessage('should fail')
     expect(sent).toBe(false) // connection is down — can't send
 
     await transport.cleanup()

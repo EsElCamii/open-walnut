@@ -10,13 +10,17 @@ import {
   createSessionRecord,
   listSessions,
   updateSessionRecord,
+  _resetSessionTrackerForTesting,
 } from '../../src/core/session-tracker.js'
+import { closeDb } from '../../src/core/session-db.js'
 import { WALNUT_HOME, TASKS_FILE } from '../../src/constants.js'
 
 let tmpDir: string
 
 beforeEach(async () => {
   tmpDir = WALNUT_HOME
+  closeDb()
+  _resetSessionTrackerForTesting()
   await fsp.rm(tmpDir, { recursive: true, force: true })
   await fsp.mkdir(tmpDir, { recursive: true })
   // Ensure tasks directory exists for task-manager operations
@@ -24,6 +28,8 @@ beforeEach(async () => {
 })
 
 afterEach(async () => {
+  closeDb()
+  _resetSessionTrackerForTesting()
   await fsp.rm(tmpDir, { recursive: true, force: true })
 })
 

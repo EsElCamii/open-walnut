@@ -322,14 +322,14 @@ describe('executeTool — repos/ integration', () => {
       '    path: /tmp/tool-test',
     ].join('\n');
 
-    const writeRaw = await executeTool('files_write', {
+    const writeRaw = await executeTool('file_write', {
       source: 'repos/tool-test',
       content: yaml,
     });
     const writeResult = JSON.parse(writeRaw as string);
     expect(writeResult.status).toBe('created');
 
-    const readRaw = await executeTool('files_read', {
+    const readRaw = await executeTool('file_read', {
       source: 'repos/tool-test',
     });
     const readResult = JSON.parse(readRaw as string);
@@ -342,13 +342,13 @@ describe('executeTool — repos/ integration', () => {
 
   it('files_list for repos/ returns created repos', async () => {
     // Create a repo first
-    await executeTool('files_write', {
+    await executeTool('file_write', {
       source: 'repos/list-test',
       content: 'name: List Test\nhosts:\n  local:\n    path: /tmp/lt\n',
     });
 
     // files_list uses 'prefix' param, not 'source'
-    const listRaw = await executeTool('files_list', { prefix: 'repos/' });
+    const listRaw = await executeTool('file_list', { prefix: 'repos/' });
     const listResult = JSON.parse(listRaw as string);
 
     // files_list returns a flat array of items
@@ -359,7 +359,7 @@ describe('executeTool — repos/ integration', () => {
   });
 
   it('files_read for non-existent repo returns error', async () => {
-    const readRaw = await executeTool('files_read', {
+    const readRaw = await executeTool('file_read', {
       source: 'repos/nonexistent',
     });
     // Should contain error-like text (not found)

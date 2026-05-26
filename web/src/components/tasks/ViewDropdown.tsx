@@ -8,7 +8,7 @@ import { useState, useRef, useEffect, useCallback } from 'react';
 
 // ── Types ──
 
-export type SortBy = 'priority' | 'date' | 'updated';
+export type SortBy = 'manual' | 'priority' | 'date' | 'updated';
 export type GroupBy = 'category' | 'none';
 export type DateFilter = '' | 'now' | 'overdue' | 'this-week' | 'no-date';
 
@@ -138,8 +138,13 @@ export function ViewDropdown({
             <div className="vd-control-group">
               <span className="vd-label">Sort</span>
               <div className="vd-seg">
-                {([['priority', 'P\u2193'], ['date', 'C\u2193'], ['updated', 'U\u2193']] as const).map(([val, lbl]) => (
-                  <button key={val} className={`vd-seg-btn${sortBy === val ? ' vd-active' : ''}`} onClick={() => onSortByChange(val)}>{lbl}</button>
+                {([['manual', 'M'], ['priority', 'P\u2193'], ['date', 'C\u2193'], ['updated', 'U\u2193']] as const).map(([val, lbl]) => (
+                  <button
+                    key={val}
+                    className={`vd-seg-btn${sortBy === val ? ' vd-active' : ''}`}
+                    onClick={() => onSortByChange(val)}
+                    title={val === 'manual' ? 'Manual order (drag / move buttons)' : undefined}
+                  >{lbl}</button>
                 ))}
               </div>
             </div>

@@ -9,7 +9,7 @@ const NAV_ITEMS: NavItem[] = [
   { id: 'general', label: 'General' },
   { id: 'sessions', label: 'Claude Code Session' },
   { id: 'integrations', label: 'Integrations' },
-  { id: 'search', label: 'Search' },
+  { id: 'search', label: 'Search & Embeddings' },
   { id: 'stt', label: 'Speech-to-Text' },
   { id: 'audio-capture', label: 'Audio Capture' },
   { id: 'heartbeat', label: 'Heartbeat' },

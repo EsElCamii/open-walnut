@@ -236,7 +236,7 @@ export class SubagentRunner {
     const maxTokens = agentDef.max_tokens ?? subagentConfig?.max_tokens ?? config.agent?.maxTokens;
     const maxToolRounds = agentDef.max_tool_rounds ?? subagentConfig?.max_tool_rounds ?? 10;
 
-    // Capture task phase at launch for CAS guard on update_task
+    // Capture task phase at launch for CAS guard on task_update
     let launchPhase: string | undefined;
     if (data.taskId) {
       try {
@@ -358,10 +358,10 @@ export class SubagentRunner {
       let systemPrompt = buildSubagentSystemPrompt(agentDef, data.task, combinedContext || undefined);
       const toolSet = await buildSubagentToolSet(agentDef, data.deniedTools);
 
-      // CAS guard: wrap update_task to inject ifPhase from launchPhase.
+      // CAS guard: wrap task_update to inject ifPhase from launchPhase.
       // This prevents stale triage from overwriting phase after user resumes.
       if (run._launchPhase && TRIAGE_AGENT_IDS.has(run.agentId)) {
-        const updateTaskTool = toolSet.find(t => t.name === 'update_task');
+        const updateTaskTool = toolSet.find(t => t.name === 'task_update');
         if (updateTaskTool) {
           const originalExecute = updateTaskTool.execute;
           const launchPhase = run._launchPhase;
@@ -502,8 +502,9 @@ export class SubagentRunner {
         run.usage = totalUsage;
         log.subagent.info('embedded loop cancelled', { runId: run.runId, agentId: run.agentId });
 
-        // Update SessionRecord on cancel
+        // Update SessionRecord on cancel — auto-archive triage sessions
         try {
+          const isTriage = TRIAGE_AGENT_IDS.has(run.agentId);
           const { updateSessionRecord } = await import('../core/session-tracker.js');
           await updateSessionRecord(run.runId, {
             process_status: 'stopped',
@@ -511,6 +512,7 @@ export class SubagentRunner {
             last_status_change: new Date().toISOString(),
             status_reason: 'user_stopped',
             status_changed_by: 'subagent-runner',
+            ...(isTriage ? { archived: true, archive_reason: 'triage_cancelled' } : {}),
           } as any);
         } catch {}
 
@@ -532,8 +534,10 @@ export class SubagentRunner {
 
       jsonl.writeResult(totalUsage);
 
-      // Update SessionRecord on completion
+      // Update SessionRecord on completion — triage sessions are archived immediately
+      // to prevent ghost session accumulation that blocks session_import.
       try {
+        const isTriage = TRIAGE_AGENT_IDS.has(run.agentId);
         const { updateSessionRecord } = await import('../core/session-tracker.js');
         await updateSessionRecord(run.runId, {
           process_status: 'stopped',
@@ -541,6 +545,7 @@ export class SubagentRunner {
           last_status_change: new Date().toISOString(),
           status_reason: 'normal_completion',
           status_changed_by: 'subagent-runner',
+          ...(isTriage ? { archived: true, archive_reason: 'triage_complete' } : {}),
         } as any);
       } catch (err) {
         log.subagent.warn('failed to update session record on completion', {
@@ -601,8 +606,9 @@ export class SubagentRunner {
 
       log.subagent.error('run error', { runId: run.runId, error: run.error });
 
-      // Update SessionRecord on error
+      // Update SessionRecord on error — auto-archive triage sessions
       try {
+        const isTriage = TRIAGE_AGENT_IDS.has(run.agentId);
         const { updateSessionRecord } = await import('../core/session-tracker.js');
         await updateSessionRecord(run.runId, {
           process_status: 'error',
@@ -611,6 +617,7 @@ export class SubagentRunner {
           last_status_change: new Date().toISOString(),
           status_reason: 'api_error',
           status_changed_by: 'subagent-runner',
+          ...(isTriage ? { archived: true, archive_reason: 'triage_error' } : {}),
         } as any);
       } catch {}
 

@@ -1,115 +1,462 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import type { Config } from '@open-walnut/core';
 import { SectionCard } from '../inputs/SectionCard';
-import { ToggleSwitch } from '../inputs/ToggleSwitch';
-import { NumberInput } from '../inputs/NumberInput';
-import { useSystemHealth } from '@/hooks/useSystemHealth';
-import { InstallButton } from '@/components/common/InstallButton';
+import { log } from '@/utils/log';
 
 interface Props {
   config: Config;
   onSave: (partial: Partial<Config>) => Promise<void>;
 }
 
+// ── Model presets ──
+
+const MODEL_PRESETS = [
+  { label: 'BGE-M3 (Multilingual, ~1.16 GB)', value: 'hf:CompendiumLabs/bge-m3-gguf/bge-m3-f16.gguf' },
+  { label: 'Qwen3-Embedding-0.6B (Multilingual, ~640 MB)', value: 'hf:Qwen/Qwen3-Embedding-0.6B-GGUF/Qwen3-Embedding-0.6B-Q8_0.gguf' },
+  { label: 'EmbeddingGemma (English, ~300 MB)', value: 'hf:ggml-org/embeddinggemma-300M-Q8_0/embeddinggemma-300M-Q8_0.gguf' },
+  { label: 'Custom...', value: 'custom' },
+];
+
+// Server default is defined in src/core/qmd.ts — keep in sync
+const DEFAULT_MODEL = MODEL_PRESETS[0].value;
+
+// ── Types for API responses ──
+
+interface QmdModelInfo {
+  name: string;
+  file: string;
+  size: string;
+  path: string;
+  downloaded: boolean;
+}
+
+interface StoreStats {
+  collections: Record<string, { indexed: number; embedded: number; chunks: number }>;
+  totalIndexed: number;
+  totalEmbedded: number;
+  totalChunks: number;
+}
+
+interface EmbedProgress {
+  chunksEmbedded: number;
+  totalChunks: number;
+  bytesProcessed: number;
+  totalBytes: number;
+  store: string;
+}
+
+interface QmdStatus {
+  model: QmdModelInfo;
+  stores: {
+    memory: StoreStats | null;
+    notes: StoreStats | null;
+    tasks: StoreStats | null;
+    sessions: StoreStats | null;
+  };
+  status: 'ready' | 'indexing' | 'downloading' | 'error';
+  error: string | null;
+  progress: EmbedProgress | null;
+}
+
+// ── Pulse keyframe style (injected once) ──
+
+const PULSE_KEYFRAMES = `
+@keyframes qmd-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}
+`;
+
+// ── Component ──
+
 export function SearchSection({ config, onSave }: Props) {
   const search = config.search ?? {};
-  const [enabled, setEnabled] = useState(search.enabled ?? true);
-  const [ollamaUrl, setOllamaUrl] = useState(search.ollama_url ?? 'http://localhost:11434');
-  const [model, setModel] = useState(search.model ?? 'bge-m3');
-  const [defaultMode, setDefaultMode] = useState(search.default_mode ?? 'hybrid');
-  const [rrfAlpha, setRrfAlpha] = useState<number | undefined>(search.rrf_alpha ?? 0.4);
-  const { health } = useSystemHealth();
-  const ollamaOk = health.embedding.ollamaAvailable;
+  const [selectedModel, setSelectedModel] = useState(() => {
+    const saved = search.qmd_model ?? DEFAULT_MODEL;
+    const isPreset = MODEL_PRESETS.some((p) => p.value === saved);
+    return isPreset ? saved : 'custom';
+  });
+  const [customUrl, setCustomUrl] = useState(() => {
+    const saved = search.qmd_model ?? '';
+    const isPreset = MODEL_PRESETS.some((p) => p.value === saved);
+    return isPreset ? '' : saved;
+  });
+  const [customUrlError, setCustomUrlError] = useState<string | null>(null);
 
+  // QMD status from server
+  const [qmdStatus, setQmdStatus] = useState<QmdStatus | null>(null);
+  const [fetchError, setFetchError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [actionPending, setActionPending] = useState(false);
+
+  const pollRef = useRef<ReturnType<typeof setInterval> | undefined>(undefined);
+  // Track whether user has made unsaved edits (suppress config->state sync)
+  const userEditedRef = useRef(false);
+  // Track initial mount for config sync
+  const mountedRef = useRef(false);
+
+  // ── Sync from config prop (only on initial mount or if user hasn't edited) ──
   useEffect(() => {
+    if (mountedRef.current && userEditedRef.current) return;
+    mountedRef.current = true;
     const s = config.search ?? {};
-    setEnabled(s.enabled ?? true);
-    setOllamaUrl(s.ollama_url ?? 'http://localhost:11434');
-    setModel(s.model ?? 'bge-m3');
-    setDefaultMode(s.default_mode ?? 'hybrid');
-    setRrfAlpha(s.rrf_alpha ?? 0.4);
+    const saved = s.qmd_model ?? DEFAULT_MODEL;
+    const isPreset = MODEL_PRESETS.some((p) => p.value === saved);
+    setSelectedModel(isPreset ? saved : 'custom');
+    setCustomUrl(isPreset ? '' : saved);
   }, [config]);
 
+  // ── Fetch status (CRITICAL-1: AbortController) ──
+  const fetchStatus = useCallback(async (signal?: AbortSignal) => {
+    try {
+      const res = await fetch('/api/qmd/status', { signal });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data: QmdStatus = await res.json();
+      setQmdStatus(data);
+      setFetchError(null);
+      return data;
+    } catch (err) {
+      if (err instanceof DOMException && err.name === 'AbortError') return null;
+      const msg = err instanceof Error ? err.message : String(err);
+      setFetchError(msg);
+      log.warn('settings', 'QMD status fetch failed', { error: msg });
+      return null;
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  // ── Initial fetch with AbortController ──
+  useEffect(() => {
+    const ac = new AbortController();
+    fetchStatus(ac.signal);
+    return () => ac.abort();
+  }, [fetchStatus]);
+
+  // ── Poll while downloading or indexing (CRITICAL-2: clear before create) ──
+  useEffect(() => {
+    if (pollRef.current) clearInterval(pollRef.current);
+    if (qmdStatus?.status === 'downloading' || qmdStatus?.status === 'indexing') {
+      pollRef.current = setInterval(fetchStatus, 5000);
+    }
+    return () => {
+      if (pollRef.current) clearInterval(pollRef.current);
+    };
+  }, [qmdStatus?.status, fetchStatus]);
+
+  // ── Actions (CRITICAL-3: actionPending guard) ──
+  const handleDownload = async () => {
+    setActionPending(true);
+    try {
+      const res = await fetch('/api/qmd/download', { method: 'POST' });
+      if (!res.ok && res.status !== 409) throw new Error(`HTTP ${res.status}`);
+      log.info('settings', 'QMD download triggered');
+      await fetchStatus();
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      log.error('settings', 'QMD download trigger failed', { error: msg });
+      setFetchError(msg);
+    } finally {
+      setActionPending(false);
+    }
+  };
+
+  const handleReindex = async () => {
+    // MEDIUM-2: Confirmation before reindex
+    if (!window.confirm('Re-index all documents? This may take a few minutes.')) return;
+    setActionPending(true);
+    try {
+      const res = await fetch('/api/qmd/reindex', { method: 'POST' });
+      if (!res.ok && res.status !== 409) throw new Error(`HTTP ${res.status}`);
+      log.info('settings', 'QMD reindex triggered');
+      await fetchStatus();
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      log.error('settings', 'QMD reindex trigger failed', { error: msg });
+      setFetchError(msg);
+    } finally {
+      setActionPending(false);
+    }
+  };
+
+  // ── Save config (CRITICAL-4: validate custom URL) ──
   const handleSave = async () => {
+    setCustomUrlError(null);
+    if (selectedModel === 'custom') {
+      const trimmed = customUrl.trim();
+      if (!trimmed) {
+        setCustomUrlError('Model URL is required');
+        return;
+      }
+      if (!trimmed.startsWith('hf:')) {
+        setCustomUrlError('Model URL must start with "hf:" (e.g. hf:org/repo/file.gguf)');
+        return;
+      }
+    }
+    const modelValue = selectedModel === 'custom' ? customUrl.trim() : selectedModel;
     await onSave({
       search: {
         ...config.search,
-        enabled,
-        ollama_url: ollamaUrl,
-        model,
-        default_mode: defaultMode as 'hybrid' | 'keyword' | 'semantic',
-        rrf_alpha: rrfAlpha,
+        qmd_model: modelValue || undefined,
       },
     });
+    // Reset user-edited flag after successful save
+    userEditedRef.current = false;
   };
 
-  return (
-    <SectionCard id="search" title="Search & Embedding" description="Vector search configuration (Ollama + BGE-M3)." onSave={handleSave}>
-      <div className="form-group">
-        <ToggleSwitch id="search-enabled" checked={enabled} onChange={setEnabled} label="Enable Embedding Search" />
-      </div>
+  // ── Derived state ──
+  const isBusy = qmdStatus?.status === 'downloading' || qmdStatus?.status === 'indexing';
+  const buttonsDisabled = actionPending || isBusy;
+  const modelDownloaded = qmdStatus?.model.downloaded ?? false;
 
+  return (
+    <SectionCard id="search" title="Search & Embeddings" description="Local embedding model for semantic search (QMD)." onSave={handleSave}>
+      {/* Inject pulse keyframes */}
+      <style>{PULSE_KEYFRAMES}</style>
+
+      {/* ── Model Status ── */}
       <div className="form-group">
-        <label htmlFor="ollama-url">Ollama URL</label>
-        <input
-          id="ollama-url"
-          type="text"
-          value={ollamaUrl}
-          onChange={(e) => setOllamaUrl(e.target.value)}
-          placeholder="http://localhost:11434"
-        />
-        {!ollamaOk && (
-          <div style={{ marginTop: 6, display: 'flex', alignItems: 'center', gap: 8 }}>
-            <span className="text-sm" style={{ color: 'var(--red, #ff3b30)' }}>Ollama not detected</span>
-            <InstallButton target="ollama" label="Install Ollama" />
+        {/* MEDIUM-3: div instead of label for non-form display */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8, fontWeight: 500 }}>
+          Model Status
+          <StatusBadge status={qmdStatus?.status ?? null} loading={loading} />
+        </div>
+
+        {loading && !qmdStatus && (
+          <p className="text-sm text-muted">Loading status...</p>
+        )}
+
+        {/* HIGH-3: Show fetch error alongside stale data */}
+        {fetchError && (
+          <p className="text-sm" style={{ color: 'var(--error)' }}>
+            {qmdStatus ? 'Last status update failed: ' : 'Failed to fetch status: '}{fetchError}
+          </p>
+        )}
+
+        {qmdStatus && (
+          <div style={{ fontSize: 13, lineHeight: 1.7 }}>
+            <div><span className="text-muted">Model:</span> {qmdStatus.model.name}</div>
+            <div><span className="text-muted">File:</span> <code style={{ fontSize: 12 }}>{qmdStatus.model.file}</code></div>
+            <div><span className="text-muted">Size:</span> {qmdStatus.model.size}</div>
+            {qmdStatus.error && (
+              <div style={{ color: 'var(--error)', marginTop: 4 }}>
+                Error: {qmdStatus.error}
+              </div>
+            )}
           </div>
         )}
-        {ollamaOk && (
-          <p className="text-sm" style={{ marginTop: 2, color: 'var(--green, #34c759)' }}>Ollama connected</p>
+
+        <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
+          <button
+            type="button"
+            className="btn btn-secondary"
+            disabled={buttonsDisabled}
+            onClick={handleDownload}
+            data-testid="qmd-download-btn"
+          >
+            {/* MEDIUM-1: Label changes when already downloaded */}
+            {qmdStatus?.status === 'downloading' ? 'Downloading...' : modelDownloaded ? 'Re-download Model' : 'Download Model'}
+          </button>
+          <button
+            type="button"
+            className="btn btn-secondary"
+            disabled={buttonsDisabled || !modelDownloaded}
+            onClick={handleReindex}
+            data-testid="qmd-reindex-btn"
+          >
+            {qmdStatus?.status === 'indexing' ? 'Indexing...' : 'Re-index'}
+          </button>
+        </div>
+
+        {/* ── Embedding Progress Bar ── */}
+        {qmdStatus?.status === 'indexing' && qmdStatus.progress && qmdStatus.progress.totalChunks > 0 && (
+          <div style={{ marginTop: 10 }}>
+            <div style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 4 }}>
+              Embedding {qmdStatus.progress.store}: {qmdStatus.progress.chunksEmbedded} / {qmdStatus.progress.totalChunks} chunks ({Math.round(qmdStatus.progress.chunksEmbedded / qmdStatus.progress.totalChunks * 100)}%)
+            </div>
+            <div style={{ height: 6, borderRadius: 3, background: 'var(--bg-secondary, #333)', overflow: 'hidden' }}>
+              <div style={{
+                height: '100%',
+                borderRadius: 3,
+                background: 'var(--accent, #4a9eff)',
+                width: `${Math.round(qmdStatus.progress.chunksEmbedded / qmdStatus.progress.totalChunks * 100)}%`,
+                transition: 'width 0.3s ease',
+              }} />
+            </div>
+          </div>
         )}
       </div>
 
-      <div className="form-row">
+      {/* ── Index Statistics ── */}
+      {qmdStatus && (qmdStatus.stores.memory || qmdStatus.stores.notes || qmdStatus.stores.tasks || qmdStatus.stores.sessions) && (
         <div className="form-group">
-          <label htmlFor="embed-model">Embedding Model</label>
-          <input
-            id="embed-model"
-            type="text"
-            value={model}
-            onChange={(e) => setModel(e.target.value)}
-            placeholder="bge-m3"
-          />
+          {/* MEDIUM-3: div instead of label */}
+          <div style={{ marginBottom: 8, fontWeight: 500 }}>Index Statistics</div>
+          <div style={{ display: 'flex', gap: 32, flexWrap: 'wrap' }}>
+            {qmdStatus.stores.memory && (
+              <StoreStatsCard label="Memory" stats={qmdStatus.stores.memory} />
+            )}
+            {qmdStatus.stores.notes && (
+              <StoreStatsCard label="Notes" stats={qmdStatus.stores.notes} />
+            )}
+            {qmdStatus.stores.tasks && (
+              <StoreStatsCard label="Tasks" stats={qmdStatus.stores.tasks} />
+            )}
+            {qmdStatus.stores.sessions && (
+              <StoreStatsCard label="Sessions" stats={qmdStatus.stores.sessions} />
+            )}
+          </div>
         </div>
+      )}
 
-        <div className="form-group">
-          <label htmlFor="search-mode">Default Search Mode</label>
-          <select
-            id="search-mode"
-            value={defaultMode}
-            onChange={(e) => setDefaultMode(e.target.value)}
-          >
-            <option value="hybrid">Hybrid (BM25 + vector)</option>
-            <option value="keyword">Keyword only</option>
-            <option value="semantic">Semantic only</option>
-          </select>
-        </div>
-      </div>
-
+      {/* ── Model Selection ── */}
       <div className="form-group">
-        <label htmlFor="rrf-alpha">RRF Alpha (BM25 weight)</label>
-        <NumberInput
-          id="rrf-alpha"
-          value={rrfAlpha}
-          onChange={setRrfAlpha}
-          step={0.1}
-          min={0}
-          max={1}
-          placeholder="0.4"
-        />
-        <p className="text-sm text-muted" style={{ marginTop: 2 }}>
-          0 = pure vector, 1 = pure keyword. Default: 0.4.
+        <label htmlFor="qmd-model">Embedding Model</label>
+        <select
+          id="qmd-model"
+          value={selectedModel}
+          onChange={(e) => {
+            setSelectedModel(e.target.value);
+            setCustomUrlError(null);
+            userEditedRef.current = true;
+          }}
+          data-testid="qmd-model-select"
+        >
+          {MODEL_PRESETS.map((p) => (
+            <option key={p.value} value={p.value}>{p.label}</option>
+          ))}
+        </select>
+        {selectedModel === 'custom' && (
+          <>
+            <input
+              type="text"
+              value={customUrl}
+              onChange={(e) => {
+                setCustomUrl(e.target.value);
+                setCustomUrlError(null);
+                userEditedRef.current = true;
+              }}
+              placeholder="hf:org/repo/file.gguf"
+              style={{ marginTop: 8, ...(customUrlError ? { borderColor: 'var(--error)' } : {}) }}
+              data-testid="qmd-custom-url-input"
+            />
+            {customUrlError && (
+              <p className="text-sm" style={{ color: 'var(--error)', marginTop: 4 }}>
+                {customUrlError}
+              </p>
+            )}
+          </>
+        )}
+        <p className="text-sm text-muted" style={{ marginTop: 4 }}>
+          Changing the model requires re-downloading and re-indexing all documents.
+        </p>
+        {/* HIGH-1: Warning that model change requires restart / re-download */}
+        <p className="text-sm" style={{ marginTop: 2, color: 'var(--warning, #e8a838)' }}>
+          Model change takes effect after clicking Download Model to fetch and apply the new model.
         </p>
       </div>
     </SectionCard>
+  );
+}
+
+// ── Sub-components ──
+
+function StatusBadge({ status, loading }: { status: QmdStatus['status'] | null; loading: boolean }) {
+  if (loading && !status) return <span className="text-sm text-muted">(checking...)</span>;
+
+  // LOW-2: Type-safe status map
+  const map: Record<QmdStatus['status'], { color: string; label: string }> = {
+    ready: { color: 'var(--success)', label: 'Ready' },
+    downloading: { color: 'var(--warning, #e8a838)', label: 'Downloading...' },
+    indexing: { color: 'var(--warning, #e8a838)', label: 'Indexing...' },
+    error: { color: 'var(--error)', label: 'Error' },
+  };
+
+  const info = status ? map[status] : null;
+  if (!info) return null;
+
+  // HIGH-2: Use the injected qmd-pulse keyframe
+  const isAnimating = status === 'downloading' || status === 'indexing';
+
+  return (
+    <span
+      style={{
+        display: 'inline-flex',
+        alignItems: 'center',
+        gap: 5,
+        fontSize: 12,
+        fontWeight: 500,
+        color: info.color,
+      }}
+    >
+      <span style={{
+        width: 7,
+        height: 7,
+        borderRadius: '50%',
+        backgroundColor: info.color,
+        display: 'inline-block',
+        animation: isAnimating ? 'qmd-pulse 1.5s infinite' : undefined,
+      }} />
+      {info.label}
+    </span>
+  );
+}
+
+function StoreStatsCard({ label, stats }: { label: string; stats: StoreStats }) {
+  const entries = Object.entries(stats.collections).sort(([a], [b]) => a.localeCompare(b));
+
+  if (entries.length === 0) {
+    return (
+      <div style={{ minWidth: 180 }}>
+        <div style={{ fontWeight: 500, fontSize: 13, marginBottom: 4 }}>{label}</div>
+        <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>
+          No indexed documents yet
+        </div>
+      </div>
+    );
+  }
+
+  const allEmbedded = stats.totalEmbedded >= stats.totalIndexed;
+
+  return (
+    <div style={{ minWidth: 180 }}>
+      <div style={{ fontWeight: 500, fontSize: 13, marginBottom: 4 }}>{label}</div>
+      <div style={{ fontSize: 12, lineHeight: 1.8, color: 'var(--text-muted)' }}>
+        {entries.map(([name, col]) => (
+          <div key={name} style={{ display: 'flex', justifyContent: 'space-between', gap: 16 }}>
+            <span>{name}</span>
+            <span style={{ fontVariantNumeric: 'tabular-nums' }}>{col.indexed} docs</span>
+          </div>
+        ))}
+        {/* Totals row */}
+        <div style={{
+          borderTop: '1px solid var(--border)',
+          marginTop: 4,
+          paddingTop: 4,
+          fontWeight: 500,
+          display: 'flex',
+          justifyContent: 'space-between',
+        }}>
+          <span>Indexed</span>
+          <span style={{ fontVariantNumeric: 'tabular-nums' }}>{stats.totalIndexed} docs</span>
+        </div>
+        {/* Embedding health row */}
+        <div style={{
+          display: 'flex',
+          justifyContent: 'space-between',
+          fontWeight: 500,
+          color: allEmbedded ? 'var(--success)' : 'var(--warning, #e8a838)',
+        }}>
+          <span>Embedded</span>
+          <span style={{ fontVariantNumeric: 'tabular-nums' }}>
+            {stats.totalEmbedded}/{stats.totalIndexed} {allEmbedded ? '\u2713' : '\u26a0'}
+          </span>
+        </div>
+        <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+          <span>Chunks</span>
+          <span style={{ fontVariantNumeric: 'tabular-nums' }}>{stats.totalChunks}</span>
+        </div>
+      </div>
+    </div>
   );
 }

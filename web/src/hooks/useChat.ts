@@ -290,7 +290,7 @@ interface UseChatReturn {
   /** Ref set to true right before older messages are prepended.
    *  Pass to ChatPanel so it can distinguish prepend from append for scroll preservation. */
   prependedRef: MutableRefObject<boolean>;
-  sendMessage: (text: string, taskContext?: TaskContext, images?: ImageAttachment[], source?: string, mode?: 'plan', planModeFirst?: boolean) => void;
+  sendMessage: (text: string, taskContext?: TaskContext, images?: ImageAttachment[], source?: string, mode?: 'plan', planModeFirst?: boolean, planModeOff?: boolean) => void;
   clearMessages: () => void;
   addLocalMessage: (content: string) => void;
   stopGeneration: () => void;
@@ -360,7 +360,7 @@ export function useChat(agentId: string = 'general'): UseChatReturn {
   const nextPageRef = useRef(2);
   // Queue for messages sent while AI is streaming
   const queueIdCounter = useRef(0);
-  const queueRef = useRef<{ id: number; text: string; taskContext?: TaskContext; images?: ImageAttachment[]; mode?: 'plan'; planModeFirst?: boolean }[]>([]);
+  const queueRef = useRef<{ id: number; text: string; taskContext?: TaskContext; images?: ImageAttachment[]; mode?: 'plan'; planModeFirst?: boolean; planModeOff?: boolean }[]>([]);
   // Track whether an RPC is in flight (to know when to drain)
   const rpcInFlightRef = useRef(false);
   // Timer ID for delayed drain after errors (cleared on queue reset / unmount)
@@ -495,7 +495,7 @@ export function useChat(agentId: string = 'general'): UseChatReturn {
     );
 
     // Desktop notification when agent asks a question
-    if (toolName === 'ask_question' && typeof Notification !== 'undefined' && Notification.permission === 'granted') {
+    if (toolName === 'user_ask' && typeof Notification !== 'undefined' && Notification.permission === 'granted') {
       const questions = input?.questions as Array<{ question?: string }> | undefined
       const firstQ = questions?.[0]?.question ?? 'The agent has a question for you'
       new Notification('Agent has a question', {
@@ -842,14 +842,14 @@ export function useChat(agentId: string = 'general'): UseChatReturn {
           return m;
         });
       });
-      sendRpcRef.current?.(next.text, next.taskContext, next.images, undefined, next.mode, next.planModeFirst);
+      sendRpcRef.current?.(next.text, next.taskContext, next.images, undefined, next.mode, next.planModeFirst, next.planModeOff);
     } else {
       setIsStreaming(false);
     }
   }, []);
 
   /** Send a message via RPC (not queued) */
-  const sendRpc = useCallback((text: string, taskContext?: TaskContext, images?: ImageAttachment[], source?: string, mode?: 'plan', planModeFirst?: boolean) => {
+  const sendRpc = useCallback((text: string, taskContext?: TaskContext, images?: ImageAttachment[], source?: string, mode?: 'plan', planModeFirst?: boolean, planModeOff?: boolean) => {
     setIsStreaming(true);
     setError(null);
     rpcInFlightRef.current = true;
@@ -870,6 +870,8 @@ export function useChat(agentId: string = 'general'): UseChatReturn {
     if (mode === 'plan') {
       payload.mode = mode;
       if (planModeFirst) payload.planModeFirst = true;
+    } else if (planModeOff) {
+      payload.planModeOff = true;
     }
 
     wsClient.sendRpc('chat', payload)
@@ -890,7 +892,7 @@ export function useChat(agentId: string = 'general'): UseChatReturn {
   }, [drainOrStop]);
   sendRpcRef.current = sendRpc;
 
-  const sendMessage = useCallback((text: string, taskContext?: TaskContext, images?: ImageAttachment[], source?: string, mode?: 'plan', planModeFirst?: boolean) => {
+  const sendMessage = useCallback((text: string, taskContext?: TaskContext, images?: ImageAttachment[], source?: string, mode?: 'plan', planModeFirst?: boolean, planModeOff?: boolean) => {
     if (isStreamingRef.current) {
       if (queueRef.current.length >= MAX_QUEUE_SIZE) return;
       const queueId = ++queueIdCounter.current;
@@ -901,7 +903,7 @@ export function useChat(agentId: string = 'general'): UseChatReturn {
         ...(source ? { source: source as ChatMessage['source'] } : {}),
       };
       setMessages((prev) => [...prev, userMsg]);
-      queueRef.current.push({ id: queueId, text, taskContext, images, mode, planModeFirst });
+      queueRef.current.push({ id: queueId, text, taskContext, images, mode, planModeFirst, planModeOff });
       setQueueCount(queueRef.current.length);
       return;
     }
@@ -913,7 +915,7 @@ export function useChat(agentId: string = 'general'): UseChatReturn {
       ...(source ? { source: source as ChatMessage['source'] } : {}),
     };
     setMessages((prev) => [...prev, userMsg]);
-    sendRpc(text, taskContext, images, source, mode, planModeFirst);
+    sendRpc(text, taskContext, images, source, mode, planModeFirst, planModeOff);
   }, [sendRpc]);
 
   const clearMessages = useCallback(() => {

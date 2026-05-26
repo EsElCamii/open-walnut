@@ -1,10 +1,9 @@
 /**
- * E2E: Integration tools (slack, tts, image) via executeTool() with a real server.
+ * E2E: Integration tools (slack, tts) via executeTool() with a real server.
  *
  * External services are mocked at module boundary:
  *   - @slack/web-api → mock WebClient
  *   - edge-tts → mock ttsSave
- *   - ../agent/model.js → mock sendMessage (Bedrock)
  *
  * Everything else is real: Express server, event bus, config loading,
  * tool dispatch, parameter validation, error handling.
@@ -58,23 +57,6 @@ vi.mock('edge-tts', () => ({
   getVoices: vi.fn().mockResolvedValue([]),
 }));
 
-// ── Bedrock model mock (for image tool) ──
-const { mockSendMessage } = vi.hoisted(() => ({
-  mockSendMessage: vi.fn().mockResolvedValue({
-    content: [{ type: 'text', text: 'A beautiful landscape with mountains and a lake.' }],
-    stopReason: 'end_turn',
-  }),
-}));
-
-vi.mock('../../src/agent/model.js', () => ({
-  sendMessage: mockSendMessage,
-  sendMessageStream: vi.fn(),
-  resetClient: vi.fn(),
-  DEFAULT_MODEL: 'global.anthropic.claude-opus-4-6-v1',
-  getContextWindowSize: (model?: string) => model?.includes('[1m]') ? 1_000_000 : 200_000,
-  getContextThreshold: (model: string | undefined, percent: number) =>
-    Math.round((model?.includes('[1m]') ? 1_000_000 : 200_000) * percent),
-}));
 
 import { WALNUT_HOME } from '../../src/constants.js';
 import { startServer, stopServer } from '../../src/web/server.js';
@@ -127,10 +109,6 @@ beforeEach(() => {
     fs.mkdirSync(path.dirname(filePath), { recursive: true });
     fs.writeFileSync(filePath, 'fake-mp3-audio-data');
   });
-  mockSendMessage.mockResolvedValue({
-    content: [{ type: 'text', text: 'A beautiful landscape with mountains and a lake.' }],
-    stopReason: 'end_turn',
-  });
 });
 
 // ═══════════════════════════════════════════════════════════
@@ -141,7 +119,7 @@ describe('Slack tool E2E', () => {
   it('send_message dispatches through executeTool and calls Slack API', async () => {
     process.env.SLACK_BOT_TOKEN = 'xoxb-e2e-test';
     try {
-      const result = await executeTool('slack', {
+      const result = await executeTool('integration_slack', {
         action: 'send_message',
         channel: '#test-channel',
         text: 'hello e2e',
@@ -162,7 +140,7 @@ describe('Slack tool E2E', () => {
   it('send_message with thread_ts sends threaded reply', async () => {
     process.env.SLACK_BOT_TOKEN = 'xoxb-e2e-test';
     try {
-      const result = await executeTool('slack', {
+      const result = await executeTool('integration_slack', {
         action: 'send_message',
         channel: '#test-channel',
         text: 'threaded reply',
@@ -183,7 +161,7 @@ describe('Slack tool E2E', () => {
   it('read_messages returns formatted channel history', async () => {
     process.env.SLACK_BOT_TOKEN = 'xoxb-e2e-test';
     try {
-      const result = await executeTool('slack', {
+      const result = await executeTool('integration_slack', {
         action: 'read_messages',
         channel: 'C123',
         limit: 5,
@@ -206,7 +184,7 @@ describe('Slack tool E2E', () => {
     process.env.SLACK_BOT_TOKEN = 'xoxb-e2e-test';
     mockConversationsHistory.mockResolvedValueOnce({ ok: true, messages: [] });
     try {
-      const result = await executeTool('slack', {
+      const result = await executeTool('integration_slack', {
         action: 'read_messages',
         channel: 'C-empty',
       });
@@ -219,7 +197,7 @@ describe('Slack tool E2E', () => {
   it('react adds emoji reaction', async () => {
     process.env.SLACK_BOT_TOKEN = 'xoxb-e2e-test';
     try {
-      const result = await executeTool('slack', {
+      const result = await executeTool('integration_slack', {
         action: 'react',
         channel: 'C123',
         timestamp: '1700000000.000001',
@@ -240,7 +218,7 @@ describe('Slack tool E2E', () => {
   it('react returns error when timestamp missing', async () => {
     process.env.SLACK_BOT_TOKEN = 'xoxb-e2e-test';
     try {
-      const result = await executeTool('slack', {
+      const result = await executeTool('integration_slack', {
         action: 'react',
         channel: 'C123',
         emoji: 'thumbsup',
@@ -255,7 +233,7 @@ describe('Slack tool E2E', () => {
   it('react returns error when emoji missing', async () => {
     process.env.SLACK_BOT_TOKEN = 'xoxb-e2e-test';
     try {
-      const result = await executeTool('slack', {
+      const result = await executeTool('integration_slack', {
         action: 'react',
         channel: 'C123',
         timestamp: '1700000000.000001',
@@ -270,7 +248,7 @@ describe('Slack tool E2E', () => {
   it('pin pins a message', async () => {
     process.env.SLACK_BOT_TOKEN = 'xoxb-e2e-test';
     try {
-      const result = await executeTool('slack', {
+      const result = await executeTool('integration_slack', {
         action: 'pin',
         channel: 'C123',
         timestamp: '1700000000.000001',
@@ -290,7 +268,7 @@ describe('Slack tool E2E', () => {
     const saved = process.env.SLACK_BOT_TOKEN;
     delete process.env.SLACK_BOT_TOKEN;
     try {
-      const result = await executeTool('slack', {
+      const result = await executeTool('integration_slack', {
         action: 'send_message',
         channel: '#general',
         text: 'this should fail',
@@ -305,7 +283,7 @@ describe('Slack tool E2E', () => {
   it('unknown action returns error', async () => {
     process.env.SLACK_BOT_TOKEN = 'xoxb-e2e-test';
     try {
-      const result = await executeTool('slack', {
+      const result = await executeTool('integration_slack', {
         action: 'invalid_action',
         channel: 'C123',
       });
@@ -320,7 +298,7 @@ describe('Slack tool E2E', () => {
     process.env.SLACK_BOT_TOKEN = 'xoxb-e2e-test';
     mockPostMessage.mockRejectedValueOnce(new Error('channel_not_found'));
     try {
-      const result = await executeTool('slack', {
+      const result = await executeTool('integration_slack', {
         action: 'send_message',
         channel: '#nonexistent',
         text: 'hello',
@@ -335,7 +313,7 @@ describe('Slack tool E2E', () => {
   it('send_message without text returns error', async () => {
     process.env.SLACK_BOT_TOKEN = 'xoxb-e2e-test';
     try {
-      const result = await executeTool('slack', {
+      const result = await executeTool('integration_slack', {
         action: 'send_message',
         channel: '#general',
       });
@@ -353,7 +331,7 @@ describe('Slack tool E2E', () => {
 
 describe('TTS tool E2E', () => {
   it('synthesizes text to speech and returns audio path', async () => {
-    const result = await executeTool('tts', { text: 'Hello world from E2E' });
+    const result = await executeTool('integration_tts', { text: 'Hello world from E2E' });
     const parsed = JSON.parse(result);
     expect(parsed.audio_path).toContain('.mp3');
     expect(parsed.voice).toBe('en-US-AriaNeural');
@@ -369,7 +347,7 @@ describe('TTS tool E2E', () => {
   });
 
   it('uses custom voice parameter', async () => {
-    const result = await executeTool('tts', {
+    const result = await executeTool('integration_tts', {
       text: 'Custom voice test',
       voice: 'en-US-GuyNeural',
     });
@@ -383,150 +361,30 @@ describe('TTS tool E2E', () => {
   });
 
   it('returns error when text is empty', async () => {
-    const result = await executeTool('tts', { text: '' });
+    const result = await executeTool('integration_tts', { text: '' });
     expect(result).toContain('Error');
   });
 
   it('handles TTS engine failure gracefully', async () => {
     mockTtsSave.mockRejectedValueOnce(new Error('TTS engine unavailable'));
-    const result = await executeTool('tts', { text: 'This should fail' });
+    const result = await executeTool('integration_tts', { text: 'This should fail' });
     expect(result).toContain('Error');
     expect(result).toContain('TTS engine unavailable');
   });
 
   it('generates unique filenames for different texts', async () => {
-    const result1 = await executeTool('tts', { text: 'First message' });
-    const result2 = await executeTool('tts', { text: 'Second message' });
+    const result1 = await executeTool('integration_tts', { text: 'First message' });
+    const result2 = await executeTool('integration_tts', { text: 'Second message' });
     const path1 = JSON.parse(result1).audio_path;
     const path2 = JSON.parse(result2).audio_path;
     expect(path1).not.toBe(path2);
   });
 
   it('audio file is saved under WALNUT_HOME/media/tts/', async () => {
-    const result = await executeTool('tts', { text: 'Path check' });
+    const result = await executeTool('integration_tts', { text: 'Path check' });
     const parsed = JSON.parse(result);
     const expectedDir = path.join(WALNUT_HOME, 'media', 'tts');
     expect(parsed.audio_path.startsWith(expectedDir)).toBe(true);
-  });
-});
-
-// ═══════════════════════════════════════════════════════════
-// Image analysis tool E2E
-// ═══════════════════════════════════════════════════════════
-
-describe('Image analysis tool E2E', () => {
-  let imgDir: string;
-
-  beforeAll(() => {
-    imgDir = path.join(WALNUT_HOME, 'test-images');
-    fs.mkdirSync(imgDir, { recursive: true });
-  });
-
-  it('analyzes a PNG image via executeTool', async () => {
-    const imgPath = path.join(imgDir, 'landscape.png');
-    fs.writeFileSync(imgPath, Buffer.from('fake-png-data'));
-
-    const result = await executeTool('analyze_image', { image_path: imgPath });
-    expect(result).toBe('A beautiful landscape with mountains and a lake.');
-    expect(mockSendMessage).toHaveBeenCalledWith(
-      expect.objectContaining({
-        system: expect.stringContaining('image analysis'),
-        messages: expect.arrayContaining([
-          expect.objectContaining({
-            role: 'user',
-            content: expect.arrayContaining([
-              expect.objectContaining({ type: 'text', text: 'Describe this image in detail' }),
-            ]),
-          }),
-        ]),
-      }),
-    );
-  });
-
-  it('passes custom prompt to the model', async () => {
-    const imgPath = path.join(imgDir, 'custom-prompt.jpg');
-    fs.writeFileSync(imgPath, Buffer.from('fake-jpg-data'));
-
-    await executeTool('analyze_image', {
-      image_path: imgPath,
-      prompt: 'What color is the sky?',
-    });
-    expect(mockSendMessage).toHaveBeenCalledWith(
-      expect.objectContaining({
-        messages: expect.arrayContaining([
-          expect.objectContaining({
-            content: expect.arrayContaining([
-              expect.objectContaining({ type: 'text', text: 'What color is the sky?' }),
-            ]),
-          }),
-        ]),
-      }),
-    );
-  });
-
-  it('returns error for non-existent file', async () => {
-    const result = await executeTool('analyze_image', {
-      image_path: '/nonexistent/image.png',
-    });
-    expect(result).toContain('Error');
-    expect(result).toContain('File not found');
-  });
-
-  it('returns error for unsupported format', async () => {
-    const txtPath = path.join(imgDir, 'document.bmp');
-    fs.writeFileSync(txtPath, Buffer.from('not-an-image'));
-
-    const result = await executeTool('analyze_image', { image_path: txtPath });
-    expect(result).toContain('Error');
-    expect(result).toContain('Unsupported image format');
-  });
-
-  it('supports JPEG extension', async () => {
-    const imgPath = path.join(imgDir, 'photo.jpeg');
-    fs.writeFileSync(imgPath, Buffer.from('fake-jpeg-data'));
-
-    const result = await executeTool('analyze_image', { image_path: imgPath });
-    expect(result).toBe('A beautiful landscape with mountains and a lake.');
-  });
-
-  it('supports WebP format', async () => {
-    const imgPath = path.join(imgDir, 'modern.webp');
-    fs.writeFileSync(imgPath, Buffer.from('fake-webp-data'));
-
-    const result = await executeTool('analyze_image', { image_path: imgPath });
-    expect(result).toBe('A beautiful landscape with mountains and a lake.');
-  });
-
-  it('supports GIF format', async () => {
-    const imgPath = path.join(imgDir, 'animation.gif');
-    fs.writeFileSync(imgPath, Buffer.from('fake-gif-data'));
-
-    const result = await executeTool('analyze_image', { image_path: imgPath });
-    expect(result).toBe('A beautiful landscape with mountains and a lake.');
-  });
-
-  it('encodes image data as base64 in the API call', async () => {
-    const imgPath = path.join(imgDir, 'base64-test.png');
-    const testData = Buffer.from('PNG-test-data-for-base64');
-    fs.writeFileSync(imgPath, testData);
-
-    await executeTool('analyze_image', { image_path: imgPath });
-
-    const callArgs = mockSendMessage.mock.calls[0][0];
-    const imageBlock = callArgs.messages[0].content[0];
-    expect(imageBlock.source.type).toBe('base64');
-    expect(imageBlock.source.media_type).toBe('image/png');
-    expect(imageBlock.source.data).toBe(testData.toString('base64'));
-  });
-
-  it('handles model API error gracefully', async () => {
-    mockSendMessage.mockRejectedValueOnce(new Error('Bedrock throttling'));
-    const imgPath = path.join(imgDir, 'error-test.png');
-    fs.writeFileSync(imgPath, Buffer.from('fake-png'));
-
-    const result = await executeTool('analyze_image', { image_path: imgPath });
-    expect(result).toContain('Error');
-    expect(result).toContain('Bedrock throttling');
   });
 });
 
@@ -535,24 +393,24 @@ describe('Image analysis tool E2E', () => {
 // ═══════════════════════════════════════════════════════════
 
 describe('Cross-tool round-trip E2E', () => {
-  it('write_file → exec → read_file pipeline works within the same server', async () => {
+  it('file_write → shell_exec → file_read pipeline works within the same server', async () => {
     const testFile = path.join(WALNUT_HOME, 'cross-tool-test.txt');
 
     // Step 1: write a file using the write_file tool
-    const writeResult = await executeTool('write_file', {
+    const writeResult = await executeTool('file_write', {
       path: testFile,
       content: 'Hello from E2E cross-tool test\nLine 2\nLine 3',
     });
     expect(writeResult).toContain('File written');
 
     // Step 2: use exec to verify the file exists and has content
-    const execResult = await executeTool('exec', {
+    const execResult = await executeTool('shell_exec', {
       command: `cat "${testFile}"`,
     });
     expect(execResult).toContain('Hello from E2E cross-tool test');
 
     // Step 3: read the file back
-    const readResult = await executeTool('read_file', {
+    const readResult = await executeTool('file_read', {
       path: testFile,
     });
     expect(readResult).toContain('Hello from E2E cross-tool test');
@@ -562,8 +420,8 @@ describe('Cross-tool round-trip E2E', () => {
 
   it('task + slack tools coexist: create task then send slack notification', async () => {
     // Create a task
-    await executeTool('create_task', { type: 'category', name: 'Test', source: 'ms-todo' });
-    const taskResult = await executeTool('create_task', {
+    await executeTool('task_create', { type: 'category', name: 'Test', source: 'ms-todo' });
+    const taskResult = await executeTool('task_create', {
       title: 'Integration test task',
       category: 'Test',
     });
@@ -574,7 +432,7 @@ describe('Cross-tool round-trip E2E', () => {
     // Send a Slack notification about the task (mocked)
     process.env.SLACK_BOT_TOKEN = 'xoxb-e2e-test';
     try {
-      const slackResult = await executeTool('slack', {
+      const slackResult = await executeTool('integration_slack', {
         action: 'send_message',
         channel: '#notifications',
         text: `Task created: ${taskId}`,

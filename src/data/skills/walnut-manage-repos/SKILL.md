@@ -10,36 +10,36 @@ description: >-
 
 # Manage Repositories
 
-You manage repository profiles using the `files_*` tools with the `repos/` URI prefix.
+You manage repository profiles using the `file_*` tools with the `repos/` URI prefix.
 Repository data is stored as YAML files in `~/.open-walnut/repositories/`.
 
 ## Available Operations
 
 ### List all repositories
 ```
-files_list prefix='repos'
+file_list prefix='repos'
 ```
 
 ### Read a repository's full profile
 ```
-files_read source='repos/{name}'
+file_read source='repos/{name}'
 ```
 
 ### Create a new repository
 ```
-files_write source='repos/{name}' content='...'
+file_write source='repos/{name}' content='...'
 ```
 
 ### Edit an existing repository
 ```
-files_read source='repos/{name}'   # get content_hash first
-files_edit source='repos/{name}' old_content='...' new_content='...' content_hash='...'
+file_read source='repos/{name}'   # get content_hash first
+file_edit source='repos/{name}' old_content='...' new_content='...' content_hash='...'
 ```
 
 ### Delete a repository
-Ask the user to delete it from the Repos page in the UI, or use exec:
+Ask the user to delete it from the Repos page in the UI, or use shell_exec:
 ```
-exec command='rm "$HOME/.open-walnut/repositories/{name}.yaml"'
+shell_exec command='rm "$HOME/.open-walnut/repositories/{name}.yaml"'
 ```
 
 ## YAML Format
@@ -95,7 +95,7 @@ When user asks to add/register a repository:
 1. Ask for the repo name and path (or infer from context)
 2. Ask for description and tech stack
 3. Generate the YAML content
-4. Write with `files_write source='repos/{slug}'`
+4. Write with `file_write source='repos/{slug}'`
 5. Confirm creation and show the profile
 
 The slug (filename) should be lowercase, hyphenated (e.g., "my-project").

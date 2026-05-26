@@ -9,11 +9,15 @@ import {
 } from './shared.js';
 import { appendDailyLog } from '../core/daily-log.js';
 import { appendProjectMemory } from '../core/project-memory.js';
-import { SESSIONS_FILE } from '../constants.js';
-import { withFileLockSync } from '../utils/file-lock.js';
+import { WALNUT_HOME } from '../constants.js';
 import fs from 'node:fs';
+import path from 'node:path';
 import { execSync } from 'node:child_process';
 import { log } from '../logging/index.js';
+
+// Local copy of SESSION_DB_PATH to keep the hook bundle free of session-db.ts
+// (which would drag in types + logger). Keep in sync with src/core/session-db.ts:30.
+const SESSION_DB_PATH = path.join(WALNUT_HOME, 'sessions.sqlite');
 
 /**
  * On-stop hook: runs when a Claude Code session ends.
@@ -49,7 +53,7 @@ function main(): void {
 
     try {
       const projectPath = taskId ? deriveProjectPath(taskId) : null;
-      const entry = formatDailyLogEntry(summary, 'session-end', filesChanged);
+      const entry = formatDailyLogEntry(summary, filesChanged);
       appendDailyLog(entry, 'session-end', projectPath ?? undefined);
       if (projectPath) {
         appendProjectMemory(projectPath, summary.summary, 'session');
@@ -86,24 +90,32 @@ function getFilesChanged(): string[] {
 
 function updateSessionStore(sessionId: string): void {
   try {
-    withFileLockSync(SESSIONS_FILE, () => {
-      if (!fs.existsSync(SESSIONS_FILE)) return;
+    if (!fs.existsSync(SESSION_DB_PATH)) return;
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const Database = require('better-sqlite3') as typeof import('better-sqlite3');
+    const db = new Database(SESSION_DB_PATH);
+    try {
+      db.pragma('journal_mode = WAL');
+      db.pragma('busy_timeout = 5000');
 
-      const raw = fs.readFileSync(SESSIONS_FILE, 'utf-8');
-      const store = JSON.parse(raw);
-      if (!Array.isArray(store.sessions)) return;
-
-      for (const session of store.sessions) {
-        if (session.claudeSessionId === sessionId && session.process_status !== 'error') {
-          session.process_status = 'stopped';
-          session.last_status_change = new Date().toISOString();
-          session.lastActiveAt = new Date().toISOString();
-          delete session.activity;
-        }
-      }
-
-      fs.writeFileSync(SESSIONS_FILE, JSON.stringify(store, null, 2) + '\n', 'utf-8');
-    });
+      const now = new Date().toISOString();
+      // Don't overwrite 'error' status: if the server already marked the
+      // session as error (OOM kill, stream parse failure), the hook must not
+      // downgrade it back to 'stopped' or the UI loses the error indicator.
+      const stmt = db.prepare(
+        `UPDATE sessions SET
+           process_status = 'stopped',
+           last_status_change = ?,
+           last_active_at = ?,
+           activity = NULL
+         WHERE claude_session_id = ? AND (process_status IS NULL OR process_status <> 'error')`,
+      );
+      db.transaction(() => {
+        stmt.run(now, now, sessionId);
+      })();
+    } finally {
+      try { db.close(); } catch { /* ignore */ }
+    }
   } catch (err) {
     log.hook.warn('on-stop: session store update failed', { sessionId, error: String(err) });
   }
@@ -111,20 +123,23 @@ function updateSessionStore(sessionId: string): void {
 
 function findLinkedTaskId(): string | null {
   try {
-    if (!fs.existsSync(SESSIONS_FILE)) return null;
-
-    const raw = fs.readFileSync(SESSIONS_FILE, 'utf-8');
-    const store = JSON.parse(raw);
-    if (!Array.isArray(store.sessions)) return null;
-
-    // Find the most recent active/completed session with a taskId
-    const linked = store.sessions
-      .filter((s: { taskId?: string }) => s.taskId)
-      .sort((a: { lastActiveAt: string }, b: { lastActiveAt: string }) =>
-        b.lastActiveAt.localeCompare(a.lastActiveAt),
-      );
-
-    return linked[0]?.taskId ?? null;
+    if (!fs.existsSync(SESSION_DB_PATH)) return null;
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const Database = require('better-sqlite3') as typeof import('better-sqlite3');
+    const db = new Database(SESSION_DB_PATH, { readonly: true, fileMustExist: true });
+    try {
+      const row = db
+        .prepare(
+          `SELECT task_id FROM sessions
+           WHERE task_id IS NOT NULL AND task_id <> ''
+           ORDER BY last_active_at DESC
+           LIMIT 1`,
+        )
+        .get() as { task_id: string | null } | undefined;
+      return row?.task_id ?? null;
+    } finally {
+      try { db.close(); } catch { /* ignore */ }
+    }
   } catch {
     return null;
   }

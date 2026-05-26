@@ -47,10 +47,10 @@ export function PriorityPicker({ priority, onChange, fixed }: PriorityPickerProp
     };
     const handleScroll = () => setOpen(false);
     document.addEventListener('mousedown', handleClick);
-    window.addEventListener('scroll', handleScroll, true);
+    window.addEventListener('scroll', handleScroll);
     return () => {
       document.removeEventListener('mousedown', handleClick);
-      window.removeEventListener('scroll', handleScroll, true);
+      window.removeEventListener('scroll', handleScroll);
     };
   }, [open]);
 

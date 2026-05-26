@@ -6,7 +6,7 @@ import { readHeartbeatChecklist, writeHeartbeatChecklist } from '../../heartbeat
 
 export const heartbeatTools: ToolDefinition[] = [
   {
-    name: 'get_heartbeat_checklist',
+    name: 'heartbeat_get',
     description:
       'Read the current HEARTBEAT.md checklist content. This file defines what the heartbeat system checks periodically.',
     input_schema: {
@@ -23,7 +23,7 @@ export const heartbeatTools: ToolDefinition[] = [
     },
   },
   {
-    name: 'update_heartbeat_checklist',
+    name: 'heartbeat_update',
     description:
       'Replace the HEARTBEAT.md checklist content. Use this to update what the heartbeat system should check.',
     input_schema: {

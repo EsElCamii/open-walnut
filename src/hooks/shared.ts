@@ -1,9 +1,15 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { CLAUDE_HOME, SESSIONS_DIR, TASKS_FILE, HOOK_LOG_FILE } from '../constants.js';
-import { withFileLockSync } from '../utils/file-lock.js';
-import type { SessionSummary, Task, TaskStore } from '../core/types.js';
+import { CLAUDE_HOME, SESSIONS_DIR, TASKS_DIR, HOOK_LOG_FILE } from '../constants.js';
+import type { SessionSummary } from '../core/types.js';
 import { log } from '../logging/index.js';
+
+// Local TASK_DB_PATH copy (kept in sync with src/core/task-db.ts): hooks are
+// bundled as standalone scripts with `better-sqlite3` listed in tsup's
+// `external` array, so they load it via runtime `require()`. If better-sqlite3
+// is removed from the externals list, hook bundles will try to inline the
+// native addon and fail at load time.
+const TASK_DB_PATH = path.join(TASKS_DIR, 'tasks.sqlite');
 
 /**
  * Find the most recent Claude Code session directory.
@@ -116,49 +122,143 @@ ${nextStepsSection}
  */
 export function updateTaskFromSession(taskId: string, summary: SessionSummary): void {
   try {
-    withFileLockSync(TASKS_FILE, () => {
-      if (!fs.existsSync(TASKS_FILE)) return;
+    // Lazy require so the TS type system doesn't fight the `external` bundle flag.
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const Database = require('better-sqlite3') as typeof import('better-sqlite3');
+    if (!fs.existsSync(TASK_DB_PATH)) return;
 
-      const raw = fs.readFileSync(TASKS_FILE, 'utf-8');
-      const store: TaskStore = JSON.parse(raw);
+    const db = new Database(TASK_DB_PATH);
+    try {
+      db.pragma('journal_mode = WAL');
+      db.pragma('busy_timeout = 5000');
 
-      const task = store.tasks.find((t) => t.id.startsWith(taskId));
-      if (!task) return;
+      // Find a task whose id starts with the (possibly truncated) taskId.
+      // Use LIKE with escaped % to preserve the existing `startsWith` semantics.
+      //
+      // Exact-match-wins pattern: a full-length task id passed by a caller must
+      // hit its exact row even if another task starts with the same 8-char
+      // prefix. ORDER BY (id = ?) DESC prioritizes the exact match over prefix
+      // hits. LIKE escapes guard against a literal `%`, `_`, or `\` in an id
+      // corrupting the pattern.
+      const escaped = taskId.replace(/[\\%_]/g, (ch) => '\\' + ch);
+      const row = db
+        .prepare(
+          `SELECT id, phase, session_ids, note, description, summary, payload
+           FROM tasks
+           WHERE id = ? OR id LIKE ? ESCAPE '\\'
+           ORDER BY (id = ?) DESC
+           LIMIT 1`,
+        )
+        .get(taskId, escaped + '%', taskId) as
+        | {
+            id: string;
+            phase: string | null;
+            session_ids: string | null;
+            note: string | null;
+            description: string | null;
+            summary: string | null;
+            payload: string | null;
+          }
+        | undefined;
+      if (!row) return;
 
+      // Parse session_ids (JSON column).
+      let sessionIds: string[] = [];
+      if (row.session_ids) {
+        try {
+          const parsed = JSON.parse(row.session_ids);
+          if (Array.isArray(parsed)) sessionIds = parsed.filter((s): s is string => typeof s === 'string');
+        } catch { /* treat as empty */ }
+      }
+
+      // Parse payload (for plan_session_id / exec_session_id / session_id / legacy active_session_*).
+      let payload: Record<string, unknown> = {};
+      if (row.payload) {
+        try {
+          const parsed = JSON.parse(row.payload);
+          if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+            payload = parsed as Record<string, unknown>;
+          }
+        } catch { /* ignore corrupt payload */ }
+      }
+
+      // Append note entry.
       const entry = `[${summary.date}] Session: ${summary.summary}`;
-      // Migration safety: handle old notes array format
-      const taskRaw = task as unknown as Record<string, unknown>;
-      if (Array.isArray(taskRaw.notes)) {
-        task.note = (taskRaw.notes as string[]).join('\n\n');
-        delete taskRaw.notes;
-        if (task.description === undefined) task.description = '';
-        if (task.summary === undefined) task.summary = '';
-      }
-      task.note = task.note ? task.note + '\n\n' + entry : entry;
+      const currentNote = row.note ?? '';
+      const newNote = currentNote ? currentNote + '\n\n' + entry : entry;
 
-      // Advance task phase to AGENT_COMPLETE when session ends (if still TODO or IN_PROGRESS)
-      if (task.phase === 'TODO' || task.phase === 'IN_PROGRESS') {
-        task.phase = 'AGENT_COMPLETE';
+      // Phase advance.
+      let newPhase = row.phase;
+      if (row.phase === 'TODO' || row.phase === 'IN_PROGRESS') {
+        newPhase = 'AGENT_COMPLETE';
       }
 
-      if (!task.session_ids.includes(summary.id)) {
-        task.session_ids.push(summary.id);
+      // session_ids append (dedupe).
+      if (!sessionIds.includes(summary.id)) {
+        sessionIds.push(summary.id);
       }
 
-      // Manage typed session slots (plan_session_id / exec_session_id + new session_id)
+      // Clear typed session slots on completion. These live in payload (not their
+      // own columns). Only touch payload if we actually change it.
+      let payloadDirty = false;
       if (summary.status === 'completed') {
-        if (task.plan_session_id === summary.id) task.plan_session_id = undefined;
-        if (task.exec_session_id === summary.id) task.exec_session_id = undefined;
-        // Also clear new single-slot field (parallel 1-slot transition)
-        if (task.session_id === summary.id) task.session_id = undefined;
+        for (const slot of ['plan_session_id', 'exec_session_id', 'session_id'] as const) {
+          if (payload[slot] === summary.id) {
+            delete payload[slot];
+            payloadDirty = true;
+          }
+        }
       }
-      // Clean up legacy active_session_ids if still present
-      delete taskRaw.active_session_ids;
-      delete taskRaw.active_session_id;
+      // Clean up legacy keys regardless of status.
+      if ('active_session_ids' in payload) { delete payload.active_session_ids; payloadDirty = true; }
+      if ('active_session_id' in payload) { delete payload.active_session_id; payloadDirty = true; }
 
-      task.updated_at = new Date().toISOString();
-      fs.writeFileSync(TASKS_FILE, JSON.stringify(store, null, 2) + '\n', 'utf-8');
-    });
+      const updatedAt = new Date().toISOString();
+      const sessionIdsJson = JSON.stringify(sessionIds);
+      const payloadJson = payloadDirty ? JSON.stringify(payload) : null;
+
+      const updateWithPayload = db.prepare(
+        `UPDATE tasks SET
+           note = @note,
+           phase = @phase,
+           session_ids = @session_ids,
+           updated_at = @updated_at,
+           payload = @payload
+         WHERE id = @id`,
+      );
+      const updateWithoutPayload = db.prepare(
+        `UPDATE tasks SET
+           note = @note,
+           phase = @phase,
+           session_ids = @session_ids,
+           updated_at = @updated_at
+         WHERE id = @id`,
+      );
+
+      const tx = db.transaction(() => {
+        if (payloadDirty) {
+          updateWithPayload.run({
+            id: row.id,
+            note: newNote,
+            phase: newPhase,
+            session_ids: sessionIdsJson,
+            updated_at: updatedAt,
+            payload: payloadJson,
+          });
+        } else {
+          updateWithoutPayload.run({
+            id: row.id,
+            note: newNote,
+            phase: newPhase,
+            session_ids: sessionIdsJson,
+            updated_at: updatedAt,
+          });
+        }
+      });
+      tx();
+    } finally {
+      try { db.close(); } catch { /* ignore */ }
+    }
   } catch {
     // Never throw from hook utilities
   }
@@ -188,7 +288,6 @@ export function logHookError(context: string, error: unknown): void {
  */
 export function formatDailyLogEntry(
   summary: SessionSummary,
-  source: string,
   filesChanged?: string[],
 ): string {
   let entry = summary.summary;
@@ -204,18 +303,29 @@ export function formatDailyLogEntry(
  */
 export function deriveProjectPath(taskId: string): string | null {
   try {
-    if (!fs.existsSync(TASKS_FILE)) return null;
-
-    const raw = fs.readFileSync(TASKS_FILE, 'utf-8');
-    const store: TaskStore = JSON.parse(raw);
-
-    const task = store.tasks.find((t: Task) => t.id.startsWith(taskId));
-    if (!task) return null;
-
-    if (task.category && task.project) {
-      return `${task.category}/${task.project}`;
+    if (!fs.existsSync(TASK_DB_PATH)) return null;
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const Database = require('better-sqlite3') as typeof import('better-sqlite3');
+    const db = new Database(TASK_DB_PATH, { readonly: true, fileMustExist: true });
+    try {
+      const escaped = taskId.replace(/[\\%_]/g, (ch) => '\\' + ch);
+      const row = db
+        .prepare(
+          `SELECT category, project
+           FROM tasks
+           WHERE id = ? OR id LIKE ? ESCAPE '\\'
+           ORDER BY (id = ?) DESC
+           LIMIT 1`,
+        )
+        .get(taskId, escaped + '%', taskId) as
+        | { category: string | null; project: string | null }
+        | undefined;
+      if (!row) return null;
+      if (row.category && row.project) return `${row.category}/${row.project}`;
+      return null;
+    } finally {
+      try { db.close(); } catch { /* ignore */ }
     }
-    return null;
   } catch {
     return null;
   }

@@ -17,7 +17,7 @@ function json(data: unknown): string {
 }
 
 export const listAgentsTool: ToolDefinition = {
-  name: 'list_agents',
+  name: 'agent_list',
   description: 'List all available agent definitions (builtin and config-defined).',
   input_schema: {
     type: 'object',
@@ -38,7 +38,7 @@ export const listAgentsTool: ToolDefinition = {
 };
 
 export const getAgentTool: ToolDefinition = {
-  name: 'get_agent',
+  name: 'agent_get',
   description: 'Get full details of an agent definition by ID.',
   input_schema: {
     type: 'object',
@@ -55,7 +55,7 @@ export const getAgentTool: ToolDefinition = {
 };
 
 export const createAgentTool: ToolDefinition = {
-  name: 'create_agent',
+  name: 'agent_create',
   description: 'Create a new agent definition. Persisted to config.yaml.',
   input_schema: {
     type: 'object',
@@ -99,7 +99,7 @@ export const createAgentTool: ToolDefinition = {
 };
 
 export const updateAgentTool: ToolDefinition = {
-  name: 'update_agent',
+  name: 'agent_update',
   description: 'Update an agent definition. Only config-defined agents can be updated.',
   input_schema: {
     type: 'object',
@@ -143,7 +143,7 @@ export const updateAgentTool: ToolDefinition = {
 };
 
 export const deleteAgentTool: ToolDefinition = {
-  name: 'delete_agent',
+  name: 'agent_delete',
   description: 'Delete an agent definition. Only config-defined agents can be deleted.',
   input_schema: {
     type: 'object',

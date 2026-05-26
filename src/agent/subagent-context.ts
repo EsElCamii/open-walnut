@@ -6,17 +6,17 @@
  */
 
 import { tools, type ToolDefinition } from './tools.js';
-import { getAllAgents } from '../core/agent-registry.js';
+import { getAllAgents, migrateToolNames } from '../core/agent-registry.js';
 import { getConfig } from '../core/config-manager.js';
 import type { AgentDefinition } from '../core/types.js';
 
 // Tools that subagents are never allowed to use (prevent recursion / privilege escalation)
 const ALWAYS_DENIED_TOOLS = [
-  'start_session',
-  'send_to_session',
-  'create_agent',
-  'update_agent',
-  'delete_agent',
+  'session_start',
+  'session_send',
+  'agent_create',
+  'agent_update',
+  'agent_delete',
 ];
 
 /**
@@ -77,15 +77,15 @@ export async function buildSubagentToolSet(
   perCallDenied?: string[],
 ): Promise<ToolDefinition[]> {
   const config = await getConfig();
-  const globalDenied = config.agent?.subagent?.denied_tools ?? [];
+  const globalDenied = migrateToolNames(config.agent?.subagent?.denied_tools) ?? [];
 
   const agentId = agentDef.id;
 
-  /** Wrap files_* tools to inject _agentId so they write to agent-specific dirs. */
+  /** Wrap file_* tools to inject _agentId so they write to agent-specific dirs. */
   function injectAgentId(filtered: ToolDefinition[]): ToolDefinition[] {
     if (!agentId || agentId === 'general') return filtered;
     return filtered.map((t) => {
-      if (t.name.startsWith('files_')) {
+      if (t.name.startsWith('file_')) {
         return {
           ...t,
           execute: (params: Record<string, unknown>) => t.execute({ ...params, _agentId: agentId }),
@@ -118,7 +118,7 @@ export async function buildSubagentToolSet(
 /**
  * Build the agents section for the main agent's system prompt.
  * Summarizes available agent definitions so the main agent knows
- * what agents it can dispatch via start_session.
+ * what agents it can dispatch via session_start.
  */
 export async function buildAgentsSection(): Promise<string> {
   const agents = await getAllAgents();
@@ -132,6 +132,6 @@ export async function buildAgentsSection(): Promise<string> {
   });
 
   return `## Available agents
-You can dispatch tasks to these agents using start_session with runner="embedded" and agent_id:
+You can dispatch tasks to these agents using session_start with runner="embedded" and agent_id:
 ${lines.join('\n')}`;
 }

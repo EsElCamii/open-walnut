@@ -1,12 +1,12 @@
 /**
- * ask_question tool — lets the main agent ask the user questions mid-turn.
+ * user_ask tool — lets the main agent ask the user questions mid-turn.
  *
  * Mirrors the AskUserQuestion pattern: one call, 1-4 questions,
  * each with optional predefined options. The tool blocks until the
  * user answers in the chat UI, then returns all answers to the agent.
  *
  * Flow:
- *   1. Agent calls ask_question with questions array
+ *   1. Agent calls user_ask with questions array
  *   2. onToolCall callback fires → UI renders QuestionCard
  *   3. Tool blocks (waitForAnswers returns a Promise)
  *   4. User answers via QuestionCard or normal chat input
@@ -19,7 +19,7 @@ import type { ToolDefinition } from '../tools.js'
 import { waitForAnswers, type AskQuestionItem } from '../../core/agent-question.js'
 
 export const askQuestionTool: ToolDefinition = {
-  name: 'ask_question',
+  name: 'user_ask',
   description:
     'Ask the user one or more questions and wait for their answers. ' +
     'Use when you need clarification, a decision, or input before proceeding. ' +

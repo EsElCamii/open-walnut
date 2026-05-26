@@ -6,10 +6,13 @@ import {
   logHookError,
 } from './shared.js';
 import { appendDailyLog } from '../core/daily-log.js';
-import { SESSIONS_FILE } from '../constants.js';
-import { withFileLockSync } from '../utils/file-lock.js';
+import { WALNUT_HOME } from '../constants.js';
 import { log } from '../logging/index.js';
 import fs from 'node:fs';
+import path from 'node:path';
+
+// Keep in sync with src/core/session-db.ts:30.
+const SESSION_DB_PATH = path.join(WALNUT_HOME, 'sessions.sqlite');
 
 /**
  * On-compact hook: runs when Claude Code compacts context.
@@ -28,7 +31,7 @@ function main(): void {
     saveSessionSummary(summary);
 
     try {
-      const entry = formatDailyLogEntry(summary, 'compact');
+      const entry = formatDailyLogEntry(summary);
       appendDailyLog(entry, 'compact');
     } catch (err) { log.hook.warn('on-compact: daily log failed', { error: String(err) }); }
 
@@ -44,21 +47,22 @@ function main(): void {
 
 function updateSessionLastActive(): void {
   try {
-    withFileLockSync(SESSIONS_FILE, () => {
-      if (!fs.existsSync(SESSIONS_FILE)) return;
+    if (!fs.existsSync(SESSION_DB_PATH)) return;
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const Database = require('better-sqlite3') as typeof import('better-sqlite3');
+    const db = new Database(SESSION_DB_PATH);
+    try {
+      db.pragma('journal_mode = WAL');
+      db.pragma('busy_timeout = 5000');
 
-      const raw = fs.readFileSync(SESSIONS_FILE, 'utf-8');
-      const store = JSON.parse(raw);
-      if (!Array.isArray(store.sessions)) return;
-
-      for (const session of store.sessions) {
-        if (session.process_status === 'running') {
-          session.lastActiveAt = new Date().toISOString();
-        }
-      }
-
-      fs.writeFileSync(SESSIONS_FILE, JSON.stringify(store, null, 2) + '\n', 'utf-8');
-    });
+      const now = new Date().toISOString();
+      const stmt = db.prepare(
+        `UPDATE sessions SET last_active_at = ? WHERE process_status = 'running'`,
+      );
+      db.transaction(() => { stmt.run(now); })();
+    } finally {
+      try { db.close(); } catch { /* ignore */ }
+    }
   } catch (err) {
     log.hook.warn('on-compact: session update failed', { error: String(err) });
   }

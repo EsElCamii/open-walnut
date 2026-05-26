@@ -72,7 +72,7 @@ interface TodoPanelProps {
   loading: boolean;
   onComplete: (id: string) => void;
   onSetPhase?: (id: string, phase: string) => void;
-  onCreate: (input: { title: string; priority: string; category?: string; project?: string }) => Promise<Task | unknown>;
+  onCreate: (input: { title: string; priority: string; category?: string; project?: string; starred?: boolean; pinnedTier?: FocusTier }) => Promise<Task | unknown>;
   onUpdate?: (id: string, updates: { title?: string }) => void;
   onStar?: (id: string) => void;
   onDelete?: (id: string) => void;
@@ -86,7 +86,9 @@ interface TodoPanelProps {
   ordering?: UseOrderingReturn;
   onReorder?: (category: string, project: string, taskIds: string[]) => void;
   onMoveTask?: (taskId: string, category: string, project: string, insertNearTaskId?: string) => void;
-  onReparentTask?: (taskId: string, newParentId: string | null) => void;
+  onReparentTask?: (taskId: string, newParentId: string | null, opts?: { insertAfterId?: string }) => void;
+  /** Called when switching to manual sort — baker freezes current displayed order into the store. */
+  onBakeOrder?: (orderedIds: string[]) => void;
   onOpenSession?: (sessionId: string) => void;
   onOpenTriageForTask?: (taskId: string) => void;
   onPinTask?: (taskId: string) => void;
@@ -97,6 +99,7 @@ interface TodoPanelProps {
   pinnedTaskIds?: Set<string>;
   focusTaskIds?: Set<string>;
   nextTaskIds?: Set<string>;
+  waitTaskIds?: Set<string>;
   /** When true, suppress opening the detail panel for the focused task (e.g. chat task-ref clicks). */
   suppressDetail?: boolean;
   /** Set of session IDs currently displayed in session columns. */
@@ -212,6 +215,8 @@ interface SortableTaskItemProps {
   isFocused: boolean;
   isDetailOpen?: boolean;
   isRecentlyDone?: boolean;
+  /** True when a drag is hovering this task long enough to nest into it. */
+  isNestTarget?: boolean;
   depth?: number;               // Nesting depth (0 = top-level, 1 = child, 2 = grandchild, etc.)
   childCount?: number;
   isExpanded?: boolean;           // Whether children are visible (only for parents)
@@ -243,7 +248,7 @@ interface SortableTaskItemProps {
   isFadingOverride?: boolean;     // Task is fading out after focus moved away
 }
 
-function SortableTaskItem({ task, isFocused, isDetailOpen, isRecentlyDone, depth = 0, childCount, isExpanded, onToggleExpand, onClick, onSetPhase, onStar, onDelete, onSetPriority, onUpdateTitle, onOpenSession, openSessionIds, onExpandDetail, onClearFocus, onPinTask, onUnpinTask, onSetTier, onSetDate, onUnparent, onMoveUp, isPinned, pinnedTier, searchContext, searchMatchField, searchScore, searchKeywordScore, searchSemanticScore, filterOverrideReason, isFadingOverride }: SortableTaskItemProps) {
+function SortableTaskItem({ task, isFocused, isDetailOpen, isRecentlyDone, isNestTarget, depth = 0, childCount, isExpanded, onToggleExpand, onClick, onSetPhase, onStar, onDelete, onSetPriority, onUpdateTitle, onOpenSession, openSessionIds, onExpandDetail, onClearFocus, onPinTask, onUnpinTask, onSetTier, onSetDate, onUnparent, onMoveUp, isPinned, pinnedTier, searchContext, searchMatchField, searchScore, searchKeywordScore, searchSemanticScore, filterOverrideReason, isFadingOverride }: SortableTaskItemProps) {
   const integrations = useIntegrations();
   const hookPhases = usePhaseHooks();
   const {
@@ -292,6 +297,7 @@ function SortableTaskItem({ task, isFocused, isDetailOpen, isRecentlyDone, depth
     isFocused ? 'task-focused' : '',
     filterOverrideReason ? 'task-filter-override' : '',
     isFadingOverride ? 'task-filter-override-fading' : '',
+    isNestTarget ? 'todo-panel-item-nest-target' : '',
   ].filter(Boolean).join(' ');
 
   const dueDateLabel = formatDateDisplay(task.due_date);
@@ -770,7 +776,7 @@ const PRIORITY_RANK: Record<string, number> = { immediate: 0, important: 1, back
 function readSortBy(): SortBy {
   try {
     const v = localStorage.getItem(LS_SORT_KEY);
-    if (v === 'priority' || v === 'date' || v === 'updated') return v;
+    if (v === 'manual' || v === 'priority' || v === 'date' || v === 'updated') return v;
   } catch { /* ignore */ }
   return 'priority';
 }
@@ -1597,7 +1603,11 @@ function SortableRecentCard({ task, isFocused, isDetailOpen, onClick, onPinTask,
 
 // ── TodoPanel ──
 
-export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onComplete, onSetPhase, onCreate, onUpdate, onStar, onDelete, onSetPriority, onFocusTask, onClearFocus, focusedTaskId, focusNonce, favorites, ordering, onReorder, onMoveTask, onReparentTask, onOpenSession, onOpenTriageForTask, onPinTask, onUnpinTask, onReorderPinned, onSetTier, onSetDate, pinnedTaskIds, focusTaskIds, nextTaskIds, suppressDetail, openSessionIds, operationError, onClearOperationError, onOperationError, externalCategory, onCategoryChange }: TodoPanelProps) {
+export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onComplete, onSetPhase, onCreate, onUpdate, onStar, onDelete, onSetPriority, onFocusTask, onClearFocus, focusedTaskId, focusNonce, favorites, ordering, onReorder, onMoveTask, onReparentTask, onBakeOrder, onOpenSession, onOpenTriageForTask, onPinTask, onUnpinTask, onReorderPinned, onSetTier, onSetDate, pinnedTaskIds, focusTaskIds, nextTaskIds, waitTaskIds, suppressDetail, openSessionIds, operationError, onClearOperationError, onOperationError, externalCategory, onCategoryChange }: TodoPanelProps) {
+  // TEMP drag-flash trace — remove after diagnosis
+  const __renderCountRef = useRef(0);
+  __renderCountRef.current += 1;
+  scrollLog('drag-trace-TodoPanel-render', { n: __renderCountRef.current, tasks: rawTasks.length });
   // Hide .metadata* tasks (project/category configuration tasks, not user-visible)
   const tasks = useMemo(() => rawTasks.filter((t) => !t.title.startsWith('.metadata')), [rawTasks]);
   const { tierLimits } = useFocusBarContext();
@@ -1610,6 +1620,18 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
   const [tagFilter, setTagFilter] = useState('');
   const [dateFilter, setDateFilter] = useState<DateFilter>(readDateFilter);
   const [sortBy, setSortBy] = useState<SortBy>(readSortBy);
+  // Ephemeral toast shown when a manual action (drag / move up / move left)
+  // auto-switches the sort mode to 'manual'. 3s lifetime, non-blocking.
+  const [sortToast, setSortToast] = useState<string | null>(null);
+  const sortToastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const showSortToast = useCallback((msg: string) => {
+    setSortToast(msg);
+    if (sortToastTimerRef.current) clearTimeout(sortToastTimerRef.current);
+    sortToastTimerRef.current = setTimeout(() => setSortToast(null), 3000);
+  }, []);
+  useEffect(() => {
+    return () => { if (sortToastTimerRef.current) clearTimeout(sortToastTimerRef.current); };
+  }, []);
   const [groupBy, setGroupBy] = useState<GroupBy>(readGroupBy);
   const [activeCategory, setActiveCategory] = useState(readTab);
 
@@ -1666,10 +1688,29 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
 
   const integrations = useIntegrations();
   const [newTitle, setNewTitle] = useState('');
+  const [quickCategory, setQuickCategory] = useState<string>(''); // '' = use default
+  const [quickProject, setQuickProject] = useState<string>('');
+  const [quickStarred, setQuickStarred] = useState(false);
+  const [quickPinnedTier, setQuickPinnedTier] = useState<FocusTier | null>(null);
+  const [quickMoreOpen, setQuickMoreOpen] = useState(false);
+  const quickMoreBtnRef = useRef<HTMLButtonElement | null>(null);
+  const quickMoreMenuRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    if (!quickMoreOpen) return;
+    const handleClick = (e: MouseEvent) => {
+      if (quickMoreBtnRef.current?.contains(e.target as Node)) return;
+      if (quickMoreMenuRef.current?.contains(e.target as Node)) return;
+      setQuickMoreOpen(false);
+    };
+    document.addEventListener('mousedown', handleClick);
+    return () => document.removeEventListener('mousedown', handleClick);
+  }, [quickMoreOpen]);
   const [pinnedCollapsed, setPinnedCollapsed] = useState(false);
   const [focusCollapsed, setFocusCollapsed] = useState(false);
   const [nextCollapsed, setNextCollapsed] = useState(false);
   const [satelliteCollapsed, setSatelliteCollapsed] = useState(false);
+  const [waitCollapsed, setWaitCollapsed] = useState(false);
   const [recentCollapsed, setRecentCollapsed] = useState(false);
   const [collapsedCategories, setCollapsedCategories] = useState<Set<string>>(() => readSetFromStorage(LS_COLLAPSED_CATS_KEY));
   const [collapsedProjects, setCollapsedProjects] = useState<Set<string>>(() => readSetFromStorage(LS_COLLAPSED_PROJS_KEY));
@@ -1700,6 +1741,23 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
   }, [loading, tasks]);
   const [activeDragId, setActiveDragId] = useState<string | null>(null);
   const [activeDragType, setActiveDragType] = useState<string | null>(null);
+  // Apple-Reminders-style dwell-to-nest: when a task is dragged onto another
+  // task and held still for NEST_DWELL_MS, the target highlights and a drop
+  // here will nest the dragged task under it (regardless of edge/center).
+  // The dwell-selected target sits in state for the visual ring; the target
+  // under consideration sits in a ref so rapid onDragOver events don't
+  // trigger state churn while the timer is still counting down.
+  const [nestTargetId, setNestTargetId] = useState<string | null>(null);
+  const nestDwellTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const nestDwellTargetRef = useRef<string | null>(null);
+  // Cancel any pending dwell timer if the panel unmounts mid-drag (prevents
+  // setState-after-unmount warnings + leaked timers on route change).
+  useEffect(() => () => {
+    if (nestDwellTimerRef.current) {
+      clearTimeout(nestDwellTimerRef.current);
+      nestDwellTimerRef.current = null;
+    }
+  }, []);
   const [detailTarget, setDetailTarget] = useState<DetailTarget>(null);
 
   // Search state
@@ -1951,16 +2009,23 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
   const satelliteTasksLocal = useMemo(() => {
     const fSet = focusTaskIds ?? new Set<string>();
     const nSet = nextTaskIds ?? new Set<string>();
-    return pinnedTasks.filter((t) => !fSet.has(t.id) && !nSet.has(t.id));
-  }, [pinnedTasks, focusTaskIds, nextTaskIds]);
+    const wSet = waitTaskIds ?? new Set<string>();
+    return pinnedTasks.filter((t) => !fSet.has(t.id) && !nSet.has(t.id) && !wSet.has(t.id));
+  }, [pinnedTasks, focusTaskIds, nextTaskIds, waitTaskIds]);
+
+  const waitTasksLocal = useMemo(() => {
+    if (!waitTaskIds || waitTaskIds.size === 0) return [];
+    return pinnedTasks.filter((t) => waitTaskIds.has(t.id));
+  }, [pinnedTasks, waitTaskIds]);
 
   // Helper: resolve a task's current tier
   const getTier = useCallback((taskId: string): FocusTier | undefined => {
     if (!pinnedTaskIds?.has(taskId)) return undefined;
     if (focusTaskIds?.has(taskId)) return 'focus';
     if (nextTaskIds?.has(taskId)) return 'next';
+    if (waitTaskIds?.has(taskId)) return 'wait';
     return 'satellite';
-  }, [pinnedTaskIds, focusTaskIds, nextTaskIds]);
+  }, [pinnedTaskIds, focusTaskIds, nextTaskIds, waitTaskIds]);
 
   // Recent tasks: all non-completed tasks excluding pinned, sorted by most recent activity
   const recentTasks = useMemo(() => {
@@ -2009,7 +2074,7 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
   //     (DnD Kit handles visual reorder via CSS transforms; final position resolved in onDragEnd)
   //  4. React.memo on card components to prevent re-render cascades
 
-  const DROP_ZONE_TIERS: Record<string, FocusTier> = { 'focus-drop-zone': 'focus', 'next-drop-zone': 'next', 'satellite-drop-zone': 'satellite' };
+  const DROP_ZONE_TIERS: Record<string, FocusTier> = { 'focus-drop-zone': 'focus', 'next-drop-zone': 'next', 'satellite-drop-zone': 'satellite', 'wait-drop-zone': 'wait' };
 
   // Local tier arrays that can be overridden during drag
   // Drag overlay arrays stored as refs (NOT state) to avoid triggering React re-renders
@@ -2018,6 +2083,7 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
   const dragFocusIdsRef = useRef<string[] | null>(null);
   const dragNextIdsRef = useRef<string[] | null>(null);
   const dragSatelliteIdsRef = useRef<string[] | null>(null);
+  const dragWaitIdsRef = useRef<string[] | null>(null);
   const [, setDragTick] = useState(0);
   const dragRafRef = useRef(0);
   const bumpDragTick = useCallback(() => {
@@ -2031,6 +2097,7 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
   const dragFocusIds = dragFocusIdsRef.current;
   const dragNextIds = dragNextIdsRef.current;
   const dragSatelliteIds = dragSatelliteIdsRef.current;
+  const dragWaitIds = dragWaitIdsRef.current;
 
   // Active arrays: use drag overrides when dragging, else the source-of-truth.
   // MUST be memoized — .map() creates a new array on every render, which makes
@@ -2039,15 +2106,17 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
   const focusIds_arr = useMemo(() => dragFocusIds ?? focusTasksLocal.map((t) => t.id), [dragFocusIds, focusTasksLocal]);
   const nextIds_arr = useMemo(() => dragNextIds ?? nextTasksLocal.map((t) => t.id), [dragNextIds, nextTasksLocal]);
   const satelliteIds_arr = useMemo(() => dragSatelliteIds ?? satelliteTasksLocal.map((t) => t.id), [dragSatelliteIds, satelliteTasksLocal]);
+  const waitIds_arr = useMemo(() => dragWaitIds ?? waitTasksLocal.map((t) => t.id), [dragWaitIds, waitTasksLocal]);
 
   // Resolve tier ID arrays to Task objects (uses drag overrides when active)
   const pinnedTaskMap = useMemo(() => new Map(pinnedTasks.map((t) => [t.id, t])), [pinnedTasks]);
   const focusTasksDisplay = useMemo(() => focusIds_arr.map((id) => pinnedTaskMap.get(id)).filter(Boolean) as Task[], [focusIds_arr, pinnedTaskMap]);
   const nextTasksDisplay = useMemo(() => nextIds_arr.map((id) => pinnedTaskMap.get(id)).filter(Boolean) as Task[], [nextIds_arr, pinnedTaskMap]);
   const satelliteTasksDisplay = useMemo(() => satelliteIds_arr.map((id) => pinnedTaskMap.get(id)).filter(Boolean) as Task[], [satelliteIds_arr, pinnedTaskMap]);
+  const waitTasksDisplay = useMemo(() => waitIds_arr.map((id) => pinnedTaskMap.get(id)).filter(Boolean) as Task[], [waitIds_arr, pinnedTaskMap]);
 
   // Snapshot of original tier arrays at drag start (for revert on cancel)
-  const dragStartSnapshot = useRef<{ focus: string[]; next: string[]; satellite: string[]; recent?: string[] } | null>(null);
+  const dragStartSnapshot = useRef<{ focus: string[]; next: string[]; satellite: string[]; wait: string[]; recent?: string[] } | null>(null);
   const [activeDragPinnedId, setActiveDragPinnedId] = useState<string | null>(null);
   const activeDragPinnedTask = useMemo(
     () => {
@@ -2074,14 +2143,16 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
     const fArr = focusTasksLocal.map((t) => t.id);
     const nArr = nextTasksLocal.map((t) => t.id);
     const sArr = satelliteTasksLocal.map((t) => t.id);
+    const wArr = waitTasksLocal.map((t) => t.id);
     const rArr = recentTasks.map((t) => t.id);
-    dragStartSnapshot.current = { focus: fArr, next: nArr, satellite: sArr, recent: rArr };
+    dragStartSnapshot.current = { focus: fArr, next: nArr, satellite: sArr, wait: wArr, recent: rArr };
     // Freeze tier state — SortableContext items won't change from external events during drag
     dragFocusIdsRef.current = fArr;
     dragNextIdsRef.current = nArr;
     dragSatelliteIdsRef.current = sArr;
+    dragWaitIdsRef.current = wArr;
     setActiveDragPinnedId(event.active.id as string);
-  }, [focusTasksLocal, nextTasksLocal, satelliteTasksLocal, recentTasks]);
+  }, [focusTasksLocal, nextTasksLocal, satelliteTasksLocal, waitTasksLocal, recentTasks]);
 
   // Live movement: when hovering over a different tier, move item between arrays
   // Also handles items dragged FROM Recent into a tier zone
@@ -2111,16 +2182,18 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
     const targetTier = DROP_ZONE_TIERS[overId]
       ?? ((dragFocusIdsRef.current ?? snap.focus).includes(overId) ? 'focus' : undefined)
       ?? ((dragNextIdsRef.current ?? snap.next).includes(overId) ? 'next' : undefined)
-      ?? ((dragSatelliteIdsRef.current ?? snap.satellite).includes(overId) ? 'satellite' : undefined);
+      ?? ((dragSatelliteIdsRef.current ?? snap.satellite).includes(overId) ? 'satellite' : undefined)
+      ?? ((dragWaitIdsRef.current ?? snap.wait).includes(overId) ? 'wait' : undefined);
     if (!targetTier) return;
 
     // For items from Recent: check if already placed in a tier during this drag
     if (isFromRecent) {
-      const getRef = (tier: FocusTier) => tier === 'focus' ? (dragFocusIdsRef.current ?? snap.focus) : tier === 'next' ? (dragNextIdsRef.current ?? snap.next) : (dragSatelliteIdsRef.current ?? snap.satellite);
-      const setRef = (tier: FocusTier, val: string[]) => { if (tier === 'focus') dragFocusIdsRef.current = val; else if (tier === 'next') dragNextIdsRef.current = val; else dragSatelliteIdsRef.current = val; };
+      const getRef = (tier: FocusTier) => tier === 'focus' ? (dragFocusIdsRef.current ?? snap.focus) : tier === 'next' ? (dragNextIdsRef.current ?? snap.next) : tier === 'wait' ? (dragWaitIdsRef.current ?? snap.wait) : (dragSatelliteIdsRef.current ?? snap.satellite);
+      const setRef = (tier: FocusTier, val: string[]) => { if (tier === 'focus') dragFocusIdsRef.current = val; else if (tier === 'next') dragNextIdsRef.current = val; else if (tier === 'wait') dragWaitIdsRef.current = val; else dragSatelliteIdsRef.current = val; };
       const currentPlacement =
         getRef('focus').includes(activeId) ? 'focus' as FocusTier :
         getRef('next').includes(activeId) ? 'next' as FocusTier :
+        getRef('wait').includes(activeId) ? 'wait' as FocusTier :
         getRef('satellite').includes(activeId) ? 'satellite' as FocusTier : null;
       if (currentPlacement === targetTier) return;
       const remove = (arr: string[]) => arr.filter((id) => id !== activeId);
@@ -2140,7 +2213,8 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
     // tier arrays.
     const currentTier: FocusTier =
       (dragFocusIdsRef.current ?? snap.focus).includes(activeId) ? 'focus' :
-      (dragNextIdsRef.current ?? snap.next).includes(activeId) ? 'next' : 'satellite';
+      (dragNextIdsRef.current ?? snap.next).includes(activeId) ? 'next' :
+      (dragWaitIdsRef.current ?? snap.wait).includes(activeId) ? 'wait' : 'satellite';
     // Same tier — skip (invariant #3: never mutate SortableContext items for same-tier
     // reorders in onDragOver). DnD Kit handles visual reorder via CSS transforms;
     // final position is resolved in handlePinnedDragEnd using the `over` target.
@@ -2158,8 +2232,8 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
       return copy;
     };
 
-    const getArr = (tier: FocusTier) => tier === 'focus' ? (dragFocusIdsRef.current ?? snap.focus) : tier === 'next' ? (dragNextIdsRef.current ?? snap.next) : (dragSatelliteIdsRef.current ?? snap.satellite);
-    const setArr = (tier: FocusTier, val: string[]) => { if (tier === 'focus') dragFocusIdsRef.current = val; else if (tier === 'next') dragNextIdsRef.current = val; else dragSatelliteIdsRef.current = val; };
+    const getArr = (tier: FocusTier) => tier === 'focus' ? (dragFocusIdsRef.current ?? snap.focus) : tier === 'next' ? (dragNextIdsRef.current ?? snap.next) : tier === 'wait' ? (dragWaitIdsRef.current ?? snap.wait) : (dragSatelliteIdsRef.current ?? snap.satellite);
+    const setArr = (tier: FocusTier, val: string[]) => { if (tier === 'focus') dragFocusIdsRef.current = val; else if (tier === 'next') dragNextIdsRef.current = val; else if (tier === 'wait') dragWaitIdsRef.current = val; else dragSatelliteIdsRef.current = val; };
 
     setArr(currentTier, remove(getArr(currentTier)));
     setArr(targetTier, addAt(getArr(targetTier), overId));
@@ -2171,6 +2245,7 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
     dragFocusIdsRef.current = null;
     dragNextIdsRef.current = null;
     dragSatelliteIdsRef.current = null;
+    dragWaitIdsRef.current = null;
     dragStartSnapshot.current = null;
     setActiveDragPinnedId(null);
   }, []);
@@ -2190,6 +2265,7 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
     const liveFocus = dragFocusIdsRef.current;
     const liveNext = dragNextIdsRef.current;
     const liveSatellite = dragSatelliteIdsRef.current;
+    const liveWait = dragWaitIdsRef.current;
 
     clearDragState();
 
@@ -2206,8 +2282,9 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
       const focus = [...(liveFocus ?? snap.focus)];
       const next = [...(liveNext ?? snap.next)];
       const satellite = [...(liveSatellite ?? snap.satellite)];
+      const wait = [...(liveWait ?? snap.wait)];
       if (adjustInTier && activeId !== overId) {
-        const arr = adjustInTier === 'focus' ? focus : adjustInTier === 'next' ? next : satellite;
+        const arr = adjustInTier === 'focus' ? focus : adjustInTier === 'next' ? next : adjustInTier === 'wait' ? wait : satellite;
         const ai = arr.indexOf(activeId);
         const oi = arr.indexOf(overId);
         if (ai !== -1 && oi !== -1 && ai !== oi) {
@@ -2215,7 +2292,7 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
           arr.splice(oi, 0, activeId);
         }
       }
-      return [...focus, ...next, ...satellite];
+      return [...focus, ...next, ...satellite, ...wait];
     };
 
     // When over === active, collision detected the dragged card itself (its center
@@ -2225,6 +2302,7 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
       const currentTier: FocusTier | undefined =
         (liveFocus ?? snap.focus).includes(activeId) ? 'focus' :
         (liveNext ?? snap.next).includes(activeId) ? 'next' :
+        (liveWait ?? snap.wait).includes(activeId) ? 'wait' :
         (liveSatellite ?? snap.satellite).includes(activeId) ? 'satellite' : undefined;
       if (isFromRecent) {
         if (currentTier) {
@@ -2233,7 +2311,7 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
           setTimeout(() => onSetTier?.(activeId, currentTier, order), 100);
         }
       } else {
-        const origTier: FocusTier = snap.focus.includes(activeId) ? 'focus' : snap.next.includes(activeId) ? 'next' : 'satellite';
+        const origTier: FocusTier = snap.focus.includes(activeId) ? 'focus' : snap.next.includes(activeId) ? 'next' : snap.wait.includes(activeId) ? 'wait' : 'satellite';
         if (currentTier && origTier !== currentTier) {
           onSetTier?.(activeId, currentTier, buildOrderFromRefs());
         }
@@ -2246,7 +2324,8 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
       const targetTier = DROP_ZONE_TIERS[overId]
         ?? (snap.focus.includes(overId) ? 'focus' : undefined)
         ?? (snap.next.includes(overId) ? 'next' : undefined)
-        ?? (snap.satellite.includes(overId) ? 'satellite' : undefined);
+        ?? (snap.satellite.includes(overId) ? 'satellite' : undefined)
+        ?? (snap.wait.includes(overId) ? 'wait' : undefined);
       if (!targetTier) return;
       // Pin first, then set tier. setFocusTier requires task.pinned===true in the
       // store, so we delay to let the pin write complete before changing tier.
@@ -2257,10 +2336,11 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
     }
 
     // Existing pinned-to-pinned logic
-    const origTier: FocusTier = snap.focus.includes(activeId) ? 'focus' : snap.next.includes(activeId) ? 'next' : 'satellite';
+    const origTier: FocusTier = snap.focus.includes(activeId) ? 'focus' : snap.next.includes(activeId) ? 'next' : snap.wait.includes(activeId) ? 'wait' : 'satellite';
     const targetTier = DROP_ZONE_TIERS[overId]
       ?? (snap.focus.includes(overId) ? 'focus' : undefined)
       ?? (snap.next.includes(overId) ? 'next' : undefined)
+      ?? (snap.wait.includes(overId) ? 'wait' : undefined)
       ?? 'satellite';
 
     if (origTier !== targetTier) {
@@ -2539,9 +2619,6 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
   // --- Parent-anchored sort with child grouping ---
   // Produces a sorted ID order where children always follow their parent.
   const computeSortOrder = useCallback((items: Task[]): string[] => {
-    const cmpMap: Record<SortBy, (a: Task, b: Task) => number> = { priority: comparePriority, date: compareDate, updated: compareUpdated };
-    const cmp = cmpMap[sortBy] ?? compareDate;
-
     // Partition tasks into top-level (+ orphans) vs children-of-visible-parent
     const topLevel: Task[] = [];
     const childrenOf = new Map<string, Task[]>();
@@ -2568,8 +2645,13 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
       }
     }
 
-    topLevel.sort(cmp);
-    for (const children of childrenOf.values()) children.sort(cmp);
+    // Manual mode: keep store order as-is. Priority/date/updated: re-sort siblings.
+    if (sortBy !== 'manual') {
+      const cmpMap: Record<Exclude<SortBy, 'manual'>, (a: Task, b: Task) => number> = { priority: comparePriority, date: compareDate, updated: compareUpdated };
+      const cmp = cmpMap[sortBy] ?? compareDate;
+      topLevel.sort(cmp);
+      for (const children of childrenOf.values()) children.sort(cmp);
+    }
 
     // Recursive interleave: parent → children → grandchildren
     const order: string[] = [];
@@ -2614,6 +2696,13 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
       return;
     }
     prevFilteredIdsRef.current = currIds;
+
+    // Manual mode: store order IS the truth — flush immediately, no debounce.
+    // This prevents a stray debounced re-sort from overriding the user's drag result.
+    if (sortBy === 'manual') {
+      stableSortUpdate(newOrder);
+      return;
+    }
 
     // Same set of tasks, just reordered (e.g. priority change): debounce 3s
     const timer = setTimeout(() => stableSortUpdate(newOrder), 3000);
@@ -2858,21 +2947,57 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
     return m;
   }, [grouped]);
 
+  const quickAddCategories = useMemo(() => {
+    const set = new Set<string>();
+    for (const t of tasks) if (t.category) set.add(t.category);
+    if (!set.has('Inbox')) set.add('Inbox');
+    return [...set].sort((a, b) => (a === 'Inbox' ? -1 : b === 'Inbox' ? 1 : a.localeCompare(b)));
+  }, [tasks]);
+
+  const quickAddProjectsByCategory = useMemo(() => {
+    const m = new Map<string, Set<string>>();
+    for (const t of tasks) {
+      if (!t.category || !t.project) continue;
+      if (!m.has(t.category)) m.set(t.category, new Set());
+      m.get(t.category)!.add(t.project);
+    }
+    return m;
+  }, [tasks]);
+
+  const effectiveDefaultCategory = useMemo(() => {
+    if (quickCategory) return quickCategory;
+    if (activeCategory && activeCategory !== STARRED_TAB) return activeCategory;
+    return 'Inbox';
+  }, [quickCategory, activeCategory]);
+
   const handleAdd = useCallback(async (e: FormEvent) => {
     e.preventDefault();
     const title = newTitle.trim();
     if (!title) return;
+    const category = effectiveDefaultCategory;
+    const project = quickProject.trim() || undefined;
     try {
-      const result = await onCreate({ title, priority: 'none', category: 'Inbox', project: 'Quick Start' });
+      const result = await onCreate({
+        title,
+        priority: 'none',
+        category,
+        project,
+        starred: quickStarred,
+        pinnedTier: quickPinnedTier ?? undefined,
+      });
       setNewTitle('');
+      setQuickCategory('');
+      setQuickProject('');
+      setQuickStarred(false);
+      setQuickPinnedTier(null);
       if (onClearOperationError) onClearOperationError();
       const newTask = result as Task | undefined;
       if (newTask?.id) {
-        // Smart navigation: All view shows everything so stay; others jump to Inbox
-        if (activeCategory !== '') {
-          setActiveCategory('Inbox');
-          persistTab('Inbox');
-          onCategoryChange?.('Inbox');
+        // Jump to the category where the task actually landed
+        if (activeCategory !== '' && activeCategory !== category) {
+          setActiveCategory(category);
+          persistTab(category);
+          onCategoryChange?.(category);
         }
         // Auto-focus triggers scroll-into-view via SortableTaskItem
         onFocusTask?.(newTask);
@@ -2881,7 +3006,7 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
       const msg = err instanceof Error ? err.message : 'Failed to add task';
       if (onOperationError) onOperationError(msg);
     }
-  }, [newTitle, onCreate, onClearOperationError, onOperationError, onFocusTask, activeCategory]);
+  }, [newTitle, quickProject, quickStarred, quickPinnedTier, effectiveDefaultCategory, onCreate, onClearOperationError, onOperationError, onFocusTask, activeCategory, onCategoryChange]);
 
   const toggleCategory = (cat: string) => {
     setCollapsedCategories((prev) => {
@@ -2958,11 +3083,93 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
     setActiveDragId(id);
     const type = (event.active.data?.current as { type?: string })?.type ?? 'task';
     setActiveDragType(type);
+    // Reset dwell state on every new drag
+    if (nestDwellTimerRef.current) { clearTimeout(nestDwellTimerRef.current); nestDwellTimerRef.current = null; }
+    nestDwellTargetRef.current = null;
+    setNestTargetId(null);
   }, []);
 
+  /** Clear any pending dwell timer + UI ring — call on drag end/cancel. */
+  const clearNestDwell = useCallback(() => {
+    if (nestDwellTimerRef.current) {
+      clearTimeout(nestDwellTimerRef.current);
+      nestDwellTimerRef.current = null;
+    }
+    nestDwellTargetRef.current = null;
+    setNestTargetId((prev) => (prev === null ? prev : null));
+  }, []);
+
+  /** Milliseconds the cursor must rest on a target task before it becomes a nest target. */
+  const NEST_DWELL_MS = 500;
+
+  const handleDragOver = useCallback((event: DragOverEvent) => {
+    const activeType = (event.active.data?.current as { type?: string })?.type ?? 'task';
+    // Dwell-to-nest only applies to task drags (not category/project group drags)
+    if (activeType !== 'task') { clearNestDwell(); return; }
+
+    const activeId = String(event.active.id);
+    const overId = event.over?.id ? String(event.over.id) : null;
+
+    // Only dwell on other tasks — not on headers, not on the dragged task itself
+    if (!overId || overId === activeId || !taskGroupMap.has(overId)) { clearNestDwell(); return; }
+
+    // Prevent cycle: the target cannot be the dragged task OR any of its descendants.
+    // Walk up from target — if we ever hit activeId, it's a descendant. (childParentMap
+    // maps child → parent, so walking up eventually reaches a root.)
+    let walk: string | undefined = overId;
+    for (let i = 0; i < 32 && walk; i++) {
+      if (walk === activeId) { clearNestDwell(); return; }
+      walk = childParentMap.get(walk);
+    }
+
+    // Skip dwell if target is already the active task's current parent — nesting
+    // there would be a confusing no-op. Existing "drop on parent = unparent"
+    // gesture still works for drags that don't dwell.
+    const activeParentId = childParentMap.get(activeId);
+    if (activeParentId && activeParentId === overId) { clearNestDwell(); return; }
+
+    // Same target as the one we're already dwelling on → nothing to do
+    if (nestDwellTargetRef.current === overId) return;
+
+    // Switched to a different target — reset timer & clear any active ring
+    if (nestDwellTimerRef.current) clearTimeout(nestDwellTimerRef.current);
+    nestDwellTargetRef.current = overId;
+    setNestTargetId((prev) => (prev === null ? prev : null));
+    nestDwellTimerRef.current = setTimeout(() => {
+      // Double-check we're still on the same target (ref may have moved)
+      if (nestDwellTargetRef.current === overId) {
+        setNestTargetId(overId);
+      }
+      nestDwellTimerRef.current = null;
+    }, NEST_DWELL_MS);
+  }, [taskGroupMap, childParentMap, clearNestDwell]);
+
+  // Auto-switch to manual sort when the user performs a manual action (drag
+  // reorder / Move up / Move left). If a priority/date/updated sort is active,
+  // the manual change would immediately be overridden by re-sort — instead we
+  // silently switch to manual and toast the user so they understand why.
+  //
+  // Before switching, bake the current displayed `sortOrder` into the tasks
+  // store so manual mode renders the SAME order the user was looking at. Without
+  // this step the entire list re-shuffles from priority/date order to raw store
+  // order — which is the "flash + I lost my task" feeling.
+  const ensureManualSort = useCallback(() => {
+    if (sortBy !== 'manual') {
+      if (onBakeOrder && sortOrder.length > 0) onBakeOrder(sortOrder);
+      setSortBy('manual');
+      persistSortBy('manual');
+      showSortToast('Switched to Manual sort');
+    }
+  }, [sortBy, sortOrder, onBakeOrder, showSortToast]);
+
   const handleDragEnd = useCallback((event: DragEndEvent) => {
+    // Capture dwell state BEFORE clearing — if the user hovered a task long
+    // enough to trigger the nest ring, drop-here means "nest as subtask"
+    // regardless of normal reparent heuristics. (Apple Reminders style.)
+    const dwellNest = nestTargetId;
     setActiveDragId(null);
     setActiveDragType(null);
+    clearNestDwell();
     const { active, over } = event;
     if (!over || active.id === over.id) return;
 
@@ -3043,25 +3250,48 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
 
     // ── Reparent detection ──
     // When dragging a task, check if the drop target implies a parent change.
-    // Rules:
-    //   - Drop on a child task → adopt same parent (become sibling)
-    //   - Drop on a parent task (has children) → become child of that task
-    //   - Drop on a header → unparent (become top-level)
-    //   - Drop on a regular task (no children, no parent) → unparent
+    // Rules (prioritized so "drag out of parent" is always reachable):
+    //   - Drop on own parent or own sibling (if dragged is a subtask) → unparent
+    //     (most intuitive "drag out" gesture — otherwise every nearby target
+    //     would just re-nest the task under the same parent)
+    //   - Drop on another child task (not same parent) → adopt that parent
+    //   - Drop on a parent task (has children, not own parent) → become its child
+    //   - Drop on a header → unparent
+    //   - Drop on a regular top-level task (no children, no parent) → unparent
     const activeTask = sorted.find((t) => t.id === activeId);
     if (activeTask && onReparentTask) {
+      // Resolve the dragged task's current parent (full id) up-front so we can
+      // detect "drop on own parent/sibling" as an unparent gesture.
+      const currentParentFullId = activeTask.parent_task_id
+        ? (sorted.find((t) => t.id.startsWith(activeTask.parent_task_id!))?.id ?? null)
+        : null;
+
       let newParentId: string | null = null;
       if (insertNearTaskId) {
         const targetTask = sorted.find((t) => t.id === insertNearTaskId);
         if (targetTask) {
-          if (childParentMap.has(targetTask.id)) {
-            // Target is a child → adopt same parent (become sibling)
-            newParentId = childParentMap.get(targetTask.id)!;
-          } else if ((trueChildCountMap.get(targetTask.id) ?? 0) > 0) {
-            // Target is a parent (has visible children) → become child of target
+          // Apple Reminders–style explicit nest: user dwelled on this task
+          // long enough to light the nest ring. Force nest regardless of
+          // the usual heuristics (parent vs sibling vs plain target).
+          if (dwellNest && dwellNest === targetTask.id) {
             newParentId = targetTask.id;
+          } else {
+            const targetParent = childParentMap.get(targetTask.id) ?? null;
+            if (currentParentFullId && (
+                targetTask.id === currentParentFullId ||
+                targetParent === currentParentFullId
+              )) {
+              // Dropped on own parent or own sibling → user wants OUT. Unparent.
+              newParentId = null;
+            } else if (targetParent) {
+              // Target is someone else's child → adopt that parent
+              newParentId = targetParent;
+            } else if ((trueChildCountMap.get(targetTask.id) ?? 0) > 0) {
+              // Target is a different parent (has children) → become its child
+              newParentId = targetTask.id;
+            }
+            // else: target is a plain top-level task → newParentId stays null (unparent)
           }
-          // else: target is a plain top-level task → newParentId stays null (unparent)
         }
       }
       // Dropped on header: newParentId stays null (unparent)
@@ -3075,10 +3305,8 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
         walkId = nextParent;
       }
 
-      // Resolve current parent of the dragged task
-      const currentParentId = activeTask.parent_task_id
-        ? (sorted.find((t) => t.id.startsWith(activeTask.parent_task_id!))?.id ?? null)
-        : null;
+      // Already resolved above as currentParentFullId
+      const currentParentId = currentParentFullId;
 
       if (newParentId !== currentParentId) {
         // Auto-expand new parent so the moved task is visible
@@ -3093,7 +3321,10 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
         // Preserve scroll position: mark the moved task so the post-refetch
         // useEffect scrolls it back into view (otherwise list jumps to top).
         scrollAfterReparentRef.current = activeId;
-        onReparentTask(activeId, newParentId);
+        ensureManualSort();
+        // Pass the drag drop target so reparent places the task where the
+        // user actually dropped it — not some arbitrary fallback position.
+        onReparentTask(activeId, newParentId, insertNearTaskId ? { insertAfterId: insertNearTaskId } : undefined);
         return;
       }
     }
@@ -3104,6 +3335,7 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
       // Same group: existing reorder logic
       if (!onReorder) return;
       if (!insertNearTaskId) return; // dropped on own header, nothing to do
+      ensureManualSort();
 
       const { category, project } = activeInfo;
       const group = grouped.find((g) => g.category === category);
@@ -3150,17 +3382,19 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
     } else {
       // Cross-group move
       if (!onMoveTask) return;
+      ensureManualSort();
       onMoveTask(activeId, targetCategory, targetProject, insertNearTaskId);
     }
-  }, [onReorder, onMoveTask, onReparentTask, ordering, taskGroupMap, grouped, fullGrouped, sorted, childParentMap, trueChildCountMap]);
+  }, [onReorder, onMoveTask, onReparentTask, ordering, taskGroupMap, grouped, fullGrouped, sorted, childParentMap, trueChildCountMap, ensureManualSort, nestTargetId, clearNestDwell]);
 
   // Kebab "Move left" — promote subtask to top-level via onReparentTask(id, null).
   // Also primes scroll restoration so the task stays visible after refetch.
   const handleUnparent = useCallback((taskId: string) => {
     if (!onReparentTask) return;
+    ensureManualSort();
     scrollAfterReparentRef.current = taskId;
     onReparentTask(taskId, null);
-  }, [onReparentTask]);
+  }, [onReparentTask, ensureManualSort]);
 
   // Kebab "Move up" — map of taskId → handler that swaps the task with the
   // previous sibling in its group. Siblings are grouped by parent_task_id so
@@ -3192,6 +3426,7 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
             if (a === -1 || b === -1) return;
             const newOrder = [...fullIds];
             [newOrder[a], newOrder[b]] = [newOrder[b], newOrder[a]];
+            ensureManualSort();
             scrollAfterReparentRef.current = task.id;
             onReorder(category, project, newOrder);
           });
@@ -3210,7 +3445,7 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
       }
     }
     return map;
-  }, [grouped, fullGrouped, onReorder]);
+  }, [grouped, fullGrouped, onReorder, ensureManualSort]);
 
   const draggedTask = activeDragId ? sorted.find((t) => t.id === activeDragId) : null;
 
@@ -3374,6 +3609,27 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
                       )}
                     </div>
                   )}
+
+                  {/* Wait sub-group — parked tasks pinned but deprioritized */}
+                  <div className="todo-pinned-subgroup">
+                    <div className="todo-pinned-sublabel" onClick={() => setWaitCollapsed(c => !c)} role="button" tabIndex={0} onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') setWaitCollapsed(c => !c); }} style={{ cursor: 'pointer' }} title="Wait — parked tasks, pinned but not actively worked on">
+                      <span className={`todo-pinned-chevron todo-pinned-sub-chevron${waitCollapsed ? '' : ' todo-pinned-chevron-open'}`}>{'\u25B8'}</span>
+                      <span className="todo-pinned-sublabel-icon todo-icon-wait" />
+                      <span className="todo-pinned-sublabel-text">Wait</span>
+                      <span className="todo-pinned-sublabel-count">{waitTasksDisplay.length}</span>
+                    </div>
+                    {!waitCollapsed && (
+                      <SortableContext items={waitIds_arr} strategy={verticalListSortingStrategy}>
+                        <div className="todo-pinned-list-scroll" style={waitTasksDisplay.length > tierLimits.wait ? { maxHeight: tierLimits.wait * CARD_HEIGHT_PX } : undefined}>
+                          <TierDropZone id="wait-drop-zone" isEmpty={waitTasksDisplay.length === 0}>
+                            {waitTasksDisplay.map((task) => (
+                              <SortableTierCard key={task.id} task={task} tier="wait" isFocused={focusedTaskId === task.id} isDetailOpen={focusedTaskId === task.id && !suppressDetail} onClick={handlePinnedCardClick} onSetTier={onSetTier} onUnpinTask={onUnpinTask} onPinTask={onPinTask} onSetPriority={onSetPriority} onSetDate={onSetDate} onStar={onStar} onExpandDetail={handleExpandDetail} onClearFocus={onClearFocus} onOpenSession={onOpenSession} onSetPhase={setPhaseOrComplete} onUpdateTitle={onUpdate ? handleUpdateTitle : undefined} />
+                            ))}
+                          </TierDropZone>
+                        </div>
+                      </SortableContext>
+                    )}
+                  </div>
                 </>
               )}
             </div>
@@ -3510,6 +3766,7 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
                     isFocused={focusedTaskId === task.id}
                     isDetailOpen={focusedTaskId === task.id && !suppressDetail}
                     isRecentlyDone={recentlyCompletedRef.current.has(task.id)}
+                    isNestTarget={nestTargetId === task.id}
                     depth={depthMap.get(task.id) ?? 0}
                     childCount={searchChildCount.get(task.id)}
                     isExpanded={expandedParents.has(task.id)}
@@ -3556,7 +3813,9 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
                   key={task.id}
                   task={task}
                   isFocused={focusedTaskId === task.id}
+                  isDetailOpen={focusedTaskId === task.id && !suppressDetail}
                   isRecentlyDone={recentlyCompletedRef.current.has(task.id)}
+                  isNestTarget={nestTargetId === task.id}
                   depth={depthMap.get(task.id) ?? 0}
                   childCount={trueChildCountMap.get(task.id)}
                   isExpanded={expandedParents.has(task.id)}
@@ -3591,7 +3850,9 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
             sensors={sensors}
             collisionDetection={typeAwareCollision}
             onDragStart={handleDragStart}
+            onDragOver={handleDragOver}
             onDragEnd={handleDragEnd}
+            onDragCancel={clearNestDwell}
           >
             <SortableContext items={grouped.map((g) => `cat:${g.category}`)} strategy={verticalListSortingStrategy}>
               {grouped.map(({ category, directTasks, projects }) => (
@@ -3634,7 +3895,9 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
                                   key={task.id}
                                   task={task}
                                   isFocused={focusedTaskId === task.id}
+                                  isDetailOpen={focusedTaskId === task.id && !suppressDetail}
                                   isRecentlyDone={recentlyCompletedRef.current.has(task.id)}
+                                  isNestTarget={nestTargetId === task.id}
                                   depth={depthMap.get(task.id) ?? 0}
                                   childCount={trueChildCountMap.get(task.id)}
                                   isExpanded={expandedParents.has(task.id)}
@@ -3703,7 +3966,9 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
                                                 key={task.id}
                                                 task={task}
                                                 isFocused={focusedTaskId === task.id}
+                                                isDetailOpen={focusedTaskId === task.id && !suppressDetail}
                                                 isRecentlyDone={recentlyCompletedRef.current.has(task.id)}
+                                                isNestTarget={nestTargetId === task.id}
                                                 depth={depthMap.get(task.id) ?? 0}
                                                 childCount={trueChildCountMap.get(task.id)}
                                                 isExpanded={expandedParents.has(task.id)}
@@ -3797,6 +4062,81 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
           placeholder="Quick add task..."
           aria-label="New task title"
         />
+        <div className="quick-add-more-wrap">
+          <button
+            ref={quickMoreBtnRef}
+            type="button"
+            className={`task-kebab-btn quick-add-more-btn${quickStarred || quickPinnedTier || quickCategory || quickProject ? ' has-selections' : ''}`}
+            onClick={() => setQuickMoreOpen(v => !v)}
+            aria-label="More options"
+            aria-expanded={quickMoreOpen}
+            title="More options"
+          >
+            ⋮
+          </button>
+          {quickMoreOpen && (
+            <div ref={quickMoreMenuRef} className="task-kebab-menu quick-add-menu" role="menu">
+              <div className="task-kebab-tier">
+                <span className="task-kebab-tier-label">Category</span>
+                <select
+                  className="quick-add-menu-select"
+                  value={quickCategory}
+                  onChange={(e) => { setQuickCategory(e.target.value); setQuickProject(''); }}
+                  aria-label="Category"
+                >
+                  <option value="">{effectiveDefaultCategory} (default)</option>
+                  {quickAddCategories.map((c) => <option key={c} value={c}>{c}</option>)}
+                </select>
+              </div>
+              <div className="task-kebab-divider" />
+              <div className="task-kebab-tier">
+                <span className="task-kebab-tier-label">Project</span>
+                <select
+                  className="quick-add-menu-select"
+                  value={quickProject}
+                  onChange={(e) => setQuickProject(e.target.value)}
+                  aria-label="Project"
+                >
+                  <option value="">None</option>
+                  {[...(quickAddProjectsByCategory.get(effectiveDefaultCategory) ?? [])].map((p) => (
+                    <option key={p} value={p}>{p}</option>
+                  ))}
+                </select>
+              </div>
+              <div className="task-kebab-divider" />
+              <button
+                type="button"
+                className={`task-kebab-item${quickStarred ? ' task-kebab-item-active' : ''}`}
+                onClick={() => setQuickStarred(v => !v)}
+              >
+                <span className="task-kebab-icon">{quickStarred ? '★' : '☆'}</span>
+                <span>{quickStarred ? 'Starred' : 'Star'}</span>
+              </button>
+              <div className="task-kebab-divider" />
+              <div className="task-kebab-tier">
+                <span className="task-kebab-tier-label">Pin to</span>
+                <div className="task-kebab-tier-options">
+                  {(['focus', 'next', 'satellite', 'wait'] as FocusTier[]).map((t) => {
+                    const colors: Record<FocusTier, string> = { focus: 'var(--accent)', next: '#FF9500', satellite: 'var(--fg-muted)', wait: '#8e8e93' };
+                    const label = t.charAt(0).toUpperCase() + t.slice(1);
+                    return (
+                      <button
+                        key={t}
+                        type="button"
+                        className={`task-kebab-tier-btn${quickPinnedTier === t ? ' active' : ''}`}
+                        style={{ color: colors[t] }}
+                        title={label}
+                        onClick={() => setQuickPinnedTier(quickPinnedTier === t ? null : t)}
+                      >
+                        {label}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
         <button type="submit" className="btn btn-primary btn-sm" disabled={!newTitle.trim()}>
           Add
         </button>
@@ -3810,6 +4150,11 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
           if (task) handleTaskClick(task);
         }}
       />
+      {sortToast && (
+        <div className="sort-toast" role="status" aria-live="polite">
+          {sortToast}
+        </div>
+      )}
     </div>
   );
 });

@@ -19,8 +19,9 @@ export interface TasksContextValue {
   star: (id: string) => void;
   reorder: (category: string, project: string, taskIds: string[]) => void;
   moveTask: (taskId: string, category: string, project: string, insertNearTaskId?: string) => void;
-  reparentTask: (taskId: string, newParentId: string | null) => void;
+  reparentTask: (taskId: string, newParentId: string | null, opts?: { insertAfterId?: string }) => void;
   deleteTask: (id: string) => Promise<void>;
+  bakeOrder: (orderedIds: string[]) => void;
 }
 
 const TasksContext = createContext<TasksContextValue | null>(null);

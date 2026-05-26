@@ -103,7 +103,7 @@ contextInspectorRouter.get('/', async (req: Request, res: Response, next: NextFu
     const apiMessages = await getModelContext()
 
     // Task categories & projects overview
-    const taskCategoriesText = buildTaskCategoriesSection()
+    const taskCategoriesText = await buildTaskCategoriesSection()
 
     // Format project summaries as text (same as buildMemoryContext)
     const projectSummariesText = projectSummaries.length > 0

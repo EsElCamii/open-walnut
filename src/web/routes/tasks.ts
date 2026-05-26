@@ -8,6 +8,7 @@ import { VALID_PHASES } from '../../core/phase.js'
 import {
   addTask,
   listTasks,
+  listTasksSlim,
   getTask,
   completeTask,
   toggleComplete,
@@ -25,6 +26,7 @@ import {
   getAllTags,
   CircularDependencyError,
   isTaskBlocked,
+  type SlimTask,
 } from '../../core/task-manager.js'
 import { listSessions } from '../../core/session-tracker.js'
 import { bus, EventNames } from '../../core/event-bus.js'
@@ -240,57 +242,76 @@ tasksRouter.get('/', async (req: Request, res: Response, next: NextFunction) => 
   try {
     const t0 = Date.now()
     const { status, category, project, source, tags, sprint, slim } = req.query as Record<string, string | undefined>
+    const isSlim = slim === '1'
+
+    // Slim path: listTasksSlim pushes status/category/source filters into SQL
+    // and never materializes note/conversation_log. enrich + isTaskBlocked
+    // only touch session_id / depends_on / phase fields so they work on the
+    // SlimTask shape too (cast via unknown for the enrichment helper).
+    if (isSlim) {
+      const rawSlim = (await listTasksSlim({ status, category, source }))
+        .filter((t) => !t.title.startsWith('.metadata'))
+      const tList = Date.now()
+      let filtered: SlimTask[] = project
+        ? rawSlim.filter((t) => t.project.toLowerCase() === project.toLowerCase())
+        : rawSlim
+      if (tags) {
+        const tagSet = new Set(tags.split(',').map(t => t.trim()).filter(Boolean))
+        if (tagSet.size > 0) {
+          filtered = filtered.filter((t) => t.tags?.some(tag => tagSet.has(tag)))
+        }
+      }
+      if (sprint) {
+        filtered = filtered.filter((t) => t.sprint === sprint)
+      }
+      const tFilter = Date.now()
+      // enrichTasksWithSessionStatus reads session_id / session_ids / slot IDs
+      // and writes session_status / plan_session_status / exec_session_status —
+      // none of which overlap note/conversation_log. Safe to reuse on SlimTask
+      // via a Task cast (the helper only reads/writes shared fields).
+      const enriched = (await enrichTasksWithSessionStatus(filtered as unknown as Task[])) as unknown as SlimTask[]
+      const tEnrich = Date.now()
+      const tasksWithBlocked = enriched.map((t) => ({
+        ...t,
+        ...(t.depends_on?.length ? { is_blocked: isTaskBlocked(t as unknown as Task, enriched as unknown as Task[]) } : {}),
+      }))
+      res.json({ tasks: tasksWithBlocked })
+      const tDone = Date.now()
+      const total = tDone - t0
+      if (total > 200) {
+        log.web.warn('GET /api/tasks slow', {
+          total, listMs: tList - t0, filterMs: tFilter - tList, enrichMs: tEnrich - tFilter,
+          serializeMs: tDone - tEnrich, taskCount: rawSlim.length, filteredCount: filtered.length, slim: true,
+        })
+      }
+      return
+    }
+
+    // Non-slim path unchanged — full Task payload.
     const tasks = (await listTasks({ status, category })).filter((t) => !t.title.startsWith('.metadata'))
     const tList = Date.now()
-    // Client-side project filtering (listTasks only supports status+category)
     let filtered = project
       ? tasks.filter((t) => t.project.toLowerCase() === project.toLowerCase())
       : tasks
-    // Source/provider filtering
     if (source) {
       filtered = filtered.filter((t) => t.source === source)
     }
-    // Tag filtering (comma-separated, any-match)
     if (tags) {
       const tagSet = new Set(tags.split(',').map(t => t.trim()).filter(Boolean))
       if (tagSet.size > 0) {
         filtered = filtered.filter((t) => t.tags?.some(tag => tagSet.has(tag)))
       }
     }
-    // Sprint filtering (exact match)
     if (sprint) {
       filtered = filtered.filter((t) => t.sprint === sprint)
     }
     const tFilter = Date.now()
     const enriched = await enrichTasksWithSessionStatus(filtered)
     const tEnrich = Date.now()
-    // Add is_blocked flag based on dependency resolution
     const tasksWithBlocked = enriched.map((t) => ({
       ...t,
       ...(t.depends_on?.length ? { is_blocked: isTaskBlocked(t, enriched) } : {}),
     }))
-    // Slim mode: strip heavy text fields to reduce payload (~400KB savings)
-    if (slim === '1') {
-      const slimmed = tasksWithBlocked.map((t) => {
-        const { note, conversation_log, ...rest } = t
-        return {
-          ...rest,
-          has_note: !!note,
-          has_conversation_log: !!conversation_log,
-        }
-      })
-      res.json({ tasks: slimmed })
-      const tDone = Date.now()
-      // Log slow responses (>200ms total)
-      const total = tDone - t0
-      if (total > 200) {
-        log.web.warn('GET /api/tasks slow', {
-          total, listMs: tList - t0, filterMs: tFilter - tList, enrichMs: tEnrich - tFilter,
-          serializeMs: tDone - tEnrich, taskCount: tasks.length, filteredCount: filtered.length, slim: true,
-        })
-      }
-      return
-    }
     res.json({ tasks: tasksWithBlocked })
     const tDone = Date.now()
     const total = tDone - t0
@@ -519,7 +540,7 @@ tasksRouter.patch('/:id', async (req: Request, res: Response, next: NextFunction
     log.web.info('task updated via REST', { taskId: id, fields: Object.keys(req.body) })
 
     // Phase hooks: declarative automation triggered by phase transitions.
-    // Only fires via REST (UI phase picker) — agent update_task calls bypass this intentionally.
+    // Only fires via REST (UI phase picker) — agent task_update calls bypass this intentionally.
     // Uses taskBeforeUpdate for session_id (result.task is storage-only, lacks runtime fields).
     if (req.body.phase && previousPhase && req.body.phase !== previousPhase && taskBeforeUpdate) {
       const { executePhaseHooks } = await import('../../core/task-phase-hooks/index.js')

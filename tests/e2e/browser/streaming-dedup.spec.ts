@@ -70,11 +70,11 @@ test.describe('Agent streaming text deduplication', () => {
     await page.waitForTimeout(50)
 
     await injectEvent(page, 'agent:tool-call', {
-      toolName: 'query_tasks',
+      toolName: 'task_query',
       input: { type: 'all' },
     })
     await injectEvent(page, 'agent:tool-result', {
-      toolName: 'query_tasks',
+      toolName: 'task_query',
       result: 'Found 5 tasks',
     })
     await page.waitForTimeout(50)
@@ -152,8 +152,8 @@ test.describe('Agent streaming text deduplication', () => {
 
     // Round 1: text + tool call 1
     await injectEvent(page, 'agent:text-delta', { delta: 'First, searching.' })
-    await injectEvent(page, 'agent:tool-call', { toolName: 'search', input: { query: 'test' } })
-    await injectEvent(page, 'agent:tool-result', { toolName: 'search', result: 'ok' })
+    await injectEvent(page, 'agent:tool-call', { toolName: 'task_search', input: { query: 'test' } })
+    await injectEvent(page, 'agent:tool-result', { toolName: 'task_search', result: 'ok' })
     await page.waitForTimeout(30)
 
     // Round 2: text + tool call 2

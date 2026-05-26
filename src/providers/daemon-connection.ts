@@ -26,11 +26,14 @@ import { WebSocket } from 'ws'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
+import crypto from 'node:crypto'
 import { log } from '../logging/index.js'
 import { getDaemonSource } from './daemon-source.js'
+import { REQUIRED_DAEMON_CAPABILITIES } from './daemon-capabilities.js'
 import { DAEMON_BINARIES_DIR } from '../constants.js'
 import { buildRemotePreamble } from './session-io.js'
 import type { SshTarget } from './session-io.js'
+import { localDaemon } from './local-daemon.js'
 
 const execFileAsync = promisify(execFileCb)
 
@@ -51,6 +54,12 @@ export interface DaemonEvent {
   code?: number
   /** Stderr content from the process (only present on exit events with non-zero code) */
   stderr?: string
+  /** Authoritative lifecycle state broadcast ('running' | 'dead' | 'spawning') */
+  state?: string
+  /** Exit code on session_state=dead */
+  exitCode?: number
+  /** Reason string on session_state=dead (e.g. 'proc-exit', 'send-enxio', 'idle-scan-missed-exit') */
+  reason?: string
   [key: string]: unknown
 }
 
@@ -67,7 +76,7 @@ interface PendingCommand {
 export class DaemonConnection {
   private ws: WebSocket | null = null
   private tunnel: ChildProcess | null = null
-  private sshTarget: SshTarget
+  private sshTarget: SshTarget | null
   private hostKey: string
   private localPort: number | null = null
   private remotePort: number | null = null
@@ -82,6 +91,19 @@ export class DaemonConnection {
   private pingTimer: ReturnType<typeof setInterval> | null = null
   /** Timestamp of last pong received — used for stale connection detection. */
   private lastPongAt = 0
+  /** Counter of consecutive reconnect attempts since last successful connect. Reset in setConnected(true). */
+  private _reconnectAttempts = 0
+  /** Last WebSocket URL opened — logged on close for troubleshooting. */
+  private _lastWsUrl: string | null = null
+  /**
+   * Daemon instance ID from the most recent successful `hello`. Null until the
+   * first handshake. Comparing against the daemon.instance file (or a later
+   * hello) detects the "you reconnected to a different daemon" scenario that
+   * previously surfaced as stale-state bugs.
+   */
+  private _daemonInstanceId: string | null = null
+  /** Daemon start timestamp from the most recent successful `hello`. */
+  private _daemonStartedAt: number | null = null
 
   /** Command timeout in ms. Generous for initial deploy operations. */
   private static COMMAND_TIMEOUT_MS = 30_000
@@ -101,9 +123,24 @@ export class DaemonConnection {
   /** Tracks whether the last deploy used source (not binary) — affects startDaemon() command. */
   private _deployedViaSource = false
 
-  constructor(hostKey: string, sshTarget: SshTarget) {
+  constructor(hostKey: string, sshTarget: SshTarget | null) {
     this.hostKey = hostKey
     this.sshTarget = sshTarget
+  }
+
+  /**
+   * Access sshTarget with non-null assertion. Only call from SSH-only code paths
+   * (connect, deploy, tunnel) — never from connectDirect.
+   */
+  private get ssh(): SshTarget {
+    if (!this.sshTarget) {
+      throw new Error(
+        `DaemonConnection(${this.hostKey}): SSH path taken but sshTarget is null. ` +
+        `This is a bug — local connections should not reach SSH code. ` +
+        `Use connectDirect() and reconnect's __local__ branch instead.`
+      )
+    }
+    return this.sshTarget
   }
 
   // ── Binary deployment helpers ──
@@ -143,6 +180,8 @@ export class DaemonConnection {
 
   get connected(): boolean { return this._connected }
   get disconnectedSince(): number | null { return this._disconnectedSince }
+  get daemonInstanceId(): string | null { return this._daemonInstanceId }
+  get daemonStartedAt(): number | null { return this._daemonStartedAt }
 
   /**
    * Centralized setter for _connected — fires the pool-level callback
@@ -154,6 +193,7 @@ export class DaemonConnection {
     this._connected = value
     if (value) {
       this._disconnectedSince = null
+      this._reconnectAttempts = 0
     } else if (changed) {
       this._disconnectedSince = Date.now()
     }
@@ -220,7 +260,29 @@ export class DaemonConnection {
       // Step 5: Connect WebSocket
       await this.connectWebSocket(this.localPort)
 
-      this.setConnected(true)
+      // Step 6: Capability handshake — final guard against protocol drift.
+      // Run BEFORE setConnected(true) so the pool-status broadcast doesn't let
+      // external callers send real commands (e.g. sendRaw) through a stale
+      // daemon. verifyCapabilities uses _sendHandshake() which bypasses the
+      // _connected gate in send().
+      //
+      // Even if version strings match (Layers 1-3 happy), the binary could be
+      // corrupted or hand-swapped. An old daemon without `hello` returns
+      // `unknown command: hello` → redeploy. A newer daemon that's somehow
+      // missing a capability → redeploy. See daemon-capabilities.ts for the
+      // required list.
+      const handshakeOk = await this.verifyCapabilities()
+      if (!handshakeOk) {
+        log.session.warn('DaemonConnection: capability handshake failed — forcing redeploy', {
+          host: this.hostKey,
+        })
+        // Tear down tunnel + WS, stop remote daemon, redeploy, reconnect.
+        // forceRedeployAndReconnect handles its own setConnected(true) on
+        // success; on failure it throws, caught by the outer try/catch.
+        await this.forceRedeployAndReconnect()
+      } else {
+        this.setConnected(true)
+      }
       this._connecting = false
 
       // Start ping keepalive
@@ -243,6 +305,12 @@ export class DaemonConnection {
 
   /**
    * Send a command to the daemon and wait for a response.
+   *
+   * Auto-injects a `traceId` into the payload when the caller hasn't supplied
+   * one. This lets `grep <traceId>` stitch together a turn across walnut logs,
+   * daemon logs, and (via --debug) Claude CLI logs. Callers who want a trace
+   * ID that outlives one `send()` (e.g. the whole turn — send → jsonl → result)
+   * should supply their own.
    */
   async send(cmd: string, params: Record<string, unknown> = {}): Promise<DaemonCommandResult> {
     if (!this._connected || !this.ws) {
@@ -250,12 +318,30 @@ export class DaemonConnection {
     }
 
     const id = ++this.cmdCounter
-    const message = JSON.stringify({ id, cmd, ...params })
+    const traceId = typeof params.traceId === 'string' && params.traceId
+      ? params.traceId
+      : crypto.randomBytes(4).toString('hex')
+    const payload = { id, cmd, ...params, traceId }
+    const message = JSON.stringify(payload)
+
+    // Per-command send log — paired with daemon's cmd_recv log (same traceId).
+    // Skip `ping` to avoid spamming the logs (it fires every 15s, adds nothing
+    // we can't infer from the pong gap timer).
+    if (cmd !== 'ping') {
+      log.session.debug('DaemonConnection: send', {
+        host: this.hostKey,
+        cmd,
+        id,
+        traceId,
+        sid: typeof params.sid === 'string' ? params.sid : undefined,
+        daemonInstanceId: this._daemonInstanceId,
+      })
+    }
 
     return new Promise<DaemonCommandResult>((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pendingCommands.delete(id)
-        reject(new Error(`daemon command timeout: ${cmd} (${DaemonConnection.COMMAND_TIMEOUT_MS}ms)`))
+        reject(new Error(`daemon command timeout: ${cmd} (${DaemonConnection.COMMAND_TIMEOUT_MS}ms) [traceId=${traceId}]`))
       }, DaemonConnection.COMMAND_TIMEOUT_MS)
 
       this.pendingCommands.set(id, { resolve, reject, timer })
@@ -318,9 +404,9 @@ export class DaemonConnection {
   // ── Private: SSH helpers ──
 
   private get sshHostString(): string {
-    return this.sshTarget.user
-      ? `${this.sshTarget.user}@${this.sshTarget.hostname}`
-      : this.sshTarget.hostname
+    return this.ssh.user
+      ? `${this.ssh.user}@${this.ssh.hostname}`
+      : this.ssh.hostname
   }
 
   private get baseSshArgs(): string[] {
@@ -333,7 +419,7 @@ export class DaemonConnection {
    */
   private buildSshArgs(opts: { useControlMaster: boolean } = { useControlMaster: true }): string[] {
     const args = ['-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=no']
-    if (this.sshTarget.port) args.push('-p', String(this.sshTarget.port))
+    if (this.ssh.port) args.push('-p', String(this.ssh.port))
     if (opts.useControlMaster && this._controlPath) {
       args.push('-o', `ControlPath=${this._controlPath}`)
     }
@@ -360,7 +446,7 @@ export class DaemonConnection {
       '-o', 'ServerAliveInterval=15',
       '-o', 'ServerAliveCountMax=3',
     ]
-    if (this.sshTarget.port) args.push('-p', String(this.sshTarget.port))
+    if (this.ssh.port) args.push('-p', String(this.ssh.port))
     args.push('-fN', this.sshHostString)  // -f: background, -N: no command
 
     try {
@@ -450,38 +536,58 @@ export class DaemonConnection {
    * Tries the binary first, then falls back to the old node-based daemon
    * (in case a previous source-deploy daemon is still running).
    */
-  private async checkDaemonRunning(): Promise<number | null> {
-    // Try binary daemon first
+  private async checkDaemonRunning(opts: { strict?: boolean } = {}): Promise<number | null> {
+    // Shell uses `|| true` so sshExec only rejects on real SSH failures (dead
+    // ControlMaster, tunnel, network). A missing daemon just returns empty stdout.
+    // Without this, a dead ControlMaster is indistinguishable from a dead daemon
+    // and triggers a wasteful redeploy on every tunnel hiccup.
+    let binarySshErr: unknown = null
     try {
       const remotePath = await this.getRemoteDaemonPath()
-      const result = await this.sshExec(`${remotePath} --status 2>/dev/null`)
-      const status = JSON.parse(result)
-      if (status.running && status.port) {
-        // Auto-upgrade: compare local binary version with running remote daemon.
-        // If they differ, stop the old daemon so the caller triggers deployDaemon().
-        if (await this.shouldUpgradeDaemon(remotePath)) {
-          return null
+      const result = await this.sshExec(`${remotePath} --status 2>/dev/null || true`)
+      if (result) {
+        const status = JSON.parse(result)
+        if (status.running && status.port) {
+          if (await this.shouldUpgradeDaemon(remotePath)) {
+            return null
+          }
+          log.session.info('DaemonConnection: daemon already running (binary)', {
+            host: this.hostKey, port: status.port, pid: status.pid,
+          })
+          return status.port
         }
-        log.session.info('DaemonConnection: daemon already running (binary)', {
-          host: this.hostKey, port: status.port, pid: status.pid,
-        })
-        return status.port
       }
-    } catch { /* not running or binary not deployed */ }
+    } catch (err) {
+      binarySshErr = err
+    }
 
     // Fallback: check old node-based daemon (may still be running from previous deploy)
+    let nodeSshErr: unknown = null
     try {
-      const preamble = buildRemotePreamble(this.sshTarget.shell_setup)
-      const result = await this.sshExec(`${preamble}; node /tmp/open-walnut/daemon.cjs --status 2>/dev/null`)
-      const status = JSON.parse(result)
-      if (status.running && status.port) {
-        log.session.info('DaemonConnection: daemon already running (node)', {
-          host: this.hostKey, port: status.port, pid: status.pid,
-        })
-        return status.port
+      const preamble = buildRemotePreamble(this.ssh.shell_setup)
+      const result = await this.sshExec(`${preamble}; node /tmp/open-walnut/daemon.cjs --status 2>/dev/null || true`)
+      if (result) {
+        const status = JSON.parse(result)
+        if (status.running && status.port) {
+          log.session.info('DaemonConnection: daemon already running (node)', {
+            host: this.hostKey, port: status.port, pid: status.pid,
+          })
+          return status.port
+        }
       }
-    } catch { /* not running */ }
+    } catch (err) {
+      nodeSshErr = err
+    }
 
+    // Both probes reached SSH but got back empty → daemon genuinely absent.
+    if (!binarySshErr && !nodeSshErr) return null
+
+    // Strict mode (reconnect path): SSH itself failed — propagate so callers can
+    // retry/rebuild ControlMaster instead of misdiagnosing as "daemon died".
+    if (opts.strict) {
+      throw (binarySshErr ?? nodeSshErr) as Error
+    }
+    // Non-strict (initial connect): treat SSH failure as absent → deploy.
     return null
   }
 
@@ -511,6 +617,174 @@ export class DaemonConnection {
     } catch {
       // Version check failed — don't block, just reuse existing daemon
       return false
+    }
+  }
+
+  /**
+   * Send one command directly on this.ws, bypassing the _connected gate that
+   * send() enforces. Used exclusively by verifyCapabilities() during the
+   * pre-connect handshake window, when the ws is open but _connected has not
+   * yet been flipped true.
+   */
+  private _sendHandshake(cmd: string, params: Record<string, unknown> = {}): Promise<DaemonCommandResult> {
+    if (!this.ws) {
+      return Promise.reject(new Error(`DaemonConnection: ws not open for ${this.hostKey}`))
+    }
+    const id = ++this.cmdCounter
+    const message = JSON.stringify({ id, cmd, ...params })
+    return new Promise<DaemonCommandResult>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.pendingCommands.delete(id)
+        reject(new Error(`daemon command timeout: ${cmd} (${DaemonConnection.COMMAND_TIMEOUT_MS}ms)`))
+      }, DaemonConnection.COMMAND_TIMEOUT_MS)
+      this.pendingCommands.set(id, { resolve, reject, timer })
+      this.ws!.send(message)
+    })
+  }
+
+  /**
+   * Send `hello` to the daemon and verify it advertises every required
+   * capability. Returns true on full match, false on any mismatch (including
+   * "unknown command: hello" from pre-hello daemons).
+   *
+   * Called right after the WS opens, before any real commands are sent.
+   *
+   * Pre-hello daemons may not respond at all (they don't even return
+   * 'unknown command') — the send() timeout is what catches that case, so
+   * timeout == drift.
+   */
+  private async verifyCapabilities(): Promise<boolean> {
+    try {
+      const res = await this._sendHandshake('hello', {})
+      if (!res.ok) {
+        log.session.warn('DaemonConnection: hello returned !ok', {
+          host: this.hostKey, reason: res.reason, error: res.error,
+        })
+        return false
+      }
+      const caps = Array.isArray(res.capabilities) ? res.capabilities as string[] : []
+      const missing = REQUIRED_DAEMON_CAPABILITIES.filter(c => !caps.includes(c))
+      if (missing.length > 0) {
+        log.session.warn('DaemonConnection: daemon missing capabilities', {
+          host: this.hostKey,
+          version: res.version,
+          missing,
+          got: caps,
+        })
+        return false
+      }
+      // Capture instance ID — if this differs from a prior value, the daemon
+      // was swapped out from under us. We don't fail here (could be the first
+      // handshake, or a deliberate restart), but downstream reconnect logic
+      // can compare and decide whether to invalidate per-session state.
+      const newInstanceId = typeof res.instanceId === 'string' ? res.instanceId : null
+      const newStartedAt = typeof res.startedAt === 'number' ? res.startedAt : null
+      const changed =
+        this._daemonInstanceId !== null &&
+        newInstanceId !== null &&
+        this._daemonInstanceId !== newInstanceId
+      if (changed) {
+        log.session.warn('DaemonConnection: daemon instance changed across reconnect', {
+          host: this.hostKey,
+          priorInstanceId: this._daemonInstanceId,
+          newInstanceId,
+          newStartedAt,
+        })
+      }
+      this._daemonInstanceId = newInstanceId
+      this._daemonStartedAt = newStartedAt
+      log.session.info('DaemonConnection: capability handshake OK', {
+        host: this.hostKey,
+        version: res.version,
+        capCount: caps.length,
+        instanceId: newInstanceId,
+        uptimeSec: typeof res.uptimeSec === 'number' ? res.uptimeSec : undefined,
+      })
+      return true
+    } catch (err) {
+      // Timeout or WS closed mid-hello — treat as drift, force redeploy
+      log.session.warn('DaemonConnection: hello failed', {
+        host: this.hostKey, error: err instanceof Error ? err.message : String(err),
+      })
+      return false
+    }
+  }
+
+  /**
+   * Tear down the current connection, stop the remote daemon, redeploy, and
+   * reconnect. Used when the capability handshake reveals a stale binary.
+   *
+   * Throws if redeploy/reconnect fails or the post-redeploy handshake still
+   * fails — caller (connect()) will catch and surface the error. The internal
+   * try/catch ensures a mid-helper throw still leaves the object in a clean
+   * disconnected state (ws/tunnel nulled, _connected=false) so reconnect
+   * logic can retry.
+   */
+  private async forceRedeployAndReconnect(): Promise<void> {
+    log.session.info('DaemonConnection: forcing redeploy due to capability drift', {
+      host: this.hostKey,
+    })
+
+    // Close WS + tunnel, but keep ControlMaster (we'll reuse it).
+    try { this.ws?.close() } catch {}
+    this.ws = null
+    this.setConnected(false)
+
+    if (this.tunnel) {
+      try { this.tunnel.kill('SIGTERM') } catch {}
+      this.tunnel = null
+    }
+    this.localPort = null
+
+    try {
+      // Stop BOTH the binary daemon AND the source daemon — a previous connect
+      // may have fallen back to source deploy (corp SSH proxy kills large
+      // binary transfers), leaving a node daemon running. On a fresh binary
+      // deploy the port-binding and pid-file would clash if we don't also kill
+      // the source daemon first.
+      try {
+        const remotePath = await this.getRemoteDaemonPath()
+        await this.sshExec(`${remotePath} --stop 2>/dev/null || true`, 5_000)
+      } catch {}
+      try {
+        const preamble = buildRemotePreamble(this.ssh.shell_setup)
+        await this.sshExec(`${preamble}; node /tmp/open-walnut/daemon.cjs --stop 2>/dev/null || true`, 5_000)
+      } catch {}
+
+      // Redeploy + start + tunnel + reconnect
+      await this.deployDaemon()
+      const daemonPort = await this.startDaemon()
+      this.remotePort = daemonPort
+      this.localPort = await this.createTunnel(daemonPort)
+      await this.connectWebSocket(this.localPort)
+
+      // Re-verify BEFORE flipping _connected so external sends can't slip
+      // through if the new binary is also broken.
+      const ok = await this.verifyCapabilities()
+      if (!ok) {
+        log.session.error('DaemonConnection: capability handshake STILL failing after redeploy', {
+          host: this.hostKey,
+        })
+        throw new Error('DaemonConnection: capability handshake still failing after forced redeploy — giving up')
+      }
+      this.setConnected(true)
+    } catch (err) {
+      // Ensure clean teardown so the outer reconnect machinery can retry.
+      // Casts are needed because TS control-flow has narrowed this.ws /
+      // this.tunnel to `never` after the pre-try assignments to null above;
+      // connectWebSocket and createTunnel re-populate them via side effects
+      // that TS can't track through an async call boundary.
+      const currentWs = this.ws as WebSocket | null
+      try { currentWs?.close() } catch {}
+      this.ws = null
+      const currentTunnel = this.tunnel as ChildProcess | null
+      if (currentTunnel) {
+        try { currentTunnel.kill('SIGTERM') } catch {}
+        this.tunnel = null
+      }
+      this.localPort = null
+      this.setConnected(false)
+      throw err
     }
   }
 
@@ -600,37 +874,93 @@ export class DaemonConnection {
 
         const gzData = fs.readFileSync(gzPath)
         const gzSize = gzData.length
-        const CHUNK_SIZE = 1_048_576  // 1MB — well under WSSH's ~5MB kill threshold
+        // 256KB — deep under WSSH's ~5MB kill threshold AND any per-connection
+        // byte-rate throttling. Larger chunks (1MB) were the main failure mode
+        // pre-2026-05-05: corp proxies would kill ~half the chunks on a ~40MB
+        // binary, blowing past MAX_RETRIES=2, falling back to source deploy,
+        // which then failed on old-glibc hosts — leaving the daemon dead.
+        //
+        // Tune by observation, not theory — too small wastes SSH setup overhead
+        // (per-chunk connection cost dominates); too large hits proxy kills.
+        // 256KB was chosen after observing WSSH kills consistently at ~1MB and
+        // confirming 256KB survives reliably across proxy variants.
+        const CHUNK_SIZE = 262_144
         const totalChunks = Math.ceil(gzSize / CHUNK_SIZE)
         const chunkDir = '/tmp/open-walnut/deploy_chunks'
 
         // Clean any partial previous transfer
         await this.sshExec(`rm -rf ${chunkDir} && mkdir -p ${chunkDir}`, 5_000).catch(() => {})
 
-        let retries = 0
-        const MAX_RETRIES = 2  // fail fast — source deploy (44KB, <2s) makes retrying binary (38MB) a waste of time
+        // Per-chunk retry budget: proxy kills are transient. 5 attempts per
+        // chunk with exponential backoff (3s → 5s → 10s → 15s → 20s) gives
+        // us ~53s per bad chunk before accepting defeat.
+        //
+        // Total failure cap: ~5 min worst case under sustained proxy
+        // interference (30 failures × mixed backoffs + per-chunk SSH cost).
+        // Source-deploy fallback is still faster than giving up on upgrade
+        // permanently, so err on the robust side here.
+        //
+        // Values chosen empirically — 5 retries per chunk handled the observed
+        // WSSH transient kills on 40MB deploys during the 2026-05-05 incident.
+        // Tune downward only with data; the cost of failing the deploy is
+        // ~30min of blocked remote sessions until the user notices.
+        const MAX_CHUNK_RETRIES = 5
+        const BACKOFF_MS = [3_000, 5_000, 10_000, 15_000, 20_000]
+        const MAX_TOTAL_FAILURES = 30
+        let totalFailures = 0
+
         for (let i = 0; i < totalChunks; i++) {
+          // Abort fast if the connection was torn down mid-deploy — user should
+          // not have to wait out retries/backoff after a destroy().
+          if (this._destroyed) throw new Error('deploy aborted: connection destroyed')
+
           const offset = i * CHUNK_SIZE
           const chunk = gzData.subarray(offset, offset + CHUNK_SIZE)
 
+          let chunkAttempt = 0
           // Each chunk writes to its own file (overwrite) — retries are safe
-          const ok = await this.pipeChunk(chunk, chunkDir, i)
-          if (!ok) {
-            retries++
-            if (retries > MAX_RETRIES) {
-              throw new Error(`binary deploy failed: SSH proxy killed ${retries} chunks (will fall back to source deploy)`)
+          let ok = await this.pipeChunk(chunk, chunkDir, i)
+          while (!ok) {
+            chunkAttempt++
+            totalFailures++
+            if (totalFailures > MAX_TOTAL_FAILURES) {
+              throw new Error(
+                `binary deploy failed: ${totalFailures} total chunk failures across ${totalChunks} chunks — proxy actively blocking, will fall back to source deploy`,
+              )
             }
+            if (chunkAttempt > MAX_CHUNK_RETRIES) {
+              throw new Error(
+                `binary deploy failed: chunk ${i + 1}/${totalChunks} killed ${chunkAttempt} times — will fall back to source deploy`,
+              )
+            }
+            // ±20% jitter prevents lockstep retry collision when multiple
+            // Walnut instances happen to be deploying to the same host.
+            const baseDelay = BACKOFF_MS[Math.min(chunkAttempt - 1, BACKOFF_MS.length - 1)]
+            const delayMs = Math.round(baseDelay * (0.8 + Math.random() * 0.4))
             log.session.info('DaemonConnection: chunk transfer killed by proxy, retrying', {
-              host: this.hostKey, chunk: i + 1, totalChunks, retries,
+              host: this.hostKey, chunk: i + 1, totalChunks,
+              chunkAttempt, totalFailures, delayMs,
             })
-            await new Promise(r => setTimeout(r, 5_000))
-            i-- // retry same chunk
-            continue
+            // Second abort gate: don't burn the full backoff if we're being torn down.
+            if (this._destroyed) throw new Error('deploy aborted: connection destroyed')
+            await new Promise(r => setTimeout(r, delayMs))
+            ok = await this.pipeChunk(chunk, chunkDir, i)
           }
 
-          // Brief pause between chunks to avoid triggering rate limits
+          // Progress log every 16 chunks (~4MB) so a 160-chunk (~40MB) upload
+          // shows ~10 progress markers without log spam.
+          if (i % 16 === 0 || i === totalChunks - 1) {
+            log.session.info('DaemonConnection: binary deploy progress', {
+              host: this.hostKey, chunk: i + 1, totalChunks,
+              percent: Math.round(((i + 1) / totalChunks) * 100),
+            })
+          }
+
+          // Brief pause between chunks to avoid triggering rate limits.
+          // 250ms (vs old 1000ms) because 256KB chunks = 4x as many chunks;
+          // keep total deploy wall-clock roughly constant.
           if (i < totalChunks - 1) {
-            await new Promise(r => setTimeout(r, 1_000))
+            await new Promise(r => setTimeout(r, 250))
           }
         }
 
@@ -653,8 +983,8 @@ export class DaemonConnection {
         const remoteBinaryName = await this.getRemoteBinaryName()
         log.session.info('DaemonConnection: binary deployed via chunked pipe', {
           host: this.hostKey, deployMs: Date.now() - t0,
-          bytes: binarySize, gzBytes: gzSize, chunks: totalChunks, retries,
-          binary: remoteBinaryName, remoteVersion: unpackResult.trim(),
+          bytes: binarySize, gzBytes: gzSize, chunks: totalChunks,
+          totalFailures, binary: remoteBinaryName, remoteVersion: unpackResult.trim(),
         })
       }
     } catch (err) {
@@ -669,7 +999,7 @@ export class DaemonConnection {
   private async deploySource(): Promise<void> {
     const source = getDaemonSource()
     const t0 = Date.now()
-    const preamble = buildRemotePreamble(this.sshTarget.shell_setup)
+    const preamble = buildRemotePreamble(this.ssh.shell_setup)
 
     try {
       // Create directory and clean up legacy daemon.js (which breaks under "type":"module")
@@ -714,27 +1044,75 @@ export class DaemonConnection {
     try {
       // Determine the start command based on what was deployed.
       // Binary: direct execution. Source: needs node PATH discovery.
+      //
+      // Why `--status` AFTER `cat daemon.port`: the port file can linger from
+      // a previous daemon that crashed, making `cat daemon.port` look like
+      // success while the current spawn is already dead. `--status` (binary)
+      // or `kill -0 <pid>` (source) confirms a running process, not just a
+      // leftover port file. Without this, pre-2026-05-05 startup reported
+      // "success" while a glibc-crashed node left the daemon dead — caller
+      // happily tunneled to a port nobody was listening on.
+      // Binary has `--status` subcommand; source daemon doesn't, so use `kill -0`
+      // on its PID file instead. See daemon-source.ts — no --status handler.
       let startCmd: string
       if (!this._deployedViaSource && await this.getLocalBinaryPath()) {
         // Binary deploy — run directly, no PATH setup needed
         const remotePath = await this.getRemoteDaemonPath()
         startCmd = `nohup ${remotePath} --start > /tmp/open-walnut/daemon-start.log 2>&1 & ` +
-          'sleep 2 && cat /tmp/open-walnut/daemon.port'
+          `sleep 2 && cat /tmp/open-walnut/daemon.port && echo && ${remotePath} --status`
       } else {
-        // Source deploy — needs node PATH discovery
-        const preamble = buildRemotePreamble(this.sshTarget.shell_setup)
+        // Source deploy — needs node PATH discovery.
+        // `[ -n "$DPID" ]` guards against empty pid file (cat succeeds but
+        // yields empty → `kill -0 ""` behavior is shell-dependent; some emit
+        // the current shell's pid).
+        const preamble = buildRemotePreamble(this.ssh.shell_setup)
         startCmd = `${preamble}; nohup node /tmp/open-walnut/daemon.cjs --start > /tmp/open-walnut/daemon-start.log 2>&1 & ` +
-          'sleep 2 && cat /tmp/open-walnut/daemon.port'
+          'sleep 2 && cat /tmp/open-walnut/daemon.port && echo && ' +
+          'DPID=$(cat /tmp/open-walnut/daemon.pid 2>/dev/null) && ' +
+          '[ -n "$DPID" ] && kill -0 "$DPID" 2>/dev/null && echo "{\\"running\\":true}"'
       }
 
       const output = await this.sshExec(startCmd, 20_000)
 
-      const port = parseInt(output.trim(), 10)
-      if (isNaN(port) || port < 1 || port > 65535) {
-        // Read the startup log for diagnostics
+      // Parse out port + status confirmation. Defensive against preamble noise:
+      // the source-deploy branch runs shell_setup which may source rc files
+      // that print banners, MOTDs, or nvm/pyenv init lines. Match by shape:
+      // port = pure digits, status = contains "running":true.
+      const lines = output.trim().split('\n').map(l => l.trim()).filter(Boolean)
+      // Extract port: prefer a pure-digit line, fall back to leading digits of
+      // any line (handles cases where port file has no trailing newline and
+      // concatenates with the next command's output, e.g. "32899{\"running\":true}").
+      let portStr = lines.find(l => /^\d+$/.test(l)) || ''
+      if (!portStr) {
+        for (const l of lines) {
+          const m = l.match(/^(\d+)/)
+          if (m) { portStr = m[1]; break }
+        }
+      }
+      const statusLine = lines.find(l => l.includes('"running":true')) || ''
+      const port = parseInt(portStr, 10)
+
+      if (isNaN(port) || port < 1 || port > 65535 || !statusLine.includes('"running":true')) {
+        // Read the startup log for diagnostics and detect the specific failure
+        // modes we've seen in production.
         let startLog = ''
         try { startLog = await this.sshExec('cat /tmp/open-walnut/daemon-start.log 2>/dev/null', 5_000) } catch {}
-        throw new Error(`Invalid daemon port: "${output.trim()}". Startup log: ${startLog.slice(0, 500)}`)
+
+        let hint = ''
+        if (/GLIBC_\d/.test(startLog)) {
+          hint = ' [glibc mismatch: the node binary on PATH requires newer glibc than this host has. '
+            + 'Check `node -v` on the remote — if it errors, install an older nvm-managed node (v16 on AL2/RHEL7). '
+            + 'Prefer binary daemon deploy which avoids node entirely.]'
+        } else if (startLog.includes('EADDRINUSE')) {
+          hint = ' [port in use: another daemon already running — try `daemon --stop` first]'
+        } else if (startLog.includes('Permission denied')) {
+          hint = ' [permission denied: /tmp/open-walnut may be owned by a different user]'
+        }
+
+        throw new Error(
+          `daemon failed to start (port='${portStr}', status='${statusLine}')${hint}. `
+          + `Startup log: ${startLog.slice(0, 500)}`,
+        )
       }
 
       log.session.info('DaemonConnection: daemon started', { host: this.hostKey, port })
@@ -840,6 +1218,7 @@ export class DaemonConnection {
   private connectWebSocket(urlOrPort: number | string): Promise<void> {
     return new Promise((resolve, reject) => {
       const url = typeof urlOrPort === 'string' ? urlOrPort : `ws://127.0.0.1:${urlOrPort}`
+      this._lastWsUrl = url
       const ws = new WebSocket(url, { handshakeTimeout: 10_000 })
 
       ws.on('open', () => {
@@ -850,7 +1229,10 @@ export class DaemonConnection {
 
       ws.on('error', (err) => {
         if (!this._connected) {
-          reject(new Error(`WebSocket connection failed: ${err.message}`))
+          const errDetails = (err as Error & { code?: string }).code || err.message || 'no details'
+          reject(new Error(
+            `WebSocket connection failed: ${errDetails} (host=${this.hostKey}, url=${url})`
+          ))
         } else {
           log.session.warn('DaemonConnection: WebSocket error', {
             host: this.hostKey, error: err.message,
@@ -860,7 +1242,21 @@ export class DaemonConnection {
 
       ws.on('close', () => {
         if (this._connected) {
-          log.session.warn('DaemonConnection: WebSocket closed', { host: this.hostKey })
+          let localDaemonPidAlive: boolean | null = null
+          if (this.hostKey === '__local__') {
+            try {
+              const pid = localDaemon.pid
+              if (pid !== null && pid !== undefined) {
+                try { process.kill(pid, 0); localDaemonPidAlive = true }
+                catch { localDaemonPidAlive = false }
+              }
+            } catch {}
+          }
+          log.session.warn('DaemonConnection: WebSocket closed', {
+            host: this.hostKey,
+            wsUrl: this._lastWsUrl,
+            localDaemonPidAlive,
+          })
           this.handleConnectionLost()
         }
       })
@@ -942,11 +1338,14 @@ export class DaemonConnection {
     this.reconnectTimer = setTimeout(async () => {
       this.reconnectTimer = null
       if (this._destroyed || this._connected) return
+      this._reconnectAttempts += 1
       try {
         await this.reconnect()
       } catch (err) {
         log.session.warn('DaemonConnection: reconnect failed, will retry', {
           host: this.hostKey,
+          attempt: this._reconnectAttempts,
+          stuckForMs: this._disconnectedSince ? Date.now() - this._disconnectedSince : null,
           error: err instanceof Error ? err.message : String(err),
           nextDelayMs: Math.min(delayMs * 2, DaemonConnection.RECONNECT_MAX_DELAY_MS),
         })
@@ -964,6 +1363,34 @@ export class DaemonConnection {
 
     log.session.info('DaemonConnection: attempting reconnect', { host: this.hostKey })
 
+    // Local daemon path: no SSH tunnel / ControlMaster — just re-ensure the
+    // in-process daemon is running and reconnect the WebSocket. Going through
+    // the SSH branch would dereference sshTarget (null for __local__) and loop
+    // forever in backoff.
+    if (this.hostKey === '__local__' || !this.sshTarget) {
+      const { localDaemon } = await import('./local-daemon.js')
+      await localDaemon.ensureRunning()
+      const wsUrl = localDaemon.wsUrl
+      if (!wsUrl) throw new Error('Local daemon has no wsUrl after ensureRunning')
+      await this.connectWebSocket(wsUrl)
+      // Re-verify capabilities + refresh instance ID. Skipping this leaves
+      // _daemonInstanceId pointing at the pre-crash daemon; downstream
+      // instance-change detection would then silently miss restarts.
+      const ok = await this.verifyCapabilities()
+      if (!ok) {
+        log.session.warn('DaemonConnection: local reconnect hello failed — proceeding anyway', {
+          host: this.hostKey,
+        })
+      }
+      this.setConnected(true)
+      this.startPing()
+      log.session.info('DaemonConnection: local reconnected', {
+        host: this.hostKey, wsUrl, instanceId: this._daemonInstanceId,
+      })
+      this.recoverDisconnectedSessions().catch(() => {})
+      return
+    }
+
     // Reset deploy flag — if daemon is still alive we skip deploy entirely;
     // if daemon died, deployDaemon() will set this correctly.
     this._deployedViaSource = false
@@ -974,12 +1401,30 @@ export class DaemonConnection {
       this.tunnel = null
     }
 
-    // Check if daemon is still running
-    let daemonPort = await this.checkDaemonRunning()
+    // When the WebSocket/tunnel drops, the ControlMaster usually died with it.
+    // Tear it down and rebuild before probing — otherwise every SSH command
+    // silently fails through a dead socket and we misdiagnose a live daemon
+    // as dead, burning ~10s on a pointless redeploy.
+    await this.stopControlMaster().catch(() => {})
+    await this.ensureControlMaster()
+
+    // Check if daemon is still running. Strict mode: an SSH failure now means
+    // the link is still broken (not that the daemon died) — surface it so the
+    // outer reconnect loop retries with backoff instead of redeploying.
+    let daemonPort: number | null
+    try {
+      daemonPort = await this.checkDaemonRunning({ strict: true })
+    } catch (err) {
+      log.session.warn('DaemonConnection: daemon status probe failed via SSH — will retry reconnect', {
+        host: this.hostKey,
+        error: err instanceof Error ? err.message : String(err),
+      })
+      throw err
+    }
 
     if (daemonPort === null) {
-      // Daemon died — redeploy and restart
-      log.session.info('DaemonConnection: daemon died, redeploying', { host: this.hostKey })
+      // Daemon genuinely absent — redeploy and restart
+      log.session.info('DaemonConnection: daemon not running, redeploying', { host: this.hostKey })
       await this.deployDaemon()
       daemonPort = await this.startDaemon()
     }
@@ -992,11 +1437,31 @@ export class DaemonConnection {
     // Connect WebSocket
     await this.connectWebSocket(this.localPort)
 
+    // Re-verify capabilities + refresh daemon instance ID. If instance
+    // changed (daemon was restarted out-of-band), verifyCapabilities logs
+    // the transition — downstream session probes then resume via --resume
+    // naturally, but the log line is the critical diagnostic.
+    const priorInstanceId = this._daemonInstanceId
+    const handshakeOk = await this.verifyCapabilities()
+    if (!handshakeOk) {
+      log.session.warn('DaemonConnection: reconnect hello failed — forcing redeploy', {
+        host: this.hostKey,
+      })
+      await this.forceRedeployAndReconnect()
+      // forceRedeploy handles setConnected(true). recoverDisconnectedSessions
+      // still needs to run even on forced-redeploy path.
+      this.recoverDisconnectedSessions().catch(() => {})
+      return
+    }
     this.setConnected(true)
     this.startPing()
 
     log.session.info('DaemonConnection: reconnected', {
-      host: this.hostKey, localPort: this.localPort, remotePort: daemonPort,
+      host: this.hostKey,
+      localPort: this.localPort,
+      remotePort: daemonPort,
+      instanceId: this._daemonInstanceId,
+      instanceChanged: priorInstanceId !== null && priorInstanceId !== this._daemonInstanceId,
     })
 
     // Auto-recover sessions that were marked error due to disconnect
@@ -1014,23 +1479,31 @@ export class DaemonConnection {
         if (s.host !== this.hostKey) continue
         if (s.archived) continue
 
-        // Two failure shapes to recover:
-        //  (1) 'error' + "Connection lost" — disconnect propagated to session record
-        //  (2) 'running' — WebSocket died silently mid-turn, session record never got
-        //      the error (tailer read-end broke, CLI completed turn remotely, terminal
-        //      result event never reached walnut). These sessions remain 'running'
-        //      forever until next reconnect probes them here.
-        const isErroredByDisconnect = s.process_status === 'error'
-          && !!s.errorMessage?.includes('Connection lost')
-        const isPotentiallyStuckRunning = s.process_status === 'running'
-        if (!isErroredByDisconnect && !isPotentiallyStuckRunning) continue
+        // Reattach any non-terminal session. Both `running` (mid-turn) and
+        // `idle` (FIFO session between turns, CLI alive waiting for stdin) must
+        // be re-subscribed: on ws close the daemon's handleDisconnect removes
+        // us from session.subscribers, but the session-bound JSONL watcher
+        // keeps running — any new CLI output after reconnect is fan'd out to a
+        // dead subscriber set and lost. Skipping `idle` here was the cause of
+        // "messages deliver but Claude never replies in UI" after any WS flap.
+        // `stopped` is terminal (CLI dead); `error` without "Connection lost"
+        // is a real user-visible error, don't auto-recover — let the next
+        // user message trigger a fresh --resume spawn.
+        const isTerminal = s.process_status === 'stopped'
+        const isNonRecoverableError = s.process_status === 'error'
+          && !s.errorMessage?.includes('Connection lost')
+        if (isTerminal || isNonRecoverableError) continue
 
         // Ask daemon if this session's process is still alive
         try {
           const result = await this.send('status', { sid: s.claudeSessionId })
           if (result.ok && result.alive) {
+            // Preserve 'idle' if that's what the session was before reconnect —
+            // FIFO sessions sit in 'idle' between turns and forcing 'running'
+            // would lie to the UI (no turn actually in flight).
+            const recoveredStatus = s.process_status === 'idle' ? 'idle' : 'running'
             await updateSessionRecord(s.claudeSessionId, {
-              process_status: 'running',
+              process_status: recoveredStatus,
               errorMessage: undefined,
               activity: undefined,
               last_status_change: new Date().toISOString(),
@@ -1040,12 +1513,40 @@ export class DaemonConnection {
             bus.emit(EventNames.SESSION_STATUS_CHANGED, {
               sessionId: s.claudeSessionId,
               taskId: s.taskId,
-              process_status: 'running',
+              process_status: recoveredStatus,
             }, ['*'], { source: 'daemon-reconnect', urgency: 'urgent' })
             log.session.info('DaemonConnection: auto-recovered session after reconnect', {
               sessionId: s.claudeSessionId, host: this.hostKey,
               priorStatus: s.process_status,
+              recoveredStatus,
             })
+
+            // Re-subscribe this new ws to the session's push stream. Under
+            // the new session-bound watcher model the daemon's file tailer
+            // never stopped — but ws.close removed us from the subscribers
+            // Set. send('attach') re-adds us and replays any bytes we missed
+            // (catch-up from our tracked fromOffset). Under the old per-ws
+            // watcher model this was the only way to get push back at all,
+            // since the tailer was destroyed on ws.close. Either way, calling
+            // reattachWatcher is correct and idempotent.
+            try {
+              const { getRegisteredSessionManager } = await import('./session-manager.js')
+              const mgr = getRegisteredSessionManager(s.claudeSessionId)
+              type Reattachable = { reattachWatcher?: () => Promise<boolean> }
+              const reattachable = mgr as unknown as Reattachable | undefined
+              if (reattachable?.reattachWatcher) {
+                await reattachable.reattachWatcher()
+              } else {
+                log.session.debug('DaemonConnection: no manager to reattach — session has no active subscriber', {
+                  sessionId: s.claudeSessionId, host: this.hostKey,
+                })
+              }
+            } catch (err) {
+              log.session.warn('DaemonConnection: reattach watcher failed (recovery continued)', {
+                sessionId: s.claudeSessionId, host: this.hostKey,
+                error: err instanceof Error ? err.message : String(err),
+              })
+            }
           } else {
             // Process died during disconnect — mark stopped so session is resumable.
             // Don't inject a message; user's next message will trigger --resume naturally.

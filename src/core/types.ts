@@ -83,7 +83,9 @@ export interface CategoryRecord {
 }
 
 export interface TaskStore {
-  version: 1 | 2 | 3 | 4;
+  /** Legacy on-disk version marker. Preserved for existing tasks.json files
+   *  and tests; no live code reads it. */
+  version?: 1 | 2 | 3 | 4;
   tasks: Task[];
   categories?: Record<string, CategoryRecord>;
 }
@@ -274,6 +276,12 @@ export interface Config {
      *  Default: all four ['default', 'bypass', 'plan', 'accept'].
      *  Set to e.g. ['bypass', 'plan'] to only cycle between those two. */
     enabled_modes?: SessionMode[];
+    /** Pass --include-partial-messages to `claude -p` so the CLI emits
+     *  Anthropic SSE stream_event records (token-level deltas). With this on,
+     *  assistant text streams into the UI character-by-character instead of
+     *  appearing all at once when the message completes.
+     *  Default: true. Set to false to fall back to per-message delivery. */
+    stream_partial_messages?: boolean;
   };
   heartbeat?: import('../heartbeat/types.js').HeartbeatConfig;
   tools?: {

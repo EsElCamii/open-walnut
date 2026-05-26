@@ -1,5 +1,5 @@
 /**
- * Lightweight markdown parser for files_read parse=true.
+ * Lightweight markdown parser for file_read parse=true.
  * Pure regex — no AST library needed.
  */
 import yaml from 'js-yaml';

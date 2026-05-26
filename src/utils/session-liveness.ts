@@ -6,11 +6,29 @@
  *   - Registry hit → manager.isAlive() (authoritative — asks the actual manager)
  *   - Fallback (after server restart, no active manager):
  *       Remote → isDaemonConnected(host) with 5min grace period
- *       Local  → isProcessAliveAsync(pid)
+ *       Local  → process.kill(pid, 0) (pure syscall, no fork)
  *   - Embedded/SDK sessions → always true (managed externally)
+ *
+ * PID-reuse tradeoff (IMPORTANT — read before changing):
+ *   Earlier versions called `isProcessAliveAsync(pid, 'claude')` which shells out to
+ *   `ps -p <pid> -o command=` and matched the binary name. That was *binary-verified*
+ *   liveness: it would distinguish a real claude process from a recycled PID owned by
+ *   some other program. We dropped that verification because this function is invoked
+ *   up to 3× per non-terminal session per 30s health-monitor cycle (~3000 forks per
+ *   30s at ~985 sessions) and the aggregate `ps` fork cost was wedging the event loop.
+ *
+ *   In its place we now use `process.kill(pid, 0)` — a pure syscall, no child process.
+ *   This is *existence-only* liveness: if some other program happens to hold the same
+ *   PID after OS reuse, we will mistakenly report "alive".
+ *
+ *   The PID-reuse defense therefore does NOT live here. It lives in
+ *   killOrphanedProcesses() (src/core/session-health-monitor.ts), which combines:
+ *     (1) a ~2-minute grace period on `last_status_change` (real orphans are older);
+ *     (2) an `activePids` set collected from live sessions so a PID recycled into a
+ *         new session is never killed as an orphan of the old one.
+ *   Those two together — not binary verification — are the current defense.
  */
 import type { SessionRecord } from '../core/types.js'
-import { isProcessAliveAsync } from './process.js'
 
 export async function isSessionProcessAlive(session: SessionRecord): Promise<boolean> {
   // Embedded/SDK: managed by their respective providers, not by PID
@@ -40,7 +58,13 @@ export async function isSessionProcessAlive(session: SessionRecord): Promise<boo
     return true // short disconnect — assume alive
   }
 
-  // Local sessions: check PID on this machine
+  // Local sessions: check PID on this machine.
+  // Pure syscall — no child process fork. See file header for why we skip binary verification.
   if (session.pid == null) return false
-  return isProcessAliveAsync(session.pid, 'claude')
+  try {
+    process.kill(session.pid, 0)
+    return true
+  } catch {
+    return false
+  }
 }

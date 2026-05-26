@@ -74,7 +74,7 @@ const DEFAULT_META: QuickStartTaskMeta = {
   starred: true,         // mirrors existing quick-start behavior (task.starred = true)
   needs_attention: false,
   priority: 'none',
-  pinTier: undefined,
+  pinTier: 'focus',
 };
 
 export function SessionPathSelector({ open, onClose, onSelect }: Props) {
@@ -143,8 +143,10 @@ export function SessionPathSelector({ open, onClose, onSelect }: Props) {
 
   useEffect(() => {
     if (!activePath || activePath.length < 2) {
-      setLiveDirs([]);
-      setLiveTaggedDirs([]);
+      // Only clear if non-empty — avoids creating new [] refs that would trigger the
+      // reset effect and clobber the initial focus-task-derived selectedIdx.
+      setLiveDirs(prev => prev.length === 0 ? prev : []);
+      setLiveTaggedDirs(prev => prev.length === 0 ? prev : []);
       return;
     }
 

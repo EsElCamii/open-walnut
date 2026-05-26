@@ -73,12 +73,20 @@ export function MemoryPage() {
     try { localStorage.setItem(LS_WIDTH_KEY, String(listWidth)); } catch { /* ignore */ }
   }, [listWidth]);
 
-  // Load tree on mount
+  // Load tree on mount + poll every 15s for live refresh
   useEffect(() => {
-    fetchMemoryBrowse()
-      .then(setTree)
-      .catch((e: Error) => setError(e.message))
-      .finally(() => setLoading(false));
+    let cancelled = false;
+    const loadTree = () => {
+      fetchMemoryBrowse()
+        .then((t) => { if (!cancelled) setTree(t); })
+        .catch((e: Error) => { if (!cancelled) setError(e.message); })
+        .finally(() => { if (!cancelled) setLoading(false); });
+    };
+    loadTree();
+    // Live refresh: poll every 15s so new daily logs, topics, compaction snapshots
+    // appear without manual refresh. Backend `/api/memory/browse` is cheap (metadata only).
+    const interval = setInterval(loadTree, 15_000);
+    return () => { cancelled = true; clearInterval(interval); };
   }, []);
 
   // Load content when selection changes

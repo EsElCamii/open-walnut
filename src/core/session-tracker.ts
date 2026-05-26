@@ -1,11 +1,26 @@
 import path from 'node:path';
 import fs from 'node:fs/promises';
-import { SESSIONS_FILE, SESSIONS_DIR } from '../constants.js';
-import { readJsonFile, writeJsonFile, ensureDir } from '../utils/fs.js';
-import { withFileLock } from '../utils/file-lock.js';
+import { SESSIONS_DIR } from '../constants.js';
+import { ensureDir } from '../utils/fs.js';
 import { isSessionProcessAlive } from '../utils/session-liveness.js';
 import { log } from '../logging/index.js';
-import type { SessionSummary, SessionRecord, SessionMode, SessionType, TaskPhase, Task, ProcessStatus, StatusTransition } from './types.js';
+import type { SessionSummary, SessionRecord, SessionMode, SessionType, TaskPhase, ProcessStatus, StatusTransition } from './types.js';
+import { getDb, rowToSession, sessionToRow, SESSION_COLUMNS, transaction as sessionDbTx } from './session-db.js';
+import { runSessionMigrationIfNeeded } from './session-db-migration.js';
+
+let sessionInitialized = false;
+
+async function ensureSessionInit(): Promise<void> {
+  if (sessionInitialized) return;
+  sessionInitialized = true;
+  getDb();
+  await runSessionMigrationIfNeeded();
+}
+
+/** Reset module-level state for test isolation. */
+export function _resetSessionTrackerForTesting(): void {
+  sessionInitialized = false;
+}
 
 const MAX_STATUS_HISTORY = 10;
 
@@ -34,113 +49,76 @@ const TRIAGE_NAME_PATTERNS = new Set([
  *
  * Uses the `type` field (set at creation or by migration). Falls back to title-prefix
  * heuristic only for records that haven't been through migration yet (shouldn't happen
- * in normal operation — migration runs on every readStore()).
+ * in normal operation — migration runs on DB open).
  */
 export function isTriageSession(s: SessionRecord): boolean {
   if (s.type) return s.type === 'triage';
-  // Actively used during readStore() migration for legacy records (type not yet set).
-  // After migration, only reached if a record is somehow written without a type field.
   if (s.provider !== 'embedded') return false;
   const prefix = s.title?.split(':')[0]?.trim() ?? '';
   return TRIAGE_AGENTS.has(prefix) || TRIAGE_NAME_PATTERNS.has(prefix);
 }
 
-// ── Store types ──
-
-interface SessionStoreV2 {
-  version: 2;
-  sessions: SessionRecord[];
-}
-
 /**
- * Read store and auto-migrate legacy records.
- *
- * Legacy records with the old `status: 'active' | 'idle' | 'completed'` field
- * are migrated in-place to the new two-dimensional status model.
+ * Environment sessions: system-created background sessions that never occupy a
+ * user session slot. Includes triage, hook, cron, and embedded subagent runs.
+ * CLI/SDK subagent sessions (user-created) are NOT environment sessions.
  */
-async function readStore(): Promise<SessionStoreV2> {
-  // Fresh fallback each call — readJsonFile returns the fallback by reference,
-  // and callers mutate .sessions via push(), which would pollute a shared object.
-  const raw = await readJsonFile<SessionStoreV2>(SESSIONS_FILE, { version: 2, sessions: [] });
-  const store = raw as SessionStoreV2;
-  store.version = 2;
-
-  // Migrate legacy records that still have the old `status` field
-  let migrated = false;
-  for (const session of store.sessions) {
-    const legacy = session as unknown as Record<string, unknown>;
-    if ('status' in legacy && !('process_status' in legacy)) {
-      const oldStatus = legacy.status as string;
-      delete legacy.status;
-
-      if (oldStatus === 'active') {
-        session.process_status = 'stopped'; // can't verify PID during read — reconciler will fix
-      } else if (oldStatus === 'idle') {
-        session.process_status = 'stopped';
-      } else {
-        session.process_status = 'stopped';
-      }
-
-      session.mode ??= 'default';
-      session.last_status_change ??= session.lastActiveAt;
-      migrated = true;
-    }
-  }
-
-  // Strip legacy work_status field from old session records
-  for (const session of store.sessions) {
-    const legacy = session as unknown as Record<string, unknown>;
-    if ('work_status' in legacy) {
-      delete (legacy as any).work_status;
-      migrated = true;
-    }
-  }
-
-  // Migrate absorbed → archived + archive_reason (unified hidden-session model)
-  for (const session of store.sessions) {
-    const legacy = session as unknown as Record<string, unknown>;
-    if (legacy.absorbed) {
-      session.archived = true;
-      session.archive_reason ??= 'plan_executed';
-      delete legacy.absorbed;
-      migrated = true;
-    }
-  }
-
-  // Migrate: tag all sessions with explicit type
-  for (const session of store.sessions) {
-    if (session.type) continue;  // already has type
-    if (session.provider === 'embedded') {
-      session.type = isTriageSession(session) ? 'triage' : 'subagent';
-    } else {
-      session.type = 'interactive';
-    }
-    migrated = true;
-  }
-
-  if (migrated) {
-    log.session.info('migrated legacy session records', { count: store.sessions.length });
-    await writeStore(store);
-  }
-
-  return store;
+export function isEnvironmentSession(s: SessionRecord): boolean {
+  if (s.type === 'triage' || s.type === 'hook' || s.type === 'cron') return true;
+  if (s.type === 'subagent' && s.provider === 'embedded') return true;
+  return isTriageSession(s); // legacy fallback for untyped records
 }
 
-async function writeStore(store: SessionStoreV2): Promise<void> {
-  await writeJsonFile(SESSIONS_FILE, store);
+async function readStore(): Promise<{ sessions: SessionRecord[] }> {
+  await ensureSessionInit();
+  const db = getDb();
+  if (!db) {
+    throw new Error('readStore: SQLite handle is null');
+  }
+  const rows = db.prepare('SELECT * FROM sessions').all() as Record<string, any>[];
+  return { sessions: rows.map(rowToSession) };
 }
 
-// ── Write lock: serializes all read-modify-write operations ──
-// Two layers: in-process promise chain + cross-process file lock.
-// Prevents concurrent callers (session runner, health monitor, reconciler, hooks, REST)
-// from overwriting each other's changes via stale snapshots.
+// ── Write lock: serializes read-modify-write operations in-process ────────
+// Prevents concurrent callers (session runner, health monitor, reconciler,
+// hooks, REST) from overwriting each other's changes via stale snapshots.
+// SQLite's own WAL + busy_timeout handles cross-process serialization.
 let writeLock: Promise<void> = Promise.resolve();
 
 function withWriteLock<T>(fn: () => Promise<T>): Promise<T> {
   const prev = writeLock;
   let resolve: () => void;
   writeLock = new Promise<void>((r) => { resolve = r; });
-  return prev.then(() => withFileLock(SESSIONS_FILE, fn)).finally(() => resolve!());
+  return prev.then(fn).finally(() => resolve!());
+}
+
+/**
+ * Returns true when every field in `updates` already equals the current value on `session`.
+ * Scalars compared with ===; `status_history` compared by JSON (array). Unknown field
+ * types fall back to JSON equality. Used by updateSessionRecord* to skip redundant writes.
+ *
+ * No-op guard. Originally added after a daemon/remote-session bug where the
+ * CLI replayed identical init/model/pid updates ~9 times per resume. Each
+ * replay took the in-process + cross-process lock, starving /api/sessions/:id
+ * readers (60s+ timeouts observed). Skipping identical updates entirely cuts
+ * this to zero churn on the happy path.
+ */
+function isNoOpUpdate(
+  session: SessionRecord,
+  updates: Partial<Omit<SessionRecord, 'claudeSessionId'>>,
+): boolean {
+  for (const key of Object.keys(updates) as (keyof typeof updates)[]) {
+    const next = updates[key];
+    const curr = (session as unknown as Record<string, unknown>)[key as string];
+    if (next === curr) continue;
+    if (next == null && curr == null) continue;
+    if (typeof next === 'object' || typeof curr === 'object') {
+      if (JSON.stringify(next) !== JSON.stringify(curr)) return false;
+      continue;
+    }
+    return false;
+  }
+  return true;
 }
 
 /**
@@ -181,8 +159,7 @@ const DEFAULT_REMOTE_IDLE_LIMIT = 40;
  * These are the sessions actually consuming API/compute resources.
  *
  * Side-effect: any stale records (process alive in DB but PID dead)
- * are asynchronously corrected in sessions.json to prevent future
- * ghost-slot accumulation.
+ * are asynchronously corrected to prevent future ghost-slot accumulation.
  */
 export async function getActiveSessionsByHost(): Promise<Record<string, SessionRecord[]>> {
   const store = await readStore();
@@ -212,7 +189,7 @@ export async function getActiveSessionsByHost(): Promise<Record<string, SessionR
  * Used for idle limit enforcement and diagnostics.
  *
  * Side-effect: any stale records (process alive in DB but PID dead)
- * are asynchronously corrected in sessions.json.
+ * are asynchronously corrected.
  */
 export async function getAllAliveSessionsByHost(): Promise<Record<string, SessionRecord[]>> {
   const store = await readStore();
@@ -256,9 +233,6 @@ function fixStaleRecords(sessionIds: string[]): void {
     });
   }
 }
-
-/** @deprecated Use getActiveSessionsByHost() instead. */
-export const getRunningSessionsByHost = getActiveSessionsByHost;
 
 export interface SessionLimitResult {
   allowed: boolean;
@@ -383,16 +357,24 @@ export async function checkSessionLimit(
  * Get a single session by Claude session ID.
  */
 export async function getSessionByClaudeId(claudeSessionId: string): Promise<SessionRecord | null> {
-  const store = await readStore();
-  return store.sessions.find((s) => s.claudeSessionId === claudeSessionId) ?? null;
+  await ensureSessionInit();
+  const db = getDb();
+  if (!db) return null;
+  const row = db.prepare('SELECT * FROM sessions WHERE claude_session_id = ?').get(claudeSessionId) as
+    | Record<string, any>
+    | undefined;
+  return row ? rowToSession(row) : null;
 }
 
 /**
  * Get all sessions linked to a task.
  */
 export async function getSessionsForTask(taskId: string): Promise<SessionRecord[]> {
-  const store = await readStore();
-  return store.sessions.filter((s) => s.taskId === taskId);
+  await ensureSessionInit();
+  const db = getDb();
+  if (!db) return [];
+  const rows = db.prepare('SELECT * FROM sessions WHERE task_id = ?').all(taskId) as Record<string, any>[];
+  return rows.map(rowToSession);
 }
 
 /**
@@ -405,13 +387,38 @@ export async function createSessionRecord(
   cwd?: string,
   extra?: { pid?: number; outputFile?: string; title?: string; description?: string; mode?: SessionMode; planFile?: string; planCompleted?: boolean; host?: string; provider?: import('./types.js').SessionProvider; type?: SessionType; fromPlanSessionId?: string; forkedFromSessionId?: string; cliModel?: string },
 ): Promise<SessionRecord> {
+  await ensureSessionInit();
   return withWriteLock(async () => {
-    const store = await readStore();
+    const db = getDb();
+    if (!db) {
+      throw new Error('createSessionRecord: SQLite handle is null');
+    }
     const now = new Date().toISOString();
+    const row = db.prepare('SELECT * FROM sessions WHERE claude_session_id = ?').get(claudeSessionId) as
+      | Record<string, any>
+      | undefined;
 
-    // Check if a record with this Claude session ID already exists
-    const existing = store.sessions.find((s) => s.claudeSessionId === claudeSessionId);
-    if (existing) {
+    if (row) {
+      const existing = rowToSession(row);
+      // Detect whether anything material would actually change. Remote daemon replays
+      // and resume paths can re-invoke persistSessionRecord() 9× with identical values;
+      // skipping the write avoids starving readers on the write lock.
+      let materialChange = false;
+      if (cwd && existing.cwd !== cwd) materialChange = true;
+      if (extra?.pid != null && existing.pid !== extra.pid) materialChange = true;
+      if (extra?.outputFile && existing.outputFile !== extra.outputFile) materialChange = true;
+      if (extra?.mode && existing.mode !== extra.mode) materialChange = true;
+      if (extra?.planFile && existing.planFile !== extra.planFile) materialChange = true;
+      if (extra?.planCompleted != null && existing.planCompleted !== extra.planCompleted) materialChange = true;
+      if (extra?.host && existing.host !== extra.host) materialChange = true;
+      if (extra?.fromPlanSessionId && existing.fromPlanSessionId !== extra.fromPlanSessionId) materialChange = true;
+      if (extra?.forkedFromSessionId && existing.forkedFromSessionId !== extra.forkedFromSessionId) materialChange = true;
+      if (extra?.cliModel && existing.cliModel !== extra.cliModel) materialChange = true;
+
+      if (!materialChange) {
+        return existing;
+      }
+
       existing.lastActiveAt = now;
       existing.messageCount++;
       if (cwd) existing.cwd = cwd;
@@ -440,7 +447,8 @@ export async function createSessionRecord(
       if (extra?.fromPlanSessionId) existing.fromPlanSessionId = extra.fromPlanSessionId;
       if (extra?.forkedFromSessionId) existing.forkedFromSessionId = extra.forkedFromSessionId;
       if (extra?.cliModel) existing.cliModel = extra.cliModel;
-      await writeStore(store);
+
+      writeSessionRowSqlite(db, existing);
       return existing;
     }
 
@@ -469,10 +477,28 @@ export async function createSessionRecord(
       ...(extra?.cliModel ? { cliModel: extra.cliModel } : {}),
     };
 
-    store.sessions.push(record);
-    await writeStore(store);
+    writeSessionRowSqlite(db, record);
     log.session.info('session record created', { sessionId: claudeSessionId, taskId, project, mode: extra?.mode, host: extra?.host });
     return record;
+  });
+}
+
+/**
+ * Single-row INSERT OR REPLACE for a SessionRecord. Used by the SQLite fast
+ * paths — mapping via sessionToRow, spill-field preservation, one transaction.
+ */
+function writeSessionRowSqlite(db: import('better-sqlite3').Database, session: SessionRecord): void {
+  const insertCols = [...SESSION_COLUMNS, 'payload'];
+  const insertSql =
+    'INSERT OR REPLACE INTO sessions (' + insertCols.join(', ') + ') VALUES (' +
+    insertCols.map((c) => '@' + c).join(', ') + ')';
+  const partial = sessionToRow(session);
+  const bound: Record<string, unknown> = {};
+  for (const col of insertCols) {
+    bound[col] = partial[col] === undefined ? null : partial[col];
+  }
+  sessionDbTx((handle) => {
+    handle.prepare(insertSql).run(bound);
   });
 }
 
@@ -492,16 +518,12 @@ export async function importSessionRecord(opts: {
   lastActiveAt?: string;
   messageCount?: number;
 }): Promise<SessionRecord> {
+  await ensureSessionInit();
   return withWriteLock(async () => {
-    const store = await readStore();
-    const existing = store.sessions.find((s) => s.claudeSessionId === opts.claudeSessionId);
-    if (existing) {
-      throw new Error(
-        `Session ${opts.claudeSessionId} is already tracked (task: ${existing.taskId}). ` +
-        `Use send_to_session to interact with it.`,
-      );
+    const db = getDb();
+    if (!db) {
+      throw new Error('importSessionRecord: SQLite handle is null');
     }
-
     const now = new Date().toISOString();
     const record: SessionRecord = {
       claudeSessionId: opts.claudeSessionId,
@@ -519,8 +541,16 @@ export async function importSessionRecord(opts: {
       ...(opts.title ? { title: opts.title } : {}),
     };
 
-    store.sessions.push(record);
-    await writeStore(store);
+    const row = db.prepare('SELECT task_id FROM sessions WHERE claude_session_id = ?')
+      .get(opts.claudeSessionId) as { task_id?: string } | undefined;
+    if (row) {
+      throw new Error(
+        `Session ${opts.claudeSessionId} is already tracked (task: ${row.task_id ?? ''}). ` +
+        `Use session_send to interact with it.`,
+      );
+    }
+    writeSessionRowSqlite(db, record);
+
     log.session.info('imported external session', {
       sessionId: opts.claudeSessionId,
       taskId: opts.taskId,
@@ -532,48 +562,78 @@ export async function importSessionRecord(opts: {
 }
 
 /**
+ * Apply the patch to `session` in-place and produce the `lastActiveAt`-bumped
+ * final state. Shared by updateSessionRecord + updateSessionRecordConditionally
+ * so status_history ring-buffer + terminal PID clear + lastActiveAt bump behave
+ * identically everywhere.
+ *
+ * Returns `false` when the patch is a no-op (caller should skip write entirely).
+ */
+function applyUpdateToSession(
+  session: SessionRecord,
+  updates: Partial<Omit<SessionRecord, 'claudeSessionId'>>,
+  logLabel: string,
+): boolean {
+  if (isNoOpUpdate(session, updates)) return false;
+
+  const prevStatus = session.process_status;
+  Object.assign(session, updates);
+
+  if (updates.process_status && updates.process_status !== prevStatus) {
+    const transition: StatusTransition = {
+      timestamp: new Date().toISOString(),
+      process_status: updates.process_status as ProcessStatus,
+      reason: (updates as any).status_reason ?? 'unknown',
+      changed_by: (updates as any).status_changed_by ?? 'unknown',
+      message: (updates as any).errorMessage ?? null,
+    };
+    session.status_history = [
+      transition,
+      ...(session.status_history ?? []),
+    ].slice(0, MAX_STATUS_HISTORY);
+  }
+
+  // Terminal-state PID clear. Prevents stale PID orphan kills when OS recycles PIDs.
+  if (isTerminalSession(session) && session.pid != null) {
+    log.session.info(logLabel, {
+      sessionId: session.claudeSessionId, pid: session.pid,
+      process_status: session.process_status,
+    });
+    session.pid = undefined;
+  }
+  session.lastActiveAt = new Date().toISOString();
+  return true;
+}
+
+/**
  * Update an existing session's fields.
  */
 export async function updateSessionRecord(
   claudeSessionId: string,
   updates: Partial<Omit<SessionRecord, 'claudeSessionId'>>,
 ): Promise<SessionRecord> {
+  await ensureSessionInit();
   return withWriteLock(async () => {
-    const store = await readStore();
-    const session = store.sessions.find((s) => s.claudeSessionId === claudeSessionId);
-    if (!session) {
+    const db = getDb();
+    if (!db) {
+      throw new Error('updateSessionRecord: SQLite handle is null');
+    }
+
+    const row = db.prepare('SELECT * FROM sessions WHERE claude_session_id = ?').get(claudeSessionId) as
+      | Record<string, any>
+      | undefined;
+    if (!row) {
       throw new Error(`Session not found: ${claudeSessionId}`);
     }
+    const session = rowToSession(row);
 
-    // Auto-maintain status_history when process_status changes
-    const prevStatus = session.process_status;
-    Object.assign(session, updates);
-
-    if (updates.process_status && updates.process_status !== prevStatus) {
-      const transition: StatusTransition = {
-        timestamp: new Date().toISOString(),
-        process_status: updates.process_status as ProcessStatus,
-        reason: (updates as any).status_reason ?? 'unknown',
-        changed_by: (updates as any).status_changed_by ?? 'unknown',
-        message: (updates as any).errorMessage ?? null,
-      };
-      session.status_history = [
-        transition,
-        ...(session.status_history ?? []),
-      ].slice(0, MAX_STATUS_HISTORY);
+    // No-op guard BEFORE any UPDATE SQL — critical to avoid write-lock storms
+    // when the daemon replays identical init/model/pid updates.
+    if (!applyUpdateToSession(session, updates, 'clearing stale PID on terminal transition')) {
+      return session;
     }
 
-    // When session reaches terminal state, clear PID to prevent stale PID orphan kills.
-    // OS can recycle PIDs — a stale PID on a completed session can collide with a new session's PID.
-    if (isTerminalSession(session) && session.pid != null) {
-      log.session.info('clearing stale PID on terminal transition', {
-        sessionId: claudeSessionId, pid: session.pid,
-        process_status: session.process_status,
-      });
-      session.pid = undefined;
-    }
-    session.lastActiveAt = new Date().toISOString();
-    await writeStore(store);
+    writeSessionRowSqlite(db, session);
     log.session.info('session record updated', { sessionId: claudeSessionId, fields: Object.keys(updates) });
     return session;
   });
@@ -589,41 +649,25 @@ export async function updateSessionRecordConditionally(
   updates: Partial<Omit<SessionRecord, 'claudeSessionId'>>,
   shouldUpdate: (current: SessionRecord) => boolean,
 ): Promise<SessionRecord | null> {
+  await ensureSessionInit();
   return withWriteLock(async () => {
-    const store = await readStore();
-    const session = store.sessions.find((s) => s.claudeSessionId === claudeSessionId);
-    if (!session) return null;
+    const db = getDb();
+    if (!db) {
+      throw new Error('updateSessionRecordConditionally: SQLite handle is null');
+    }
+
+    const row = db.prepare('SELECT * FROM sessions WHERE claude_session_id = ?').get(claudeSessionId) as
+      | Record<string, any>
+      | undefined;
+    if (!row) return null;
+    const session = rowToSession(row);
 
     if (!shouldUpdate(session)) return null;
 
-    // Auto-maintain status_history when process_status changes
-    const prevStatus = session.process_status;
-    Object.assign(session, updates);
-
-    if (updates.process_status && updates.process_status !== prevStatus) {
-      const transition: StatusTransition = {
-        timestamp: new Date().toISOString(),
-        process_status: updates.process_status as ProcessStatus,
-        reason: (updates as any).status_reason ?? 'unknown',
-        changed_by: (updates as any).status_changed_by ?? 'unknown',
-        message: (updates as any).errorMessage ?? null,
-      };
-      session.status_history = [
-        transition,
-        ...(session.status_history ?? []),
-      ].slice(0, MAX_STATUS_HISTORY);
+    if (!applyUpdateToSession(session, updates, 'clearing stale PID on terminal transition (conditional)')) {
+      return session;
     }
-
-    // Keep in sync with updateSessionRecord — duplicated because this path bypasses it.
-    if (isTerminalSession(session) && session.pid != null) {
-      log.session.info('clearing stale PID on terminal transition (conditional)', {
-        sessionId: claudeSessionId, pid: session.pid,
-        process_status: session.process_status,
-      });
-      session.pid = undefined;
-    }
-    session.lastActiveAt = new Date().toISOString();
-    await writeStore(store);
+    writeSessionRowSqlite(db, session);
     log.session.info('session record updated (conditional)', { sessionId: claudeSessionId, fields: Object.keys(updates) });
     return session;
   });
@@ -639,14 +683,17 @@ export async function renameSessionId(
   newClaudeSessionId: string,
   updates?: Partial<Omit<SessionRecord, 'claudeSessionId'>>,
 ): Promise<SessionRecord | null> {
+  await ensureSessionInit();
   return withWriteLock(async () => {
-    const store = await readStore();
-    const session = store.sessions.find((s) => s.claudeSessionId === oldClaudeSessionId);
-    if (!session) return null;
+    const db = getDb();
+    if (!db) {
+      throw new Error('renameSessionId: SQLite handle is null');
+    }
+    const oldRow = db.prepare('SELECT * FROM sessions WHERE claude_session_id = ?').get(oldClaudeSessionId) as
+      | Record<string, any> | undefined;
+    if (!oldRow) return null;
 
-    // Guard: if the new ID already exists on a different record, don't corrupt the store.
-    // This would indicate a Claude CLI bug (two different sessions given the same ID).
-    const conflict = store.sessions.find((s) => s.claudeSessionId === newClaudeSessionId && s !== session);
+    const conflict = db.prepare('SELECT 1 FROM sessions WHERE claude_session_id = ?').get(newClaudeSessionId);
     if (conflict) {
       log.session.warn('renameSessionId: new ID already exists, skipping rename to avoid collision', {
         oldId: oldClaudeSessionId, newId: newClaudeSessionId,
@@ -654,10 +701,27 @@ export async function renameSessionId(
       return null;
     }
 
+    const session = rowToSession(oldRow);
     session.claudeSessionId = newClaudeSessionId;
     if (updates) Object.assign(session, updates);
     session.lastActiveAt = new Date().toISOString();
-    await writeStore(store);
+
+    // Delete old PK + insert under new PK in one transaction so a crash mid-rename
+    // can't leave both rows orphaned. INSERT OR REPLACE with the new PK won't
+    // clean up the old row on its own.
+    sessionDbTx((handle) => {
+      handle.prepare('DELETE FROM sessions WHERE claude_session_id = ?').run(oldClaudeSessionId);
+      const insertCols = [...SESSION_COLUMNS, 'payload'];
+      const insertSql =
+        'INSERT OR REPLACE INTO sessions (' + insertCols.join(', ') + ') VALUES (' +
+        insertCols.map((c) => '@' + c).join(', ') + ')';
+      const partial = sessionToRow(session);
+      const bound: Record<string, unknown> = {};
+      for (const col of insertCols) {
+        bound[col] = partial[col] === undefined ? null : partial[col];
+      }
+      handle.prepare(insertSql).run(bound);
+    });
     log.session.info('session ID renamed', { oldId: oldClaudeSessionId, newId: newClaudeSessionId });
     return session;
   });
@@ -678,32 +742,50 @@ export async function linkSessionToTask(claudeSessionId: string, taskId: string)
  */
 export async function completeTaskSessions(sessionIds: string[]): Promise<number> {
   if (!sessionIds.length) return 0;
+  await ensureSessionInit();
   return withWriteLock(async () => {
-    const store = await readStore();
+    const db = getDb();
+    if (!db) {
+      throw new Error('completeTaskSessions: SQLite handle is null');
+    }
     const now = new Date().toISOString();
     let updated = 0;
     const pidsToKill: number[] = [];
-    for (const sid of sessionIds) {
-      const session = store.sessions.find((s) => s.claudeSessionId === sid);
-      if (!session) continue;
-      if (isTerminalSession(session)) continue;
-      // Collect PIDs to kill (CLI sessions only — embedded/SDK have no OS process)
-      if (session.pid != null && session.provider !== 'embedded' && session.provider !== 'sdk') {
-        pidsToKill.push(session.pid);
+
+    const insertCols = [...SESSION_COLUMNS, 'payload'];
+    const insertSql =
+      'INSERT OR REPLACE INTO sessions (' + insertCols.join(', ') + ') VALUES (' +
+      insertCols.map((c) => '@' + c).join(', ') + ')';
+
+    sessionDbTx((handle) => {
+      const sel = handle.prepare('SELECT * FROM sessions WHERE claude_session_id = ?');
+      const ins = handle.prepare(insertSql);
+      for (const sid of sessionIds) {
+        const row = sel.get(sid) as Record<string, any> | undefined;
+        if (!row) continue;
+        const session = rowToSession(row);
+        if (isTerminalSession(session)) continue;
+        if (session.pid != null && session.provider !== 'embedded' && session.provider !== 'sdk') {
+          pidsToKill.push(session.pid);
+        }
+        session.process_status = 'stopped';
+        if (session.pid != null) {
+          log.session.info('clearing stale PID on task completion', { sessionId: sid, pid: session.pid });
+        }
+        session.pid = undefined;
+        session.last_status_change = now;
+        session.lastActiveAt = now;
+        const partial = sessionToRow(session);
+        const bound: Record<string, unknown> = {};
+        for (const col of insertCols) {
+          bound[col] = partial[col] === undefined ? null : partial[col];
+        }
+        ins.run(bound);
+        updated++;
       }
-      session.process_status = 'stopped';
-      if (session.pid != null) {
-        log.session.info('clearing stale PID on task completion', { sessionId: sid, pid: session.pid });
-      }
-      session.pid = undefined;
-      session.last_status_change = now;
-      session.lastActiveAt = now;
-      updated++;
-    }
+    });
     if (updated > 0) {
-      await writeStore(store);
       log.session.info('completing task sessions', { sessionIds: sessionIds.join(','), count: updated });
-      // Best-effort kill orphaned processes outside the write lock
       for (const pid of pidsToKill) {
         try { process.kill(pid, 'SIGINT'); } catch { /* already dead */ }
       }
@@ -717,50 +799,23 @@ export async function completeTaskSessions(sessionIds: string[]): Promise<number
  * Returns the number of records removed.
  */
 export async function deleteSessionRecords(ids: Set<string>): Promise<number> {
+  if (ids.size === 0) return 0;
+  await ensureSessionInit();
   return withWriteLock(async () => {
-    const store = await readStore();
-    const before = store.sessions.length;
-    store.sessions = store.sessions.filter(s => !ids.has(s.claudeSessionId));
-    const removed = before - store.sessions.length;
-    if (removed > 0) await writeStore(store);
+    const db = getDb();
+    if (!db) {
+      throw new Error('deleteSessionRecords: SQLite handle is null');
+    }
+    let removed = 0;
+    sessionDbTx((handle) => {
+      const del = handle.prepare('DELETE FROM sessions WHERE claude_session_id = ?');
+      for (const id of ids) {
+        const res = del.run(id);
+        removed += res.changes;
+      }
+    });
     return removed;
   });
-}
-
-/**
- * Check if a task's session slot is occupied by a non-terminal session.
- * Returns the SessionRecord if occupied, null if the slot is free.
- */
-export async function getSlotSession(
-  task: Task,
-  slot: 'plan' | 'exec',
-): Promise<SessionRecord | null> {
-  const sessionId = slot === 'plan' ? task.plan_session_id : task.exec_session_id;
-  if (!sessionId) return null;
-  const rec = await getSessionByClaudeId(sessionId);
-  // Slot is empty if the session no longer exists, has been archived, or has reached terminal state.
-  if (!rec || rec.archived || isTerminalSession(rec)) return null;
-  return rec;
-}
-
-/**
- * Get the active (alive) session for a task using the new 1-slot model.
- * Falls back to exec_session_id / plan_session_id for backward compat during migration.
- * Returns the session record if found and process is alive (running or idle), else null.
- */
-export async function getActiveSession(task: Task): Promise<SessionRecord | null> {
-  // Try new single slot first
-  const candidates = [
-    task.session_id,
-    task.exec_session_id,
-    task.plan_session_id,
-  ].filter(Boolean) as string[];
-
-  for (const sessionId of candidates) {
-    const rec = await getSessionByClaudeId(sessionId);
-    if (rec && !rec.archived && rec.process_status !== 'stopped' && rec.process_status !== 'error') return rec;
-  }
-  return null;
 }
 
 /**

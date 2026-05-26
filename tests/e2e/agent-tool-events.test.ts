@@ -23,7 +23,7 @@ import { _resetForTesting } from '../../src/core/task-manager.js';
 
 /** Pre-create a category so strict validation passes for subsequent task creation. */
 async function ensureCategory(name: string, source = 'ms-todo') {
-  await executeTool('create_task', { type: 'category', name, source });
+  await executeTool('task_create', { type: 'category', name, source });
 }
 
 // ── Helpers ──
@@ -94,7 +94,7 @@ describe('Agent tool → WS event E2E', () => {
     const eventPromise = waitForWsEvent(ws, 'task:created');
 
     await ensureCategory('Work');
-    await executeTool('create_task', { title: 'Agent-created task', category: 'Work' });
+    await executeTool('task_create', { title: 'Agent-created task', category: 'Work' });
 
     const frame = await eventPromise;
     expect(frame.name).toBe('task:created');
@@ -105,13 +105,13 @@ describe('Agent tool → WS event E2E', () => {
   });
 
   it('update_task with phase AGENT_COMPLETE emits task:updated to WS clients', async () => {
-    const addResult = await executeTool('create_task', { title: 'Complete via agent' });
+    const addResult = await executeTool('task_create', { title: 'Complete via agent' });
     const taskId = extractId(addResult);
 
     const ws = await connectWs();
     const eventPromise = waitForWsEvent(ws, 'task:updated');
 
-    await executeTool('update_task', { id: taskId, phase: 'AGENT_COMPLETE' });
+    await executeTool('task_update', { id: taskId, phase: 'AGENT_COMPLETE' });
 
     const frame = await eventPromise;
     expect(frame.name).toBe('task:updated');
@@ -124,13 +124,13 @@ describe('Agent tool → WS event E2E', () => {
   });
 
   it('update_task tool emits task:updated to WS clients', async () => {
-    const addResult = await executeTool('create_task', { title: 'Update via agent' });
+    const addResult = await executeTool('task_create', { title: 'Update via agent' });
     const taskId = extractId(addResult);
 
     const ws = await connectWs();
     const eventPromise = waitForWsEvent(ws, 'task:updated');
 
-    await executeTool('update_task', { id: taskId, title: 'Updated by agent', priority: 'immediate' });
+    await executeTool('task_update', { id: taskId, title: 'Updated by agent', priority: 'immediate' });
 
     const frame = await eventPromise;
     expect(frame.name).toBe('task:updated');
@@ -141,13 +141,13 @@ describe('Agent tool → WS event E2E', () => {
   });
 
   it('update_task with append_note emits task:updated to WS clients', async () => {
-    const addResult = await executeTool('create_task', { title: 'Note via agent' });
+    const addResult = await executeTool('task_create', { title: 'Note via agent' });
     const taskId = extractId(addResult);
 
     const ws = await connectWs();
     const eventPromise = waitForWsEvent(ws, 'task:updated');
 
-    await executeTool('update_task', { id: taskId, append_note: 'Agent added this note' });
+    await executeTool('task_update', { id: taskId, append_note: 'Agent added this note' });
 
     const frame = await eventPromise;
     expect(frame.name).toBe('task:updated');
@@ -159,12 +159,12 @@ describe('Agent tool → WS event E2E', () => {
 
   it('rename_category tool emits task:updated to WS clients', async () => {
     await ensureCategory('OldCat');
-    await executeTool('create_task', { title: 'Rename test task', category: 'OldCat' });
+    await executeTool('task_create', { title: 'Rename test task', category: 'OldCat' });
 
     const ws = await connectWs();
     const eventPromise = waitForWsEvent(ws, 'task:updated');
 
-    await executeTool('rename_category', { old_category: 'OldCat', new_category: 'NewCat' });
+    await executeTool('task_update', { type: 'category', old_name: 'OldCat', new_name: 'NewCat' });
 
     const frame = await eventPromise;
     expect(frame.name).toBe('task:updated');
@@ -178,12 +178,12 @@ describe('Agent tool → WS event E2E', () => {
 
   it('rename_category event has no task field (bulk operation)', async () => {
     await ensureCategory('BulkOld');
-    await executeTool('create_task', { title: 'Bulk test', category: 'BulkOld' });
+    await executeTool('task_create', { title: 'Bulk test', category: 'BulkOld' });
 
     const ws = await connectWs();
     const eventPromise = waitForWsEvent(ws, 'task:updated');
 
-    await executeTool('rename_category', { old_category: 'BulkOld', new_category: 'BulkNew' });
+    await executeTool('task_update', { type: 'category', old_name: 'BulkOld', new_name: 'BulkNew' });
 
     const frame = await eventPromise;
     // The rename payload does NOT contain a `task` field — the frontend
@@ -202,7 +202,7 @@ describe('Agent tool → WS event E2E', () => {
     const event1 = waitForWsEvent(ws1, 'task:created');
     const event2 = waitForWsEvent(ws2, 'task:created');
 
-    await executeTool('create_task', { title: 'Multi-client agent test' });
+    await executeTool('task_create', { title: 'Multi-client agent test' });
 
     const [frame1, frame2] = await Promise.all([event1, event2]);
     expect(frame1.name).toBe('task:created');
@@ -217,7 +217,7 @@ describe('Agent tool → WS event E2E', () => {
 
   it('agent-created task is persisted and visible via REST', async () => {
     await ensureCategory('TestCat');
-    const addResult = await executeTool('create_task', { title: 'Persist check', category: 'TestCat', priority: 'immediate' });
+    const addResult = await executeTool('task_create', { title: 'Persist check', category: 'TestCat', priority: 'immediate' });
     const taskId = extractId(addResult);
 
     const res = await fetch(`http://localhost:${port}/api/tasks/${taskId}`);

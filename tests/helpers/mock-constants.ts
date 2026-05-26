@@ -76,5 +76,10 @@ export function createMockConstants(prefix = 'walnut-test') {
     COMMANDS_DIR: path.join(tmpBase, 'commands'),
     BUILTIN_COMMANDS_DIR: path.join(tmpBase, 'data', 'slash-commands'),
     DAEMON_BINARIES_DIR: REAL_DAEMON_BINARIES_DIR,
+    TOPICS_DIR: path.join(tmpBase, 'memory', 'topics'),
+    COMPACTION_DIR: path.join(tmpBase, 'memory', 'compaction'),
+    MEMORY_INDEX_FILE: path.join(tmpBase, 'memory', 'index.md'),
+    WORKING_MEMORY_FILE: path.join(tmpBase, 'memory', 'working-memory.md'),
+    RECORDINGS_DIR: path.join(tmpBase, 'recordings'),
   };
 }

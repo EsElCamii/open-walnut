@@ -1,8 +1,8 @@
 /**
- * files_glob and files_grep — file search tools.
+ * file_glob and file_grep — file search tools.
  *
- * files_glob: Find files by glob pattern (wraps Node's fs.globSync).
- * files_grep: Search file contents by regex with optional context lines.
+ * file_glob: Find files by glob pattern (wraps Node's fs.globSync).
+ * file_grep: Search file contents by regex with optional context lines.
  */
 import { globSync, readFileSync, statSync } from 'node:fs';
 import path from 'node:path';
@@ -42,7 +42,7 @@ function shouldSkipPath(filePath: string): boolean {
   return parts.some((p) => SKIP_DIRS.has(p));
 }
 
-// ── files_glob ──
+// ── file_glob ──
 
 export interface GlobResult {
   matches: string[];
@@ -80,7 +80,7 @@ export function filesGlob(pattern: string, basePath?: string): GlobResult {
   return { matches, count: matches.length, truncated };
 }
 
-// ── files_grep ──
+// ── file_grep ──
 
 export interface GrepMatchContent {
   file: string;

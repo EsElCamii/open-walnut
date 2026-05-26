@@ -47,7 +47,7 @@ describe('buildDisplayBlocks', () => {
       {
         role: 'assistant',
         content: [
-          { type: 'tool_use', id: 'tu_1', name: 'search', input: { query: 'cats' } },
+          { type: 'tool_use', id: 'tu_1', name: 'task_search', input: { query: 'cats' } },
         ],
       },
       {
@@ -66,7 +66,7 @@ describe('buildDisplayBlocks', () => {
     expect(blocks).toHaveLength(2);
     expect(blocks[0]).toMatchObject({
       type: 'tool_call',
-      name: 'search',
+      name: 'task_search',
       status: 'done',
       result: 'Found 3 results',
     });
@@ -81,7 +81,7 @@ describe('buildDisplayBlocks', () => {
         role: 'assistant',
         content: [
           { type: 'text', text: 'Updating...' },
-          { type: 'tool_use', id: 'tu_1', name: 'query_tasks', input: {} },
+          { type: 'tool_use', id: 'tu_1', name: 'task_query', input: {} },
         ],
       },
       {
@@ -93,7 +93,7 @@ describe('buildDisplayBlocks', () => {
       {
         role: 'assistant',
         content: [
-          { type: 'tool_use', id: 'tu_2', name: 'update_task', input: { id: 'task1', status: 'done' } },
+          { type: 'tool_use', id: 'tu_2', name: 'task_update', input: { id: 'task1', status: 'done' } },
         ],
       },
       {
@@ -111,8 +111,8 @@ describe('buildDisplayBlocks', () => {
     const blocks = buildDisplayBlocks(msgs);
     expect(blocks).toHaveLength(4);
     expect(blocks[0]).toEqual({ type: 'text', content: 'Updating...' });
-    expect(blocks[1]).toMatchObject({ type: 'tool_call', name: 'query_tasks', result: '[task1, task2]' });
-    expect(blocks[2]).toMatchObject({ type: 'tool_call', name: 'update_task', result: 'Updated' });
+    expect(blocks[1]).toMatchObject({ type: 'tool_call', name: 'task_query', result: '[task1, task2]' });
+    expect(blocks[2]).toMatchObject({ type: 'tool_call', name: 'task_update', result: 'Updated' });
     expect(blocks[3]).toEqual({ type: 'text', content: 'All done!' });
   });
 
@@ -125,7 +125,7 @@ describe('buildDisplayBlocks', () => {
       {
         role: 'assistant',
         content: [
-          { type: 'tool_use', id: 'tu_1', name: 'read_file', input: { path: longInput } },
+          { type: 'tool_use', id: 'tu_1', name: 'file_read', input: { path: longInput } },
         ],
       },
       {

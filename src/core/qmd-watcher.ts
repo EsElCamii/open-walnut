@@ -7,11 +7,16 @@ import { MEMORY_DIR, WALNUT_HOME, NOTES_DIR } from '../constants.js';
 import { getMemoryStore, getNotesStore } from './qmd-store.js';
 import { log } from '../logging/index.js';
 
-function debounce(fn: () => void, ms: number): () => void {
+function debounce(fn: () => void, ms: number): { call: () => void; cancel: () => void } {
   let timer: ReturnType<typeof setTimeout> | null = null;
-  return () => {
-    if (timer) clearTimeout(timer);
-    timer = setTimeout(fn, ms);
+  return {
+    call() {
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(fn, ms);
+    },
+    cancel() {
+      if (timer) { clearTimeout(timer); timer = null; }
+    },
   };
 }
 
@@ -48,7 +53,7 @@ export function startQmdWatcher(): { stop: () => void } {
     if (fs.existsSync(MEMORY_DIR)) {
       watchers.push(fs.watch(MEMORY_DIR, { recursive: true }, (_event, filename) => {
         if (filename && filename.endsWith('.md')) {
-          scheduleMemoryUpdate();
+          scheduleMemoryUpdate.call();
           notifyGitVersioning(filename);
         }
       }));
@@ -56,20 +61,22 @@ export function startQmdWatcher(): { stop: () => void } {
     if (fs.existsSync(WALNUT_HOME)) {
       watchers.push(fs.watch(WALNUT_HOME, (_event, filename) => {
         if (filename === 'MEMORY.md') {
-          scheduleMemoryUpdate();
+          scheduleMemoryUpdate.call();
           notifyGitVersioning(filename);
         }
       }));
     }
     if (fs.existsSync(NOTES_DIR)) {
       watchers.push(fs.watch(NOTES_DIR, { recursive: true }, (_event, filename) => {
-        if (filename && filename.endsWith('.md')) scheduleNotesUpdate();
+        if (filename && filename.endsWith('.md')) scheduleNotesUpdate.call();
       }));
     }
   } catch { /* graceful */ }
 
   return {
     stop() {
+      scheduleMemoryUpdate.cancel();
+      scheduleNotesUpdate.cancel();
       for (const w of watchers) { try { w.close(); } catch {} }
       watchers.length = 0;
     },

@@ -1,8 +1,8 @@
 /**
- * Session Reaper — periodic cleanup of short-lived session records.
+ * Session Reaper — periodic cleanup of environment session records.
  *
- * Runs every hour. For sessions with type ∈ {triage, hook, cron} that are
- * in a terminal state and older than RETENTION_MS:
+ * Runs every hour. For environment sessions (triage, hook, cron, embedded subagent)
+ * that are in a terminal state and older than RETENTION_MS:
  *   1. Archive record → append to sessions-archive-{YYYY-MM}.jsonl
  *   2. Archive conversation → mv stream file to archive/streams/
  *   3. Remove from sessions.json
@@ -13,7 +13,8 @@ import fs from 'node:fs/promises'
 import path from 'node:path'
 import { log } from '../logging/index.js'
 import { SESSION_STREAMS_DIR } from '../constants.js'
-import type { SessionRecord, SessionType } from './types.js'
+import type { SessionRecord } from './types.js'
+import { isEnvironmentSession } from './session-tracker.js'
 
 const REAP_INTERVAL_MS = 60 * 60 * 1000          // every hour
 const INITIAL_DELAY_MS = 60 * 1000               // 60s after server start
@@ -24,13 +25,8 @@ const ARCHIVE_TTL_MS = 180 * 24 * 3600_000       // archive kept 180 days
 const ARCHIVE_DIR = path.join(path.dirname(SESSION_STREAMS_DIR), 'archive')
 const ARCHIVE_STREAMS_DIR = path.join(ARCHIVE_DIR, 'streams')
 
-/**
- * Session types eligible for automatic reaping. These are high-volume, short-lived,
- * and not user-visible in the session UI.
- * - `interactive` and `subagent` are excluded: they're user-visible and may be resumed.
- * - `hook` and `cron` are reserved for future use (not yet assigned at creation time).
- */
-const REAPABLE_TYPES: ReadonlySet<SessionType> = new Set(['triage', 'hook', 'cron'])
+// Reapable sessions are determined by isEnvironmentSession() — all system-created
+// background sessions (triage, hook, cron, embedded subagent) are eligible.
 
 /** Get the relevant timestamp for a session (for age comparison and month grouping). */
 function sessionTimestamp(s: SessionRecord): string | undefined {
@@ -85,7 +81,7 @@ export class SessionReaper {
 
     // Find reapable sessions
     const toReap = sessions.filter(s => {
-      if (!s.type || !REAPABLE_TYPES.has(s.type)) return false
+      if (!isEnvironmentSession(s)) return false
       if (s.process_status !== 'stopped' && s.process_status !== 'error') return false
       const ts = sessionTimestamp(s)
       return ts ? new Date(ts).getTime() < cutoff : false

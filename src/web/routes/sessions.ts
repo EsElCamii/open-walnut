@@ -4,7 +4,7 @@
 
 import { Router, type Request, type Response, type NextFunction } from 'express'
 import { log } from '../../logging/index.js'
-import { listSessions, getRecentSessions, getSessionSummaries, getSessionsForTask, getSessionByClaudeId, updateSessionRecord, isTriageSession } from '../../core/session-tracker.js'
+import { listSessions, getRecentSessions, getSessionSummaries, getSessionsForTask, getSessionByClaudeId, updateSessionRecord, isTriageSession, isEnvironmentSession } from '../../core/session-tracker.js'
 import { readSessionHistory, readSingleSubagentHistory, extractPlanContent, rewriteHistoryRemoteImages } from '../../core/session-history.js'
 import { listTasks, getTask, addTask, updateTask, togglePin, setFocusTier } from '../../core/task-manager.js'
 import { getConfig } from '../../core/config-manager.js'
@@ -13,6 +13,8 @@ import fsp from 'node:fs/promises'
 import path from 'path'
 import { isSessionProcessAlive } from '../../utils/session-liveness.js'
 import { readPlanFromSession, buildPlanExecutionMessage } from '../../utils/plan-message.js'
+import { injectCompactBoundary, buildCompactSummary } from '../../utils/compact-inject.js'
+import { findLocalJsonlPath } from '../../core/session-file-reader.js'
 import { getFrequentDirs, compileFromSessions } from '../../core/frequent-dirs.js'
 import type { SessionRecord, Task } from '../../core/types.js'
 import type { SessionHistoryMessage } from '../../core/session-history.js'
@@ -331,11 +333,10 @@ sessionsRouter.get('/list-dirs', async (req: Request, res: Response, next: NextF
 // POST /api/sessions/quick-start — create task + start session in one step
 sessionsRouter.post('/quick-start', async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const { cwd, host, message, category, model, mode, images, taskId: existingTaskId, taskMeta } = req.body as {
+    const { cwd, host, message, model, mode, images, taskId: existingTaskId, taskMeta } = req.body as {
       cwd: string
       host?: string
       message: string
-      category?: string
       model?: string
       mode?: string
       images?: ImagePayload[]
@@ -420,8 +421,6 @@ sessionsRouter.post('/quick-start', async (req: Request, res: Response, next: Ne
     // Quick Start tasks always go to the built-in 'Local' category (source=local,
     // hard-reserved via config.local.categories so no sync plugin can claim it).
     // The session AI will move the task to the correct category/project after completion.
-    // Fixes the duplicate-task bug where Inbox's polluted storeCatSource flipped
-    // source=local to source=ms-todo, causing a round-trip that recreated orphans.
     const taskCategory = 'Local'
 
     let updatedTask: Task
@@ -454,6 +453,7 @@ sessionsRouter.post('/quick-start', async (req: Request, res: Response, next: Ne
         title,
         category: taskCategory,
         project: 'Quick Start',
+        source: 'local',
       })
       // Merge taskMeta into initial update; `starred` defaults to true for quick-start.
       const updates: Partial<Task> = {
@@ -499,8 +499,8 @@ sessionsRouter.post('/quick-start', async (req: Request, res: Response, next: Ne
     const appendSystemPrompt = [
       '<quick_start_task>',
       'This task was created via Quick Start in Local / Quick Start. When your work is complete:',
-      '1. Update the task title to be descriptive (replace the generic "Session: ..." title) using update_task',
-      '2. Move the task to the correct category and project using update_task (category + project fields)',
+      '1. Update the task title to be descriptive (replace the generic "Session: ..." title) using task_update',
+      '2. Move the task to the correct category and project using task_update (category + project fields)',
       '</quick_start_task>',
     ].join('\n')
 
@@ -545,9 +545,9 @@ sessionsRouter.get('/tree', async (req: Request, res: Response, next: NextFuncti
     }
 
     for (const s of sessions) {
-      // Triage subagent runs are high-volume housekeeping — exclude from session tree.
-      // Non-triage embedded sessions (e.g. general agent) are shown.
-      if (isTriageSession(s)) continue
+      // Environment sessions (triage, hook, cron, embedded subagent) are system housekeeping —
+      // exclude from session tree. Non-embedded subagent sessions (user-created) are shown.
+      if (isEnvironmentSession(s)) continue
       if (s.archived) continue
       // hideCompleted now uses task.phase (checked at display layer) — sessions no longer carry work_status
       if (!s.taskId || !taskMap.has(s.taskId)) {
@@ -617,7 +617,7 @@ sessionsRouter.get('/tree', async (req: Request, res: Response, next: NextFuncti
 sessionsRouter.get('/', async (_req: Request, res: Response, next: NextFunction) => {
   try {
     const all = await listSessions()
-    const sessions = all.filter(s => !isTriageSession(s) && !s.archived)
+    const sessions = all.filter(s => !isEnvironmentSession(s) && !s.archived)
     res.json({ sessions: await enrichWithHostnames(await enrichWithLiveStatus(sessions)) })
   } catch (err) {
     next(err)
@@ -629,7 +629,7 @@ sessionsRouter.get('/recent', async (req: Request, res: Response, next: NextFunc
   try {
     const limit = req.query.limit ? parseInt(req.query.limit as string, 10) : 10
     const all = await getRecentSessions(limit)
-    const sessions = all.filter(s => !isTriageSession(s) && !s.archived)
+    const sessions = all.filter(s => !isEnvironmentSession(s) && !s.archived)
     res.json({ sessions: await enrichWithHostnames(await enrichWithLiveStatus(sessions)) })
   } catch (err) {
     next(err)
@@ -657,8 +657,8 @@ sessionsRouter.get('/task/:taskId', async (req: Request, res: Response, next: Ne
       taskId = task.id
     } catch { /* task not found — use raw param as-is */ }
     const all = await getSessionsForTask(taskId)
-    // Exclude triage subagent runs (archived sessions kept — frontend needs them for collapsed section)
-    const sessions = all.filter(s => !isTriageSession(s))
+    // Exclude environment sessions (archived sessions kept — frontend needs them for collapsed section)
+    const sessions = all.filter(s => !isEnvironmentSession(s))
     res.json({ sessions: await enrichWithHostnames(await enrichWithLiveStatus(sessions)) })
   } catch (err) {
     next(err)
@@ -674,7 +674,12 @@ sessionsRouter.get('/:sessionId', async (req: Request, res: Response, next: Next
       return
     }
     const [enriched] = await enrichWithHostnames(await enrichWithLiveStatus([session]))
-    res.json({ session: enriched })
+    // Include live pending permissions from the in-memory session (if running)
+    const liveSession = sessionRunner.findByClaudeId(String(req.params.sessionId))
+    const pendingPermissions = liveSession?.hasPendingPermission
+      ? liveSession.getPendingPermissionRequests()
+      : []
+    res.json({ session: enriched, pendingPermissions })
   } catch (err) {
     next(err)
   }
@@ -830,7 +835,15 @@ sessionsRouter.get('/:sessionId/history', async (req: Request, res: Response, ne
     if (source === 'streams') {
       // Fast path: host=undefined forces local-only reads (canonical JSONL + streams fallback).
       // Skips SSH entirely. For local sessions this returns full data (~1ms).
-      // For remote sessions this returns empty (they have no local files).
+      //
+      // Remote sessions have no local streams file — readSessionHistory would still
+      // walk the local filesystem and return empty. Short-circuit before even calling
+      // it so the hook's Phase 1 doesn't waste an event loop tick (and doesn't race
+      // with the Phase 2 SSH round-trip).
+      if (record?.host) {
+        res.json({ messages: [], total: 0 })
+        return
+      }
       // skipSubagents: frontend lazy-loads each subagent via /subagent/:agentId/history on demand
       const messages = await readSessionHistory(sessionId, cwd, undefined, record?.outputFile, { skipSubagents: true })
       logMessageOrdering('P1:streams', sessionId, messages, record?.host)
@@ -1062,6 +1075,122 @@ sessionsRouter.post('/:sessionId/permission', async (req: Request, res: Response
       return
     }
     res.json({ status: 'resolved', requestId, allow })
+  } catch (err) {
+    next(err)
+  }
+})
+
+// POST /api/sessions/:sessionId/execute-compact — execute plan by injecting compact boundary
+// into the SAME session (clears plan conversation but preserves session ID, slug, and plan file).
+// This avoids the "new session loses codebase context" problem while clearing the 200+ plan messages.
+sessionsRouter.post('/:sessionId/execute-compact', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const planSessionId = req.params.sessionId as string
+    const { task_id, working_directory, instructions, mode, host } = req.body as {
+      task_id?: string
+      working_directory?: string
+      instructions?: string
+      mode?: string
+      host?: string
+    }
+
+    const sourceRecord = await getSessionByClaudeId(planSessionId)
+    if (!sourceRecord) {
+      res.status(404).json({ error: 'Session not found' })
+      return
+    }
+
+    // Follow one hop to the source plan session
+    let actualPlanSessionId = planSessionId
+    if (sourceRecord.fromPlanSessionId && !sourceRecord.planCompleted) {
+      actualPlanSessionId = sourceRecord.fromPlanSessionId
+    }
+
+    // Read plan content
+    let planResult = await readPlanFromSession(actualPlanSessionId)
+    if ('error' in planResult) {
+      const planRecord = actualPlanSessionId !== planSessionId
+        ? await getSessionByClaudeId(actualPlanSessionId)
+        : sourceRecord
+      if (planRecord) {
+        const extracted = await extractPlanContent(actualPlanSessionId, planRecord.cwd, planRecord.host)
+        if (extracted?.trim()) {
+          planResult = { content: extracted, planFile: planRecord.planFile ?? `(extracted from session ${actualPlanSessionId} JSONL)` }
+        }
+      }
+    }
+    if ('error' in planResult) {
+      const status = planResult.error.includes('not found') ? 404 : 400
+      res.status(status).json({ error: planResult.error })
+      return
+    }
+
+    const taskId = task_id ?? sourceRecord?.taskId
+    const cwd = working_directory ?? sourceRecord?.cwd
+    if (!cwd) {
+      res.status(400).json({ error: 'working_directory is required' })
+      return
+    }
+
+    const validModes = ['bypass', 'accept', 'default', 'plan']
+    if (mode && !validModes.includes(mode)) {
+      res.status(400).json({ error: `Invalid mode: ${mode}. Must be one of: ${validModes.join(', ')}` })
+      return
+    }
+    const execMode = (mode ?? 'bypass') as 'bypass' | 'accept' | 'default' | 'plan'
+
+    // ── Find the session's JSONL file ──
+    const jsonlPath = await findLocalJsonlPath(actualPlanSessionId, cwd)
+    if (!jsonlPath) {
+      log.web.warn('execute-compact: JSONL not found, use /execute instead', { planSessionId: actualPlanSessionId, cwd })
+      res.status(400).json({ error: 'Could not find session JSONL file. Use /execute instead.' })
+      return
+    }
+
+    // ── Stop the session process if alive (must stop before JSONL injection) ──
+    if (sourceRecord.process_status !== 'stopped') {
+      log.web.info('execute-compact: stopping session process before injection', { planSessionId: actualPlanSessionId })
+      const liveSession = sessionRunner.findByClaudeId(actualPlanSessionId)
+      if (liveSession) {
+        liveSession.interrupt()
+        await new Promise(resolve => setTimeout(resolve, 1000))
+      }
+    }
+
+    // ── Inject compact boundary + plan summary into JSONL ──
+    const summary = buildCompactSummary(planResult.content, planResult.planFile)
+    const injectResult = await injectCompactBoundary(jsonlPath, summary)
+    if (!injectResult) {
+      res.status(500).json({ error: 'Failed to inject compact boundary into session JSONL' })
+      return
+    }
+
+    // ── Update session mode and send execute message ──
+    await updateSessionRecord(actualPlanSessionId, { mode: execMode })
+
+    const planMessage = buildPlanExecutionMessage(planResult.planFile, planResult.content, instructions)
+    const { sendMessageToSession } = await import('../../core/session-message-queue.js')
+    await sendMessageToSession(actualPlanSessionId, planMessage, {
+      source: 'web-api',
+      taskId,
+      mode: execMode,
+    })
+
+    log.web.info('execute-compact: injected boundary and sent execute message', {
+      sessionId: actualPlanSessionId,
+      boundaryUuid: injectResult.boundaryUuid,
+      planFile: planResult.planFile,
+    })
+
+    res.json({
+      status: 'started',
+      sessionId: actualPlanSessionId,
+      strategy: 'compact',
+      planSessionId: actualPlanSessionId,
+      taskId,
+      mode: execMode,
+      boundaryUuid: injectResult.boundaryUuid,
+    })
   } catch (err) {
     next(err)
   }
@@ -1318,63 +1447,137 @@ sessionsRouter.post('/:sessionId/retry', async (req: Request, res: Response, nex
   }
 })
 
-// POST /api/sessions/:sessionId/restart — kill process, archive, start fresh with same prompt
+// POST /api/sessions/:sessionId/restart — kill the current CLI and immediately resume.
+//
+// Flow:
+//   1. Kill the running CLI (SessionManager.kill if registered, otherwise SIGTERM to process group).
+//   2. Revert any 'processing' messages in the queue back to 'pending' — they were stuck mid-send.
+//   3. Reset session record to idle.
+//   4. Emit SESSION_SEND to trigger processNext, which spawns a fresh `claude -p --resume` and
+//      drains the pending queue. If queue is empty, we skip step 4 (no message means no CLI work,
+//      which matches Claude CLI semantics — `claude -p --resume` without stdin input is a no-op).
+//
+// All log statements prefixed "session restart:" so the full path is greppable when the
+// UX appears unresponsive.
 sessionsRouter.post('/:sessionId/restart', async (req: Request, res: Response, next: NextFunction) => {
+  const sessionId = req.params.sessionId as string
+  const startedAt = Date.now()
+  log.web.info('session restart: request received', { sessionId })
   try {
-    const sessionId = req.params.sessionId as string
     const record = await getSessionByClaudeId(sessionId)
-    if (!record) { res.status(404).json({ error: 'Session not found' }); return }
-    if (!record.taskId) { res.status(400).json({ error: 'Session has no associated task' }); return }
+    if (!record) {
+      log.web.warn('session restart: session not found', { sessionId })
+      res.status(404).json({ error: 'Session not found' })
+      return
+    }
 
-    const task = await getTask(record.taskId)
-    if (!task) { res.status(404).json({ error: 'Associated task not found' }); return }
+    log.web.info('session restart: record loaded', {
+      sessionId,
+      recordPid: record.pid,
+      processStatus: record.process_status,
+      host: record.host,
+      isRemote: !!record.host,
+      taskId: record.taskId,
+    })
 
-    // Kill process if alive
+    // Step 1: Kill the running CLI.
     if (record.pid != null) {
       const { isSessionProcessAlive: isAlive } = await import('../../utils/session-liveness.js')
-      if (await isAlive(record)) {
+      const alive = await isAlive(record)
+      log.web.info('session restart: liveness check', { sessionId, pid: record.pid, alive })
+
+      if (alive) {
         const { getRegisteredSessionManager } = await import('../../providers/session-manager.js')
         const mgr = getRegisteredSessionManager(sessionId)
         if (mgr) {
+          log.web.info('session restart: killing via SessionManager', { sessionId, pid: record.pid, managerKind: mgr.constructor.name })
           mgr.kill()
         } else {
-          try { process.kill(-record.pid, 'SIGTERM') } catch { /* already dead */ }
+          log.web.info('session restart: killing via process.kill (no manager registered)', { sessionId, pid: record.pid })
+          try {
+            process.kill(-record.pid, 'SIGTERM')
+            log.web.info('session restart: SIGTERM sent to process group', { sessionId, pgid: record.pid })
+          } catch (err) {
+            log.web.warn('session restart: process.kill failed (likely already dead)', {
+              sessionId, pid: record.pid,
+              error: err instanceof Error ? err.message : String(err),
+            })
+          }
         }
+      } else {
+        log.web.info('session restart: CLI already dead, skipping kill', { sessionId, pid: record.pid })
       }
+    } else {
+      log.web.info('session restart: no pid in record, nothing to kill', { sessionId })
     }
 
-    // Archive old session + clear task slot
-    await updateSessionRecord(sessionId, { archived: true, archive_reason: 'restart' })
-    try {
-      const { clearSession, clearSessionSlot } = await import('../../core/task-manager.js')
-      await clearSession(task.id, sessionId)
-      await clearSessionSlot(task.id, sessionId)
-    } catch { /* task may not exist */ }
-
-    // Recover original prompt from JSONL history
-    let restartMessage = 'Restart session'
-    try {
-      const messages = await readSessionHistory(sessionId, record.cwd, record.host, record.outputFile)
-      const firstUser = messages.find(m => m.role === 'user')
-      if (firstUser?.text) restartMessage = firstUser.text
-    } catch { /* history may be unavailable */ }
-
-    // Start new session with same task + mode + model
-    bus.emit(EventNames.SESSION_START, {
-      taskId: task.id,
-      message: restartMessage,
-      cwd: record.cwd,
-      project: task.project ?? '',
-      mode: record.mode !== 'default' ? record.mode : undefined,
-      model: record.model,
-      host: record.host,
-    }, ['session-runner'], { source: 'restart' })
-
-    log.web.info('session restart: killed + archived + started new', {
-      oldSessionId: sessionId, taskId: task.id,
+    // Step 2: Revert any in-flight 'processing' messages back to 'pending' so they get
+    // re-sent to the new CLI. A message stuck in 'processing' means the old CLI was
+    // killed mid-send — without revert it would be lost forever.
+    const { getQueue, revertToPending } = await import('../../core/session-message-queue.js')
+    const queue = await getQueue(sessionId)
+    const stuck = queue.filter((m) => m.status === 'processing')
+    log.web.info('session restart: queue state', {
+      sessionId,
+      queueSize: queue.length,
+      pendingCount: queue.filter((m) => m.status === 'pending').length,
+      processingCount: stuck.length,
     })
-    res.json({ status: 'restarting', taskId: task.id, oldSessionId: sessionId })
+    if (stuck.length > 0) {
+      await revertToPending(stuck)
+      log.web.info('session restart: reverted processing → pending', {
+        sessionId,
+        count: stuck.length,
+        messageIds: stuck.map((m) => m.id),
+      })
+    }
+
+    // Step 3: Reset record to idle.
+    await updateSessionRecord(sessionId, {
+      process_status: 'idle',
+      errorMessage: undefined,
+      pid: undefined,
+    })
+    log.web.info('session restart: record reset to idle', { sessionId })
+
+    // Step 4: If there are pending messages, trigger processNext to spawn a fresh CLI.
+    const pendingAfterRevert = stuck.length + queue.filter((m) => m.status === 'pending').length
+    if (pendingAfterRevert > 0) {
+      const { bus, EventNames } = await import('../../core/event-bus.js')
+      // handleSend drains the queue via processNext — message body is unused for the
+      // non-interrupt path (it reads pending messages from the queue). Pass empty string
+      // to avoid confusion in bus event logs.
+      bus.emit(EventNames.SESSION_SEND, {
+        sessionId,
+        taskId: record.taskId,
+        message: '',
+      }, ['session-runner'], { source: 'restart' })
+      log.web.info('session restart: emitted SESSION_SEND to trigger resume', {
+        sessionId,
+        pendingMessages: pendingAfterRevert,
+      })
+    } else {
+      log.web.info('session restart: no pending messages — CLI will stay idle until next user input', { sessionId })
+    }
+
+    log.web.info('session restart: complete', {
+      sessionId,
+      durationMs: Date.now() - startedAt,
+      triggeredResume: pendingAfterRevert > 0,
+    })
+    res.json({
+      status: 'restarted',
+      sessionId,
+      pendingMessages: pendingAfterRevert,
+      resumed: pendingAfterRevert > 0,
+    })
   } catch (err) {
+    log.web.error('session restart: failed', {
+      sessionId,
+      durationMs: Date.now() - startedAt,
+      error: err instanceof Error ? err.message : String(err),
+      stack: err instanceof Error ? err.stack : undefined,
+    })
     next(err)
   }
 })

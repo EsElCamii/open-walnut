@@ -43,7 +43,33 @@ export class DaemonFileReader implements SessionFileReader {
     }
 
     const result = await conn.send('fs.read', { path: remotePath, encoding: 'utf-8' })
-    return result.ok ? result.data as string : null
+    if (result.ok) return result.data as string
+
+    // Distinguish "file doesn't exist" (null) from RPC/transport failure (throw).
+    // The daemon tags ENOENT in the error message (see cmdFsRead). Any other
+    // failure mode means the caller should NOT fall back to glob/find, because
+    // the daemon itself is unhealthy.
+    const errMsg = typeof result.error === 'string' ? result.error : ''
+    if (/ENOENT|no such file/i.test(errMsg)) return null
+    throw new Error('fs.read transport failure: ' + (errMsg || 'unknown'))
+  }
+
+  /**
+   * Stat a remote file via the daemon. Returns mtime/size, null if missing.
+   * Throws on transport/RPC failure (caller should fall back to non-cached path).
+   * Requires the daemon to implement `fs.stat` — old daemons return "unknown
+   * command" which we treat as a transport failure, forcing the caller to
+   * skip the cache and do a full read.
+   */
+  async stat(remotePath: string): Promise<{ mtimeMs: number; size: number } | null> {
+    await this.resolve()
+    const conn = await getDaemonConnection(this.host, this.sshTarget!)
+    const result = await conn.send('fs.stat', { path: remotePath })
+    if (result.ok) {
+      if (!result.exists) return null
+      return { mtimeMs: result.mtimeMs as number, size: result.size as number }
+    }
+    throw new Error('fs.stat failed: ' + (typeof result.error === 'string' ? result.error : 'unknown'))
   }
 
   async listDir(remotePath: string): Promise<string[]> {
@@ -55,9 +81,11 @@ export class DaemonFileReader implements SessionFileReader {
 
   /**
    * Search for a session JSONL file under ~/.claude/projects using fs.find.
-   * Returns the file content if found, null otherwise.
+   * Returns { content, path } if found, null otherwise. Path is the full
+   * remote path where the file was located (useful for caching so we don't
+   * have to search again next time).
    */
-  async findSession(sessionId: string): Promise<string | null> {
+  async findSession(sessionId: string): Promise<{ content: string; path: string } | null> {
     await this.resolve()
     const conn = await getDaemonConnection(this.host, this.sshTarget!)
     const result = await conn.send('fs.find', {
@@ -68,7 +96,7 @@ export class DaemonFileReader implements SessionFileReader {
     if (!result.ok || !(result.files as string[])?.length) return null
     const filePath = (result.files as string[])[0]
     const content = await conn.send('fs.read', { path: filePath, encoding: 'utf-8' })
-    return content.ok ? content.data as string : null
+    return content.ok ? { content: content.data as string, path: filePath } : null
   }
 
   /**

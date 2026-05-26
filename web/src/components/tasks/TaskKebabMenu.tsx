@@ -30,18 +30,24 @@ interface TaskKebabMenuProps {
   onSetTier?: (id: string, tier: FocusTier) => void;
   onOpenSession?: (sessionId: string) => void;
   onSetDate?: (id: string, date: string | null) => void;
+  /** Promote a subtask to top-level (remove parent_task_id). Only shown when task has a parent. */
+  onUnparent?: (id: string) => void;
+  /** Move task up one slot among its siblings. Pass undefined when task is already first. */
+  onMoveUp?: (id: string) => void;
 }
 
 const TIER_OPTIONS: { value: FocusTier; label: string; icon: string }[] = [
   { value: 'focus', label: 'Focus', icon: '●' },
   { value: 'next', label: 'Next', icon: '●' },
   { value: 'satellite', label: 'Satellite', icon: '○' },
+  { value: 'wait', label: 'Wait', icon: '◐' },
 ];
 
 const TIER_COLORS: Record<FocusTier, string> = {
   focus: 'var(--accent)',
   next: '#FF9500',
   satellite: 'var(--fg-muted)',
+  wait: '#8e8e93',
 };
 
 const PRIORITY_OPTIONS: { value: TaskPriority; icon: string; label: string }[] = [
@@ -51,7 +57,7 @@ const PRIORITY_OPTIONS: { value: TaskPriority; icon: string; label: string }[] =
   { value: 'none', icon: '--', label: 'None' },
 ];
 
-export function TaskKebabMenu({ task, isFocused, isDetailOpen, isPinned, pinnedTier, isDone, onExpandDetail, onClearFocus, onSetPriority, onStar, onPinTask, onUnpinTask, onSetTier, onOpenSession, onSetDate }: TaskKebabMenuProps) {
+export function TaskKebabMenu({ task, isFocused, isDetailOpen, isPinned, pinnedTier, isDone, onExpandDetail, onClearFocus, onSetPriority, onStar, onPinTask, onUnpinTask, onSetTier, onOpenSession, onSetDate, onUnparent, onMoveUp }: TaskKebabMenuProps) {
   const integrations = useIntegrations();
   const [open, setOpen] = useState(false);
   const [menuPos, setMenuPos] = useState<{ top: number; right: number } | null>(null);
@@ -69,10 +75,10 @@ export function TaskKebabMenu({ task, isFocused, isDetailOpen, isPinned, pinnedT
     };
     const handleScroll = () => closeMenu();
     document.addEventListener('mousedown', handleClickOutside);
-    window.addEventListener('scroll', handleScroll, true);
+    window.addEventListener('scroll', handleScroll);
     return () => {
       document.removeEventListener('mousedown', handleClickOutside);
-      window.removeEventListener('scroll', handleScroll, true);
+      window.removeEventListener('scroll', handleScroll);
     };
   }, [open, closeMenu]);
 
@@ -138,16 +144,16 @@ export function TaskKebabMenu({ task, isFocused, isDetailOpen, isPinned, pinnedT
 
           {/* Details */}
           <button
-            className={`task-kebab-item${(isDetailOpen ?? isFocused) ? ' task-kebab-item-active' : ''}`}
+            className={`task-kebab-item${isDetailOpen ? ' task-kebab-item-active' : ''}`}
             onClick={(e) => {
               e.stopPropagation();
-              if (isDetailOpen ?? isFocused) onClearFocus?.();
+              if (isDetailOpen) onClearFocus?.();
               else onExpandDetail?.(task);
               closeMenu();
             }}
           >
             <span className="task-kebab-icon">{ICONS.ICON_INFO}</span>
-            <span>{(isDetailOpen ?? isFocused) ? 'Close details' : 'Details'}</span>
+            <span>{isDetailOpen ? 'Close details' : 'Details'}</span>
           </button>
 
           {/* Star */}
@@ -163,6 +169,39 @@ export function TaskKebabMenu({ task, isFocused, isDetailOpen, isPinned, pinnedT
               <span className="task-kebab-icon">{task.starred ? ICONS.ICON_STAR_FILLED : ICONS.ICON_STAR_EMPTY}</span>
               <span>{task.starred ? 'Unstar' : 'Star'}</span>
             </button>
+          )}
+
+          {/* Move actions — hierarchy + order shortcuts (precise alternative to drag) */}
+          {((onUnparent && task.parent_task_id) || onMoveUp) && (
+            <>
+              <div className="task-kebab-divider" />
+              {onUnparent && task.parent_task_id && (
+                <button
+                  className="task-kebab-item"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onUnparent(task.id);
+                    closeMenu();
+                  }}
+                >
+                  <span className="task-kebab-icon">←</span>
+                  <span>Move left</span>
+                </button>
+              )}
+              {onMoveUp && (
+                <button
+                  className="task-kebab-item"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onMoveUp(task.id);
+                    closeMenu();
+                  }}
+                >
+                  <span className="task-kebab-icon">↑</span>
+                  <span>Move up</span>
+                </button>
+              )}
+            </>
           )}
 
           {/* Pin / Tier */}

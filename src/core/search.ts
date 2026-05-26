@@ -1,29 +1,26 @@
-import path from 'node:path';
 import { log } from '../logging/index.js';
 import { listTasks } from './task-manager.js';
-import { listMemories, type MemoryEntry } from './memory.js';
-import type { SearchMode } from './embedding/types.js';
 import type { Task } from './types.js';
 
 export interface SearchResult {
-  type: 'task' | 'memory';
+  type: 'task' | 'memory' | 'session';
   title: string;
   snippet: string;
   path?: string;
   taskId?: string;
+  sessionId?: string;
   parentTaskId?: string;  // populated for child tasks
   isAutoExpanded?: boolean; // true if included because parent matched (not direct hit)
   score: number;        // combined normalized score
-  matchField: string;   // 'semantic' | field name of best keyword match
+  matchField: string;   // field name of best keyword match
   keywordScore?: number;  // normalized BM25 contribution [0,1], undefined if no keyword match
   semanticScore?: number; // normalized cosine contribution [0,1], undefined if no vector match
 }
 
 export interface SearchOptions {
   limit?: number;
-  types?: ('task' | 'memory')[];
+  types?: ('task' | 'memory' | 'session')[];
   category?: string;
-  mode?: SearchMode;
 }
 
 export function extractSnippet(
@@ -120,19 +117,12 @@ function escapeRegex(str: string): string {
   return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
-function recencyBonus(updatedAt: string): number {
-  const now = Date.now();
-  const updated = new Date(updatedAt).getTime();
-  const daysAgo = (now - updated) / (1000 * 60 * 60 * 24);
-  if (daysAgo > 30) return 0;
-  return (30 - daysAgo) * 0.1;
-}
-
-// ── Reciprocal Rank Fusion ──
+// ── Reciprocal Rank Fusion (kept for backward compatibility — used by tests) ──
 
 /**
- * Merge two ranked result lists using RRF.
- * alpha = BM25 weight (0-1), k = RRF constant (default 60).
+ * Merge two ranked result lists using normalized weighted average.
+ * alpha = BM25 weight (0-1).
+ * @deprecated No longer used in search(). Kept for test backward compatibility.
  */
 export function normalizedFuse(
   bm25Results: SearchResult[],
@@ -154,7 +144,6 @@ export function normalizedFuse(
   }
 
   // Min-max normalize cosine scores to [0, 1] using result set min/max
-  // (standard approach used by Weaviate, OpenSearch, Vespa, Airbnb)
   const vecVals = [...vecScores.values()];
   const vecMin = Math.min(...vecVals);
   const vecMax = Math.max(...vecVals);
@@ -173,18 +162,17 @@ export function normalizedFuse(
   }
 
   // Weighted average: both lists contribute their normalized score
-  // Results in only one list still get that list's contribution (no penalty)
   const scored: Array<{ key: string; score: number; bn?: number; vn?: number }> = [];
   for (const key of allKeys) {
     const bn = bm25Norm.get(key);
     const vn = vecNorm.get(key);
     let score: number;
     if (bn != null && vn != null) {
-      score = alpha * bn + (1 - alpha) * vn; // found by both
+      score = alpha * bn + (1 - alpha) * vn;
     } else if (bn != null) {
-      score = alpha * bn; // keyword only
+      score = alpha * bn;
     } else {
-      score = (1 - alpha) * vn!; // semantic only — cross-language, related concepts
+      score = (1 - alpha) * vn!;
     }
     scored.push({ key, score, bn, vn });
   }
@@ -206,108 +194,9 @@ function resultKey(r: SearchResult): string {
   return r.taskId ?? r.path ?? r.title;
 }
 
-// ── Vector search helpers ──
+// ── BM25 keyword scoring — fallback when QMD task store is unavailable ──
 
-/**
- * Embed the query once via Ollama. Returns null if unavailable.
- * Uses 30m keep_alive to reduce cold-start frequency.
- */
-async function embedQuery(query: string): Promise<Float32Array | null> {
-  try {
-    const { embed } = await import('./embedding/client.js');
-    return await embed(query);
-  } catch (err) {
-    log.web.debug('search: failed to embed query', {
-      error: err instanceof Error ? err.message : String(err),
-    });
-    return null;
-  }
-}
-
-/**
- * Run vector search for both tasks and memory using a pre-computed query vector.
- * Single function avoids redundant dynamic imports and embed calls.
- */
-async function vectorSearchAll(
-  queryVec: Float32Array,
-  query: string,
-  tasks: Task[],
-  searchTypes: ('task' | 'memory')[],
-  limit: number,
-  minCosine: number = 0.5,
-): Promise<SearchResult[]> {
-  try {
-    const [{ getAllTaskEmbeddings, getAllChunkEmbeddings }, { topK, cosineSimilarity }] =
-      await Promise.all([
-        import('./embedding/store.js'),
-        import('./embedding/cosine.js'),
-      ]);
-
-    const results: SearchResult[] = [];
-
-    if (searchTypes.includes('task')) {
-      const allEmbeddings = getAllTaskEmbeddings();
-      if (allEmbeddings.length > 0) {
-        const candidates = allEmbeddings.map((e) => ({
-          id: e.task_id,
-          embedding: e.embedding,
-        }));
-        const topResults = topK(queryVec, candidates, limit);
-        const taskMap = new Map(tasks.map((t) => [t.id, t]));
-
-        for (const r of topResults) {
-          if (r.score <= minCosine) continue;
-          const task = taskMap.get(r.id);
-          results.push({
-            type: 'task',
-            title: task?.title ?? r.id,
-            snippet: task ? extractSnippet(task.title + '. ' + (task.description || task.summary || ''), query) : '',
-            taskId: r.id,
-            parentTaskId: task?.parent_task_id,
-            score: r.score,
-            matchField: 'semantic',
-          });
-        }
-      }
-    }
-
-    if (searchTypes.includes('memory')) {
-      const allChunks = getAllChunkEmbeddings();
-      if (allChunks.length > 0) {
-        const scored = allChunks.map((e) => ({
-          ...e,
-          score: cosineSimilarity(queryVec, e.embedding),
-        }));
-        scored.sort((a, b) => b.score - a.score);
-
-        for (const r of scored.slice(0, limit)) {
-          if (r.score <= minCosine) continue;
-          results.push({
-            type: 'memory',
-            title: path.basename(r.path, '.md'),
-            snippet: extractSnippet(r.text, query),
-            path: r.path,
-            score: r.score,
-            matchField: 'semantic',
-          });
-        }
-      }
-    }
-
-    return results;
-  } catch (err) {
-    log.web.debug('search: vector search failed', {
-      error: err instanceof Error ? err.message : String(err),
-    });
-    return [];
-  }
-}
-
-// ── BM25 keyword scoring ──
-
-// Weights: 3 = title/id/session_id (exact identifiers), 2-2.5 = description/tags/url,
-//           1.5 = note, 1 = category/project (broad metadata)
-function bm25ScoreTasks(tasks: Task[], query: string): SearchResult[] {
+export function bm25ScoreTasks(tasks: Task[], query: string): SearchResult[] {
   const results: SearchResult[] = [];
   for (const task of tasks) {
     let bestScore = 0;
@@ -388,64 +277,6 @@ function bm25ScoreTasks(tasks: Task[], query: string): SearchResult[] {
   return results;
 }
 
-async function bm25ScoreMemory(
-  query: string,
-  limit: number,
-  category?: string,
-): Promise<SearchResult[]> {
-  const results: SearchResult[] = [];
-
-  // Try FTS5 first
-  try {
-    const { searchIndex } = await import('./memory-index.js');
-    const ftsResults = searchIndex(query, limit);
-    if (ftsResults.length > 0) {
-      const maxFts = ftsResults[0].score;
-      for (const r of ftsResults) {
-        results.push({
-          type: 'memory',
-          title: path.basename(r.path, '.md'),
-          snippet: extractSnippet(r.text, query),
-          path: r.path,
-          score: (r.score / maxFts) * 5,
-          matchField: 'content',
-        });
-      }
-      return results;
-    }
-  } catch (err) {
-    log.web.debug('search: FTS5 index unavailable', {
-      error: err instanceof Error ? err.message : String(err),
-    });
-  }
-
-  // Fallback: in-memory scan
-  const memories: MemoryEntry[] = category ? listMemories(category) : listMemories();
-  for (const mem of memories) {
-    let bestScore = 0;
-    let matchField = '';
-
-    const titleScore = scoreMatch(mem.title, query, 3);
-    if (titleScore > bestScore) { bestScore = titleScore; matchField = 'title'; }
-
-    const contentScore = scoreMatch(mem.content, query, 1);
-    if (contentScore > bestScore) { bestScore = contentScore; matchField = 'content'; }
-
-    if (bestScore > 0) {
-      bestScore += recencyBonus(mem.updatedAt);
-      results.push({
-        type: 'memory',
-        title: mem.title,
-        snippet: extractSnippet(mem.content, query),
-        path: mem.path,
-        score: bestScore,
-        matchField,
-      });
-    }
-  }
-  return results;
-}
-
 // ── Main search function ──
 
 export async function search(
@@ -454,64 +285,97 @@ export async function search(
 ): Promise<SearchResult[]> {
   const limit = options.limit ?? 20;
   const types = options.types ?? ['task', 'memory'];
-  const mode = options.mode ?? 'hybrid';
 
   const normalizedQuery = query.trim();
   if (normalizedQuery.length === 0) return [];
 
-  // Load tasks once — shared by BM25, vector search, and child expansion
-  const tasks = types.includes('task') ? await listTasks() : [];
+  const results: SearchResult[] = [];
 
-  // ── Task search via BM25 (unchanged) ──
-  const taskResults: SearchResult[] = [];
+  // Tasks loaded lazily — only when needed for BM25 fallback or child expansion
+  let tasks: Task[] | null = null;
+  async function getTasks(): Promise<Task[]> {
+    if (!tasks) tasks = await listTasks();
+    return tasks;
+  }
+
+  // Task search: fully delegated to QMD (BM25 + vector + reranking internally)
   if (types.includes('task')) {
-    taskResults.push(...bm25ScoreTasks(tasks, normalizedQuery));
-
-    // If hybrid or semantic mode, also run vector search for tasks
-    if (mode !== 'keyword') {
-      const queryVec = await embedQuery(normalizedQuery);
-      if (queryVec) {
-        const vecTaskResults = await vectorSearchAll(queryVec, normalizedQuery, tasks, ['task'], limit, mode === 'semantic' ? 0.5 : 0.3);
-        if (vecTaskResults.length > 0 && taskResults.length > 0) {
-          const fused = normalizedFuse(taskResults, vecTaskResults, 0.4);
-          taskResults.length = 0;
-          taskResults.push(...fused);
-        } else if (vecTaskResults.length > 0) {
-          taskResults.push(...vecTaskResults);
-        }
+    try {
+      const { memoryNotesSearch } = await import('./memory-search.js');
+      const qmdResults = await memoryNotesSearch(normalizedQuery, ['task'], limit);
+      for (const r of qmdResults) {
+        results.push({
+          type: 'task',
+          title: r.title,
+          snippet: r.snippet,
+          taskId: r.taskId,
+          score: r.finalScore,
+          matchField: 'task',
+        });
       }
+    } catch (err) {
+      // QMD task search failed — fall back to BM25 keyword search.
+      // This should not happen in normal operation (sanitizeForVec + model mismatch
+      // detection at startup prevent the known failure modes). If this fires,
+      // investigate the root cause rather than relying on the fallback.
+      const msg = err instanceof Error ? err.message : String(err);
+      log.agent.warn('QMD task search failed — falling back to BM25 keyword search', { query: normalizedQuery, error: msg });
+      const allTasks = await getTasks();
+      results.push(...bm25ScoreTasks(allTasks, normalizedQuery));
     }
   }
 
-  // ── Memory search via QMD (replaces old BM25 + vector pipeline for memory) ──
-  const memoryResults: SearchResult[] = [];
+  // Session search: delegate to QMD
+  if (types.includes('session')) {
+    try {
+      const { memoryNotesSearch } = await import('./memory-search.js');
+      const qmdResults = await memoryNotesSearch(normalizedQuery, ['session'], limit);
+      for (const r of qmdResults) {
+        results.push({
+          type: 'session',
+          title: r.title,
+          snippet: r.snippet,
+          sessionId: r.sessionId,
+          score: r.finalScore,
+          matchField: r.source,
+        });
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      log.agent.warn('QMD session search failed — no session results', { query: normalizedQuery, error: msg });
+    }
+  }
+
+  // Memory search: delegate to QMD
   if (types.includes('memory')) {
     try {
       const { memoryNotesSearch } = await import('./memory-search.js');
       const qmdResults = await memoryNotesSearch(normalizedQuery, undefined, limit);
       for (const r of qmdResults) {
-        memoryResults.push({
+        results.push({
           type: 'memory',
           title: r.title,
           snippet: r.snippet,
           path: r.filepath,
           score: r.finalScore,
-          matchField: 'content',
+          matchField: r.source,
         });
       }
     } catch (err) {
-      // QMD unavailable — fall back to legacy BM25 memory search
-      log.web.debug('search: QMD memory search failed, falling back to BM25', {
-        error: err instanceof Error ? err.message : String(err),
-      });
-      memoryResults.push(...await bm25ScoreMemory(normalizedQuery, limit, options.category));
+      const msg = err instanceof Error ? err.message : String(err);
+      log.agent.warn('QMD memory search failed — no memory results', { query: normalizedQuery, error: msg });
     }
   }
 
-  // ── Merge task + memory results ──
-  const allResults = [...taskResults, ...memoryResults];
-  allResults.sort((a, b) => b.score - a.score);
-  return expandChildTasks(allResults.slice(0, limit), tasks);
+  results.sort((a, b) => b.score - a.score);
+  const sliced = results.slice(0, limit);
+
+  // Keep child task expansion for task results (lazy-loads tasks only if needed)
+  if (types.includes('task')) {
+    const allTasks = await getTasks();
+    return expandChildTasks(sliced, allTasks);
+  }
+  return sliced;
 }
 
 /**
@@ -520,7 +384,7 @@ export async function search(
  * (if not already present). Children are marked with isAutoExpanded=true.
  * Accepts pre-loaded tasks to avoid redundant disk reads.
  */
-function expandChildTasks(results: SearchResult[], allTasks: Task[]): SearchResult[] {
+export function expandChildTasks(results: SearchResult[], allTasks: Task[]): SearchResult[] {
   // Collect parent task IDs (tasks that are NOT children themselves)
   const taskResults = results.filter((r) => r.type === 'task' && !r.parentTaskId);
   if (taskResults.length === 0) return results;

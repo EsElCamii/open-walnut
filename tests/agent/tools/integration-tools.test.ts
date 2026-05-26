@@ -48,25 +48,10 @@ vi.mock('edge-tts', () => ({
   getVoices: vi.fn().mockResolvedValue([]),
 }));
 
-// ── Bedrock model mock ──
-const { mockSendMessage } = vi.hoisted(() => ({
-  mockSendMessage: vi.fn().mockResolvedValue({
-    content: [{ type: 'text', text: 'This is a photo of a sunset over the ocean.' }],
-    stopReason: 'end_turn',
-  }),
-}));
-vi.mock('../../../src/agent/model.js', () => ({
-  sendMessage: mockSendMessage,
-  DEFAULT_MODEL: 'global.anthropic.claude-opus-4-6-v1',
-  getContextWindowSize: (model?: string) => model?.includes('[1m]') ? 1_000_000 : 200_000,
-  getContextThreshold: (model: string | undefined, percent: number) =>
-    Math.round((model?.includes('[1m]') ? 1_000_000 : 200_000) * percent),
-}));
 
 import { WALNUT_HOME } from '../../../src/constants.js';
 import { slackTool } from '../../../src/agent/tools/slack-tool.js';
 import { ttsTool } from '../../../src/agent/tools/tts-tool.js';
-import { imageTool } from '../../../src/agent/tools/image-tool.js';
 import fs2 from 'node:fs/promises';
 
 beforeEach(async () => {
@@ -82,7 +67,7 @@ afterEach(async () => {
 // ── Slack Tool Tests ──
 describe('slack tool', () => {
   it('has correct tool definition', () => {
-    expect(slackTool.name).toBe('slack');
+    expect(slackTool.name).toBe('integration_slack');
     expect(slackTool.input_schema.required).toContain('action');
     expect(slackTool.input_schema.required).toContain('channel');
   });
@@ -261,7 +246,7 @@ describe('slack tool', () => {
 // ── TTS Tool Tests ──
 describe('tts tool', () => {
   it('has correct tool definition', () => {
-    expect(ttsTool.name).toBe('tts');
+    expect(ttsTool.name).toBe('integration_tts');
     expect(ttsTool.input_schema.required).toContain('text');
   });
 
@@ -311,123 +296,3 @@ describe('tts tool', () => {
   });
 });
 
-// ── Image Tool Tests ──
-describe('image tool', () => {
-  it('has correct tool definition', () => {
-    expect(imageTool.name).toBe('analyze_image');
-    expect(imageTool.input_schema.required).toContain('image_path');
-  });
-
-  it('analyzes an image file', async () => {
-    // Create a fake image file
-    const imgDir = path.join(tmpDir, 'images');
-    fs.mkdirSync(imgDir, { recursive: true });
-    const imgPath = path.join(imgDir, 'test.png');
-    fs.writeFileSync(imgPath, Buffer.from('fake-png-data'));
-
-    const result = await imageTool.execute({ image_path: imgPath });
-    expect(result).toBe('This is a photo of a sunset over the ocean.');
-    expect(mockSendMessage).toHaveBeenCalledWith(
-      expect.objectContaining({
-        system: expect.stringContaining('image analysis'),
-        messages: expect.arrayContaining([
-          expect.objectContaining({
-            role: 'user',
-            content: expect.arrayContaining([
-              expect.objectContaining({ type: 'text', text: 'Describe this image in detail' }),
-            ]),
-          }),
-        ]),
-      }),
-    );
-  });
-
-  it('uses custom prompt when provided', async () => {
-    const imgDir = path.join(tmpDir, 'images');
-    fs.mkdirSync(imgDir, { recursive: true });
-    const imgPath = path.join(imgDir, 'test.jpg');
-    fs.writeFileSync(imgPath, Buffer.from('fake-jpg-data'));
-
-    await imageTool.execute({
-      image_path: imgPath,
-      prompt: 'What color is the sky?',
-    });
-    expect(mockSendMessage).toHaveBeenCalledWith(
-      expect.objectContaining({
-        messages: expect.arrayContaining([
-          expect.objectContaining({
-            content: expect.arrayContaining([
-              expect.objectContaining({ type: 'text', text: 'What color is the sky?' }),
-            ]),
-          }),
-        ]),
-      }),
-    );
-  });
-
-  it('returns error for non-existent file', async () => {
-    const result = await imageTool.execute({ image_path: '/nonexistent/image.png' });
-    expect(result).toContain('Error');
-    expect(result).toContain('File not found');
-  });
-
-  it('returns error for unsupported format', async () => {
-    const imgDir = path.join(tmpDir, 'images');
-    fs.mkdirSync(imgDir, { recursive: true });
-    const imgPath = path.join(imgDir, 'test.bmp');
-    fs.writeFileSync(imgPath, Buffer.from('fake-bmp-data'));
-
-    const result = await imageTool.execute({ image_path: imgPath });
-    expect(result).toContain('Error');
-    expect(result).toContain('Unsupported image format');
-  });
-
-  it('supports JPEG extension', async () => {
-    const imgDir = path.join(tmpDir, 'images');
-    fs.mkdirSync(imgDir, { recursive: true });
-    const imgPath = path.join(imgDir, 'photo.jpeg');
-    fs.writeFileSync(imgPath, Buffer.from('fake-jpeg-data'));
-
-    const result = await imageTool.execute({ image_path: imgPath });
-    expect(result).toBe('This is a photo of a sunset over the ocean.');
-  });
-
-  it('supports WebP format', async () => {
-    const imgDir = path.join(tmpDir, 'images');
-    fs.mkdirSync(imgDir, { recursive: true });
-    const imgPath = path.join(imgDir, 'photo.webp');
-    fs.writeFileSync(imgPath, Buffer.from('fake-webp-data'));
-
-    const result = await imageTool.execute({ image_path: imgPath });
-    expect(result).toBe('This is a photo of a sunset over the ocean.');
-  });
-
-  it('handles model API error gracefully', async () => {
-    mockSendMessage.mockRejectedValueOnce(new Error('Bedrock throttling'));
-
-    const imgDir = path.join(tmpDir, 'images');
-    fs.mkdirSync(imgDir, { recursive: true });
-    const imgPath = path.join(imgDir, 'test.png');
-    fs.writeFileSync(imgPath, Buffer.from('fake-png-data'));
-
-    const result = await imageTool.execute({ image_path: imgPath });
-    expect(result).toContain('Error');
-    expect(result).toContain('Bedrock throttling');
-  });
-
-  it('encodes image as base64', async () => {
-    const imgDir = path.join(tmpDir, 'images');
-    fs.mkdirSync(imgDir, { recursive: true });
-    const imgPath = path.join(imgDir, 'test.gif');
-    const testData = Buffer.from('GIF89a-fake-gif-data');
-    fs.writeFileSync(imgPath, testData);
-
-    await imageTool.execute({ image_path: imgPath });
-
-    const callArgs = mockSendMessage.mock.calls[0][0];
-    const imageBlock = callArgs.messages[0].content[0];
-    expect(imageBlock.source.type).toBe('base64');
-    expect(imageBlock.source.media_type).toBe('image/gif');
-    expect(imageBlock.source.data).toBe(testData.toString('base64'));
-  });
-});

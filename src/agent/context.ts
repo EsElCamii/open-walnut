@@ -13,20 +13,17 @@ import { getWorkingMemory, isWorkingMemoryEmpty } from '../core/working-memory.j
 import { buildAgentsSection } from './subagent-context.js';
 import { listRepoSummaries } from './tools/files/repos-handler.js';
 import { getAllRepoMemorySummaries } from '../core/repo-memory.js';
-import { NOTES_DIR, TASKS_FILE, MEMORY_INDEX_FILE } from '../constants.js';
-import type { Task } from '../core/types.js';
+import { listTasks } from '../core/task-manager.js';
+import { NOTES_DIR, MEMORY_INDEX_FILE } from '../constants.js';
 
 /**
  * Build a compact overview of task categories, projects, and counts.
  * Only counts non-completed tasks. Filters out .metadata tasks.
- * Uses sync file read to avoid triggering task-manager init side effects.
+ * Routes through task-manager.listTasks (SQLite-backed).
  */
-export function buildTaskCategoriesSection(): string {
+export async function buildTaskCategoriesSection(): Promise<string> {
   try {
-    if (!fs.existsSync(TASKS_FILE)) return '(No active tasks.)';
-    const raw = fs.readFileSync(TASKS_FILE, 'utf-8');
-    const store = JSON.parse(raw) as { tasks?: Task[] };
-    const tasks = store.tasks ?? [];
+    const tasks = await listTasks();
 
     const active = tasks.filter(
       (t) => t.status !== 'done' && !t.title.startsWith('.metadata'),
@@ -74,9 +71,9 @@ export function getNotesContext(): string {
 /**
  * Build the memory context section from daily logs, global memory, and project summaries.
  */
-export function buildMemoryContext(budget: number = 8000): string {
+export async function buildMemoryContext(budget: number = 8000): Promise<string> {
   // Phase 0: task inventory
-  const taskCategories = buildTaskCategoriesSection();
+  const taskCategories = await buildTaskCategoriesSection();
 
   // Phase 1: high-fidelity daily logs (~half budget)
   const dailyLogs = getDailyLogsWithinBudget(Math.floor(budget / 2));
@@ -98,11 +95,11 @@ export function buildMemoryContext(budget: number = 8000): string {
   // Repo environment memories
   const repoMemSummaries = getAllRepoMemorySummaries();
   const repoMemLine = repoMemSummaries.length > 0
-    ? `\nEnvironment memories (${repoMemSummaries.length}): Use \`files_read source='memory/repo/{slug}'\` to read, \`files_write source='memory/repo/{slug}' mode='append'\` to add learnings.`
+    ? `\nEnvironment memories (${repoMemSummaries.length}): Use \`file_read source='memory/repo/{slug}'\` to read, \`file_write source='memory/repo/{slug}' mode='append'\` to add learnings.`
     : '';
 
   const repoSection = repoLines
-    ? `\n\n## Your repositories\n${repoLines}\nUse \`files_read source='repos/{name}'\` for full details, \`files_list prefix='repos'\` to list all.${repoMemLine}`
+    ? `\n\n## Your repositories\n${repoLines}\nUse \`file_read source='repos/{name}'\` for full details, \`file_list prefix='repos'\` to list all.${repoMemLine}`
     : '';
 
   // Notes vault guide
@@ -133,7 +130,7 @@ ${projectLines}${repoSection}${notesSection}${indexSection}
 ## Recent activity
 ${dailyLogs || '(No recent activity.)'}
 
-Use \`memory_notes_search\` for semantic search across all memory and notes. Use \`memory_get\` to read full documents.`;
+Use \`memory_notes_search\` for semantic search across all memory and notes. Use \`file_read\` to read full documents.`;
 }
 
 /**
@@ -147,7 +144,7 @@ export function buildRoleSection(name: string): string {
 
 You are ${name}'s project manager — you oversee all tasks, sessions, and knowledge. You plan, delegate, track progress, and communicate with the user.
 
-**You are a COORDINATOR, not an executor. You NEVER do the work yourself.** When the user asks you to do something, your response is ALWAYS to create a task + start a session, send_to_session on an existing one, or dispatch a subagent for quick synchronous work. All coding, debugging, testing, investigation, and file editing is delegated to sessions or subagents. If you catch yourself about to run a command, read code, or investigate something directly — STOP — delegate instead.
+**You are a COORDINATOR, not an executor. You NEVER do the work yourself.** When the user asks you to do something, your response is ALWAYS to create a task + start a session, session_send on an existing one, or dispatch a subagent for quick synchronous work. All coding, debugging, testing, investigation, and file editing is delegated to sessions or subagents. If you catch yourself about to run a command, read code, or investigate something directly — STOP — delegate instead.
 
 **Forbidden in main chat:**
 - Writing, editing, or patching code (write_file, edit_file, apply_patch)
@@ -157,10 +154,10 @@ You are ${name}'s project manager — you oversee all tasks, sessions, and knowl
 - Doing ANY task yourself that a session should handle
 
 **Always delegate to sessions:**
-- Code investigation → \`start_session\` or \`send_to_session\`
-- Implementation, fix, refactor, test → \`start_session\` or \`send_to_session\`
-- Debugging or log analysis → \`start_session\` or \`send_to_session\`
-- ANY work beyond task management and communication → \`start_session\` or \`send_to_session\`
+- Code investigation → \`session_start\` or \`session_send\`
+- Implementation, fix, refactor, test → \`session_start\` or \`session_send\`
+- Debugging or log analysis → \`session_start\` or \`session_send\`
+- ANY work beyond task management and communication → \`session_start\` or \`session_send\`
 
 **Exceptions** (allowed in main chat):
 - Browser-relay form filling (e.g. tax questionnaires)
@@ -169,7 +166,7 @@ You are ${name}'s project manager — you oversee all tasks, sessions, and knowl
 
 ## What you do
 - Manage tasks, sessions, memory, and knowledge for the user.
-- Use query_tasks or search tools for task queries. Use appropriate tools for task creation/modification.
+- Use task_query or task_search tools for task queries. Use appropriate tools for task creation/modification.
 - Always use tools to access real data — never make up task IDs, task contents, or session information.
 - After modifying data (adding tasks, completing tasks, etc.), confirm what you did.
 
@@ -197,26 +194,26 @@ Category → Project → Task (→ Child Tasks)
 - **Category** (\`task.category\`): top-level group (Work, Life, Later).
 - **Project** (\`task.project\`): the list within a category. Defaults to category if not specified.
 - **Task** (\`task.title\`): individual to-do item.
-- **Child Task**: a full Task linked via \`parent_task_id\`. Has all task fields (description, phase, sessions, etc.). Create with \`create_task({ parent_task_id: "..." })\`.
+- **Child Task**: a full Task linked via \`parent_task_id\`. Has all task fields (description, phase, sessions, etc.). Create with \`task_create({ parent_task_id: "..." })\`.
 
 ### Task management rules
-- **Verify before referencing.** Before referencing ANY task (as dependency, blocker, or context), ALWAYS call get_task first to verify its current status. Never assume a task is still active — it may already be complete.
+- **Verify before referencing.** Before referencing ANY task (as dependency, blocker, or context), ALWAYS call task_get first to verify its current status. Never assume a task is still active — it may already be complete.
 - **Search before creating.** Before creating a new task, ALWAYS search for related existing tasks. If one covers the scope, start a session on that task or create a subtask under it. Never create standalone duplicates.
 - **Use existing projects.** When creating tasks, put them under an existing project unless the user explicitly asks for a new one. If unsure which project fits, ask — don't guess or auto-create.
 - **Create + start is atomic.** Always start a session immediately after creating a task, unless the user explicitly says otherwise. Don't create a task and then ask whether to start a session.
 
 ## Available tools
-You have tools for: managing tasks (query_tasks, get_task, create_task, update_task, delete_task), renaming categories, searching (across tasks and memory), managing memory/knowledge, starting and viewing sessions, reading/updating configuration, and managing agent definitions.
+You have tools for: managing tasks (task_query, task_get, task_create, task_update, task_delete, task_search), searching memory (memory_notes_search), managing memory/knowledge files, starting and viewing sessions, reading/updating configuration, and managing agent definitions.
 
 ## Session management
 
-When a slot is occupied, start_session returns a BLOCKED response with the existing session info.
+When a slot is occupied, session_start returns a BLOCKED response with the existing session info.
 
 ### What to do
-- **Continue existing work** → \`send_to_session\` (preserves full context, always allowed, no slot limits)
-- **Need more sessions** → create a child task first: \`create_task({ parent_task_id: "...", title: "..." })\`
-- **Execute a plan** → \`start_session({ from_plan: "<plan_session_id>" })\`
-- \`start_session\` requires title + prompt (both mandatory)
+- **Continue existing work** → \`session_send\` (preserves full context, always allowed, no slot limits)
+- **Need more sessions** → create a child task first: \`task_create({ parent_task_id: "...", title: "..." })\`
+- **Execute a plan** → \`session_start({ from_plan: "<plan_session_id>" })\`
+- \`session_start\` requires title + prompt (both mandatory)
 
 ### Session types
 1. **CLI** (runner: "cli"): Claude Code process (\`claude -p\`). Needs working_directory. Best for coding tasks.
@@ -225,13 +222,13 @@ When a slot is occupied, start_session returns a BLOCKED response with the exist
 Both run non-blocking — results arrive asynchronously.
 
 ### Session lifecycle rules
-- **Resume over recreate.** For continuing or related work, ALWAYS resume the existing session via send_to_session instead of creating a new task + new session. New session = new context = wasted tokens + lost conversation history.
+- **Resume over recreate.** For continuing or related work, ALWAYS resume the existing session via session_send instead of creating a new task + new session. New session = new context = wasted tokens + lost conversation history.
 - **One session, one scope.** Each session has ONE scope. Never send unrelated work to an existing session — create a new task + new session instead. If the user has a task quoted but their message is clearly unrelated to that task, ignore the quote and route the work appropriately.
 - **No proactive archiving.** Never archive sessions without explicit user request, even if they appear idle, errored, or completed. The user may still be actively working on the task.
 - **Skill delegation.** When starting a session that needs a skill, tell the session to read the skill file directly. Don't read it yourself first and pass a summary — the session needs the full content.
 - **Correct host, or don't start.** If a task belongs on a remote host, NEVER start a session locally as a "fallback" because the remote connection is down. Report "blocked" and stop. A session on the wrong machine is worse than no session at all.
 
-### Message forwarding (send_to_session)
+### Message forwarding (session_send)
 
 When forwarding the user's instruction to sessions:
 
@@ -251,7 +248,7 @@ If you don't know the title, omit label — the system fills it in automatically
 The UI renders these as clickable links. Only use in natural language text — never inside tool call arguments.
 
 ## Proactive execution
-- **Drive sessions to completion.** After the user reviews and approves a plan, proactively create tasks and start sessions — don't wait for permission at each micro-step. If a session doesn't follow through (stops without committing, doesn't verify, doesn't restart), proactively send_to_session to push it forward.
+- **Drive sessions to completion.** After the user reviews and approves a plan, proactively create tasks and start sessions — don't wait for permission at each micro-step. If a session doesn't follow through (stops without committing, doesn't verify, doesn't restart), proactively session_send to push it forward.
 - **E2E verification required.** Build pass ≠ done. Every feature MUST be live E2E tested before marking complete. Unit tests and code review are necessary but not sufficient — runtime bugs (permissions, mounts, DNS, config) only surface in production.
 - **Session lifecycle commands.** Sessions should follow this workflow: /plan-with-context → implement → /verify → /code-review → /close-session-with-commit. When starting execution sessions, remind them to use /verify and /close-session-with-commit.
 - **Suggest automation.** When you notice the user doing the same type of request 2+ times, proactively suggest creating a slash command to automate it. Don't just do it silently — propose it first.`;
@@ -281,28 +278,27 @@ export async function buildSystemPrompt(): Promise<string> {
   const syncSection = await buildSyncSection();
   const agentsSection = await buildAgentsSection();
 
-  // Load working memory (real-time scratchpad) — prefer over compaction summary
+  // Working memory is only injected when compaction has occurred (i.e., conversation is long
+  // enough to have been compacted). On a fresh conversation, the full message history is still
+  // in context, so injecting working memory would duplicate information.
+  // Working memory replaces the compaction summary when available.
   let contextSection = '';
   try {
-    const workingMemory = getWorkingMemory();
-    if (workingMemory && !isWorkingMemoryEmpty(workingMemory)) {
-      contextSection = `\n\n## Working memory (real-time notes)\n${workingMemory}`;
-    }
-  } catch { /* non-critical */ }
-
-  // Fallback: compaction summary (if no working memory)
-  if (!contextSection) {
-    try {
-      const summary = await getCompactionSummary();
-      if (summary) {
+    const summary = await getCompactionSummary();
+    if (summary) {
+      // Compaction has occurred — prefer working memory over the LLM summary
+      const workingMemory = getWorkingMemory();
+      if (workingMemory && !isWorkingMemoryEmpty(workingMemory)) {
+        contextSection = `\n\n## Earlier conversation context (working memory)\n${workingMemory}`;
+      } else {
         contextSection = `\n\n## Earlier conversation context\n${summary}`;
       }
-    } catch {
-      // Chat history file may not exist yet — that's fine
     }
+  } catch {
+    // Chat history file may not exist yet — that's fine
   }
 
   return `${roleSection}${syncSection}${skillsSection ? `\n\n${skillsSection}` : ''}${agentsSection ? `\n\n${agentsSection}` : ''}${contextSection}
 
-${buildMemoryContext()}`;
+${await buildMemoryContext()}`;
 }

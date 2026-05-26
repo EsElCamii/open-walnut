@@ -97,10 +97,21 @@ const DAEMON_DIR = process.env.WALNUT_DAEMON_DIR || '/tmp/open-walnut';
 const STREAMS_DIR = '/tmp/open-walnut-streams';
 const PORT_FILE = path.join(DAEMON_DIR, 'daemon.port');
 const PID_FILE = path.join(DAEMON_DIR, 'daemon.pid');
-const LOG_FILE = path.join(DAEMON_DIR, 'daemon.log');
+const INSTANCE_ID_FILE = path.join(DAEMON_DIR, 'daemon.instance');
 const AGENT_POLL_INTERVAL_MS = 2000;
 const AGENT_REDISCOVER_INTERVAL_MS = 10000;
 const PING_INTERVAL_MS = 15000;
+const HEARTBEAT_INTERVAL_MS = 30000;
+
+// ── Daemon Instance ID ──
+// Must mirror daemon-standalone.ts exactly (CLAUDE.md: keep in sync).
+const DAEMON_START_TS = Date.now();
+const DAEMON_INSTANCE_ID = (function() {
+  const seed = process.pid + '-' + DAEMON_START_TS + '-' + Math.random();
+  const hash = crypto.createHash('sha256').update(seed).digest('hex').slice(0, 8);
+  return 'd-' + process.pid + '-' + hash;
+})();
+const LOG_FILE = path.join(DAEMON_DIR, 'daemon-' + DAEMON_INSTANCE_ID + '.log');
 
 // ── Logging ──
 function logMsg(level, msg, data) {
@@ -108,10 +119,18 @@ function logMsg(level, msg, data) {
     ts: new Date().toISOString(),
     level,
     msg,
+    instanceId: DAEMON_INSTANCE_ID,
     ...data,
   });
   try { fs.appendFileSync(LOG_FILE, entry + '\\n'); } catch {}
   if (level === 'error') console.error(msg, data || '');
+}
+
+/** Structured state-transition log — emit BEFORE mutating state. */
+function logStateTransition(sid, oldState, newState, reason, source, extra) {
+  logMsg('info', 'state_transition', Object.assign({
+    sid, oldState, newState, reason, source,
+  }, extra || {}));
 }
 
 // ── Managed Sessions ──
@@ -238,20 +257,26 @@ function reapSession(sid, code, reason) {
   // Normalize code=-1 from poll-based death paths to 0 when the CLI finished
   // a turn cleanly. Prevents spurious "exited with code -1" errors in the UI
   // every time claude -p naturally exits at the end of a turn.
-  if (code !== 0 && isTurnCompleteExit(session.jsonlPath)) {
+  let jsonlAgeMs = null;
+  try { jsonlAgeMs = Date.now() - fs.statSync(session.jsonlPath).mtimeMs; } catch {}
+  const cleanExit = isTurnCompleteExit(session.jsonlPath);
+  if (code !== 0 && cleanExit) {
     logMsg('info', 'reapSession: turn-complete detected, normalizing exit code', {
-      sid, pid: session.pid, originalCode: code, originalReason: reason,
+      sid, pid: session.pid, originalCode: code, originalReason: reason, jsonlAgeMs,
     });
     code = 0;
     reason = reason + '+turn-complete';
   }
 
+  logStateTransition(sid, 'running', 'dead', reason, 'reapSession', {
+    pid: session.pid, code, cleanExit, jsonlAgeMs,
+  });
   session.state = 'dead';
   session.exitCode = code;
   session.exitReason = reason;
   session.exitedAt = Date.now();
 
-  logMsg('info', 'reapSession', { sid, pid: session.pid, code, reason });
+  logMsg('info', 'reapSession', { sid, pid: session.pid, code, reason, cleanExit, jsonlAgeMs });
 
   if (session.orphanPollTimer) {
     try { clearInterval(session.orphanPollTimer); } catch {}
@@ -300,7 +325,9 @@ function startOrphanPoll(sid) {
   const session = sessions.get(sid);
   if (!session || session.state !== 'running' || !session.pid || session.orphanPollTimer) return;
   const pid = session.pid;
-  session.orphanPollTimer = setInterval(() => {
+  const capturedStartTime = session.startTime;
+  logMsg('info', 'startOrphanPoll: started', { sid, pid, startTime: capturedStartTime });
+  const timer = setInterval(() => {
     const s = sessions.get(sid);
     if (!s || s.state !== 'running') {
       if (s && s.orphanPollTimer) {
@@ -309,17 +336,31 @@ function startOrphanPoll(sid) {
       }
       return;
     }
+    // Stale-timer guard: if cmdStart replaced the session with a new pid,
+    // we must not reap — that would kill the newborn CLI. Self-terminate.
+    if (s.pid !== pid) {
+      logMsg('warn', 'orphan poll: stale timer detected (session replaced), self-terminating', {
+        sid, capturedPid: pid, currentPid: s.pid,
+      });
+      try { clearInterval(timer); } catch {}
+      return;
+    }
     try { process.kill(pid, 0); } catch {
+      logMsg('info', 'orphan poll: kill(pid,0) ESRCH — reaping', { sid, pid });
       reapSession(sid, -1, 'orphan-poll-dead');
       return;
     }
-    if (s.startTime) {
+    if (capturedStartTime) {
       const current = readStartTime(pid);
-      if (current && current !== s.startTime) {
+      if (current && current !== capturedStartTime) {
+        logMsg('warn', 'orphan poll: pid recycled (start_time drift) — reaping', {
+          sid, pid, captured: capturedStartTime, current,
+        });
         reapSession(sid, -1, 'pid-recycled');
       }
     }
   }, ORPHAN_POLL_INTERVAL_MS);
+  session.orphanPollTimer = timer;
 }
 
 // ── Startup reconcile (Phase C, primitive P4) ──
@@ -375,6 +416,7 @@ function reconcileRegistry() {
       }
     }
 
+    logStateTransition(sid, 'none', 'running', 'reconcile-adopt', 'reconcileRegistry', { pid });
     logMsg('info', 'reconcile: adopted orphan session', { sid, pid });
     startOrphanPoll(sid);
     broadcastSessionState(sid, 'running', { pid, adopted: true });
@@ -606,6 +648,15 @@ function handleCommand(ws, msg) {
   try { cmd = JSON.parse(msg); } catch { return sendError(ws, null, 'invalid JSON'); }
   const { id } = cmd;
 
+  // Per-command receive log (drop ping — too high frequency to log).
+  if (cmd.cmd !== 'ping') {
+    logMsg('debug', 'cmd_recv', {
+      cmd: cmd.cmd, id,
+      sid: typeof cmd.sid === 'string' ? cmd.sid : undefined,
+      traceId: typeof cmd.traceId === 'string' ? cmd.traceId : undefined,
+    });
+  }
+
   switch (cmd.cmd) {
     case 'start': return cmdStart(ws, id, cmd);
     case 'attach': return cmdAttach(ws, id, cmd);
@@ -629,6 +680,9 @@ function handleCommand(ws, msg) {
     case 'hello': return sendOk(ws, id, {
       version: process.env.DAEMON_VERSION || 'dev-source',
       capabilities: __DAEMON_CAPABILITIES__,
+      instanceId: DAEMON_INSTANCE_ID,
+      startedAt: DAEMON_START_TS,
+      uptimeSec: Math.floor((Date.now() - DAEMON_START_TS) / 1000),
     });
     default: return sendError(ws, id, 'unknown command: ' + cmd.cmd);
   }
@@ -639,6 +693,36 @@ function cmdStart(ws, id, cmd) {
   const { sid, args, cwd, message, resume, mode } = cmd;
   if (!sid || !args || !cwd || !message) {
     return sendError(ws, id, 'start: missing required fields (sid, args, cwd, message)');
+  }
+
+  // Replace-existing cleanup: prevents stale orphanPollTimer from the old
+  // session mis-firing pid-recycled against the newborn pid.
+  const existing = sessions.get(sid);
+  if (existing) {
+    logMsg('warn', 'cmdStart: replacing existing session', {
+      sid,
+      oldPid: existing.pid,
+      oldState: existing.state,
+      oldHasOrphanPoll: !!existing.orphanPollTimer,
+      resume: !!resume,
+    });
+    if (existing.orphanPollTimer) {
+      try { clearInterval(existing.orphanPollTimer); } catch {}
+      existing.orphanPollTimer = null;
+    }
+    if (existing.state === 'running' && existing.pid) {
+      let oldAlive = false;
+      try { process.kill(existing.pid, 0); oldAlive = true; } catch {}
+      if (oldAlive) {
+        logMsg('warn', 'cmdStart: killing old-session process group before respawn', {
+          sid, oldPid: existing.pid,
+        });
+        try { process.kill(-existing.pid, 'SIGTERM'); } catch {}
+      }
+    }
+    existing.state = 'dead';
+    existing.exitReason = 'replaced-by-cmdstart';
+    existing.exitedAt = Date.now();
   }
 
   fs.mkdirSync(STREAMS_DIR, { recursive: true });
@@ -695,6 +779,7 @@ function cmdStart(ws, id, cmd) {
   proc.unref();
   try { fs.writeFileSync(pgidPath, String(pid)); } catch {}
 
+  logStateTransition(sid, 'none', 'running', resume ? 'spawn-resume' : 'spawn-fresh', 'cmdStart', { pid });
   logMsg('info', 'session started', { sid, pid, resume: !!resume });
 
   // Track session
@@ -861,9 +946,18 @@ function addSubscriber(ws, sid, fromOffset) {
   const currentOffset = session.watcher ? session.watcher.offset : 0;
   const start = typeof fromOffset === 'number' && fromOffset >= 0 ? fromOffset : 0;
   if (start < currentOffset) {
+    const bytesToRead = currentOffset - start;
+    if (bytesToRead > 256 * 1024) {
+      logMsg('warn', 'addSubscriber: large catch-up replay', {
+        sid, fromOffset: start, currentOffset, bytesToRead,
+      });
+    } else {
+      logMsg('info', 'addSubscriber: replay', {
+        sid, fromOffset: start, currentOffset, bytesToRead,
+      });
+    }
     try {
       const fd = fs.openSync(session.jsonlPath, 'r');
-      const bytesToRead = currentOffset - start;
       const buf = Buffer.alloc(bytesToRead);
       fs.readSync(fd, buf, 0, bytesToRead, start);
       fs.closeSync(fd);
@@ -874,6 +968,10 @@ function addSubscriber(ws, sid, fromOffset) {
         }
       }
     } catch {}
+  } else {
+    logMsg('info', 'addSubscriber: no replay (future-only)', {
+      sid, fromOffset: start, currentOffset,
+    });
   }
   return true;
 }
@@ -1697,11 +1795,13 @@ function cleanup() {
     clearInterval(sub.timer);
     clearInterval(sub.rediscoverTimer);
   }
-  // Remove port/pid files (so new daemon knows to start fresh)
+  // Remove port/pid/instance files (so new daemon knows to start fresh).
   // IMPORTANT: Do NOT remove .pgid files here — cleanupOrphanedProcessGroups()
   // on the next daemon needs them to adopt running sessions. See that function above.
   try { fs.unlinkSync(PORT_FILE); } catch {}
   try { fs.unlinkSync(PID_FILE); } catch {}
+  try { fs.unlinkSync(INSTANCE_ID_FILE); } catch {}
+  logMsg('info', 'daemon cleanup complete', { uptimeSec: Math.floor((Date.now() - DAEMON_START_TS) / 1000) });
 }
 
 // ── Main ──
@@ -1723,7 +1823,9 @@ if (action === '--status') {
     const pid = parseInt(fs.readFileSync(PID_FILE, 'utf-8').trim(), 10);
     process.kill(pid, 0);
     const port = fs.readFileSync(PORT_FILE, 'utf-8').trim();
-    console.log(JSON.stringify({ running: true, pid, port: parseInt(port, 10) }));
+    let instanceId;
+    try { instanceId = fs.readFileSync(INSTANCE_ID_FILE, 'utf-8').trim(); } catch {}
+    console.log(JSON.stringify({ running: true, pid, port: parseInt(port, 10), instanceId }));
   } catch {
     console.log(JSON.stringify({ running: false }));
   }
@@ -1814,11 +1916,25 @@ if (action === '--start') {
     const port = httpServer.address().port;
     fs.writeFileSync(PORT_FILE, String(port));
     fs.writeFileSync(PID_FILE, String(process.pid));
+    fs.writeFileSync(INSTANCE_ID_FILE, DAEMON_INSTANCE_ID);
     console.log(port); // Print port for parent to capture
-    logMsg('info', 'daemon started', { port, pid: process.pid });
+    logMsg('info', 'daemon started', { port, pid: process.pid, startedAt: DAEMON_START_TS });
 
     // Start session idle scanner (every 60s)
     setInterval(scanIdleSessions, SESSION_SCAN_INTERVAL_MS);
+
+    // Heartbeat: 30s vitals log. Absence = wedged daemon.
+    setInterval(function() {
+      const mem = process.memoryUsage();
+      logMsg('info', 'heartbeat', {
+        sessions: sessions.size,
+        wsClients: wsClients.size,
+        agentSubs: agentSubs.size,
+        uptimeSec: Math.floor((Date.now() - DAEMON_START_TS) / 1000),
+        rssMb: Math.round(mem.rss / 1024 / 1024),
+        heapMb: Math.round(mem.heapUsed / 1024 / 1024),
+      });
+    }, HEARTBEAT_INTERVAL_MS);
   });
 
   // Handle signals

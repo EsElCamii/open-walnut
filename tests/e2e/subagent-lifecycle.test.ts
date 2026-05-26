@@ -4,9 +4,9 @@
  * Tests:
  * 1. Agent Registry CRUD (builtin + config)
  * 2. Embedded session start → subagent:started + subagent:result via WebSocket
- * 3. list_sessions includes embedded runs
- * 4. send_to_session with run_id resumes embedded run
- * 5. Agent CRUD tools (list_agents, create_agent, etc.)
+ * 3. session_list includes embedded runs
+ * 4. session_send with run_id resumes embedded run
+ * 5. Agent CRUD tools (agent_list, agent_create, etc.)
  */
 import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import type { Server as HttpServer } from 'node:http';
@@ -159,7 +159,7 @@ describe('Agent Registry', () => {
       name: 'Research Agent',
       description: 'Searches and summarizes findings',
       runner: 'embedded',
-      denied_tools: ['exec', 'write', 'edit'],
+      denied_tools: ['shell_exec', 'file_write', 'file_edit'],
     });
     expect(agent.id).toBe('researcher');
     expect(agent.source).toBe('config');
@@ -176,7 +176,7 @@ describe('Agent Registry', () => {
     const agent = await getAgent('researcher');
     expect(agent).toBeDefined();
     expect(agent!.name).toBe('Research Agent');
-    expect(agent!.denied_tools).toEqual(['exec', 'write', 'edit']);
+    expect(agent!.denied_tools).toEqual(['shell_exec', 'file_write', 'file_edit']);
   });
 
   it('should persist config agents to config.yaml', async () => {
@@ -200,14 +200,14 @@ describe('Agent Registry', () => {
 
 describe('Agent CRUD Tools', () => {
   it('list_agents returns built-in agents', async () => {
-    const result = await executeTool('list_agents', {});
+    const result = await executeTool('agent_list', {});
     const agents = JSON.parse(result);
     expect(agents).toBeInstanceOf(Array);
     expect(agents.find((a: { id: string }) => a.id === 'general')).toBeDefined();
   });
 
   it('create_agent creates a config agent via tool', async () => {
-    const result = await executeTool('create_agent', {
+    const result = await executeTool('agent_create', {
       id: 'quick',
       name: 'Quick Agent',
       description: 'Fast, cheap tasks',
@@ -219,7 +219,7 @@ describe('Agent CRUD Tools', () => {
   });
 
   it('get_agent returns the created agent', async () => {
-    const result = await executeTool('get_agent', { agent_id: 'quick' });
+    const result = await executeTool('agent_get', { agent_id: 'quick' });
     const agent = JSON.parse(result);
     expect(agent.id).toBe('quick');
     expect(agent.name).toBe('Quick Agent');
@@ -227,10 +227,10 @@ describe('Agent CRUD Tools', () => {
   });
 
   it('delete_agent removes the config agent', async () => {
-    const result = await executeTool('delete_agent', { agent_id: 'quick' });
+    const result = await executeTool('agent_delete', { agent_id: 'quick' });
     expect(result).toContain('deleted');
 
-    const getResult = await executeTool('get_agent', { agent_id: 'quick' });
+    const getResult = await executeTool('agent_get', { agent_id: 'quick' });
     expect(getResult).toContain('not found');
   });
 });
@@ -277,7 +277,7 @@ describe('Embedded Session Lifecycle', () => {
   }, 30000);
 
   it('list_sessions tool includes embedded runs', async () => {
-    const result = await executeTool('list_sessions', { runner: 'embedded' });
+    const result = await executeTool('session_list', { runner: 'embedded' });
     const sessions = JSON.parse(result);
     expect(sessions).toBeInstanceOf(Array);
     expect(sessions.length).toBeGreaterThanOrEqual(1);
@@ -293,7 +293,7 @@ describe('Embedded Session Lifecycle', () => {
     const run = runs[0];
     expect(run).toBeDefined();
 
-    const result = await executeTool('get_session_history', { run_id: run.runId });
+    const result = await executeTool('session_history', { run_id: run.runId });
     const parsed = JSON.parse(result);
     expect(parsed.run_id).toBe(run.runId);
     expect(parsed.agent_id).toBe('general');
@@ -304,7 +304,7 @@ describe('Embedded Session Lifecycle', () => {
     const ws = await connectWs();
 
     // Use the start_session tool directly with runner=embedded
-    const result = await executeTool('start_session', {
+    const result = await executeTool('session_start', {
       prompt: 'Research TypeScript 6.0 features',
       runner: 'embedded',
       agent_id: 'general',
@@ -330,7 +330,7 @@ describe('Embedded Session Lifecycle', () => {
     expect(completedRun).toBeDefined();
 
     // Resume with run_id
-    const result = await executeTool('send_to_session', {
+    const result = await executeTool('session_send', {
       run_id: completedRun!.runId,
       message: 'Give me more details',
     });
@@ -382,7 +382,7 @@ describe('Embedded session links to task', () => {
 describe('start_session tool backward compat', () => {
   it('start_session without runner defaults to CLI', async () => {
     // With no runner/agent_id, should try CLI path → requires working_directory
-    const result = await executeTool('start_session', {
+    const result = await executeTool('session_start', {
       prompt: 'Hello world',
     });
     expect(result).toContain('working_directory is required');
@@ -391,7 +391,7 @@ describe('start_session tool backward compat', () => {
   it('start_session with agent_id defaults to embedded', async () => {
     const ws = await connectWs();
 
-    const result = await executeTool('start_session', {
+    const result = await executeTool('session_start', {
       prompt: 'Quick task',
       agent_id: 'general',
     });

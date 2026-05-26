@@ -9,7 +9,8 @@ let configFile: string;
 vi.mock('../../src/constants.js', () => createMockConstants());
 
 // Import after mocking
-import { addTask, listTasks, completeTask, getDashboardData, reorderTasks, deleteTask, linkActiveSession, clearActiveSession, linkSessionSlot, clearSessionSlot, ActiveSessionError, updateTask, getProjectMetadata, autoPushIfConfigured, updateTaskRaw } from '../../src/core/task-manager.js';
+import { addTask, listTasks, completeTask, getDashboardData, reorderTasks, deleteTask, linkSessionSlot, clearSessionSlot, ActiveSessionError, updateTask, getProjectMetadata, autoPushIfConfigured, updateTaskRaw, _resetForTesting } from '../../src/core/task-manager.js';
+import { closeDb } from '../../src/core/task-db.js';
 import { WALNUT_HOME, TASKS_FILE, CONFIG_FILE } from '../../src/constants.js';
 
 beforeEach(async () => {
@@ -17,13 +18,14 @@ beforeEach(async () => {
   tasksFile = TASKS_FILE;
   configFile = CONFIG_FILE;
   // Clean temp directory
+  closeDb();
+  _resetForTesting();
   await fs.rm(tmpDir, { recursive: true, force: true });
 });
 
 afterEach(async () => {
+  closeDb();
   await fs.rm(tmpDir, { recursive: true, force: true });
-  // Reset the initialized flag by clearing module state
-  vi.resetModules;
 });
 
 describe('addTask', () => {
@@ -70,13 +72,10 @@ describe('addTask', () => {
     expect(task.due_date).toBe('2026-12-31');
   });
 
-  it('persists tasks to the store file', async () => {
-    await addTask({ title: 'Persisted task' });
-
-    const content = await fs.readFile(tasksFile, 'utf-8');
-    const store = JSON.parse(content);
-    expect(store.tasks).toHaveLength(1);
-    expect(store.tasks[0].title).toBe('Persisted task');
+  it('persists tasks across listTasks calls', async () => {
+    const { task } = await addTask({ title: 'Persisted task' });
+    const listed = await listTasks();
+    expect(listed.find(t => t.id === task.id)?.title).toBe('Persisted task');
   });
 });
 
@@ -412,21 +411,6 @@ describe('linkSessionSlot / clearSessionSlot', () => {
     expect(updated.exec_session_id).toBeUndefined();
   });
 
-  it('backward-compat alias linkActiveSession works', async () => {
-    const { task } = await addTask({ title: 'Compat' });
-    const { task: updated } = await linkActiveSession(task.id, 'sess-compat');
-
-    expect(updated.exec_session_id).toBe('sess-compat');
-    expect(updated.session_ids).toContain('sess-compat');
-  });
-
-  it('backward-compat alias clearActiveSession works', async () => {
-    const { task } = await addTask({ title: 'Compat clear' });
-    await linkSessionSlot(task.id, 'sess-x', 'exec');
-    const { task: updated } = await clearActiveSession(task.id, 'sess-x');
-
-    expect(updated.exec_session_id).toBeUndefined();
-  });
 });
 
 describe('updateTask — starred', () => {
@@ -758,3 +742,4 @@ describe('autoPushIfConfigured sync_error lifecycle', () => {
     expect(result.success).toBe(true);
   });
 });
+

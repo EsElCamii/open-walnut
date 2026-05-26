@@ -20,15 +20,21 @@ import {
   importSessionRecord,
   getSessionByClaudeId,
   listSessions,
+  _resetSessionTrackerForTesting,
 } from '../../src/core/session-tracker.js';
+import { closeDb } from '../../src/core/session-db.js';
 import { WALNUT_HOME } from '../../src/constants.js';
 
 beforeEach(async () => {
+  closeDb();
+  _resetSessionTrackerForTesting();
   await fsp.rm(WALNUT_HOME, { recursive: true, force: true });
   await fsp.mkdir(WALNUT_HOME, { recursive: true });
 });
 
 afterEach(async () => {
+  closeDb();
+  _resetSessionTrackerForTesting();
   for (let i = 0; i < 3; i++) {
     try {
       await fsp.rm(WALNUT_HOME, { recursive: true, force: true });

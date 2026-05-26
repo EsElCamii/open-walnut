@@ -87,7 +87,7 @@ describe('evaluateExecPolicy', () => {
 
 describe('execTool', () => {
   it('has correct tool definition shape', () => {
-    expect(execTool.name).toBe('exec');
+    expect(execTool.name).toBe('shell_exec');
     expect(execTool.description).toBeDefined();
     expect(execTool.input_schema.required).toContain('command');
     expect(typeof execTool.execute).toBe('function');

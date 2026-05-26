@@ -53,7 +53,7 @@ afterAll(async () => {
 
 describe('Exec tool E2E', () => {
   it('executes a simple echo command', async () => {
-    const raw = await executeTool('exec', { command: 'echo "hello e2e"' });
+    const raw = await executeTool('shell_exec', { command: 'echo "hello e2e"' });
     const result = parseExecResult(raw);
 
     expect(result.status).toBe('success');
@@ -63,7 +63,7 @@ describe('Exec tool E2E', () => {
   });
 
   it('captures multi-line output', async () => {
-    const raw = await executeTool('exec', { command: 'printf "line1\\nline2\\nline3"' });
+    const raw = await executeTool('shell_exec', { command: 'printf "line1\\nline2\\nline3"' });
     const result = parseExecResult(raw);
 
     expect(result.status).toBe('success');
@@ -73,7 +73,7 @@ describe('Exec tool E2E', () => {
   });
 
   it('propagates non-zero exit codes', async () => {
-    const raw = await executeTool('exec', { command: 'exit 42' });
+    const raw = await executeTool('shell_exec', { command: 'exit 42' });
     const result = parseExecResult(raw);
 
     expect(result.exit_code).toBe(42);
@@ -81,7 +81,7 @@ describe('Exec tool E2E', () => {
   });
 
   it('captures stderr output', async () => {
-    const raw = await executeTool('exec', { command: 'echo "err" >&2' });
+    const raw = await executeTool('shell_exec', { command: 'echo "err" >&2' });
     const result = parseExecResult(raw);
 
     expect(result.output).toContain('err');
@@ -90,7 +90,7 @@ describe('Exec tool E2E', () => {
   it('respects working directory', async () => {
     const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'exec-cwd-'));
     try {
-      const raw = await executeTool('exec', { command: 'pwd', workdir: tmpDir });
+      const raw = await executeTool('shell_exec', { command: 'pwd', workdir: tmpDir });
       const result = parseExecResult(raw);
 
       expect(result.status).toBe('success');
@@ -104,7 +104,7 @@ describe('Exec tool E2E', () => {
   });
 
   it('injects environment variables', async () => {
-    const raw = await executeTool('exec', {
+    const raw = await executeTool('shell_exec', {
       command: 'echo $E2E_TEST_VAR',
       env: { E2E_TEST_VAR: 'e2e_value' },
     });
@@ -116,7 +116,7 @@ describe('Exec tool E2E', () => {
 
   it('times out long-running commands', async () => {
     const start = Date.now();
-    const raw = await executeTool('exec', {
+    const raw = await executeTool('shell_exec', {
       command: 'sleep 30',
       timeout_seconds: 1,
     });
@@ -131,7 +131,7 @@ describe('Exec tool E2E', () => {
   });
 
   it('handles command not found', async () => {
-    const raw = await executeTool('exec', {
+    const raw = await executeTool('shell_exec', {
       command: 'this_command_does_not_exist_xyz',
     });
     const result = parseExecResult(raw);
@@ -142,7 +142,7 @@ describe('Exec tool E2E', () => {
   });
 
   it('supports shell pipelines', async () => {
-    const raw = await executeTool('exec', { command: 'echo "a b c" | wc -w' });
+    const raw = await executeTool('shell_exec', { command: 'echo "a b c" | wc -w' });
     const result = parseExecResult(raw);
 
     expect(result.status).toBe('success');
@@ -152,7 +152,7 @@ describe('Exec tool E2E', () => {
   it('creates files via exec and they persist on disk', async () => {
     const tmpFile = path.join(os.tmpdir(), `e2e-exec-test-${Date.now()}.txt`);
     try {
-      const raw = await executeTool('exec', {
+      const raw = await executeTool('shell_exec', {
         command: `echo "created by exec" > "${tmpFile}"`,
       });
       const result = parseExecResult(raw);
@@ -172,13 +172,13 @@ describe('Exec tool E2E', () => {
 
     try {
       // Use write_file tool to create a script
-      await executeTool('write_file', {
+      await executeTool('file_write', {
         path: scriptPath,
         content: '#!/bin/bash\necho "script ran successfully"',
       });
 
       // Use exec tool to run it
-      const raw = await executeTool('exec', {
+      const raw = await executeTool('shell_exec', {
         command: `bash "${scriptPath}"`,
       });
       const result = parseExecResult(raw);

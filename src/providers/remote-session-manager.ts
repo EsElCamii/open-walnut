@@ -393,15 +393,21 @@ export class RemoteSessionManager implements SessionManager {
       }
 
       const reason = String(result.reason || result.error || '')
+      // `session_dead` means daemon reaped the remote CLI — this is terminal
+      // for the current process and the next send will need to spawn a new
+      // one. Trigger the same _onExit flow used for ENXIO/not-found so the
+      // client's _hasPipe state doesn't get stuck "true" after the remote died.
+      const remoteDied = reason.includes('not found')
+        || reason === 'ENXIO'
+        || reason === 'EAGAIN'
+        || reason === 'session_dead'
       log.session.warn('RemoteSessionManager: send failed', {
         host: this.hostKey, sid, reason,
+        exitCode: result.exitCode ?? null,
+        remoteDied,
+        willFireExit: remoteDied && this._hasPipe,
       })
-      // FIFO write failed — CLI process is dead or pipe is broken.
-      // Fire onExit once per transport death so downstream cleanup runs; the
-      // `_hasPipe` flag guards against double-fire if the daemon already pushed
-      // an `exit` event. Returning false (below) is independent of that guard
-      // so a stopped session still gets respawned on the next send.
-      if (reason.includes('not found') || reason === 'ENXIO' || reason === 'EAGAIN') {
+      if (remoteDied) {
         if (this._hasPipe) {
           this._hasPipe = false
           this._onExit?.(1)
@@ -428,10 +434,16 @@ export class RemoteSessionManager implements SessionManager {
       const result = await conn.send('sendRaw', { sid, raw: json })
       if (result.ok) return true
       const reason = String(result.reason || result.error || '')
+      const remoteDied = reason.includes('not found')
+        || reason === 'ENXIO'
+        || reason === 'EAGAIN'
+        || reason === 'session_dead'
       log.session.warn('RemoteSessionManager: writeRaw failed', {
         host: this.hostKey, sid, reason,
+        exitCode: result.exitCode ?? null,
+        remoteDied,
       })
-      if (reason.includes('not found') || reason === 'ENXIO' || reason === 'EAGAIN') {
+      if (remoteDied) {
         if (this._hasPipe) {
           this._hasPipe = false
           this._onExit?.(1)

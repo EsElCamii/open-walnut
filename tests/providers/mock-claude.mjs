@@ -223,6 +223,163 @@ if (outputFormat === 'stream-json') {
       process.stdout.write(JSON.stringify(exitPlanEvent) + '\n');
     }
 
+    // 2a.5. Stream-partial test — mimics `--include-partial-messages` output.
+    //       Emits the same shape the real Claude CLI produces so we exercise the
+    //       stream_event parse path, dedup with final assistant, thinking/delta
+    //       variants, and the unknown catch-all.
+    //
+    //   Triggers (exact message or prefix):
+    //     "stream-partial-test"           → text_delta stream + full assistant
+    //     "stream-partial-thinking"       → thinking_delta stream
+    //     "stream-partial-tool"           → content_block_start (tool_use) +
+    //                                       input_json_delta stream + final assistant
+    //     "stream-partial-unknown"        → includes a made-up stream_event type
+    //                                       and a made-up top-level JSONL type
+    //     "stream-partial-signature"      → signature_delta (must NOT reach UI)
+    //
+    //   The full text streamed is 'Hello, world!' split into small deltas.
+    if (effectiveMessage.startsWith('stream-partial-')) {
+      const mode = effectiveMessage.slice('stream-partial-'.length) || 'test';
+      const msgId = 'msg_mock_stream_' + outputSessionId.slice(0, 6);
+
+      function emitStream(line) { process.stdout.write(JSON.stringify(line) + '\n'); }
+      function wrap(ev) { return { type: 'stream_event', event: ev, session_id: outputSessionId, parent_tool_use_id: null }; }
+
+      // message_start
+      emitStream(wrap({ type: 'message_start', message: { id: msgId, role: 'assistant', content: [], model: modelFlag || 'mock-model', usage: { input_tokens: 10, output_tokens: 0 } } }));
+
+      if (mode === 'unknown-top-level') {
+        // Emit a completely new top-level JSONL type (not wrapped in stream_event)
+        emitStream({ type: 'never_seen_before', payload: { ping: 'pong' }, session_id: outputSessionId });
+      }
+
+      if (mode === 'unknown' || mode === 'unknown-stream-event') {
+        // Unknown stream_event subtype — should go through unknown catch-all
+        emitStream(wrap({ type: 'future_sse_event_xyz', payload: { x: 1 } }));
+      }
+
+      if (mode === 'thinking-then-text') {
+        // Realistic extended-thinking flow:
+        //   SSE: index=0 thinking block → index=1 text block
+        //   assistant: content only carries the text block
+        // This used to cause text duplication because the dedup trackingKey
+        // didn't match between paths. Regression test for that bug.
+        emitStream(wrap({ type: 'content_block_start', index: 0, content_block: { type: 'thinking', thinking: '' } }));
+        for (const t of ['Hmm ', 'let me ', 'think']) {
+          emitStream(wrap({ type: 'content_block_delta', index: 0, delta: { type: 'thinking_delta', thinking: t } }));
+        }
+        emitStream(wrap({ type: 'content_block_stop', index: 0 }));
+
+        emitStream(wrap({ type: 'content_block_start', index: 1, content_block: { type: 'text', text: '' } }));
+        for (const chunk of ['Hel', 'lo,', ' wor', 'ld', '!']) {
+          emitStream(wrap({ type: 'content_block_delta', index: 1, delta: { type: 'text_delta', text: chunk } }));
+        }
+        emitStream(wrap({ type: 'content_block_stop', index: 1 }));
+
+        // Final assistant carries ONLY the text (not thinking) — Claude Code
+        // strips thinking from the persisted message. This is where dedup
+        // was breaking: blockIdx=0 in the loop, but stream used index=1.
+        emitStream({
+          type: 'assistant',
+          message: {
+            id: msgId, role: 'assistant', model: 'mock-model',
+            content: [{ type: 'text', text: 'Hello, world!' }],
+            stop_reason: 'end_turn',
+            usage: { input_tokens: 10, output_tokens: 5 },
+          },
+          session_id: outputSessionId,
+        });
+
+        emitStream(wrap({ type: 'message_delta', delta: { stop_reason: 'end_turn' }, usage: { output_tokens: 5 } }));
+        emitStream(wrap({ type: 'message_stop' }));
+        const resultEvent = {
+          type: 'result', subtype: 'success', is_error: false,
+          duration_ms: 50, num_turns: 1, result: 'Hello, world!',
+          session_id: outputSessionId, total_cost_usd: 0.001,
+          usage: { input_tokens: 10, output_tokens: 5 },
+        };
+        process.stdout.write(JSON.stringify(resultEvent) + '\n', () => process.exit(0));
+        return;
+      }
+
+      if (mode === 'tool') {
+        // Tool use — content_block_start yields tool id+name; input streams via input_json_delta
+        emitStream(wrap({ type: 'content_block_start', index: 0, content_block: { type: 'tool_use', id: 'toolu_mock_stream', name: 'Bash', input: {} } }));
+        emitStream(wrap({ type: 'content_block_delta', index: 0, delta: { type: 'input_json_delta', partial_json: '{"comm' } }));
+        emitStream(wrap({ type: 'content_block_delta', index: 0, delta: { type: 'input_json_delta', partial_json: 'and":"ls' } }));
+        emitStream(wrap({ type: 'content_block_delta', index: 0, delta: { type: 'input_json_delta', partial_json: ' -la"}' } }));
+        emitStream(wrap({ type: 'content_block_stop', index: 0 }));
+
+        // Final full assistant (what the real CLI writes once the block completes)
+        emitStream({
+          type: 'assistant',
+          message: {
+            id: msgId, role: 'assistant', model: 'mock-model',
+            content: [{ type: 'tool_use', id: 'toolu_mock_stream', name: 'Bash', input: { command: 'ls -la' } }],
+            stop_reason: 'tool_use',
+            usage: { input_tokens: 50, output_tokens: 10 },
+          },
+          session_id: outputSessionId,
+        });
+      } else {
+        // Text or thinking streaming
+        emitStream(wrap({ type: 'content_block_start', index: 0, content_block: { type: mode === 'thinking' ? 'thinking' : 'text', text: '' } }));
+
+        if (mode === 'thinking') {
+          for (const chunk of ['Let ', 'me ', 'think ', 'about ', 'this…']) {
+            emitStream(wrap({ type: 'content_block_delta', index: 0, delta: { type: 'thinking_delta', thinking: chunk } }));
+          }
+        } else if (mode === 'signature') {
+          // signature_delta should be DROPPED (not reach UI)
+          emitStream(wrap({ type: 'content_block_delta', index: 0, delta: { type: 'signature_delta', signature: 'abc123def' } }));
+          // And a normal text_delta so the test has at least one visible delta
+          emitStream(wrap({ type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'OK' } }));
+        } else {
+          // text: emit 'Hello, world!' as 5 deltas
+          for (const chunk of ['Hel', 'lo,', ' wor', 'ld', '!']) {
+            emitStream(wrap({ type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: chunk } }));
+          }
+        }
+
+        emitStream(wrap({ type: 'content_block_stop', index: 0 }));
+
+        // Final full assistant — must dedup against accumulated deltas above
+        const finalText = mode === 'thinking' ? ''
+          : mode === 'signature' ? 'OK'
+          : 'Hello, world!';
+        if (finalText || mode === 'thinking') {
+          emitStream({
+            type: 'assistant',
+            message: {
+              id: msgId, role: 'assistant', model: 'mock-model',
+              content: mode === 'thinking'
+                ? [{ type: 'thinking', thinking: 'Let me think about this…' }]
+                : [{ type: 'text', text: finalText }],
+              stop_reason: 'end_turn',
+              usage: { input_tokens: 10, output_tokens: 5 },
+            },
+            session_id: outputSessionId,
+          });
+        }
+      }
+
+      // message_stop + message_delta for usage/stop_reason
+      emitStream(wrap({ type: 'message_delta', delta: { stop_reason: 'end_turn' }, usage: { output_tokens: 10 } }));
+      emitStream(wrap({ type: 'message_stop' }));
+
+      // Final result
+      const resultEvent = {
+        type: 'result', subtype: 'success', is_error: false,
+        duration_ms: 50, num_turns: 1,
+        result: mode === 'tool' ? 'Done.' : (mode === 'thinking' ? 'Let me think about this…' : (mode === 'signature' ? 'OK' : 'Hello, world!')),
+        session_id: outputSessionId,
+        total_cost_usd: 0.001,
+        usage: { input_tokens: 10, output_tokens: 10 },
+      };
+      process.stdout.write(JSON.stringify(resultEvent) + '\n', () => process.exit(0));
+      return; // skip default assistant+result tail
+    }
+
     // 2b. For "tool-test" messages, emit a tool_use + tool_result before the text
     if (effectiveMessage === 'tool-test') {
       const toolUseEvent = {

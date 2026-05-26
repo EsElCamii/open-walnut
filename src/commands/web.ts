@@ -48,6 +48,16 @@ export async function runWeb(options: {
   // Normal server
   // Note: ephemeral WALNUT_HOME guard is in constants.ts (must run at import time,
   // before any derived paths are computed). See resolveWalnutHome() there.
+
+  // Sanity check: dist/daemon-binaries/*.version must match current daemon source.
+  // If not, auto-rebuild; refuse to start if rebuild fails. This is the belt to
+  // the suspenders of `npm run build` auto-building daemon — catches someone
+  // running `node dist/cli.js web` directly after editing daemon source.
+  const { verifyDaemonBinaryVersion } = await import('../providers/daemon-version-check.js')
+  if (!verifyDaemonBinaryVersion()) {
+    process.exit(1)
+  }
+
   const { startServer } = await import('../web/server.js')
 
   const port = options.port ? parseInt(options.port, 10) : undefined

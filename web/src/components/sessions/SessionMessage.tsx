@@ -569,6 +569,21 @@ export const SessionMessage = memo(function SessionMessage({ message, sessionId,
   const time = formatTime(timestamp);
   const isUser = role === 'user';
 
+  // Interrupt marker — render as muted system banner, not a "You" bubble.
+  // Claude CLI writes `[Request interrupted by user]` whenever its
+  // AbortController fires without a reason — walnut's health-monitor idle
+  // reap triggers it via SIGINT, but it's indistinguishable from a real
+  // user-clicked Interrupt. Showing it as a blue "You" bubble is misleading.
+  if (isUser && text && text.trim() === '[Request interrupted by user]') {
+    return (
+      <div className="chat-interrupt-banner">
+        <span className="chat-interrupt-icon">{'⏹'}</span>
+        <span className="chat-interrupt-text">Turn interrupted</span>
+        {time && <span className="chat-interrupt-time">{time}</span>}
+      </div>
+    );
+  }
+
   // Detect image paths in assistant text and render inline previews
   const textImagePaths = useMemo(() => {
     if (!text || isUser) return [];

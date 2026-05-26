@@ -9,12 +9,12 @@ import { UserMessagesSummary } from './UserMessagesSummary';
 import { ChatInput } from '@/components/chat/ChatInput';
 import { renderMarkdownWithRefs } from '@/utils/markdown';
 import { useSessionSend } from '@/hooks/useSessionSend';
-import { useSessionStream } from '@/hooks/useSessionStream';
 import { useSlashCommands } from '@/hooks/useSlashCommands';
 import { useSessionHistory } from '@/hooks/useSessionHistory';
 import type { ImageAttachment } from '@/api/chat';
 import { useEvent } from '@/hooks/useWebSocket';
 import { fetchSession, executePlanContinue, executePlanSession, updateSession, restartSession } from '@/api/sessions';
+import { log } from '@/utils/log';
 import { fetchTask } from '@/api/tasks';
 import { fetchPinnedTasks, pinTask, unpinTask, setTaskTier } from '@/api/focus';
 import type { FocusTier } from '@/api/focus';
@@ -122,7 +122,11 @@ export const SessionPanel = memo(function SessionPanel({ sessionId, onClose, loc
   const [session, setSession] = useState<SessionRecord | null>(null);
   const [loading, setLoading] = useState(true);
   const { optimisticMsgs, sendError, send, interruptSend, retryFailed, dismissFailed, handleMessagesDelivered, handleBatchCompleted, handleEditQueued, handleDeleteQueued, addExternalQueued, clearCommitted } = useSessionSend(sessionId);
-  const { isStreaming } = useSessionStream(sessionId);
+  // isStreaming is bubbled up from the single useSessionStream instance that lives
+  // inside SessionChatHistory (via onStreamingChange). We used to mount a second
+  // hook instance here, which doubled stream-subscribe RPCs and produced two
+  // parallel defensive-clear paths that could wipe live stream blocks.
+  const [isStreaming, setIsStreaming] = useState(false);
   const bodyRef = useRef<HTMLDivElement>(null);
   // Track latest sessionId so async callbacks can detect navigation
   const sessionIdRef = useRef(sessionId);
@@ -225,7 +229,8 @@ export const SessionPanel = memo(function SessionPanel({ sessionId, onClose, loc
         setPinned(isPinned);
         if (isPinned) {
           const tier: FocusTier = data.focus_tasks?.includes(taskId) ? 'focus'
-            : data.next_tasks?.includes(taskId) ? 'next' : 'satellite';
+            : data.next_tasks?.includes(taskId) ? 'next'
+            : data.wait_tasks?.includes(taskId) ? 'wait' : 'satellite';
           setPinnedTier(tier);
         } else {
           setPinnedTier(undefined);
@@ -461,11 +466,17 @@ export const SessionPanel = memo(function SessionPanel({ sessionId, onClose, loc
   }, []);
   const [restartBusy, setRestartBusy] = useState(false);
   const handleRestart = useCallback(async () => {
+    log.info('session-panel', 'restart button clicked', { sessionId });
     setRestartBusy(true);
     try {
       const result = await restartSession(sessionId);
-      retryTaskIdRef.current = result.taskId;
-    } catch { /* ignore — banner will stay */ }
+      log.info('session-panel', 'restart API returned', { sessionId, result });
+    } catch (err) {
+      log.error('session-panel', 'restart API failed', {
+        sessionId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
     setRestartBusy(false);
   }, [sessionId]);
   useEvent('task:updated', (data: unknown) => {
@@ -571,6 +582,12 @@ export const SessionPanel = memo(function SessionPanel({ sessionId, onClose, loc
           </div>
           {session?.taskId && (
             <div className="session-panel-task-row">
+              <TaskQuickActions
+                taskId={session.taskId}
+                task={sessionTask}
+                slot="phase"
+                compact
+              />
               <div
                 className="session-panel-task-link"
                 role="button"
@@ -591,6 +608,7 @@ export const SessionPanel = memo(function SessionPanel({ sessionId, onClose, loc
                 onPinTask={handlePinTask}
                 onUnpinTask={handleUnpinTask}
                 onSetTier={handleSetTier}
+                slot="kebab"
               />
             </div>
           )}
@@ -836,6 +854,7 @@ export const SessionPanel = memo(function SessionPanel({ sessionId, onClose, loc
             onTaskClick={onTaskClick}
             onSessionClick={onSessionClick}
             onFileOpen={handleFileOpen}
+            onStreamingChange={setIsStreaming}
           />
         </div>
 

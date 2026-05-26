@@ -1,7 +1,7 @@
 /**
  * Console Agent Turn Queue — serializes agent turns per console agent.
  *
- * Each console agent (General, Inner Space, custom) has its own queue with
+ * Each console agent (General, Mentor, custom) has its own queue with
  * concurrency=1 so that Agent B can respond instantly even while Agent A
  * is mid-turn. Different agents have different system prompts, tools, and
  * chat histories, so there's no prompt-cache benefit to sharing a queue.
@@ -102,7 +102,7 @@ function pump(agentId: string): void {
  * Enqueue a turn for a specific console agent.
  * Each agent has its own concurrency=1 queue — no cross-agent blocking.
  *
- * @param agentId — console agent ID (e.g. 'general', 'inner')
+ * @param agentId — console agent ID (e.g. 'general', 'mentor')
  * @param label — human-readable label for logging (e.g. 'chat', 'cron:reminder')
  * @param task — async function that runs the agent turn
  */

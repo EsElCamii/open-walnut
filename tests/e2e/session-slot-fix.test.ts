@@ -83,7 +83,7 @@ describe('start_session auto-archives terminal sessions', () => {
     await linkSessionSlot(taskId, 'stopped-sess-001', 'exec');
 
     // Call start_session — should auto-archive the stopped session and NOT block
-    const result = await executeTool('start_session', {
+    const result = await executeTool('session_start', {
       task_id: taskId,
       title: 'New session after stopped',
       prompt: 'Continue working',
@@ -119,7 +119,7 @@ describe('start_session auto-archives terminal sessions', () => {
     await linkSessionSlot(taskId, 'error-sess-001', 'exec');
 
     // Call start_session — should auto-archive the error session and NOT block
-    const result = await executeTool('start_session', {
+    const result = await executeTool('session_start', {
       task_id: taskId,
       title: 'New session after error',
       prompt: 'Retry the work',
@@ -155,7 +155,7 @@ describe('start_session skips triage sessions', () => {
     });
 
     // Call start_session — triage session should be skipped in the per-task check
-    const result = await executeTool('start_session', {
+    const result = await executeTool('session_start', {
       task_id: taskId,
       title: 'New session with triage running',
       prompt: 'Start working',

@@ -15,7 +15,7 @@
  * Each mock is an isolated shell + node WS server with baked-in daemon dir,
  * so multiple mocks in the same test don't collide.
  */
-import { describe, it, expect, beforeEach, afterEach, afterAll } from 'vitest'
+import { describe, it, expect, beforeAll, beforeEach, afterEach, afterAll } from 'vitest'
 import fs from 'node:fs'
 import path from 'node:path'
 import os from 'node:os'
@@ -370,12 +370,37 @@ function realBinaryExists(): boolean {
   return fs.existsSync(binaryPath)
 }
 
-// Real daemon uses hardcoded /tmp/open-walnut path. We can't override it,
-// so these tests use the production dir and clean up carefully.
-const REAL_DAEMON_DIR = '/tmp/open-walnut'
+// Real-binary integration tests run in an ISOLATED temp dir so they never
+// touch /tmp/open-walnut (where the user's production daemon lives).
+// LocalDaemon accepts { daemonDir } for this exact purpose.
+const PROD_DAEMON_DIR = '/tmp/open-walnut'
 
 describe.skipIf(!realBinaryExists())('LocalDaemon — real binary integration', () => {
+  let REAL_DAEMON_DIR: string
+  let prevWalnutDaemonDir: string | undefined
+
+  beforeAll(() => {
+    REAL_DAEMON_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'walnut-real-daemon-test-'))
+    // Safety guard: refuse to run against the production dir unless explicitly
+    // opted in via WALNUT_ALLOW_PROD_DIR=1. This catches future regressions
+    // where someone hardcodes /tmp/open-walnut again.
+    if (path.resolve(REAL_DAEMON_DIR) === path.resolve(PROD_DAEMON_DIR) &&
+        process.env.WALNUT_ALLOW_PROD_DIR !== '1') {
+      throw new Error(
+        `Refusing to run real-binary tests against production daemon dir ${PROD_DAEMON_DIR}. ` +
+        `Set WALNUT_ALLOW_PROD_DIR=1 to override (not recommended).`
+      )
+    }
+    // The daemon binary reads WALNUT_DAEMON_DIR and writes port/pid there.
+    // LocalDaemon inherits process.env when spawning the child, so setting it
+    // here in the parent redirects the spawned binary to the isolated tmp dir.
+    prevWalnutDaemonDir = process.env.WALNUT_DAEMON_DIR
+    process.env.WALNUT_DAEMON_DIR = REAL_DAEMON_DIR
+  })
+
   function killReal(): void {
+    // Only kill the PID recorded in THIS test's isolated dir — never pkill
+    // by binary name (that would kill the user's production daemon too).
     try {
       const pid = parseInt(fs.readFileSync(path.join(REAL_DAEMON_DIR, 'daemon.pid'), 'utf-8'), 10)
       if (pid > 0) {
@@ -384,15 +409,19 @@ describe.skipIf(!realBinaryExists())('LocalDaemon — real binary integration', 
     } catch {}
     try { fs.unlinkSync(path.join(REAL_DAEMON_DIR, 'daemon.port')) } catch {}
     try { fs.unlinkSync(path.join(REAL_DAEMON_DIR, 'daemon.pid')) } catch {}
-    killByName('daemon-darwin-arm64')
   }
 
   beforeEach(() => { killReal() })
   afterEach(() => { killReal() })
-  afterAll(() => { killReal() })
+  afterAll(() => {
+    killReal()
+    if (prevWalnutDaemonDir === undefined) delete process.env.WALNUT_DAEMON_DIR
+    else process.env.WALNUT_DAEMON_DIR = prevWalnutDaemonDir
+    try { fs.rmSync(REAL_DAEMON_DIR, { recursive: true, force: true }) } catch {}
+  })
 
   it('spawns the real darwin-arm64 binary and gets hello capabilities', async () => {
-    const daemon = new LocalDaemon()  // Default dir: /tmp/open-walnut
+    const daemon = new LocalDaemon({ daemonDir: REAL_DAEMON_DIR })
     const port = await daemon.ensureRunning()
     expect(port).toBeGreaterThan(0)
 
@@ -418,7 +447,7 @@ describe.skipIf(!realBinaryExists())('LocalDaemon — real binary integration', 
     const versionFile = path.join(projectRoot, 'dist', 'daemon-binaries', 'daemon-darwin-arm64.version')
     const expectedVersion = fs.readFileSync(versionFile, 'utf-8').trim()
 
-    const daemon = new LocalDaemon()
+    const daemon = new LocalDaemon({ daemonDir: REAL_DAEMON_DIR })
     const port = await daemon.ensureRunning()
 
     const result = await new Promise<{ version: string }>((resolve, reject) => {
@@ -437,11 +466,11 @@ describe.skipIf(!realBinaryExists())('LocalDaemon — real binary integration', 
   }, 15000)
 
   it('real daemon is reused on second ensureRunning()', async () => {
-    const d1 = new LocalDaemon()
+    const d1 = new LocalDaemon({ daemonDir: REAL_DAEMON_DIR })
     const port1 = await d1.ensureRunning()
     const pid1 = parseInt(fs.readFileSync(path.join(REAL_DAEMON_DIR, 'daemon.pid'), 'utf-8'), 10)
 
-    const d2 = new LocalDaemon()
+    const d2 = new LocalDaemon({ daemonDir: REAL_DAEMON_DIR })
     const port2 = await d2.ensureRunning()
     const pid2 = parseInt(fs.readFileSync(path.join(REAL_DAEMON_DIR, 'daemon.pid'), 'utf-8'), 10)
 

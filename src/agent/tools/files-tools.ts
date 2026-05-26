@@ -1,16 +1,16 @@
 /**
- * Unified files_* tool group — 6 tools for CRUDL + search on any content source.
+ * Unified file_* tool group — 6 tools for CRUDL + search on any content source.
  *
- * files_read  — read any source with optional parse
- * files_write — write/append to any source
- * files_edit  — edit by exact string replacement
- * files_list  — list contents under a source prefix
- * files_glob  — find files by glob pattern
- * files_grep  — search file contents by regex
+ * file_read  — read any source with optional parse
+ * file_write — write/append to any source
+ * file_edit  — edit by exact string replacement
+ * file_list  — list contents under a source prefix
+ * file_glob  — find files by glob pattern
+ * file_grep  — search file contents by regex
  *
  * readFileState mechanism:
- *   files_read stores { content, mtime } for each file path read.
- *   files_edit/files_write on file sources check:
+ *   file_read stores { content, mtime } for each file path read.
+ *   file_edit/file_write on file sources check:
  *     1. File was read → error if not
  *     2. File mtime unchanged → error if modified since read
  *   Memory/notes/repos sources still use content_hash for safety.
@@ -71,10 +71,10 @@ export function getReadFileState(): Map<string, ReadFileStateEntry> {
 async function validateReadState(filePath: string): Promise<string | undefined> {
   const entry = readFileState.get(filePath);
   if (!entry) {
-    return `Error: File has not been read yet. You must use files_read to read "${filePath}" before editing or writing to it.`;
+    return `Error: File has not been read yet. You must use file_read to read "${filePath}" before editing or writing to it.`;
   }
   if (entry.isPartialView) {
-    return `Error: File was only partially read (with offset/limit). You must read the full file before editing or writing to it. Use files_read without offset/limit.`;
+    return `Error: File was only partially read (with offset/limit). You must read the full file before editing or writing to it. Use file_read without offset/limit.`;
   }
 
   // Check if file has been modified since we read it
@@ -111,7 +111,7 @@ function formatError(err: unknown, source: string): string {
     return `Error: ${err.message}`;
   }
   if (err instanceof ContentNotFoundError) {
-    return `Error: old_content not found in "${source}". Make sure the string matches exactly (including whitespace and indentation). Use files_read first to see current content.`;
+    return `Error: old_content not found in "${source}". Make sure the string matches exactly (including whitespace and indentation). Use file_read first to see current content.`;
   }
   if (err instanceof AmbiguousMatchError) {
     return `Error: ${err.message}`;
@@ -129,15 +129,15 @@ function formatError(err: unknown, source: string): string {
     return `Error: Permission denied: "${source}".`;
   }
   if (code === 'EISDIR') {
-    return `Error: Source is a directory, not a file: "${source}". Use files_list instead.`;
+    return `Error: Source is a directory, not a file: "${source}". Use file_list instead.`;
   }
   return `Error: ${err instanceof Error ? err.message : String(err)}`;
 }
 
-// ── files_read ──
+// ── file_read ──
 
 export const filesReadTool: ToolDefinition = {
-  name: 'files_read',
+  name: 'file_read',
   description: `Read any content source. Returns line-numbered text + content_hash. Images return inline. PDFs supported.
 
 IMPORTANT: You must read a file before editing or writing to it. The system tracks which files have been read.
@@ -244,22 +244,22 @@ For PDFs: use pages parameter (e.g. "1-5", "3", "10-20") to extract specific pag
   },
 };
 
-// ── files_write ──
+// ── file_write ──
 
 export const filesWriteTool: ToolDefinition = {
-  name: 'files_write',
+  name: 'file_write',
   description: `Write or append content to any source.
 
-IMPORTANT: For file sources (/absolute/path), you MUST read the file first with files_read before writing.
+IMPORTANT: For file sources (/absolute/path), you MUST read the file first with file_read before writing.
            The system will reject writes to files that haven't been read. New files (that don't exist yet) are exempt.
 
 Mode 'overwrite' replaces entire content (default). Mode 'append' adds to end.
 For memory sources: append auto-prepends timestamp heading.
-content_hash (from files_read) required for overwrite on memory/notes sources — prevents stale writes.
+content_hash (from file_read) required for overwrite on memory/notes sources — prevents stale writes.
 NOTE: memory/main/* sources are READ-ONLY and cannot be written to.
 
 Sources: notes/global, notes/instructions, notes/{name}, memory/global, memory/project/{path},
-memory/daily[/YYYY-MM-DD], memory/repo/{slug}, repos/{name}, /absolute/path — see files_read for full descriptions.`,
+memory/daily[/YYYY-MM-DD], memory/repo/{slug}, repos/{name}, /absolute/path — see file_read for full descriptions.`,
   input_schema: {
     type: 'object',
     properties: {
@@ -278,7 +278,7 @@ memory/daily[/YYYY-MM-DD], memory/repo/{slug}, repos/{name}, /absolute/path — 
       },
       content_hash: {
         type: 'string',
-        description: 'From files_read. Required for overwrite on memory/notes sources.',
+        description: 'From file_read. Required for overwrite on memory/notes sources.',
       },
     },
     required: ['source', 'content'],
@@ -356,19 +356,19 @@ memory/daily[/YYYY-MM-DD], memory/repo/{slug}, repos/{name}, /absolute/path — 
   },
 };
 
-// ── files_edit ──
+// ── file_edit ──
 
 export const filesEditTool: ToolDefinition = {
-  name: 'files_edit',
+  name: 'file_edit',
   description: `Edit by exact string replacement in any source.
 
-IMPORTANT: For file sources (/absolute/path), you MUST read the file first with files_read before editing.
+IMPORTANT: For file sources (/absolute/path), you MUST read the file first with file_read before editing.
            The system will reject edits to files that haven't been read.
 
-content_hash (from files_read) required for memory/notes sources — prevents stale edits.
+content_hash (from file_read) required for memory/notes sources — prevents stale edits.
 
 Sources: notes/global, notes/instructions, notes/{name}, memory/global, memory/project/{path},
-memory/daily[/YYYY-MM-DD], memory/repo/{slug}, repos/{name}, /absolute/path — see files_read for full descriptions.`,
+memory/daily[/YYYY-MM-DD], memory/repo/{slug}, repos/{name}, /absolute/path — see file_read for full descriptions.`,
   input_schema: {
     type: 'object',
     properties: {
@@ -386,7 +386,7 @@ memory/daily[/YYYY-MM-DD], memory/repo/{slug}, repos/{name}, /absolute/path — 
       },
       content_hash: {
         type: 'string',
-        description: 'From files_read. Required for memory/notes sources.',
+        description: 'From file_read. Required for memory/notes sources.',
       },
       replace_all: {
         type: 'boolean',
@@ -456,10 +456,10 @@ memory/daily[/YYYY-MM-DD], memory/repo/{slug}, repos/{name}, /absolute/path — 
   },
 };
 
-// ── files_list ──
+// ── file_list ──
 
 export const filesListTool: ToolDefinition = {
-  name: 'files_list',
+  name: 'file_list',
   description: `List available content under a source prefix.
   "notes"          → all note documents (global + named notes)
   "memory/project" → all project memories with names & descriptions
@@ -498,14 +498,14 @@ export const filesListTool: ToolDefinition = {
   },
 };
 
-// ── files_glob ──
+// ── file_glob ──
 
 export const filesGlobTool: ToolDefinition = {
-  name: 'files_glob',
+  name: 'file_glob',
   description: `Find files by glob pattern. Returns matching paths sorted by modification time (most recent first).
 Pattern syntax: * matches any chars in one segment, ** matches across segments,
 {a,b} matches either, [abc] matches character class.
-Example: files_glob(pattern="**/*.ts", path="/project/src")`,
+Example: file_glob(pattern="**/*.ts", path="/project/src")`,
   input_schema: {
     type: 'object',
     properties: {
@@ -534,10 +534,10 @@ Example: files_glob(pattern="**/*.ts", path="/project/src")`,
   },
 };
 
-// ── files_grep ──
+// ── file_grep ──
 
 export const filesGrepTool: ToolDefinition = {
-  name: 'files_grep',
+  name: 'file_grep',
   description: `Search file contents by regex. Returns matching lines with optional context.
 Output modes: "content" (lines + context), "files" (paths only, default), "count" (per-file counts).
 Use glob or type to filter files. type maps common names (js, ts, py, go, rust, etc.) to extensions.`,
@@ -623,7 +623,7 @@ Use glob or type to filter files. type maps common names (js, ts, py, go, rust, 
   },
 };
 
-/** All files_* tools for registration. */
+/** All file_* tools for registration. */
 export const filesTools: ToolDefinition[] = [
   filesReadTool,
   filesWriteTool,

@@ -138,8 +138,8 @@ test('tools section shows tool cards with names', async ({ page }) => {
   expect(count).toBeGreaterThan(0)
 
   // Known tools should be present
-  await expect(page.locator('.context-tool-name', { hasText: 'query_tasks' })).toBeVisible()
-  await expect(page.locator('.context-tool-name', { hasText: 'search' })).toBeVisible()
+  await expect(page.locator('.context-tool-name', { hasText: 'task_query' })).toBeVisible()
+  await expect(page.locator('.context-tool-name', { hasText: 'task_search' })).toBeVisible()
   await expect(page.locator('.context-tool-name', { hasText: 'memory' })).toBeVisible()
 })
 

@@ -7,15 +7,19 @@ let tmpDir: string;
 vi.mock('../../src/constants.js', () => createMockConstants('walnut-terminal-phase'));
 
 // Import after mocking
-import { addTask, updateTask, updateTaskRaw, listTasks } from '../../src/core/task-manager.js';
+import { addTask, updateTask, updateTaskRaw, listTasks, _resetForTesting } from '../../src/core/task-manager.js';
+import { closeDb } from '../../src/core/task-db.js';
 import { WALNUT_HOME } from '../../src/constants.js';
 
 beforeEach(async () => {
   tmpDir = WALNUT_HOME;
+  closeDb();
+  _resetForTesting();
   await fs.rm(tmpDir, { recursive: true, force: true });
 });
 
 afterEach(async () => {
+  closeDb();
   await fs.rm(tmpDir, { recursive: true, force: true });
 });
 

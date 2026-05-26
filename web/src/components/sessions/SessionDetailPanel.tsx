@@ -9,6 +9,10 @@ import { ProcessStatusBadge } from './WorkStatusPicker';
 import { SessionCopyButtons } from './SessionCopyButtons';
 import { TaskQuickActions } from './TaskQuickActions';
 import { updateSession, executePlanSession, executePlanContinue, restartSession } from '@/api/sessions';
+import { log } from '@/utils/log';
+import { fetchTask } from '@/api/tasks';
+import { fetchPinnedTasks, pinTask, unpinTask, setTaskTier } from '@/api/focus';
+import type { FocusTier } from '@/api/focus';
 import { SessionRetryButton } from './SessionRetryButton';
 import { useSessionHistory } from '@/hooks/useSessionHistory';
 import { useSessionPlan } from '@/hooks/useSessionPlan';
@@ -40,6 +44,9 @@ interface SessionDetailPanelProps {
   onClearCommitted?: () => void;
   onRetryFailed?: (queueId: string) => void;
   onDismissFailed?: (queueId: string) => void;
+  /** Bubbles the stream hook's isStreaming up to page-level so the page doesn't
+   *  need its own useSessionStream mount (would double RPCs + race defensive clear). */
+  onStreamingChange?: (isStreaming: boolean) => void;
 }
 
 /** Renders plan markdown content inside the plan popover with scrollable area */
@@ -141,7 +148,7 @@ function EditableTitle({ sessionId, title, onSaved }: { sessionId: string; title
   );
 }
 
-export function SessionDetailPanel({ session, taskTitle, summary, onTitleChanged, onSessionReplaced, optimisticMessages, onMessagesDelivered, onBatchCompleted, onEditQueued, onDeleteQueued, onAgentQueued, onClearCommitted, onRetryFailed, onDismissFailed }: SessionDetailPanelProps) {
+export function SessionDetailPanel({ session, taskTitle, summary, onTitleChanged, onSessionReplaced, optimisticMessages, onMessagesDelivered, onBatchCompleted, onEditQueued, onDeleteQueued, onAgentQueued, onClearCommitted, onRetryFailed, onDismissFailed, onStreamingChange }: SessionDetailPanelProps) {
   const navigate = useNavigate();
   const enabledModes = useEnabledModes();
   const [executing, setExecuting] = useState(false);
@@ -149,7 +156,51 @@ export function SessionDetailPanel({ session, taskTitle, summary, onTitleChanged
   const [executeStarted, setExecuteStarted] = useState(false);
   const [detailsOpen, setDetailsOpen] = useState(false);
   const [fileViewerState, setFileViewerState] = useState<{ path: string; line?: number } | null>(null);
+  // Pre-fetched task + pin state for TaskQuickActions (avoids self-fetch null-render)
+  const [sessionTask, setSessionTask] = useState<import('@open-walnut/core').Task | null>(null);
+  const [pinned, setPinned] = useState(false);
+  const [pinnedTier, setPinnedTier] = useState<FocusTier | undefined>(undefined);
   const panelRef = useRef<HTMLDivElement>(null);
+
+  const refreshPinState = useCallback((taskId: string | undefined) => {
+    if (!taskId) return;
+    fetchPinnedTasks().then((data) => {
+      const isPinned = data.pinned_tasks.includes(taskId);
+      setPinned(isPinned);
+      if (isPinned) {
+        const tier: FocusTier = data.focus_tasks?.includes(taskId) ? 'focus'
+          : data.next_tasks?.includes(taskId) ? 'next'
+          : data.wait_tasks?.includes(taskId) ? 'wait' : 'satellite';
+        setPinnedTier(tier);
+      } else {
+        setPinnedTier(undefined);
+      }
+    }).catch(() => {});
+  }, []);
+
+  useEvent('config:changed', (data: unknown) => {
+    const { key } = (data ?? {}) as { key?: string };
+    if (key && key !== 'focus_bar') return;
+    refreshPinState(session?.taskId);
+  });
+
+  const handlePinTask = useCallback(async (id: string) => {
+    try { await pinTask(id); setPinned(true); } catch (err) { console.error('Pin failed:', err); }
+  }, []);
+
+  const handleUnpinTask = useCallback(async (id: string) => {
+    try { await unpinTask(id); setPinned(false); setPinnedTier(undefined); } catch (err) { console.error('Unpin failed:', err); }
+  }, []);
+
+  const handleSetTier = useCallback(async (id: string, tier: FocusTier) => {
+    try { await setTaskTier(id, tier); setPinnedTier(tier); } catch (err) { console.error('Set tier failed:', err); }
+  }, []);
+
+  useEffect(() => {
+    if (!session?.taskId) { setSessionTask(null); setPinned(false); setPinnedTier(undefined); return; }
+    fetchTask(session.taskId).then(setSessionTask).catch(() => {});
+    refreshPinState(session.taskId);
+  }, [session?.taskId, refreshPinState]);
   // Track latest sessionId so async callbacks can detect navigation
   const sessionIdRef = useRef(session?.claudeSessionId);
   sessionIdRef.current = session?.claudeSessionId;
@@ -236,14 +287,23 @@ export function SessionDetailPanel({ session, taskTitle, summary, onTitleChanged
   }, []);
   const [restartBusy, setRestartBusy] = useState(false);
   const handleRestart = useCallback(async () => {
-    if (!session?.claudeSessionId) return;
+    if (!session?.claudeSessionId) {
+      log.warn('session-detail', 'restart clicked but no claudeSessionId', { taskId: session?.taskId });
+      return;
+    }
+    log.info('session-detail', 'restart button clicked', { sessionId: session.claudeSessionId });
     setRestartBusy(true);
     try {
       const result = await restartSession(session.claudeSessionId);
-      retryTaskIdRef.current = result.taskId;
-    } catch { /* ignore */ }
+      log.info('session-detail', 'restart API returned', { sessionId: session.claudeSessionId, result });
+    } catch (err) {
+      log.error('session-detail', 'restart API failed', {
+        sessionId: session.claudeSessionId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
     setRestartBusy(false);
-  }, [session?.claudeSessionId]);
+  }, [session?.claudeSessionId, session?.taskId]);
   useEvent('task:updated', (data: unknown) => {
     const d = data as { task?: { id?: string; exec_session_id?: string; plan_session_id?: string } };
     const t = d.task;
@@ -404,11 +464,24 @@ export function SessionDetailPanel({ session, taskTitle, summary, onTitleChanged
           <div className="session-detail-meta-bar">
             {session.taskId && (
               <>
+                <TaskQuickActions
+                  taskId={session.taskId}
+                  task={sessionTask}
+                  slot="phase"
+                  compact
+                />
                 <a href={`/tasks/${session.taskId}`} className="session-detail-link" title={`Task: ${session.taskId}`}>
                   {taskLabel}
                 </a>
                 <TaskQuickActions
                   taskId={session.taskId}
+                  task={sessionTask}
+                  isPinned={pinned}
+                  pinnedTier={pinnedTier}
+                  onPinTask={handlePinTask}
+                  onUnpinTask={handleUnpinTask}
+                  onSetTier={handleSetTier}
+                  slot="kebab"
                 />
               </>
             )}
@@ -753,6 +826,7 @@ export function SessionDetailPanel({ session, taskTitle, summary, onTitleChanged
           onRetryFailed={onRetryFailed}
           onDismissFailed={onDismissFailed}
           onFileOpen={handleFileOpen}
+          onStreamingChange={onStreamingChange}
         />
         {fileViewerState && (
           <FileViewer

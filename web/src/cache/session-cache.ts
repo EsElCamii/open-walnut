@@ -232,6 +232,38 @@ function registerGlobalListeners(): void {
     } as StreamingSystemBlock);
   });
 
+  // ── thinking-delta ──
+  wsClient.onEvent('session:thinking-delta', (data: unknown) => {
+    const { sessionId: sid, delta } = data as { sessionId: string; delta: string };
+    if (!sid || !trackedSessions.has(sid)) return;
+    const state = ensureState(sid);
+    state.isStreaming = true;
+    const last = state.blocks[state.blocks.length - 1];
+    if (last && last.type === 'thinking') {
+      state.blocks[state.blocks.length - 1] = {
+        type: 'thinking',
+        content: last.content + delta,
+      };
+    } else {
+      state.blocks.push({ type: 'thinking', content: delta });
+    }
+  });
+
+  // ── unknown-event (surface as info system block so no event is silently lost) ──
+  wsClient.onEvent('session:unknown-event', (data: unknown) => {
+    const { sessionId: sid, scope, eventType, snippet } = data as {
+      sessionId: string; scope: string; eventType: string; snippet: string;
+    };
+    if (!sid || !trackedSessions.has(sid)) return;
+    const state = ensureState(sid);
+    state.blocks.push({
+      type: 'system',
+      variant: 'info',
+      message: `Unknown Claude event: ${scope}:${eventType}`,
+      detail: snippet,
+    } as StreamingSystemBlock);
+  });
+
   // ── result (streaming done, turn finished successfully) ──
   wsClient.onEvent('session:result', (data: unknown) => {
     const { sessionId: sid } = data as { sessionId: string };

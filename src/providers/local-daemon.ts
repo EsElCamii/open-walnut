@@ -44,20 +44,28 @@ export interface LocalDaemonOptions {
 export class LocalDaemon {
   private _port: number | null = null
   private _wsUrl: string | null = null
+  private _spawnedPid: number | null = null
+  private _instanceId: string | null = null
   private readonly daemonDir: string
   private readonly portFile: string
   private readonly pidFile: string
+  private readonly instanceIdFile: string
   private readonly overrideBinaryPath: string | undefined
 
   constructor(opts: LocalDaemonOptions = {}) {
     this.daemonDir = opts.daemonDir ?? DEFAULT_DAEMON_DIR
     this.portFile = path.join(this.daemonDir, 'daemon.port')
     this.pidFile = path.join(this.daemonDir, 'daemon.pid')
+    this.instanceIdFile = path.join(this.daemonDir, 'daemon.instance')
     this.overrideBinaryPath = opts.binaryPath
   }
 
   get port(): number | null { return this._port }
   get wsUrl(): string | null { return this._wsUrl }
+  /** PID of the daemon process we spawned, or pid from daemon.pid file as fallback. Null if unknown. */
+  get pid(): number | null { return this._spawnedPid ?? this.readPidFile() }
+  /** Daemon instance ID (from hello or on-disk). Null if daemon hasn't been contacted. */
+  get instanceId(): string | null { return this._instanceId ?? this.readInstanceIdFile() }
 
   async ensureRunning(): Promise<number> {
     const binaryPath = this.findDaemonBinary()
@@ -73,19 +81,26 @@ export class LocalDaemon {
           log.session.info('local daemon version mismatch — restarting', {
             running: helloResult.version,
             expected: expectedVersion,
+            runningInstanceId: helloResult.instanceId,
           })
           await this.stopDaemon()
         } else {
           this._port = existingPort
           this._wsUrl = `ws://localhost:${existingPort}`
+          this._instanceId = helloResult.instanceId ?? this.readInstanceIdFile()
           log.session.info('local daemon already running', {
             port: existingPort,
             version: helloResult.version,
+            instanceId: this._instanceId,
           })
           return existingPort
         }
       } else {
-        log.session.info('local daemon port file exists but daemon is dead, respawning')
+        log.session.info('local daemon port file exists but daemon is dead, respawning', {
+          staleExistingPort: existingPort,
+          stalePidFromFile: this.readPidFile(),
+          staleInstanceId: this.readInstanceIdFile(),
+        })
       }
     }
 
@@ -93,7 +108,14 @@ export class LocalDaemon {
     const port = await this.spawnDaemon(binaryPath)
     this._port = port
     this._wsUrl = `ws://localhost:${port}`
-    log.session.info('local daemon started', { port, version: expectedVersion })
+    // Pick up instance id from hello (spawnDaemon did one) or fall back to file
+    if (!this._instanceId) this._instanceId = this.readInstanceIdFile()
+    log.session.info('local daemon started', {
+      port,
+      pid: this._spawnedPid,
+      version: expectedVersion,
+      instanceId: this._instanceId,
+    })
     return port
   }
 
@@ -122,6 +144,15 @@ export class LocalDaemon {
     }
   }
 
+  private readInstanceIdFile(): string | null {
+    try {
+      const content = fs.readFileSync(this.instanceIdFile, 'utf-8').trim()
+      return content || null
+    } catch {
+      return null
+    }
+  }
+
   private isPidAlive(pid: number): boolean {
     try {
       process.kill(pid, 0)
@@ -131,7 +162,7 @@ export class LocalDaemon {
     }
   }
 
-  private async ping(port: number): Promise<{ alive: boolean; version?: string; capabilities?: string[] }> {
+  private async ping(port: number): Promise<{ alive: boolean; version?: string; capabilities?: string[]; instanceId?: string }> {
     return new Promise((resolve) => {
       // 2s is generous for localhost WebSocket (typically <10ms) but handles
       // daemon startup jitter. This blocks Walnut server startup, so keep short.
@@ -145,8 +176,15 @@ export class LocalDaemon {
           clearTimeout(timeout)
           ws.close()
           try {
-            const msg = JSON.parse(data.toString()) as { ok?: boolean; version?: string; capabilities?: string[] }
-            resolve({ alive: msg.ok === true, version: msg.version, capabilities: msg.capabilities })
+            const msg = JSON.parse(data.toString()) as {
+              ok?: boolean; version?: string; capabilities?: string[]; instanceId?: string
+            }
+            resolve({
+              alive: msg.ok === true,
+              version: msg.version,
+              capabilities: msg.capabilities,
+              instanceId: msg.instanceId,
+            })
           } catch {
             resolve({ alive: false })
           }
@@ -175,6 +213,9 @@ export class LocalDaemon {
     }
     try { fs.unlinkSync(this.portFile) } catch {}
     try { fs.unlinkSync(this.pidFile) } catch {}
+    try { fs.unlinkSync(this.instanceIdFile) } catch {}
+    this._spawnedPid = null
+    this._instanceId = null
   }
 
   private async spawnDaemon(binaryPath: string): Promise<number> {
@@ -187,6 +228,7 @@ export class LocalDaemon {
       stdio: 'ignore',
       env: { ...process.env },
     })
+    this._spawnedPid = proc.pid ?? null
     proc.unref()
 
     // Capture async spawn errors (ENOENT, EACCES) so they surface as rejection
@@ -209,6 +251,7 @@ export class LocalDaemon {
     if (!result.alive) {
       throw new Error(`Local daemon started (port ${port}) but not responding to hello`)
     }
+    if (result.instanceId) this._instanceId = result.instanceId
 
     return port
   }

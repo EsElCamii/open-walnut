@@ -1,13 +1,10 @@
 /**
  * Notification panel — slide-out overlay from sidebar showing system health.
- * iOS-style notification center: embedding status, Ollama availability, etc.
+ * iOS-style notification center: daemon status, git backup, etc.
  */
-import { useNavigate } from 'react-router-dom';
+import { useState, useEffect } from 'react';
 import { useSystemHealth } from '@/hooks/useSystemHealth';
-import { SETUP_DISMISS_KEY, SETUP_SHOW_EVENT } from './SetupBanner';
-import { InstallButton } from './InstallButton';
-import { getErrorSuggestion } from '@/utils/error-suggestions';
-import { ErrorSuggestionLink } from './ErrorSuggestionLink';
+import { log } from '@/utils/log';
 
 interface NotificationPanelProps {
   open: boolean;
@@ -15,14 +12,52 @@ interface NotificationPanelProps {
   sidebarCollapsed: boolean;
 }
 
+interface QmdStoreStats {
+  totalIndexed: number;
+  totalEmbedded: number;
+  totalChunks: number;
+  collections: Record<string, { indexed: number; embedded: number; chunks: number }>;
+}
+
+interface QmdStatus {
+  model: { name: string; downloaded: boolean };
+  stores: {
+    memory: QmdStoreStats | null;
+    notes: QmdStoreStats | null;
+    tasks: QmdStoreStats | null;
+    sessions: QmdStoreStats | null;
+  };
+  status: 'ready' | 'indexing' | 'downloading' | 'error';
+  error: string | null;
+  progress: { chunksEmbedded: number; totalChunks: number; store: string } | null;
+}
+
 export function NotificationPanel({ open, onClose, sidebarCollapsed }: NotificationPanelProps) {
-  const navigate = useNavigate();
-  const { health, gitSync, setupComplete, loading, reindexing, triggerReindex } = useSystemHealth();
+  const { health, gitSync, loading } = useSystemHealth();
+  const [qmdStatus, setQmdStatus] = useState<QmdStatus | null>(null);
+
+  // Fetch QMD status on mount, poll every 3s while indexing/downloading
+  useEffect(() => {
+    if (!open) return;
+    const ac = new AbortController();
+    const fetchQmd = () => {
+      fetch('/api/qmd/status', { signal: ac.signal })
+        .then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); })
+        .then((data: QmdStatus) => setQmdStatus(data))
+        .catch(err => {
+          if (err instanceof DOMException && err.name === 'AbortError') return;
+          log.warn('notifications', 'QMD status fetch failed', { error: String(err) });
+        });
+    };
+    fetchQmd();
+    const interval = setInterval(() => {
+      if (qmdStatus?.status === 'indexing' || qmdStatus?.status === 'downloading') fetchQmd();
+    }, 3000);
+    return () => { ac.abort(); clearInterval(interval); };
+  }, [open, qmdStatus?.status]);
 
   if (!open) return null;
 
-  const emb = health.embedding;
-  const embeddingOk = emb.unindexed === 0 && emb.ollamaAvailable;
   const gitOk = gitSync.protected && gitSync.consecutiveFailures < 3;
 
   return (
@@ -52,117 +87,6 @@ export function NotificationPanel({ open, onClose, sidebarCollapsed }: Notificat
             </div>
           ) : (
             <>
-              {/* Setup incomplete */}
-              {!setupComplete && (
-                <div className="notification-card warn">
-                  <div className="notification-card-row">
-                    <span className="notification-card-icon warn">{'\u26A0'}</span>
-                    <span className="notification-card-label">Setup Incomplete</span>
-                  </div>
-                  <div className="notification-card-details">
-                    {!(health.claudeCliAvailable ?? true) && (
-                      <div className="notification-detail-row warn">
-                        <span>Claude Code CLI</span>
-                        <span className="notification-detail-value warn">Not installed</span>
-                        <div className="error-suggestion">
-                          <button className="error-suggestion-link" onClick={() => { navigate('/settings#sessions'); onClose(); }}>Sessions &rarr;</button>
-                          <InstallButton target="claude-cli" label="Install" className="error-suggestion-install" />
-                        </div>
-                      </div>
-                    )}
-                    {!(health.hasReadyProvider ?? true) && (
-                      <div className="notification-detail-row warn">
-                        <span>AI Provider</span>
-                        <span className="notification-detail-value warn">Not configured</span>
-                        <div className="error-suggestion">
-                          <button className="error-suggestion-link" onClick={() => { navigate('/settings#providers'); onClose(); }}>AI Provider &rarr;</button>
-                        </div>
-                      </div>
-                    )}
-                  </div>
-                  <button
-                    className="notification-retry-btn"
-                    onClick={() => {
-                      try { localStorage.removeItem(SETUP_DISMISS_KEY); } catch {}
-                      window.dispatchEvent(new CustomEvent(SETUP_SHOW_EVENT));
-                      onClose();
-                    }}
-                  >
-                    Show Setup Guide
-                  </button>
-                </div>
-              )}
-
-              {/* Embedding status */}
-              <div className={`notification-card ${embeddingOk ? 'ok' : 'warn'}`}>
-                <div className="notification-card-row">
-                  <span className={`notification-card-icon ${embeddingOk ? 'ok' : 'warn'}`}>
-                    {embeddingOk ? '\u2713' : '\u26A0'}
-                  </span>
-                  <span className="notification-card-label">Embedding</span>
-                </div>
-
-                <div className="notification-card-details">
-                  <div className="notification-detail-row">
-                    <span>Tasks indexed</span>
-                    <span className="notification-detail-value">
-                      {emb.indexed}/{emb.total}
-                    </span>
-                  </div>
-
-                  {emb.unindexed > 0 && (
-                    <div className="notification-detail-row warn">
-                      <span>Missing embeddings</span>
-                      <span className="notification-detail-value">{emb.unindexed}</span>
-                    </div>
-                  )}
-
-                  <div className="notification-detail-row">
-                    <span>Ollama</span>
-                    <span className={`notification-detail-value ${emb.ollamaAvailable ? 'ok' : 'warn'}`}>
-                      {emb.ollamaAvailable ? 'Available' : 'Unavailable'}
-                    </span>
-                  </div>
-                  {!emb.ollamaAvailable && (
-                    <ErrorSuggestionLink
-                      suggestion="Install and start Ollama for semantic search."
-                      settingsHash="search"
-                      settingsLabel="Search"
-                      installTarget="ollama"
-                    />
-                  )}
-
-                  {emb.lastError && (
-                    <div className="notification-detail-row error">
-                      <span className="notification-error-text">{emb.lastError}</span>
-                      {(() => {
-                        const sug = getErrorSuggestion(emb.lastError, { domain: 'embedding' });
-                        return sug ? <ErrorSuggestionLink {...sug} /> : null;
-                      })()}
-                    </div>
-                  )}
-
-                  {emb.lastReconcileAt && (
-                    <div className="notification-detail-row muted">
-                      <span>Last check</span>
-                      <span className="notification-detail-value">
-                        {formatRelative(emb.lastReconcileAt)}
-                      </span>
-                    </div>
-                  )}
-                </div>
-
-                {!embeddingOk && (
-                  <button
-                    className="notification-retry-btn"
-                    onClick={triggerReindex}
-                    disabled={reindexing}
-                  >
-                    {reindexing ? 'Reindexing...' : 'Retry'}
-                  </button>
-                )}
-              </div>
-
               {/* Remote daemons status */}
               {health.daemons && health.daemons.length > 0 && (
                 <div className={`notification-card ${health.daemons.some(d => d.connected) ? 'ok' : 'neutral'}`}>
@@ -202,11 +126,6 @@ export function NotificationPanel({ open, onClose, sidebarCollapsed }: Notificat
                       <span className="notification-detail-value">
                         {gitSync.error ?? 'git unavailable'}
                       </span>
-                      <ErrorSuggestionLink
-                        suggestion="Configure git backup for data protection."
-                        settingsHash="integrations"
-                        settingsLabel="Integrations"
-                      />
                     </div>
                   ) : gitSync.consecutiveFailures >= 3 ? (
                     <>
@@ -221,11 +140,6 @@ export function NotificationPanel({ open, onClose, sidebarCollapsed }: Notificat
                       {gitSync.error && (
                         <div className="notification-detail-row error">
                           <span className="notification-error-text">{gitSync.error}</span>
-                          <ErrorSuggestionLink
-                            suggestion="Check git backup configuration."
-                            settingsHash="integrations"
-                            settingsLabel="Integrations"
-                          />
                         </div>
                       )}
                     </>
@@ -246,6 +160,95 @@ export function NotificationPanel({ open, onClose, sidebarCollapsed }: Notificat
                   )}
                 </div>
               </div>
+
+              {/* Embedding Search status */}
+              {qmdStatus && (
+                <div className={`notification-card ${qmdStatus.status === 'error' ? 'warn' : 'ok'}`}>
+                  <div className="notification-card-row">
+                    <span className={`notification-card-icon ${
+                      qmdStatus.status === 'error' ? 'error'
+                        : (qmdStatus.status === 'downloading' || qmdStatus.status === 'indexing') ? 'pulsing'
+                        : 'ok'
+                    }`}>
+                      {qmdStatus.status === 'error' ? '\u2717' : '\u2713'}
+                    </span>
+                    <span className="notification-card-label">Embedding Search</span>
+                  </div>
+
+                  <div className="notification-card-details">
+                    <div className="notification-detail-row">
+                      <span>Model</span>
+                      <span className={`notification-detail-value ${
+                        qmdStatus.status === 'ready' ? 'ok'
+                          : qmdStatus.status === 'error' ? 'warn'
+                          : ''
+                      }`}>
+                        {qmdStatus.model.name}{' '}
+                        ({qmdStatus.status === 'ready' ? 'Ready'
+                          : qmdStatus.status === 'downloading' ? 'Downloading'
+                          : qmdStatus.status === 'indexing'
+                            ? (qmdStatus.progress && qmdStatus.progress.totalChunks > 0
+                              ? `Indexing ${qmdStatus.progress.store} ${Math.round(qmdStatus.progress.chunksEmbedded / qmdStatus.progress.totalChunks * 100)}%`
+                              : 'Indexing')
+                          : 'Error'})
+                      </span>
+                    </div>
+                    {/* Memory store health */}
+                    {qmdStatus.stores.memory && (
+                      <div className="notification-detail-row">
+                        <span>Memory</span>
+                        <span className={`notification-detail-value ${
+                          qmdStatus.stores.memory.totalEmbedded >= qmdStatus.stores.memory.totalIndexed ? 'ok' : 'warn'
+                        }`}>
+                          {qmdStatus.stores.memory.totalEmbedded}/{qmdStatus.stores.memory.totalIndexed} docs
+                          {' \u00b7 '}{qmdStatus.stores.memory.totalChunks} chunks
+                        </span>
+                      </div>
+                    )}
+                    {/* Notes store health */}
+                    {qmdStatus.stores.notes && (
+                      <div className="notification-detail-row">
+                        <span>Notes</span>
+                        <span className={`notification-detail-value ${
+                          qmdStatus.stores.notes.totalEmbedded >= qmdStatus.stores.notes.totalIndexed ? 'ok' : 'warn'
+                        }`}>
+                          {qmdStatus.stores.notes.totalEmbedded}/{qmdStatus.stores.notes.totalIndexed} docs
+                          {' \u00b7 '}{qmdStatus.stores.notes.totalChunks} chunks
+                        </span>
+                      </div>
+                    )}
+                    {/* Tasks store health */}
+                    {qmdStatus.stores.tasks && (
+                      <div className="notification-detail-row">
+                        <span>Tasks</span>
+                        <span className={`notification-detail-value ${
+                          qmdStatus.stores.tasks.totalEmbedded >= qmdStatus.stores.tasks.totalIndexed ? 'ok' : 'warn'
+                        }`}>
+                          {qmdStatus.stores.tasks.totalEmbedded}/{qmdStatus.stores.tasks.totalIndexed} docs
+                          {' \u00b7 '}{qmdStatus.stores.tasks.totalChunks} chunks
+                        </span>
+                      </div>
+                    )}
+                    {/* Sessions store health */}
+                    {qmdStatus.stores.sessions && (
+                      <div className="notification-detail-row">
+                        <span>Sessions</span>
+                        <span className={`notification-detail-value ${
+                          qmdStatus.stores.sessions.totalEmbedded >= qmdStatus.stores.sessions.totalIndexed ? 'ok' : 'warn'
+                        }`}>
+                          {qmdStatus.stores.sessions.totalEmbedded}/{qmdStatus.stores.sessions.totalIndexed} docs
+                          {' \u00b7 '}{qmdStatus.stores.sessions.totalChunks} chunks
+                        </span>
+                      </div>
+                    )}
+                    {qmdStatus.error && (
+                      <div className="notification-detail-row error">
+                        <span className="notification-error-text">{qmdStatus.error}</span>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
             </>
           )}
         </div>

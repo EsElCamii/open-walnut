@@ -245,7 +245,7 @@ afterAll(async () => {
 
 describe('get_session_history — plan_only', () => {
   it('extracts plan content from a session with Write + ExitPlanMode', async () => {
-    const result = await executeTool('get_session_history', {
+    const result = await executeTool('session_history', {
       session_id: 'plan-sess-001',
       plan_only: true,
     })
@@ -257,7 +257,7 @@ describe('get_session_history — plan_only', () => {
   })
 
   it('returns descriptive error when session has no plan', async () => {
-    const result = await executeTool('get_session_history', {
+    const result = await executeTool('session_history', {
       session_id: 'regular-sess-001',
       plan_only: true,
     })
@@ -267,7 +267,7 @@ describe('get_session_history — plan_only', () => {
 
 describe('get_session_history — pagination', () => {
   it('returns newest messages on page 1', async () => {
-    const result = await executeTool('get_session_history', {
+    const result = await executeTool('session_history', {
       session_id: 'long-sess-001',
       page_size: 5,
       page: 1,
@@ -284,7 +284,7 @@ describe('get_session_history — pagination', () => {
   })
 
   it('returns older messages on page 2', async () => {
-    const result = await executeTool('get_session_history', {
+    const result = await executeTool('session_history', {
       session_id: 'long-sess-001',
       page_size: 5,
       page: 2,
@@ -297,7 +297,7 @@ describe('get_session_history — pagination', () => {
   })
 
   it('returns remaining messages on last page', async () => {
-    const result = await executeTool('get_session_history', {
+    const result = await executeTool('session_history', {
       session_id: 'long-sess-001',
       page_size: 5,
       page: 4,
@@ -312,7 +312,7 @@ describe('get_session_history — pagination', () => {
 
 describe('get_session_history — summarize', () => {
   it('returns a summary or error (falls back to default model when no agent configured)', async () => {
-    const result = await executeTool('get_session_history', {
+    const result = await executeTool('session_history', {
       session_id: 'regular-sess-001',
       summarize: true,
     })
@@ -325,7 +325,7 @@ describe('get_session_history — summarize', () => {
 
 describe('get_session_history — parameter validation', () => {
   it('rejects plan_only + summarize', async () => {
-    const result = await executeTool('get_session_history', {
+    const result = await executeTool('session_history', {
       session_id: 'any',
       plan_only: true,
       summarize: true,
@@ -334,7 +334,7 @@ describe('get_session_history — parameter validation', () => {
   })
 
   it('rejects page without page_size', async () => {
-    const result = await executeTool('get_session_history', {
+    const result = await executeTool('session_history', {
       session_id: 'any',
       page: 2,
     })
@@ -342,7 +342,7 @@ describe('get_session_history — parameter validation', () => {
   })
 
   it('rejects page_size < 1', async () => {
-    const result = await executeTool('get_session_history', {
+    const result = await executeTool('session_history', {
       session_id: 'any',
       page_size: 0,
     })
@@ -350,7 +350,7 @@ describe('get_session_history — parameter validation', () => {
   })
 
   it('rejects plan_only + page_size', async () => {
-    const result = await executeTool('get_session_history', {
+    const result = await executeTool('session_history', {
       session_id: 'any',
       plan_only: true,
       page_size: 5,
@@ -361,7 +361,7 @@ describe('get_session_history — parameter validation', () => {
 
 describe('get_session_history — default mode (no new params)', () => {
   it('returns full history with budget truncation unchanged', async () => {
-    const result = await executeTool('get_session_history', {
+    const result = await executeTool('session_history', {
       session_id: 'regular-sess-001',
     })
     const parsed = JSON.parse(result)

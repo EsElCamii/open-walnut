@@ -532,7 +532,7 @@ describe('Session permission mode', () => {
     await delay(50)
   })
 
-  it('session without mode has no permission-mode flag in result', async () => {
+  it('session without mode defaults to bypassPermissions', async () => {
     const ws = await connectWs()
     const resultPromise = waitForWsEvent(ws, 'session:result')
 
@@ -545,8 +545,8 @@ describe('Session permission mode', () => {
     const resultEvent = await resultPromise
     const rd = resultEvent.data as { result: string; isError: boolean }
     expect(rd.isError).toBe(false)
-    // No permission-mode marker in the result when mode is not set
-    expect(rd.result).not.toContain('[permission-mode:')
+    // No mode → Walnut defaults to bypassPermissions (no approval prompts).
+    expect(rd.result).toContain('[permission-mode:bypassPermissions]')
 
     ws.close()
     await delay(50)

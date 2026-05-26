@@ -81,6 +81,22 @@ export function MemoryTreePanel({ tree, selectedPath, onSelect }: MemoryTreePane
     () => filterItems(tree?.knowledge ?? [], filter),
     [tree?.knowledge, filter],
   );
+  const filteredTopics = useMemo(
+    () => filterItems(tree?.topics ?? [], filter),
+    [tree?.topics, filter],
+  );
+  const filteredCompaction = useMemo(
+    () => filterItems(tree?.compaction ?? [], filter),
+    [tree?.compaction, filter],
+  );
+  const filteredRepos = useMemo(
+    () => filterItems(tree?.repos ?? [], filter),
+    [tree?.repos, filter],
+  );
+  const filteredSpecial = useMemo(
+    () => filterItems(tree?.special ?? [], filter),
+    [tree?.special, filter],
+  );
   const filteredProjects = useMemo(
     () => filterProjectTree(projectNodes, filter),
     [projectNodes, filter],
@@ -116,6 +132,36 @@ export function MemoryTreePanel({ tree, selectedPath, onSelect }: MemoryTreePane
         />
       </div>
       <div className="memory-tree-sections">
+        {/* Special — Working Memory + Index */}
+        {filteredSpecial.length > 0 && (
+          <Section title="Memory v2" id="special" collapsed={collapsed} onToggle={toggleSection}>
+            {filteredSpecial.map((item) => (
+              <TreeItem
+                key={item.path}
+                label={item.title}
+                path={item.path}
+                selected={selectedPath === item.path}
+                onClick={() => onSelect(item.path)}
+              />
+            ))}
+          </Section>
+        )}
+
+        {/* Topics — distilled wiki pages */}
+        {filteredTopics.length > 0 && (
+          <Section title="Topics" id="topics" collapsed={collapsed} onToggle={toggleSection} count={filteredTopics.length}>
+            {filteredTopics.map((item) => (
+              <TreeItem
+                key={item.path}
+                label={item.title}
+                path={item.path}
+                selected={selectedPath === item.path}
+                onClick={() => onSelect(item.path)}
+              />
+            ))}
+          </Section>
+        )}
+
         {/* Global */}
         {showGlobal && (
           <Section title="Global" id="global" collapsed={collapsed} onToggle={toggleSection}>
@@ -190,12 +236,46 @@ export function MemoryTreePanel({ tree, selectedPath, onSelect }: MemoryTreePane
           </Section>
         )}
 
+        {/* Compaction — archived context snapshots */}
+        {filteredCompaction.length > 0 && (
+          <Section title="Compaction" id="compaction" collapsed={collapsed} onToggle={toggleSection} count={filteredCompaction.length}>
+            {filteredCompaction.map((item) => (
+              <TreeItem
+                key={item.path}
+                label={item.title}
+                path={item.path}
+                selected={selectedPath === item.path}
+                onClick={() => onSelect(item.path)}
+              />
+            ))}
+          </Section>
+        )}
+
+        {/* Repos — per-repository environment knowledge */}
+        {filteredRepos.length > 0 && (
+          <Section title="Repos" id="repos" collapsed={collapsed} onToggle={toggleSection} count={filteredRepos.length}>
+            {filteredRepos.map((item) => (
+              <TreeItem
+                key={item.path}
+                label={item.title}
+                path={item.path}
+                selected={selectedPath === item.path}
+                onClick={() => onSelect(item.path)}
+              />
+            ))}
+          </Section>
+        )}
+
         {/* Empty state when all sections are hidden */}
         {!showGlobal &&
           filteredDaily.length === 0 &&
           filteredProjects.length === 0 &&
           filteredSessions.length === 0 &&
-          filteredKnowledge.length === 0 && (
+          filteredKnowledge.length === 0 &&
+          filteredTopics.length === 0 &&
+          filteredCompaction.length === 0 &&
+          filteredRepos.length === 0 &&
+          filteredSpecial.length === 0 && (
             <div className="memory-tree-empty">No matching files</div>
           )}
       </div>

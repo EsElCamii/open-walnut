@@ -44,6 +44,7 @@ function nextReqId(): string {
 // Suppress noisy high-frequency streaming events from logging
 const SUPPRESSED_EVENTS = new Set([
   'session:text-delta',
+  'session:thinking-delta',
   'agent:text-delta',
   'agent:thinking',
 ]);

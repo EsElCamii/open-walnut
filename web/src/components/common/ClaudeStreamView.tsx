@@ -24,6 +24,7 @@ interface ClaudeStreamViewProps {
 /** Group consecutive text blocks into a single markdown render */
 function groupBlocks(blocks: StreamingBlock[]): Array<
   | { kind: 'text'; content: string; index: number }
+  | { kind: 'thinking'; content: string; index: number }
   | { kind: 'tool_call'; block: StreamingBlock & { type: 'tool_call' }; index: number }
   | { kind: 'system'; block: StreamingBlock & { type: 'system' }; index: number }
 > {
@@ -46,6 +47,8 @@ function groupBlocks(blocks: StreamingBlock[]): Array<
         groups.push({ kind: 'tool_call', block, index: i });
       } else if (block.type === 'system') {
         groups.push({ kind: 'system', block, index: i });
+      } else if (block.type === 'thinking') {
+        groups.push({ kind: 'thinking', content: block.content, index: i });
       }
     }
   }
@@ -90,13 +93,34 @@ export const ClaudeStreamView = memo(function ClaudeStreamView({
           );
         }
         if (item.kind === 'system') {
+          const detail = (item.block as { detail?: string }).detail;
           return (
             <div
               key={`sys-${item.index}`}
               className={`claude-stream-system claude-stream-system--${item.block.variant}`}
             >
               {item.block.message}
+              {detail && (
+                <details style={{ marginTop: 2, fontSize: 11, opacity: 0.75 }}>
+                  <summary style={{ cursor: 'pointer' }}>details</summary>
+                  <pre style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-word', marginTop: 4 }}>{detail}</pre>
+                </details>
+              )}
             </div>
+          );
+        }
+        if (item.kind === 'thinking') {
+          // open by default — see rationale in SessionChatHistory thinking render.
+          return (
+            <details
+              open
+              key={`think-${item.index}`}
+              className="claude-stream-thinking"
+              style={{ margin: '6px 0', opacity: 0.7, fontStyle: 'italic', fontSize: 13, borderLeft: '2px solid rgba(128,128,128,0.3)', paddingLeft: 8 }}
+            >
+              <summary style={{ cursor: 'pointer', userSelect: 'none' }}>thinking…</summary>
+              <div style={{ whiteSpace: 'pre-wrap', marginTop: 4 }}>{item.content}</div>
+            </details>
           );
         }
         return null;

@@ -31,6 +31,9 @@ interface DaemonSession {
   exitCode: number | null
 }
 
+/** Types of send fault that can be injected per-session. */
+export type SendFault = 'ENXIO' | 'EAGAIN' | 'session_dead' | 'not_found' | null
+
 /**
  * MockDaemon — implements the daemon WebSocket protocol locally.
  */
@@ -42,6 +45,14 @@ export class MockDaemon {
   private _fault: string | null = null
   private _cliCommand = MOCK_CLI
   private _attachHistory: Array<{ sid: string; fromOffset: number }> = []
+  /** Active WS client connections — for broadcasting session_state events. */
+  private _wsClients = new Set<WebSocket>()
+  /** Per-session injected faults for cmdSend (strict-ack envelope). */
+  private _sendFaults = new Map<string, SendFault>()
+  /** Sessions flagged as dead via simulateDeath — exitCode returned in session_dead replies. */
+  private _deadSessions = new Map<string, number>()
+  /** Command log for test assertions. */
+  private _commandHistory: Array<{ cmd: string; payload: Record<string, unknown>; timestamp: number }> = []
 
   get port(): number { return this._port }
 
@@ -80,6 +91,9 @@ export class MockDaemon {
     })
 
     this.wss.on('connection', (ws) => {
+      this._wsClients.add(ws)
+      ws.on('close', () => this._wsClients.delete(ws))
+      ws.on('error', () => this._wsClients.delete(ws))
       ws.on('message', (data) => {
         const raw = typeof data === 'string' ? data : data.toString()
         this.handleMessage(ws, raw)
@@ -133,6 +147,14 @@ export class MockDaemon {
 
     const id = cmd.id as number
 
+    // Record command history for test assertions
+    if (typeof cmd.cmd === 'string') {
+      this._commandHistory.push({
+        cmd: cmd.cmd,
+        payload: { ...cmd },
+        timestamp: Date.now(),
+      })
+    }
 
     // Fault injection
     if (this._fault === 'disconnect') {
@@ -277,13 +299,41 @@ export class MockDaemon {
   private cmdSend(ws: WebSocket, id: number, cmd: Record<string, unknown>): void {
     const sid = cmd.sid as string
     const message = cmd.message as string
-    const session = this.sessions.get(sid)
 
-    if (!session) {
-      return this.sendError(ws, id, `session not found: ${sid}`)
+    // 1. Dead session short-circuit (strict-ack envelope)
+    if (this._deadSessions.has(sid)) {
+      const exitCode = this._deadSessions.get(sid)!
+      return this.sendOk(ws, id, { ok: false, reason: 'session_dead', exitCode })
     }
 
-    // Write message to FIFO
+    // 2. Injected fault takes precedence (strict-ack envelope)
+    const fault = this._sendFaults.get(sid)
+    if (fault) {
+      // One-shot by default — clear after delivering
+      this._sendFaults.delete(sid)
+      switch (fault) {
+        case 'not_found':
+          return this.sendOk(ws, id, { ok: false, reason: 'not_found' })
+        case 'session_dead':
+          return this.sendOk(ws, id, { ok: false, reason: 'session_dead', exitCode: -1 })
+        case 'ENXIO':
+          // Daemon-level semantics: ENXIO reaps the session. Mirror that so
+          // follow-up sends hit session_dead.
+          this._deadSessions.set(sid, -1)
+          this.broadcastSessionState(sid, 'dead', { exitCode: -1, reason: 'send-enxio' })
+          return this.sendOk(ws, id, { ok: false, reason: 'ENXIO', exitCode: -1 })
+        case 'EAGAIN':
+          return this.sendOk(ws, id, { ok: false, reason: 'EAGAIN', retriable: true })
+      }
+    }
+
+    const session = this.sessions.get(sid)
+    if (!session) {
+      // Real daemon replies strict-ack, not envelope error, for unknown sid.
+      return this.sendOk(ws, id, { ok: false, reason: 'not_found' })
+    }
+
+    // 3. Normal path — write to FIFO
     try {
       const payload = JSON.stringify({
         type: 'user',
@@ -292,7 +342,7 @@ export class MockDaemon {
       const fd = fs.openSync(session.pipePath, fs.constants.O_WRONLY | fs.constants.O_NONBLOCK)
       fs.writeSync(fd, Buffer.from(payload + '\n'))
       fs.closeSync(fd)
-      this.sendOk(ws, id, {})
+      this.sendOk(ws, id, { ok: true })
     } catch (err) {
       this.sendError(ws, id, `write failed: ${(err as Error).message}`)
     }
@@ -416,7 +466,126 @@ export class MockDaemon {
     } catch { /* file not ready yet */ }
   }
 
+  // ── Test Injection API ──
+
+  /** Inject a one-shot fault that the next `cmdSend` for `sid` will return. */
+  injectSendFault(sid: string, reason: SendFault): void {
+    if (reason === null) this._sendFaults.delete(sid)
+    else this._sendFaults.set(sid, reason)
+  }
+
+  /** Broadcast a `session_state` event to all connected ws clients. */
+  emitSessionState(sid: string, state: 'spawning' | 'running' | 'dead', extra: Record<string, unknown> = {}): void {
+    this.broadcastSessionState(sid, state, extra)
+  }
+
+  /** Broadcast an arbitrary event (wire-level: `{ev, ...payload}`) to all clients. */
+  emitEvent(ev: string, payload: Record<string, unknown>): void {
+    const msg = JSON.stringify({ ev, ...payload })
+    for (const ws of this._wsClients) {
+      if (ws.readyState === WebSocket.OPEN) {
+        try { ws.send(msg) } catch { /* ignore */ }
+      }
+    }
+  }
+
+  /**
+   * Mark a session as "dead" on the server — next cmdSend returns session_dead,
+   * and a session_state=dead event is broadcast to all clients.
+   */
+  simulateDeath(sid: string, exitCode: number = 1): void {
+    this._deadSessions.set(sid, exitCode)
+    const session = this.sessions.get(sid)
+    if (session) {
+      session.exitCode = exitCode
+      if (session.pollTimer) {
+        clearInterval(session.pollTimer)
+        session.pollTimer = null
+      }
+    }
+    this.broadcastSessionState(sid, 'dead', { exitCode, reason: 'simulate-death' })
+  }
+
+  /** Seed a session entry without spawning a real CLI — for orphan/adoption tests. */
+  seedSession(sid: string, opts: { pid?: number; alive?: boolean; jsonlContent?: string } = {}): void {
+    const streamsDir = path.join(this.tmpDir, 'streams')
+    const pipePath = path.join(streamsDir, `${sid}.pipe`)
+    const jsonlPath = path.join(streamsDir, `${sid}.jsonl`)
+    if (opts.jsonlContent) fs.writeFileSync(jsonlPath, opts.jsonlContent)
+    const session: DaemonSession = {
+      sid,
+      proc: null,
+      pid: opts.pid ?? 99999,
+      pipePath,
+      jsonlPath,
+      pollTimer: null,
+      offset: 0,
+      exitCode: opts.alive === false ? 1 : null,
+    }
+    this.sessions.set(sid, session)
+  }
+
+  /** Restart the MockDaemon (simulating daemon crash + recovery). */
+  async restart(options: { preserveRegistry?: boolean } = {}): Promise<void> {
+    const preservedSessions = options.preserveRegistry ? new Map(this.sessions) : null
+    const savedPort = this._port
+    // Close WS cleanly
+    if (this.wss) {
+      for (const client of this.wss.clients) {
+        try { client.terminate() } catch { /* ignore */ }
+      }
+      await new Promise<void>((resolve) => this.wss!.close(() => resolve()))
+      this.wss = null
+    }
+    this._wsClients.clear()
+    if (!preservedSessions) {
+      this.sessions.clear()
+    }
+    // Reopen on same port
+    this.wss = new WebSocketServer({ port: savedPort, host: '127.0.0.1' })
+    await new Promise<void>((resolve, reject) => {
+      this.wss!.on('listening', resolve)
+      this.wss!.on('error', reject)
+    })
+    this.wss.on('connection', (ws) => {
+      this._wsClients.add(ws)
+      ws.on('close', () => this._wsClients.delete(ws))
+      ws.on('error', () => this._wsClients.delete(ws))
+      ws.on('message', (data) => {
+        const raw = typeof data === 'string' ? data : data.toString()
+        this.handleMessage(ws, raw)
+      })
+    })
+  }
+
+  /** Full command history for test assertions. */
+  getCommandHistory(): Array<{ cmd: string; payload: Record<string, unknown>; timestamp: number }> {
+    return [...this._commandHistory]
+  }
+
+  /** Commands matching `cmd` name. */
+  getCommandHistoryFor(cmd: string): Array<{ payload: Record<string, unknown>; timestamp: number }> {
+    return this._commandHistory
+      .filter((e) => e.cmd === cmd)
+      .map(({ payload, timestamp }) => ({ payload, timestamp }))
+  }
+
+  /** Clear recorded command history (useful between assertions in the same test). */
+  clearCommandHistory(): void {
+    this._commandHistory = []
+  }
+
   // ── Helpers ──
+
+  /** Broadcast a session_state event to all connected ws clients. */
+  private broadcastSessionState(sid: string, state: string, extra: Record<string, unknown> = {}): void {
+    const payload = JSON.stringify({ ev: 'session_state', sid, state, ...extra })
+    for (const ws of this._wsClients) {
+      if (ws.readyState === WebSocket.OPEN) {
+        try { ws.send(payload) } catch { /* ignore */ }
+      }
+    }
+  }
 
   private sendOk(ws: WebSocket, id: number, data: Record<string, unknown>): void {
     if (ws.readyState === WebSocket.OPEN) {

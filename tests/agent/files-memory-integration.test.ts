@@ -41,7 +41,7 @@ describe('files_read memory sources', () => {
     fs.mkdirSync(path.dirname(MEMORY_FILE), { recursive: true });
     fs.writeFileSync(MEMORY_FILE, '# Global\n\nHello world\n', 'utf-8');
 
-    const result = parseResult(await executeTool('files_read', { source: 'memory/global' }));
+    const result = parseResult(await executeTool('file_read', { source: 'memory/global' }));
 
     expect(result.content_hash).toHaveLength(12);
     expect(result.total_lines).toBeGreaterThan(0);
@@ -58,7 +58,7 @@ describe('files_read memory sources', () => {
       'utf-8',
     );
 
-    const result = parseResult(await executeTool('files_read', {
+    const result = parseResult(await executeTool('file_read', {
       source: 'memory/project/work/api',
     }));
 
@@ -76,7 +76,7 @@ describe('files_read memory sources', () => {
       'utf-8',
     );
 
-    const result = parseResult(await executeTool('files_read', { source: 'memory/daily' }));
+    const result = parseResult(await executeTool('file_read', { source: 'memory/daily' }));
 
     expect(result.content_hash).toHaveLength(12);
     expect(result.content).toContain('Daily entry');
@@ -86,7 +86,7 @@ describe('files_read memory sources', () => {
     fs.mkdirSync(path.dirname(MEMORY_FILE), { recursive: true });
     fs.writeFileSync(MEMORY_FILE, 'line1\nline2\nline3\nline4\nline5\n', 'utf-8');
 
-    const result = parseResult(await executeTool('files_read', {
+    const result = parseResult(await executeTool('file_read', {
       source: 'memory/global',
       offset: 2,
       limit: 2,
@@ -103,13 +103,13 @@ describe('files_read memory sources', () => {
 
   it('creates default global memory when file missing', async () => {
     // files_read with memory/global auto-creates the file via ensureMemoryFile()
-    const result = parseResult(await executeTool('files_read', { source: 'memory/global' }));
+    const result = parseResult(await executeTool('file_read', { source: 'memory/global' }));
     expect(result.content_hash).toHaveLength(12);
     expect(result.content).toBeDefined();
   });
 
   it('returns error when project memory missing', async () => {
-    const result = await executeTool('files_read', {
+    const result = await executeTool('file_read', {
       source: 'memory/project/nonexistent/project',
     });
     expect(result).toContain('Error');
@@ -127,7 +127,7 @@ describe('files_edit memory sources', () => {
     fs.writeFileSync(MEMORY_FILE, 'hello world', 'utf-8');
     const hash = computeContentHash('hello world');
 
-    const result = parseResult(await executeTool('files_edit', {
+    const result = parseResult(await executeTool('file_edit', {
       source: 'memory/global',
       content_hash: hash,
       old_content: 'world',
@@ -147,7 +147,7 @@ describe('files_edit memory sources', () => {
     fs.writeFileSync(path.join(projDir, 'MEMORY.md'), content, 'utf-8');
     const hash = computeContentHash(content);
 
-    const result = parseResult(await executeTool('files_edit', {
+    const result = parseResult(await executeTool('file_edit', {
       source: 'memory/project/work/api',
       content_hash: hash,
       old_content: 'Old fact here',
@@ -167,7 +167,7 @@ describe('files_edit memory sources', () => {
     fs.writeFileSync(path.join(DAILY_DIR, `${dateKey}.md`), content, 'utf-8');
     const hash = computeContentHash(content);
 
-    const result = parseResult(await executeTool('files_edit', {
+    const result = parseResult(await executeTool('file_edit', {
       source: 'memory/daily',
       content_hash: hash,
       old_content: 'Wrong info',
@@ -181,7 +181,7 @@ describe('files_edit memory sources', () => {
     fs.mkdirSync(path.dirname(MEMORY_FILE), { recursive: true });
     fs.writeFileSync(MEMORY_FILE, 'hello world', 'utf-8');
 
-    const result = await executeTool('files_edit', {
+    const result = await executeTool('file_edit', {
       source: 'memory/global',
       content_hash: 'wrong_hash_00',
       old_content: 'world',
@@ -199,7 +199,7 @@ describe('files_edit memory sources', () => {
     fs.writeFileSync(MEMORY_FILE, 'hello world', 'utf-8');
     const hash = computeContentHash('hello world');
 
-    const result = await executeTool('files_edit', {
+    const result = await executeTool('file_edit', {
       source: 'memory/global',
       content_hash: hash,
       old_content: 'nonexistent',
@@ -215,7 +215,7 @@ describe('files_edit memory sources', () => {
     fs.writeFileSync(MEMORY_FILE, 'keep\n\nremove me\n\nkeep too', 'utf-8');
     const hash = computeContentHash('keep\n\nremove me\n\nkeep too');
 
-    const result = parseResult(await executeTool('files_edit', {
+    const result = parseResult(await executeTool('file_edit', {
       source: 'memory/global',
       content_hash: hash,
       old_content: 'remove me',
@@ -227,7 +227,7 @@ describe('files_edit memory sources', () => {
   });
 
   it('requires content_hash for memory sources', async () => {
-    const result = await executeTool('files_edit', {
+    const result = await executeTool('file_edit', {
       source: 'memory/global',
       old_content: 'anything',
       new_content: 'replacement',
@@ -247,7 +247,7 @@ describe('files_write overwrite memory sources', () => {
     fs.writeFileSync(MEMORY_FILE, 'old content', 'utf-8');
     const hash = computeContentHash('old content');
 
-    const result = parseResult(await executeTool('files_write', {
+    const result = parseResult(await executeTool('file_write', {
       source: 'memory/global',
       content_hash: hash,
       content: 'brand new content',
@@ -262,7 +262,7 @@ describe('files_write overwrite memory sources', () => {
     fs.mkdirSync(path.dirname(MEMORY_FILE), { recursive: true });
     fs.writeFileSync(MEMORY_FILE, 'original', 'utf-8');
 
-    const result = await executeTool('files_write', {
+    const result = await executeTool('file_write', {
       source: 'memory/global',
       content_hash: 'wrong_hash_00',
       content: 'new content',
@@ -280,7 +280,7 @@ describe('files_write overwrite memory sources', () => {
     fs.writeFileSync(path.join(projDir, 'MEMORY.md'), content, 'utf-8');
     const hash = computeContentHash(content);
 
-    const result = parseResult(await executeTool('files_write', {
+    const result = parseResult(await executeTool('file_write', {
       source: 'memory/project/work/api',
       content_hash: hash,
       content: '---\nname: API v2\n---\n\nNew body\n',
@@ -293,7 +293,7 @@ describe('files_write overwrite memory sources', () => {
   });
 
   it('requires content_hash for overwrite mode', async () => {
-    const result = await executeTool('files_write', {
+    const result = await executeTool('file_write', {
       source: 'memory/global',
       content: 'new content',
     });
@@ -308,7 +308,7 @@ describe('files_write overwrite memory sources', () => {
 
 describe('files_write append memory sources', () => {
   it('appends to project memory + daily log', async () => {
-    const result = parseResult(await executeTool('files_write', {
+    const result = parseResult(await executeTool('file_write', {
       source: 'memory/project/work/api',
       mode: 'append',
       content: 'Added new API endpoint',
@@ -331,7 +331,7 @@ describe('files_write append memory sources', () => {
   });
 
   it('appends to daily log only (source=memory/daily)', async () => {
-    const result = await executeTool('files_write', {
+    const result = await executeTool('file_write', {
       source: 'memory/daily',
       mode: 'append',
       content: 'Daily-only observation',
@@ -347,7 +347,7 @@ describe('files_write append memory sources', () => {
   });
 
   it('rejects append to global memory', async () => {
-    const result = await executeTool('files_write', {
+    const result = await executeTool('file_write', {
       source: 'memory/global',
       mode: 'append',
       content: 'Should fail',
@@ -357,7 +357,7 @@ describe('files_write append memory sources', () => {
   });
 
   it('does not require content_hash for append', async () => {
-    const result = parseResult(await executeTool('files_write', {
+    const result = parseResult(await executeTool('file_write', {
       source: 'memory/project/work/test',
       mode: 'append',
       content: 'No hash needed',
@@ -366,19 +366,19 @@ describe('files_write append memory sources', () => {
   });
 
   it('multiple appends accumulate', async () => {
-    await executeTool('files_write', {
+    await executeTool('file_write', {
       source: 'memory/project/myproject',
       mode: 'append',
       content: 'First entry: project setup',
     });
 
-    await executeTool('files_write', {
+    await executeTool('file_write', {
       source: 'memory/project/myproject',
       mode: 'append',
       content: 'Second entry: added tests',
     });
 
-    const result = parseResult(await executeTool('files_read', {
+    const result = parseResult(await executeTool('file_read', {
       source: 'memory/project/myproject',
     }));
 
@@ -397,11 +397,11 @@ describe('chained operations', () => {
     fs.writeFileSync(MEMORY_FILE, 'aaa bbb ccc', 'utf-8');
 
     // Read
-    const r0 = parseResult(await executeTool('files_read', { source: 'memory/global' }));
+    const r0 = parseResult(await executeTool('file_read', { source: 'memory/global' }));
     expect(r0.content_hash).toBeTruthy();
 
     // Edit 1
-    const r1 = parseResult(await executeTool('files_edit', {
+    const r1 = parseResult(await executeTool('file_edit', {
       source: 'memory/global',
       content_hash: r0.content_hash as string,
       old_content: 'aaa',
@@ -411,7 +411,7 @@ describe('chained operations', () => {
     expect(r1.content_hash).not.toBe(r0.content_hash);
 
     // Edit 2 using hash from Edit 1
-    const r2 = parseResult(await executeTool('files_edit', {
+    const r2 = parseResult(await executeTool('file_edit', {
       source: 'memory/global',
       content_hash: r1.content_hash as string,
       old_content: 'bbb',
@@ -427,13 +427,13 @@ describe('chained operations', () => {
     fs.mkdirSync(path.dirname(MEMORY_FILE), { recursive: true });
     fs.writeFileSync(MEMORY_FILE, 'original', 'utf-8');
 
-    const r0 = parseResult(await executeTool('files_read', { source: 'memory/global' }));
+    const r0 = parseResult(await executeTool('file_read', { source: 'memory/global' }));
 
     // External modification
     fs.writeFileSync(MEMORY_FILE, 'modified externally', 'utf-8');
 
     // Edit with old hash should fail
-    const r1 = await executeTool('files_edit', {
+    const r1 = await executeTool('file_edit', {
       source: 'memory/global',
       content_hash: r0.content_hash as string,
       old_content: 'original',
@@ -446,9 +446,9 @@ describe('chained operations', () => {
     fs.mkdirSync(path.dirname(MEMORY_FILE), { recursive: true });
     fs.writeFileSync(MEMORY_FILE, 'old global content', 'utf-8');
 
-    const r0 = parseResult(await executeTool('files_read', { source: 'memory/global' }));
+    const r0 = parseResult(await executeTool('file_read', { source: 'memory/global' }));
 
-    const r1 = parseResult(await executeTool('files_write', {
+    const r1 = parseResult(await executeTool('file_write', {
       source: 'memory/global',
       content_hash: r0.content_hash as string,
       content: 'completely new content',

@@ -35,6 +35,11 @@ _Unresolved questions, pending items, things to follow up on._
 _What worked well? What failed? Patterns noticed. Do not duplicate other sections._
 `;
 
+/** Get the working memory template string. */
+export function getWorkingMemoryTemplate(): string {
+  return WORKING_MEMORY_TEMPLATE;
+}
+
 const SECTION_HEADERS = [
   '# Active Focus',
   '# User Requests',
@@ -95,8 +100,9 @@ export function getWorkingMemorySectionSizes(content: string): Map<string, numbe
 /**
  * Truncate working memory for compaction injection.
  * Keeps all section headers but truncates oversized sections.
+ * After per-section truncation, enforces a total token budget.
  */
-export function truncateWorkingMemoryForCompact(content: string): string {
+export function truncateWorkingMemoryForCompact(content: string, maxTokens: number = 8000): string {
   const sections = content.split(/^(?=# )/m);
   const truncated: string[] = [];
 
@@ -115,7 +121,15 @@ export function truncateWorkingMemoryForCompact(content: string): string {
     }
   }
 
-  return truncated.join('\n');
+  let result = truncated.join('\n');
+
+  // Enforce total token budget
+  if (estimateTokens(result) > maxTokens) {
+    const charBudget = maxTokens * 4;
+    result = result.slice(0, charBudget) + '\n\n[...truncated for compaction]';
+  }
+
+  return result;
 }
 
 /**

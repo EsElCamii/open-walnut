@@ -167,7 +167,7 @@ describe('Chat history persistence (E2E)', () => {
           role: 'assistant',
           content: [
             { type: 'text', text: 'Let me check your tasks.' },
-            { type: 'tool_use', id: 'tu_123', name: 'query_tasks', input: { status: 'todo' } },
+            { type: 'tool_use', id: 'tu_123', name: 'task_query', input: { status: 'todo' } },
           ],
         },
         {
@@ -197,7 +197,7 @@ describe('Chat history persistence (E2E)', () => {
     expect(assistantMsg.content[0].type).toBe('text');
     expect(assistantMsg.content[1].type).toBe('tool_use');
     expect(assistantMsg.content[1].id).toBe('tu_123');
-    expect(assistantMsg.content[1].name).toBe('query_tasks');
+    expect(assistantMsg.content[1].name).toBe('task_query');
 
     const toolResultMsg = apiMsgs[2] as { role: string; content: Array<{ type: string; tool_use_id?: string }> };
     expect(toolResultMsg.content[0].type).toBe('tool_result');

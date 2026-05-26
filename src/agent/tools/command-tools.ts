@@ -17,7 +17,7 @@ function json(data: unknown): string {
 }
 
 export const listCommandsTool: ToolDefinition = {
-  name: 'list_commands',
+  name: 'command_list',
   description: 'List all available slash commands (built-in and user-defined).',
   input_schema: {
     type: 'object',
@@ -35,7 +35,7 @@ export const listCommandsTool: ToolDefinition = {
 };
 
 export const getCommandTool: ToolDefinition = {
-  name: 'get_command',
+  name: 'command_get',
   description: 'Get full details of a slash command by name, including its content.',
   input_schema: {
     type: 'object',
@@ -52,7 +52,7 @@ export const getCommandTool: ToolDefinition = {
 };
 
 export const createCommandTool: ToolDefinition = {
-  name: 'create_command',
+  name: 'command_create',
   description: 'Create a new user slash command. Stored in ~/.open-walnut/commands/ as a .md file.',
   input_schema: {
     type: 'object',
@@ -78,7 +78,7 @@ export const createCommandTool: ToolDefinition = {
 };
 
 export const updateCommandTool: ToolDefinition = {
-  name: 'update_command',
+  name: 'command_update',
   description: 'Update an existing user slash command. Cannot modify built-in commands.',
   input_schema: {
     type: 'object',
@@ -103,7 +103,7 @@ export const updateCommandTool: ToolDefinition = {
 };
 
 export const deleteCommandTool: ToolDefinition = {
-  name: 'delete_command',
+  name: 'command_delete',
   description: 'Delete a user slash command. Cannot delete built-in commands.',
   input_schema: {
     type: 'object',

@@ -14,18 +14,19 @@ import { _resetForTesting } from '../../src/core/task-manager.js';
 
 /** Pre-create a category via the agent tool so strict validation passes for subsequent task creation. */
 async function ensureCategory(name: string, source = 'ms-todo') {
-  await executeTool('create_task', { type: 'category', name, source });
+  await executeTool('task_create', { type: 'category', name, source });
 }
 
 /** Pre-create a project via the agent tool. */
 async function ensureProject(category: string, project: string) {
-  await executeTool('create_task', { type: 'project', category, project });
+  await executeTool('task_create', { type: 'project', category, project });
 }
 
 beforeEach(async () => {
   _resetForTesting();
   tmpDir = WALNUT_HOME;
   await fs.rm(tmpDir, { recursive: true, force: true });
+  await fs.mkdir(tmpDir, { recursive: true });
 });
 
 afterEach(async () => {
@@ -36,28 +37,28 @@ afterEach(async () => {
 describe('tool definitions', () => {
   it('has all expected tools', () => {
     const names = tools.map((t) => t.name);
-    expect(names).toContain('query_tasks');
-    expect(names).toContain('get_task');
-    expect(names).toContain('create_task');
-    expect(names).toContain('update_task');
-    expect(names).toContain('delete_task');
-    expect(names).toContain('search');
-    expect(names).toContain('files_read');
-    expect(names).toContain('files_write');
-    expect(names).toContain('files_edit');
-    expect(names).toContain('files_list');
-    expect(names).toContain('files_glob');
-    expect(names).toContain('files_grep');
-    expect(names).toContain('list_sessions');
-    expect(names).toContain('get_session_summary');
-    expect(names).toContain('update_session');
-    expect(names).toContain('start_session');
-    expect(names).toContain('get_config');
-    expect(names).toContain('update_config');
+    expect(names).toContain('task_query');
+    expect(names).toContain('task_get');
+    expect(names).toContain('task_create');
+    expect(names).toContain('task_update');
+    expect(names).toContain('task_delete');
+    expect(names).toContain('task_search');
+    expect(names).toContain('file_read');
+    expect(names).toContain('file_write');
+    expect(names).toContain('file_edit');
+    expect(names).toContain('file_list');
+    expect(names).toContain('file_glob');
+    expect(names).toContain('file_grep');
+    expect(names).toContain('session_list');
+    expect(names).toContain('session_summary');
+    expect(names).toContain('session_update');
+    expect(names).toContain('session_start');
+    expect(names).toContain('config_get');
+    expect(names).toContain('config_update');
   });
 
-  it('start_session has working_directory, task_id, runner, and agent_id in input_schema', () => {
-    const startSession = tools.find((t) => t.name === 'start_session')!;
+  it('session_start has working_directory, task_id, runner, and agent_id in input_schema', () => {
+    const startSession = tools.find((t) => t.name === 'session_start')!;
     const schema = startSession.input_schema as {
       properties: Record<string, unknown>;
       required?: string[];
@@ -92,12 +93,12 @@ describe('tool definitions', () => {
 
 describe('task tools', () => {
   it('query_tasks returns empty initially', async () => {
-    const result = await executeTool('query_tasks', {});
+    const result = await executeTool('task_query', {});
     expect(result).toBe('No tasks found.');
   });
 
   it('create_task creates a task', async () => {
-    const result = await executeTool('create_task', { title: 'Test agent task' });
+    const result = await executeTool('task_create', { title: 'Test agent task' });
     expect(result).toContain('Task created:');
     expect(result).toContain('Test agent task');
   });
@@ -105,10 +106,10 @@ describe('task tools', () => {
   it('query_tasks returns created tasks', async () => {
     await ensureCategory('work');
     await ensureCategory('personal');
-    await executeTool('create_task', { title: 'Task A', priority: 'immediate', category: 'work' });
-    await executeTool('create_task', { title: 'Task B', category: 'personal' });
+    await executeTool('task_create', { title: 'Task A', priority: 'immediate', category: 'work' });
+    await executeTool('task_create', { title: 'Task B', category: 'personal' });
 
-    const result = await executeTool('query_tasks', {});
+    const result = await executeTool('task_query', {});
     const parsed = JSON.parse(result);
     expect(parsed).toHaveLength(2);
     expect(parsed[0].title).toBe('Task A');
@@ -117,21 +118,21 @@ describe('task tools', () => {
   });
 
   it('query_tasks filters by status', async () => {
-    await executeTool('create_task', { title: 'Todo task' });
-    const addResult = await executeTool('create_task', { title: 'Agent complete task' });
-    const idMatch = addResult.match(/\[([^\]]+)\]/);
+    await executeTool('task_create', { title: 'Todo task' });
+    const addResult = await executeTool('task_create', { title: 'Agent complete task' });
+    const idMatch = addResult.match(/id="([^"]+)"/);
     if (idMatch) {
       // update_task with phase AGENT_COMPLETE (status: in_progress), not COMPLETE (status: done)
-      await executeTool('update_task', { id: idMatch[1], phase: 'AGENT_COMPLETE' });
+      await executeTool('task_update', { id: idMatch[1], phase: 'AGENT_COMPLETE' });
     }
 
-    const todoResult = await executeTool('query_tasks', { where: { status: 'todo' } });
+    const todoResult = await executeTool('task_query', { where: { status: 'todo' } });
     const todos = JSON.parse(todoResult);
     expect(todos).toHaveLength(1);
     expect(todos[0].title).toBe('Todo task');
 
     // The agent-completed task is in_progress (AGENT_COMPLETE phase), not done
-    const inProgressResult = await executeTool('query_tasks', { where: { status: 'in_progress' } });
+    const inProgressResult = await executeTool('task_query', { where: { status: 'in_progress' } });
     const inProgress = JSON.parse(inProgressResult);
     expect(inProgress).toHaveLength(1);
     expect(inProgress[0].title).toBe('Agent complete task');
@@ -141,15 +142,15 @@ describe('task tools', () => {
   it('query_tasks from category returns distinct categories with counts', async () => {
     await ensureCategory('Work');
     await ensureCategory('Life');
-    await executeTool('create_task', { title: 'Work task 1', category: 'Work' });
-    await executeTool('create_task', { title: 'Work task 2', category: 'Work' });
-    await executeTool('create_task', { title: 'Life task', category: 'Life' });
-    const addResult = await executeTool('create_task', { title: 'Agent complete work', category: 'Work' });
-    const idMatch = addResult.match(/\[([^\]]+)\]/);
+    await executeTool('task_create', { title: 'Work task 1', category: 'Work' });
+    await executeTool('task_create', { title: 'Work task 2', category: 'Work' });
+    await executeTool('task_create', { title: 'Life task', category: 'Life' });
+    const addResult = await executeTool('task_create', { title: 'Agent complete work', category: 'Work' });
+    const idMatch = addResult.match(/id="([^"]+)"/);
     // update_task with phase AGENT_COMPLETE (status: in_progress), not done
-    if (idMatch) await executeTool('update_task', { id: idMatch[1], phase: 'AGENT_COMPLETE' });
+    if (idMatch) await executeTool('task_update', { id: idMatch[1], phase: 'AGENT_COMPLETE' });
 
-    const result = await executeTool('query_tasks', { type: 'category' });
+    const result = await executeTool('task_query', { type: 'category' });
     const parsed = JSON.parse(result);
     expect(parsed).toHaveLength(2);
     const work = parsed.find((c: { name: string }) => c.name === 'Work');
@@ -160,9 +161,9 @@ describe('task tools', () => {
 
   it('query_tasks from category with contains match does fuzzy find', async () => {
     await ensureCategory('__walnut-body-limit-test__');
-    await executeTool('create_task', { title: 'Test task', category: '__walnut-body-limit-test__' });
+    await executeTool('task_create', { title: 'Test task', category: '__walnut-body-limit-test__' });
 
-    const result = await executeTool('query_tasks', { type: 'category', where: { name: 'body-limit' }, match: 'contains' });
+    const result = await executeTool('task_query', { type: 'category', where: { name: 'body-limit' }, match: 'contains' });
     const parsed = JSON.parse(result);
     expect(parsed).toHaveLength(1);
     expect(parsed[0].name).toBe('__walnut-body-limit-test__');
@@ -174,11 +175,11 @@ describe('task tools', () => {
     await ensureProject('Work', 'HomeLab');
     await ensureProject('Work', 'Taxes');
     await ensureProject('Life', 'Fitness');
-    await executeTool('create_task', { title: 'HomeLab task', category: 'Work', project: 'HomeLab' });
-    await executeTool('create_task', { title: 'Taxes task', category: 'Work', project: 'Taxes' });
-    await executeTool('create_task', { title: 'Life task', category: 'Life', project: 'Fitness' });
+    await executeTool('task_create', { title: 'HomeLab task', category: 'Work', project: 'HomeLab' });
+    await executeTool('task_create', { title: 'Taxes task', category: 'Work', project: 'Taxes' });
+    await executeTool('task_create', { title: 'Life task', category: 'Life', project: 'Fitness' });
 
-    const result = await executeTool('query_tasks', { type: 'project', where: { category: 'Work' } });
+    const result = await executeTool('task_query', { type: 'project', where: { category: 'Work' } });
     const parsed = JSON.parse(result);
     expect(parsed).toHaveLength(2);
     expect(parsed.map((p: { name: string }) => p.name).sort()).toEqual(['HomeLab', 'Taxes']);
@@ -187,10 +188,10 @@ describe('task tools', () => {
   it('query_tasks with nonexistent category shows available categories hint', async () => {
     await ensureCategory('Work');
     await ensureCategory('Life');
-    await executeTool('create_task', { title: 'Work task', category: 'Work' });
-    await executeTool('create_task', { title: 'Life task', category: 'Life' });
+    await executeTool('task_create', { title: 'Work task', category: 'Work' });
+    await executeTool('task_create', { title: 'Life task', category: 'Life' });
 
-    const result = await executeTool('query_tasks', { where: { category: 'nonexistent' } });
+    const result = await executeTool('task_query', { where: { category: 'nonexistent' } });
     expect(result).toContain('No category matching');
     expect(result).toContain('Work');
     expect(result).toContain('Life');
@@ -200,56 +201,56 @@ describe('task tools', () => {
     // Use update_task with phase to set a task to COMPLETE (simulating human action)
     // since update_task with AGENT_COMPLETE only sets status: in_progress
     await ensureCategory('Archive');
-    const addResult = await executeTool('create_task', { title: 'Done task', category: 'Archive' });
-    const idMatch = addResult.match(/\[([^\]]+)\]/);
+    const addResult = await executeTool('task_create', { title: 'Done task', category: 'Archive' });
+    const idMatch = addResult.match(/id="([^"]+)"/);
     if (idMatch) {
       // Simulate human setting COMPLETE via core directly
       const { updateTask } = await import('../../src/core/task-manager.js');
       await updateTask(idMatch[1], { phase: 'COMPLETE' as any });
     }
 
-    const result = await executeTool('query_tasks', { where: { category: 'Archive' } });
+    const result = await executeTool('task_query', { where: { category: 'Archive' } });
     expect(result).toContain('No active tasks');
     expect(result).toContain('1 completed');
     expect(result).toContain("where.phase='COMPLETE'");
   });
 
   it('get_task returns task details', async () => {
-    const addResult = await executeTool('create_task', { title: 'Detail task', priority: 'immediate' });
-    const idMatch = addResult.match(/\[([^\]]+)\]/);
+    const addResult = await executeTool('task_create', { title: 'Detail task', priority: 'immediate' });
+    const idMatch = addResult.match(/id="([^"]+)"/);
     expect(idMatch).toBeTruthy();
 
-    const result = await executeTool('get_task', { id: idMatch![1] });
+    const result = await executeTool('task_get', { id: idMatch![1] });
     const parsed = JSON.parse(result);
     expect(parsed.title).toBe('Detail task');
     expect(parsed.priority).toBe('immediate');
   });
 
   it('get_task returns error for nonexistent id', async () => {
-    const result = await executeTool('get_task', { id: 'nonexistent' });
+    const result = await executeTool('task_get', { id: 'nonexistent' });
     expect(result).toContain('Error:');
   });
 
   it('update_task with phase AGENT_COMPLETE sets phase to AGENT_COMPLETE', async () => {
-    const addResult = await executeTool('create_task', { title: 'Complete me' });
-    const idMatch = addResult.match(/\[([^\]]+)\]/);
+    const addResult = await executeTool('task_create', { title: 'Complete me' });
+    const idMatch = addResult.match(/id="([^"]+)"/);
 
-    const result = await executeTool('update_task', { id: idMatch![1], phase: 'AGENT_COMPLETE' });
+    const result = await executeTool('task_update', { id: idMatch![1], phase: 'AGENT_COMPLETE' });
     expect(result).toContain('Task updated:');
     expect(result).toContain('Complete me');
 
     // Verify the task's phase and status
-    const taskResult = await executeTool('get_task', { id: idMatch![1] });
+    const taskResult = await executeTool('task_get', { id: idMatch![1] });
     const task = JSON.parse(taskResult);
     expect(task.phase).toBe('AGENT_COMPLETE');
     expect(task.status).toBe('in_progress');
   });
 
   it('update_task modifies task fields', async () => {
-    const addResult = await executeTool('create_task', { title: 'Original' });
-    const idMatch = addResult.match(/\[([^\]]+)\]/);
+    const addResult = await executeTool('task_create', { title: 'Original' });
+    const idMatch = addResult.match(/id="([^"]+)"/);
 
-    const result = await executeTool('update_task', {
+    const result = await executeTool('task_update', {
       id: idMatch![1],
       title: 'Updated',
       priority: 'immediate',
@@ -259,10 +260,10 @@ describe('task tools', () => {
   });
 
   it('update_task with append_note adds note to task', async () => {
-    const addResult = await executeTool('create_task', { title: 'Note task' });
-    const idMatch = addResult.match(/\[([^\]]+)\]/);
+    const addResult = await executeTool('task_create', { title: 'Note task' });
+    const idMatch = addResult.match(/id="([^"]+)"/);
 
-    const result = await executeTool('update_task', {
+    const result = await executeTool('task_update', {
       id: idMatch![1],
       append_note: 'This is a note',
     });
@@ -273,27 +274,27 @@ describe('task tools', () => {
 
 describe('search tool', () => {
   it('search returns results from tasks', async () => {
-    await executeTool('create_task', { title: 'Fix authentication bug' });
-    await executeTool('create_task', { title: 'Deploy to production' });
+    await executeTool('task_create', { title: 'Fix authentication bug' });
+    await executeTool('task_create', { title: 'Deploy to production' });
 
     // Use keyword mode to avoid Ollama dependency (vector search tested separately)
-    const result = await executeTool('search', { query: 'authentication', mode: 'keyword' });
+    const result = await executeTool('task_search', { query: 'authentication', mode: 'keyword' });
     const parsed = JSON.parse(result);
     expect(parsed.length).toBeGreaterThan(0);
     expect(parsed[0].title).toContain('authentication');
   });
 
   it('search returns no results for unmatched query', async () => {
-    await executeTool('create_task', { title: 'Some task' });
+    await executeTool('task_create', { title: 'Some task' });
 
-    const result = await executeTool('search', { query: 'xyznonexistent', mode: 'keyword' });
-    expect(result).toBe('No results found.');
+    const result = await executeTool('task_search', { query: 'xyznonexistent', mode: 'keyword' });
+    expect(result).toBe('No tasks found.');
   });
 });
 
 describe('session tools', () => {
   it('list_sessions returns empty initially', async () => {
-    const result = await executeTool('list_sessions', {});
+    const result = await executeTool('session_list', {});
     expect(result).toBe('No sessions found.');
   });
 });
@@ -314,10 +315,10 @@ describe('start_session tool', () => {
   });
 
   it('passes working_directory as cwd to sessionRunner.startSession', async () => {
-    const addResult = await executeTool('create_task', { title: 'Session cwd test' });
-    const idMatch = addResult.match(/\[([^\]]+)\]/);
+    const addResult = await executeTool('task_create', { title: 'Session cwd test' });
+    const idMatch = addResult.match(/id="([^"]+)"/);
 
-    await executeTool('start_session', {
+    await executeTool('session_start', {
       task_id: idMatch![1],
       working_directory: '/tmp/my-project',
       prompt: 'do work',
@@ -333,13 +334,13 @@ describe('start_session tool', () => {
   });
 
   it('passes correct project from task to sessionRunner.startSession', async () => {
-    const addResult = await executeTool('create_task', {
+    const addResult = await executeTool('task_create', {
       title: 'Project session test',
       project: 'Walnut',
     });
-    const idMatch = addResult.match(/\[([^\]]+)\]/);
+    const idMatch = addResult.match(/id="([^"]+)"/);
 
-    await executeTool('start_session', {
+    await executeTool('session_start', {
       task_id: idMatch![1],
       working_directory: '/home/user/code',
     });
@@ -353,10 +354,10 @@ describe('start_session tool', () => {
   });
 
   it('passes mode "plan" to sessionRunner.startSession', async () => {
-    const addResult = await executeTool('create_task', { title: 'Plan mode test' });
-    const idMatch = addResult.match(/\[([^\]]+)\]/);
+    const addResult = await executeTool('task_create', { title: 'Plan mode test' });
+    const idMatch = addResult.match(/id="([^"]+)"/);
 
-    await executeTool('start_session', {
+    await executeTool('session_start', {
       task_id: idMatch![1],
       working_directory: '/tmp/test',
       prompt: 'analyze codebase',
@@ -373,10 +374,10 @@ describe('start_session tool', () => {
   });
 
   it('passes mode "bypass" to sessionRunner.startSession', async () => {
-    const addResult = await executeTool('create_task', { title: 'Bypass mode test' });
-    const idMatch = addResult.match(/\[([^\]]+)\]/);
+    const addResult = await executeTool('task_create', { title: 'Bypass mode test' });
+    const idMatch = addResult.match(/id="([^"]+)"/);
 
-    await executeTool('start_session', {
+    await executeTool('session_start', {
       task_id: idMatch![1],
       working_directory: '/tmp/test',
       mode: 'bypass',
@@ -391,10 +392,10 @@ describe('start_session tool', () => {
   });
 
   it('omits mode when not specified', async () => {
-    const addResult = await executeTool('create_task', { title: 'No mode test' });
-    const idMatch = addResult.match(/\[([^\]]+)\]/);
+    const addResult = await executeTool('task_create', { title: 'No mode test' });
+    const idMatch = addResult.match(/id="([^"]+)"/);
 
-    await executeTool('start_session', {
+    await executeTool('session_start', {
       task_id: idMatch![1],
       working_directory: '/tmp/test',
     });
@@ -408,13 +409,13 @@ describe('start_session tool', () => {
   });
 
   it('returns error for completed task', async () => {
-    const addResult = await executeTool('create_task', { title: 'Done task' });
-    const idMatch = addResult.match(/\[([^\]]+)\]/);
+    const addResult = await executeTool('task_create', { title: 'Done task' });
+    const idMatch = addResult.match(/id="([^"]+)"/);
     // Simulate human setting COMPLETE (agent can only set AGENT_COMPLETE)
     const { updateTask: coreUpdateTask } = await import('../../src/core/task-manager.js');
     await coreUpdateTask(idMatch![1], { phase: 'COMPLETE' as any });
 
-    const result = await executeTool('start_session', {
+    const result = await executeTool('session_start', {
       task_id: idMatch![1],
       working_directory: '/tmp/test',
     });
@@ -423,8 +424,8 @@ describe('start_session tool', () => {
   });
 
   it('blocks start_session when task already has any session (strict 1-session-per-task)', async () => {
-    const addResult = await executeTool('create_task', { title: 'Already has session' });
-    const idMatch = addResult.match(/\[([^\]]+)\]/);
+    const addResult = await executeTool('task_create', { title: 'Already has session' });
+    const idMatch = addResult.match(/id="([^"]+)"/);
     const taskId = idMatch![1];
 
     // Manually link a stopped session to the task (simulating a previous session)
@@ -432,7 +433,7 @@ describe('start_session tool', () => {
     await linkSession(taskId, 'old-stopped-session-001');
 
     // Attempting to start a new session should be blocked
-    const result = await executeTool('start_session', {
+    const result = await executeTool('session_start', {
       task_id: taskId,
       working_directory: '/tmp/test',
       prompt: 'new work',
@@ -442,14 +443,14 @@ describe('start_session tool', () => {
     expect(parsed.blocked).toBe(true);
     expect(parsed.reason).toContain('Task already has a session');
     expect(parsed.session_ids).toContain('old-stopped-session-001');
-    expect(parsed.hint).toContain('send_to_session');
-    expect(parsed.hint).toContain('create_task');
+    expect(parsed.hint).toContain('session_send');
+    expect(parsed.hint).toContain('task_create');
     // sessionRunner.startSession should NOT have been called
     expect(startSessionSpy).not.toHaveBeenCalled();
   });
 
   it('returns error for nonexistent task', async () => {
-    const result = await executeTool('start_session', {
+    const result = await executeTool('session_start', {
       task_id: 'nonexistent-id',
       working_directory: '/tmp/test',
     });
@@ -457,7 +458,7 @@ describe('start_session tool', () => {
   });
 
   it('starts a taskless session when task_id is omitted', async () => {
-    const result = await executeTool('start_session', {
+    const result = await executeTool('session_start', {
       working_directory: '/tmp/taskless',
       prompt: 'taskless work',
     });
@@ -474,10 +475,10 @@ describe('start_session tool', () => {
   });
 
   it('includes session-ref and task-ref XML tags in result', async () => {
-    const addResult = await executeTool('create_task', { title: 'Ref tag test' });
-    const idMatch = addResult.match(/\[([^\]]+)\]/);
+    const addResult = await executeTool('task_create', { title: 'Ref tag test' });
+    const idMatch = addResult.match(/id="([^"]+)"/);
 
-    const result = await executeTool('start_session', {
+    const result = await executeTool('session_start', {
       task_id: idMatch![1],
       working_directory: '/tmp/test',
       prompt: 'do work',
@@ -488,7 +489,7 @@ describe('start_session tool', () => {
   });
 
   it('includes session-ref in taskless session result', async () => {
-    const result = await executeTool('start_session', {
+    const result = await executeTool('session_start', {
       working_directory: '/tmp/taskless',
       prompt: 'taskless work',
     });
@@ -500,19 +501,19 @@ describe('start_session tool', () => {
 
 describe('config tools', () => {
   it('get_config returns default config', async () => {
-    const result = await executeTool('get_config', {});
+    const result = await executeTool('config_get', {});
     const parsed = JSON.parse(result);
     expect(parsed.version).toBe(1);
     expect(parsed.defaults.priority).toBe('none');
   });
 
   it('update_config changes config values', async () => {
-    await executeTool('update_config', {
+    await executeTool('config_update', {
       user_name: 'TestUser',
       default_priority: 'immediate',
     });
 
-    const result = await executeTool('get_config', {});
+    const result = await executeTool('config_get', {});
     const parsed = JSON.parse(result);
     expect(parsed.user.name).toBe('TestUser');
     expect(parsed.defaults.priority).toBe('immediate');
@@ -538,7 +539,7 @@ describe('agent tool bus events', () => {
   });
 
   it('create_task emits task:created to web-ui', async () => {
-    await executeTool('create_task', { title: 'Bus event test' });
+    await executeTool('task_create', { title: 'Bus event test' });
     expect(emitSpy).toHaveBeenCalledWith(
       'task:created',
       expect.objectContaining({ task: expect.objectContaining({ title: 'Bus event test' }) }),
@@ -548,11 +549,11 @@ describe('agent tool bus events', () => {
   });
 
   it('update_task with phase AGENT_COMPLETE emits task:updated to web-ui', async () => {
-    const addResult = await executeTool('create_task', { title: 'Complete bus test' });
-    const idMatch = addResult.match(/\[([^\]]+)\]/);
+    const addResult = await executeTool('task_create', { title: 'Complete bus test' });
+    const idMatch = addResult.match(/id="([^"]+)"/);
     emitSpy.mockClear();
 
-    await executeTool('update_task', { id: idMatch![1], phase: 'AGENT_COMPLETE' });
+    await executeTool('task_update', { id: idMatch![1], phase: 'AGENT_COMPLETE' });
     expect(emitSpy).toHaveBeenCalledWith(
       'task:updated',
       expect.objectContaining({
@@ -567,11 +568,11 @@ describe('agent tool bus events', () => {
   });
 
   it('update_task emits task:updated to web-ui', async () => {
-    const addResult = await executeTool('create_task', { title: 'Update bus test' });
-    const idMatch = addResult.match(/\[([^\]]+)\]/);
+    const addResult = await executeTool('task_create', { title: 'Update bus test' });
+    const idMatch = addResult.match(/id="([^"]+)"/);
     emitSpy.mockClear();
 
-    await executeTool('update_task', { id: idMatch![1], title: 'Updated title' });
+    await executeTool('task_update', { id: idMatch![1], title: 'Updated title' });
     expect(emitSpy).toHaveBeenCalledWith(
       'task:updated',
       expect.objectContaining({ task: expect.objectContaining({ title: 'Updated title' }) }),
@@ -581,25 +582,26 @@ describe('agent tool bus events', () => {
   });
 
   it('update_task with append_note emits task:updated to web-ui', async () => {
-    const addResult = await executeTool('create_task', { title: 'Note bus test' });
-    const idMatch = addResult.match(/\[([^\]]+)\]/);
+    const addResult = await executeTool('task_create', { title: 'Note bus test' });
+    const idMatch = addResult.match(/id="([^"]+)"/);
     emitSpy.mockClear();
 
-    await executeTool('update_task', { id: idMatch![1], append_note: 'A note' });
+    await executeTool('task_update', { id: idMatch![1], append_note: 'A note' });
+    // addNote() is a core function that emits with source: 'internal' (not 'agent')
     expect(emitSpy).toHaveBeenCalledWith(
       'task:updated',
       expect.objectContaining({ task: expect.objectContaining({ title: 'Note bus test' }) }),
       ['web-ui'],
-      { source: 'agent' },
+      { source: 'internal' },
     );
   });
 
-  it('rename_category emits task:updated to web-ui', async () => {
+  it('task_update type=category rename emits task:updated to web-ui', async () => {
     await ensureCategory('OldCat');
-    await executeTool('create_task', { title: 'Cat rename test', category: 'OldCat' });
+    await executeTool('task_create', { title: 'Cat rename test', category: 'OldCat' });
     emitSpy.mockClear();
 
-    await executeTool('rename_category', { old_category: 'OldCat', new_category: 'NewCat' });
+    await executeTool('task_update', { type: 'category', old_name: 'OldCat', new_name: 'NewCat' });
     expect(emitSpy).toHaveBeenCalledWith(
       'task:updated',
       expect.objectContaining({ oldCategory: 'OldCat', newCategory: 'NewCat', count: 1 }),

@@ -1,7 +1,7 @@
 /**
  * Build a bounded context block for Claude Code sessions.
  *
- * When Walnut starts a `claude -p` session via start_session, this module
+ * When Walnut starts a `claude -p` session via session_start, this module
  * assembles task metadata, description, summary, note, prior
  * session summaries, and project memory into a system prompt (~3000 tokens max).
  *

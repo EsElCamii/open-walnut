@@ -23,7 +23,7 @@ function ensureTtsDir(): void {
 }
 
 export const ttsTool: ToolDefinition = {
-  name: 'tts',
+  name: 'integration_tts',
   description:
     'Convert text to speech audio using edge-tts (free, no API key). Returns the path to the generated MP3 file.',
   input_schema: {

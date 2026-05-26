@@ -21,6 +21,7 @@
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
+import crypto from 'node:crypto'
 import { spawn, execSync } from 'node:child_process'
 import type { ChildProcess } from 'node:child_process'
 import type { ServerWebSocket } from 'bun'
@@ -43,13 +44,28 @@ if (process.argv.includes('--version')) {
 }
 
 // ── Constants ──
-const DAEMON_DIR = '/tmp/open-walnut'
+// DAEMON_DIR default is /tmp/open-walnut; tests override via env var.
+// Must mirror daemon-source.ts (the JS fallback) — keep in sync.
+const DAEMON_DIR = process.env.WALNUT_DAEMON_DIR || '/tmp/open-walnut'
 const STREAMS_DIR = '/tmp/open-walnut-streams'
 const PORT_FILE = path.join(DAEMON_DIR, 'daemon.port')
 const PID_FILE = path.join(DAEMON_DIR, 'daemon.pid')
-const LOG_FILE = path.join(DAEMON_DIR, 'daemon.log')
+const INSTANCE_ID_FILE = path.join(DAEMON_DIR, 'daemon.instance')
 const AGENT_POLL_INTERVAL_MS = 2000
 const AGENT_REDISCOVER_INTERVAL_MS = 10000
+const HEARTBEAT_INTERVAL_MS = 30_000
+
+// ── Daemon Instance ID ──
+// Unique per daemon lifetime. Short hash of port+pid+startTs so it fits in log
+// lines without dominating. Written to daemon.instance so clients can verify
+// they're talking to the same daemon they expected (detect PID reuse / swap).
+const DAEMON_START_TS = Date.now()
+const DAEMON_INSTANCE_ID = (() => {
+  const seed = `${process.pid}-${DAEMON_START_TS}-${Math.random()}`
+  const hash = crypto.createHash('sha256').update(seed).digest('hex').slice(0, 8)
+  return `d-${process.pid}-${hash}`
+})()
+const LOG_FILE = path.join(DAEMON_DIR, `daemon-${DAEMON_INSTANCE_ID}.log`)
 
 // ── PATH setup ──
 // When running as a compiled binary, the daemon starts with a bare PATH.
@@ -168,15 +184,41 @@ interface AgentSub {
 interface WsData {}
 
 // ── Logging ──
+// Every log line includes DAEMON_INSTANCE_ID so `grep <id> daemon-*.log`
+// isolates one daemon's lifetime even when multiple daemons have run.
 function logMsg(level: string, msg: string, data?: Record<string, unknown>) {
   const entry = JSON.stringify({
     ts: new Date().toISOString(),
     level,
     msg,
+    instanceId: DAEMON_INSTANCE_ID,
     ...data,
   })
   try { fs.appendFileSync(LOG_FILE, entry + '\n') } catch {}
   if (level === 'error') console.error(msg, data || '')
+}
+
+/**
+ * Structured state-transition log. Emit BEFORE mutating state so the log line
+ * is ordered with the mutation. Every lifecycle flip (session, FIFO, CLI
+ * process, daemon itself) should flow through this.
+ */
+function logStateTransition(
+  sid: string,
+  oldState: string,
+  newState: string,
+  reason: string,
+  source: string,
+  extra?: Record<string, unknown>,
+): void {
+  logMsg('info', 'state_transition', {
+    sid,
+    oldState,
+    newState,
+    reason,
+    source,
+    ...(extra || {}),
+  })
 }
 
 // ── Process group helpers ──
@@ -388,6 +430,17 @@ function handleCommand(ws: ServerWebSocket<WsData>, msg: string) {
   try { cmd = JSON.parse(msg) } catch { return sendError(ws, null, 'invalid JSON') }
   const { id } = cmd
 
+  // Structured per-command receive log. Traces (traceId) originate at walnut
+  // and propagate through the daemon → CLI spawn. Logging on receive gives us
+  // the first server-side timestamp for a command, pairing with walnut's
+  // `enqueue` line and the eventual `jsonl` forward.
+  const traceId = typeof cmd.traceId === 'string' ? cmd.traceId : undefined
+  const sid = typeof cmd.sid === 'string' ? cmd.sid : undefined
+  if (cmd.cmd !== 'ping') {
+    // ping is high-frequency keepalive — log spam if we trace it
+    logMsg('debug', 'cmd_recv', { cmd: cmd.cmd, id, sid, traceId })
+  }
+
   switch (cmd.cmd) {
     case 'start': return cmdStart(ws, id as number, cmd)
     case 'attach': return cmdAttach(ws, id as number, cmd)
@@ -411,6 +464,9 @@ function handleCommand(ws: ServerWebSocket<WsData>, msg: string) {
     case 'hello': return sendOk(ws, id as number, {
       version: process.env.DAEMON_VERSION || 'dev',
       capabilities: REQUIRED_DAEMON_CAPABILITIES,
+      instanceId: DAEMON_INSTANCE_ID,
+      startedAt: DAEMON_START_TS,
+      uptimeSec: Math.floor((Date.now() - DAEMON_START_TS) / 1000),
     })
     default: return sendError(ws, id as number, 'unknown command: ' + cmd.cmd)
   }
@@ -430,6 +486,43 @@ function cmdStart(ws: ServerWebSocket<WsData>, id: number, cmd: Record<string, u
   // sent to a remote Linux host).
   if (!fs.existsSync(cwd)) {
     return sendError(ws, id, `start: cwd does not exist on this host (${os.hostname()}): ${cwd}`)
+  }
+
+  // If a session with this sid already exists (e.g. adopted orphan still
+  // running, or previous turn's process not yet reaped), clean it up BEFORE
+  // overwriting sessions.set() below. Otherwise the old orphanPollTimer's
+  // captured pid lingers and will misfire `pid-recycled` against our new pid
+  // ~1s after spawn, killing every --resume-spawned process in a loop.
+  const existing = sessions.get(sid)
+  if (existing) {
+    logMsg('warn', 'cmdStart: replacing existing session', {
+      sid,
+      oldPid: existing.pid,
+      oldState: existing.state,
+      oldHasOrphanPoll: !!existing.orphanPollTimer,
+      resume: !!resume,
+    })
+    if (existing.orphanPollTimer) {
+      try { clearInterval(existing.orphanPollTimer) } catch {}
+      existing.orphanPollTimer = null
+    }
+    // If the old pid is still alive, kill its process group. This is the old
+    // adopted orphan; we must not leave it running while we point `sessions`
+    // at a different pid, or the orphan becomes permanently un-reapable.
+    if (existing.state === 'running' && existing.pid) {
+      let oldAlive = false
+      try { process.kill(existing.pid, 0); oldAlive = true } catch {}
+      if (oldAlive) {
+        logMsg('warn', 'cmdStart: killing old-session process group before respawn', {
+          sid, oldPid: existing.pid,
+        })
+        try { process.kill(-existing.pid, 'SIGTERM') } catch {}
+      }
+    }
+    // Mark dead so any late callbacks (subscribers, watchers) don't act on it.
+    existing.state = 'dead'
+    existing.exitReason = 'replaced-by-cmdstart'
+    existing.exitedAt = Date.now()
   }
 
   fs.mkdirSync(STREAMS_DIR, { recursive: true })
@@ -524,6 +617,7 @@ function cmdStart(ws: ServerWebSocket<WsData>, id: number, cmd: Record<string, u
   proc.unref()
   try { fs.writeFileSync(pgidPath, String(pid)) } catch {}
 
+  logStateTransition(sid, 'none', 'running', resume ? 'spawn-resume' : 'spawn-fresh', 'cmdStart', { pid })
   logMsg('info', 'session started', { sid, pid, resume: !!resume })
 
   // Track session
@@ -700,9 +794,22 @@ function addSubscriber(ws: ServerWebSocket<WsData>, sid: string, fromOffset: num
   const currentOffset = session.watcher ? session.watcher.offset : 0
   const start = typeof fromOffset === 'number' && fromOffset >= 0 ? fromOffset : 0
   if (start < currentOffset) {
+    const bytesToRead = currentOffset - start
+    // Catch-up replay > 256KB is suspicious — it usually means the client
+    // passed an offset from a DIFFERENT file (canonical vs stream mismatch),
+    // and we're about to spam them with a huge replay that looks like "UI is
+    // replaying the whole conversation". Log before doing it so we can trace.
+    if (bytesToRead > 256 * 1024) {
+      logMsg('warn', 'addSubscriber: large catch-up replay', {
+        sid, fromOffset: start, currentOffset, bytesToRead,
+      })
+    } else {
+      logMsg('info', 'addSubscriber: replay', {
+        sid, fromOffset: start, currentOffset, bytesToRead,
+      })
+    }
     try {
       const fd = fs.openSync(session.jsonlPath, 'r')
-      const bytesToRead = currentOffset - start
       const buf = Buffer.alloc(bytesToRead)
       fs.readSync(fd, buf, 0, bytesToRead, start)
       fs.closeSync(fd)
@@ -713,6 +820,10 @@ function addSubscriber(ws: ServerWebSocket<WsData>, sid: string, fromOffset: num
         }
       }
     } catch {}
+  } else {
+    logMsg('info', 'addSubscriber: no replay (future-only)', {
+      sid, fromOffset: start, currentOffset,
+    })
   }
   return true
 }
@@ -1321,6 +1432,14 @@ function sendEvent(ws: ServerWebSocket<WsData>, ev: string, data: Record<string,
   try { ws.send(JSON.stringify({ ev, ...data })) } catch {}
 }
 
+// ── FIFO write logger ──
+// Wraps writeFifoRaw so every FIFO write attempt is observable — essential
+// for debugging "message sent but CLI never replied" bugs. Success, EAGAIN
+// backpressure, and ENXIO (dead reader) are all distinct signals.
+function logFifoWrite(sid: string, bytes: number, result: 'ok' | 'EAGAIN' | 'ENXIO' | 'error', err?: string) {
+  logMsg(result === 'ok' ? 'debug' : 'warn', 'fifo_write', { sid, bytes, result, ...(err ? { err } : {}) })
+}
+
 // ── Session idle scanner ──
 // Runs every 60s, kills orphaned sessions per the decision tree:
 //   - Process already dead → cleanup process group (kill MCP residuals)
@@ -1515,9 +1634,12 @@ function cleanup() {
     if (sub.timer) clearInterval(sub.timer)
     if (sub.rediscoverTimer) clearInterval(sub.rediscoverTimer)
   }
-  // Remove port/pid files (but NOT the sessions registry — successor needs it)
+  // Remove port/pid/instance files (but NOT the sessions registry — successor needs it).
+  // Instance file gets replaced by the successor's own id on the next --start.
   try { fs.unlinkSync(PORT_FILE) } catch {}
   try { fs.unlinkSync(PID_FILE) } catch {}
+  try { fs.unlinkSync(INSTANCE_ID_FILE) } catch {}
+  logMsg('info', 'daemon cleanup complete', { uptimeSec: Math.floor((Date.now() - DAEMON_START_TS) / 1000) })
 }
 
 // ── Handle disconnect for a WebSocket client ──
@@ -1561,7 +1683,9 @@ if (action === '--status') {
     const pid = parseInt(fs.readFileSync(PID_FILE, 'utf-8').trim(), 10)
     process.kill(pid, 0)
     const port = fs.readFileSync(PORT_FILE, 'utf-8').trim()
-    console.log(JSON.stringify({ running: true, pid, port: parseInt(port, 10) }))
+    let instanceId: string | undefined
+    try { instanceId = fs.readFileSync(INSTANCE_ID_FILE, 'utf-8').trim() } catch {}
+    console.log(JSON.stringify({ running: true, pid, port: parseInt(port, 10), instanceId }))
   } catch {
     console.log(JSON.stringify({ running: false }))
   }
@@ -1577,7 +1701,9 @@ if (action === '--start') {
     console.log(existingPort) // Already running — return port
     process.exit(0)
   } catch {
-    // Not running, continue to start
+    // Not running, continue to start. `logMsg` below will use THIS process's
+    // DAEMON_INSTANCE_ID; any leftover instance file from a crashed predecessor
+    // gets overwritten at the end of startup.
   }
 
   fs.mkdirSync(DAEMON_DIR, { recursive: true })
@@ -1637,11 +1763,35 @@ if (action === '--start') {
   const port = server.port
   fs.writeFileSync(PORT_FILE, String(port))
   fs.writeFileSync(PID_FILE, String(process.pid))
+  // Instance ID file — lets clients detect PID recycling / daemon swap by
+  // comparing the on-disk value against what `hello` returns. Stable for the
+  // lifetime of this daemon; removed on graceful cleanup().
+  fs.writeFileSync(INSTANCE_ID_FILE, DAEMON_INSTANCE_ID)
   console.log(port) // Print port for parent to capture
-  logMsg('info', 'daemon started', { port, pid: process.pid })
+  logMsg('info', 'daemon started', {
+    port,
+    pid: process.pid,
+    startedAt: DAEMON_START_TS,
+  })
 
   // Start session idle scanner (every 60s)
   setInterval(scanIdleSessions, SESSION_SCAN_INTERVAL_MS)
+
+  // Heartbeat: one JSON line every 30s with daemon vitals. Absence = wedged
+  // daemon (event loop blocked, OOM, etc). Cheap to emit, huge diagnostic
+  // value: `tail -F daemon-*.log | grep heartbeat` tells you a daemon is
+  // alive even when it has no sessions.
+  setInterval(() => {
+    const mem = process.memoryUsage()
+    logMsg('info', 'heartbeat', {
+      sessions: sessions.size,
+      wsClients: wsClients.size,
+      agentSubs: agentSubs.size,
+      uptimeSec: Math.floor((Date.now() - DAEMON_START_TS) / 1000),
+      rssMb: Math.round(mem.rss / 1024 / 1024),
+      heapMb: Math.round(mem.heapUsed / 1024 / 1024),
+    })
+  }, HEARTBEAT_INTERVAL_MS)
 
   // Handle signals
   process.on('SIGTERM', () => { cleanup(); process.exit(0) })

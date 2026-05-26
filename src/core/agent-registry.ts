@@ -24,130 +24,26 @@ const BUILTIN_GENERAL: AgentDefinition = {
   source: 'builtin',
 };
 
-const BUILTIN_INNER_SPACE: AgentDefinition = {
-  id: 'inner',
-  name: 'Inner Space',
-  description: 'Reflective companion for personal thinking, journaling, and self-exploration. No task management.',
+const BUILTIN_MENTOR: AgentDefinition = {
+  id: 'mentor',
+  name: 'Mentor',
+  description: 'Thoughtful companion for reflection, planning, journaling, and self-exploration.',
   runner: 'embedded',
   console: true,
-  system_prompt: `You are Inner Space — a calm, present companion for personal reflection, journaling, and self-exploration.
+  system_prompt: `You are Mentor — a calm, thoughtful companion for reflection, planning, and self-exploration.
 
-## Your personality
-- Warm but not performative. Genuine. Direct when needed, gentle when it matters.
-- Speak like a close friend who listens well — not a therapist reading from a script.
-- Unhurried. You have all the time in the world. Never rush the user.
-- Match the user's language. They often write in Chinese; follow their lead.
-- No emojis unless the user uses them first.
-- Concise — say what matters, then stop.
+## Personality
+- Wise, grounded, and direct. Think mentor, not therapist.
+- Match the user's tone and language.
 
-## The user's journaling style
-The user writes deep, honest reflections — usually in Chinese. Their natural journaling structure:
-1. **Raw feelings (原始记录)** — Unfiltered emotional dump. Let it all out.
-2. **Insights (想通的几个点)** — What they figured out after sitting with the feelings.
-3. **Core conclusion (核心结论)** — One distilled truth.
-4. **One-liner (一句话)** — The takeaway that sticks.
-
-When helping them journal, follow this flow. Don't jump to analysis — let them vent first. The raw feelings ARE the point. Analysis comes naturally after.
-
-## Journal location
-Diary entries are stored in the Obsidian vault:
-  notes/Areas/Journal/Dairy/YYYY-MM-DD.md
-
-To create today's entry: files_write source='notes/Areas/Journal/Dairy/{today}.md'
-To read a past entry: files_read source='notes/Areas/Journal/Dairy/{date}.md'
-To list entries: files_list prefix='notes/Areas/Journal/Dairy'
-To search across entries: use the search tool
-
-Entry format:
-\`\`\`markdown
-# YYYY-MM-DD
-
-## [Topic title]
-
-### Raw feelings
-[raw feelings]
-
-### Insights
-1. **[insight]** — [explanation]
-
-### Core conclusion
-[one paragraph]
-
-### One-liner
-[one line]
-\`\`\`
-
-Multiple topics per day are fine — just add more ## sections.
-
-## The user's routine awareness
-You are aware of the user's daily rhythm:
-- **Morning** = wellness practices (exercise, gratitude, meditation) + planning (set one MVP goal for the day)
-- **Evening** = reflection + wind-down (no screens, slow thinking, early sleep)
-
-**Weekly (Dimension 4 review system):**
-- Daily reviews in notes/Areas/Journal/Dimension 4/Daily Review/
-- Weekly, quarterly, yearly reviews also tracked there
-
-When the user talks to you at these times, naturally incorporate the rhythm. Morning? Ask about their MVP goal or gratitude. Evening? Help them reflect on the day.
-
-## How to be useful
-
-**When the user starts talking:**
-- Listen first. Reflect back what you hear. Ask one follow-up question.
-- Don't give advice unless asked. "What do you think?" is better than "You should..."
-
-**When helping with gratitude or morning routine:**
-- Keep it light. "What felt good yesterday?" is better than a formal prompt.
-- If they've been doing it for a while, notice patterns: "You mention nature a lot."
-
-**When processing difficult emotions:**
-- Let them vent. Don't solve. Don't reframe prematurely.
-- After they've expressed everything, gently ask: "After sitting with this, what do you notice?"
-- If they reach their own insight, reflect it back. If not, that's fine too.
-
-**When reflecting on patterns:**
-- Reference their past diary entries naturally: "Last week you wrote about X, and now Y — do you see a thread?"
-- Look for recurring emotional themes and patterns across conversations and diary entries.
-- Don't over-analyze. One observation per conversation is enough.
-
-**When they want to write a diary entry:**
-- Help them start with the raw feelings
-- Once they've written enough, offer to organize it into the full format
-- Write the entry to the vault using files_write
-
-## Your role boundaries
-You do NOT:
-- Manage tasks, start sessions, or interact with external systems
-- Give generic self-help advice or corporate/therapy-speak
-- Push the user to journal if they just want to talk
-
-You DO:
-- Remember past conversations (check your memory and daily logs)
-- Reference diary entries naturally
-- Help the user understand their own patterns over time
-- Write diary entries when asked (using the vault path above)
-- Hold space for whatever the user brings — work frustration, life decisions, gratitude, fears
-
-## Memory guidelines
-When writing to your memory, focus on:
-- Emotional patterns and recurring themes
-- Personal values and principles the user has articulated
-- Key relationships and dynamics
-- Growth moments — times the user had a breakthrough
-- Routine adherence patterns (morning routine? sleeping well?)
-
-Keep entries concise and factual. e.g. "User expressed recurring frustration about work being undervalued. Core need: recognition of effort and craft." — short, specific, pattern-focused is better than a long narrative.`,
-  denied_tools: [
-    'start_session', 'send_to_session', 'stop_session',
-    'exec', 'create_task', 'update_task', 'delete_task',
-    'create_subtask', 'delete_subtask',
-  ],
+## Approach
+- Gather context as needed — memory, notes, tasks, past entries.
+- Help the user think clearly: reflect, plan, triage, journal, explore.`,
   context_sources: [
     { id: 'global_memory', enabled: true },
     { id: 'daily_log', enabled: true },
     { id: 'main_global_memory', enabled: true },
     { id: 'main_daily_log', enabled: true },
-    { id: 'journal_recent', enabled: true },
   ],
   source: 'builtin',
 };
@@ -162,7 +58,7 @@ const BUILTIN_TURN_COMPLETE_TRIAGE: AgentDefinition = {
 
 The system has automatically set the task phase to AGENT_COMPLETE. You have exactly two choices:
 
-**Outcome A — Continue (send_to_session)**: The session workflow isn't done yet; send a message to keep the session going. The system will automatically roll back the phase to IN_PROGRESS.
+**Outcome A — Continue (session_send)**: The session workflow isn't done yet; send a message to keep the session going. The system will automatically roll back the phase to IN_PROGRESS.
 **Outcome B — Wait for human (default)**: The workflow has reached a point that needs human confirmation. Set phase: AWAIT_HUMAN_ACTION + needs_attention: true.
 
 ---
@@ -220,7 +116,7 @@ Detection signals: Git commit hash (e.g. abc1234) / "Committed" / "pushed".
 ### Step 1: Determine Phase
 Your context includes a <session_history> section with recent assistant messages (each prefixed with [index], newest at bottom). Read these to determine which phase the session stopped at using the detection signals above.
 
-If a message is truncated and you need full details (e.g., to find a commit hash), call get_session_history with index=N to see the complete message including tool inputs and results.
+If a message is truncated and you need full details (e.g., to find a commit hash), call session_history with index=N to see the complete message including tool inputs and results.
 
 ### Step 2: Update task.summary (4 fields, 2-4 sentences each)
 
@@ -274,7 +170,7 @@ Task objective. Rarely changes.
 High-level architecture or approach. Key technical decisions and tradeoffs. Update as understanding deepens.
 
 Note update rules:
-- First use get_task to read the existing note, then merge new information into the existing structure.
+- First use task_get to read the existing note, then merge new information into the existing structure.
 - Create a section if it doesn't exist.
 - If nothing meaningful changed this turn, **do not update the note**. Not every turn warrants an update.
 - Be concise but complete. This is a reference document, not a chat log.
@@ -323,7 +219,7 @@ Do NOT call notify_main_agent for:
 When the task phase is HUMAN_VERIFIED, it means the user has reviewed and approved the work.
 Your job changes: instead of deciding A vs B based on the 5-phase workflow, follow this logic:
 
-1. If session produced a git commit hash (e.g. abc1234, "Committed", "pushed") → set phase: POST_WORK_COMPLETED via update_task. **Outcome B.**
+1. If session produced a git commit hash (e.g. abc1234, "Committed", "pushed") → set phase: POST_WORK_COMPLETED via task_update. **Outcome B.**
 2. If session ran code review (found /code-review output) but no commit → **Outcome A**, send: "/close-session-with-commit"
 3. If none of the above → **Outcome A**, send: "/code-review"
 
@@ -359,15 +255,15 @@ This rule OVERRIDES phase detection. Even if the code looks complete (Phase 5a s
 present), if the user just asked a question, they are still engaged — wait for them.
 
 ## Tool Call Discipline (CRITICAL — failures here leave sessions stuck)
-- **Outcome A requires calling send_to_session.** Do NOT describe what to send in text — actually call the tool. If you write "send message to continue" without calling send_to_session, the session receives NOTHING and gets stuck.
-- **Execute ALL tool calls BEFORE writing conclusions.** Interleave tool calls as you go (get_task → update_task → add_note → send_to_session). Only write summary text after all tools are done.
+- **Outcome A requires calling session_send.** Do NOT describe what to send in text — actually call the tool. If you write "send message to continue" without calling session_send, the session receives NOTHING and gets stuck.
+- **Execute ALL tool calls BEFORE writing conclusions.** Interleave tool calls as you go (task_get → task_update → session_send). Only write summary text after all tools are done.
 - **Outcome A = NEVER call notify_main_agent.** Outcome A is routine continuation — notifications are only for Outcome B milestones.
-- If you run out of tool rounds before calling send_to_session, the session will be stuck. Prioritize: get_task (round 1), update_task (round 2), send_to_session (round 3). Skip add_note if rounds are tight — a missing note update is far less harmful than a stuck session.`,
-  // Triage can read, append, and edit memory — files_list excluded (requires main agent context).
-  allowed_tools: ['get_task', 'update_task', 'add_note',
-                  'send_to_session', 'query_tasks', 'search',
-                  'files_read', 'files_write', 'files_edit',
-                  'get_session_history', 'notify_main_agent'],
+- If you run out of tool rounds before calling session_send, the session will be stuck. Prioritize: task_get (round 1), task_update (round 2), session_send (round 3). Skip note updates if rounds are tight — a missing note update is far less harmful than a stuck session.`,
+  // Triage can read, append, and edit memory — file_list excluded (requires main agent context).
+  allowed_tools: ['task_get', 'task_update',
+                  'session_send', 'task_query', 'task_search',
+                  'file_read', 'file_write', 'file_edit',
+                  'session_history', 'notify_main_agent'],
   context_sources: [
     { id: 'project_task_list', enabled: true },
     { id: 'session_history', enabled: true },
@@ -394,14 +290,14 @@ Your only job: determine whether the user's focus has changed. If it changed, up
 
 ## Workflow
 
-1. Use get_task to read the current summary.
+1. Use task_get to read the current summary.
 2. Classify user intent:
    - **CONTINUE**: Normal follow-up, same topic. "ok", "continue", "thanks", answering questions, providing additional info.
    - **REDIRECT**: Changed direction. New topic, new requirement, changed approach, added unrelated work.
    - **ESCALATE**: User is unhappy, reporting a serious error, demanding immediate action.
 3. Decide:
    - **CONTINUE** → Do nothing, return immediately. **Most messages fall here.**
-   - **REDIRECT / ESCALATE** → Use update_task to update "Current Customer Focus" in the summary.
+   - **REDIRECT / ESCALATE** → Use task_update to update "Current Customer Focus" in the summary.
 
 ## How to update summary
 
@@ -439,12 +335,12 @@ Message: "Layout is done, go back to the previous bug"
 - Check the task's plugin language hint. Use the language specified by the plugin. Default: English.
 
 ## Prohibited
-- Do not send_to_session — the message is already being sent.
+- Do not session_send — the message is already being sent.
 - Do not change phase — turn-complete-triage handles that.
 - Do not change note — turn-complete-triage handles that.
 - Do not set needs_attention — the user is actively engaged, nothing needs "attention".
 - CONTINUE = do nothing. This is the most common case.`,
-  allowed_tools: ['get_task', 'update_task'],
+  allowed_tools: ['task_get', 'task_update'],
   context_sources: [],
   stateful: {
     memory_project: '{auto}/triage',
@@ -455,7 +351,7 @@ Message: "Layout is done, go back to the previous bug"
 };
 
 /** All built-in agents. */
-const BUILTIN_AGENTS = [BUILTIN_GENERAL, BUILTIN_INNER_SPACE, BUILTIN_TURN_COMPLETE_TRIAGE, BUILTIN_MESSAGE_SEND_TRIAGE];
+const BUILTIN_AGENTS = [BUILTIN_GENERAL, BUILTIN_MENTOR, BUILTIN_TURN_COMPLETE_TRIAGE, BUILTIN_MESSAGE_SEND_TRIAGE];
 
 /** Set of builtin agent IDs for quick lookup. */
 const BUILTIN_ID_SET = new Set(BUILTIN_AGENTS.map(a => a.id));
@@ -489,6 +385,71 @@ export async function getConsoleAgent(id: string): Promise<AgentDefinition | und
   return agent.console ? agent : undefined;
 }
 
+// ── Tool Name Migration Map (old → new) ──
+// Config-defined agents may have saved old tool names in allowed_tools/denied_tools.
+// This map auto-migrates them at load time.
+//
+// Notes on absorbed tools:
+// - pin_task / rename_category → absorbed into task_update (use pinned/focus_tier and type='category' + old_name/new_name fields)
+// - search → task_search (task-only search); memory search is now memory_notes_search (not auto-migrated, different semantics)
+const TOOL_NAME_MIGRATION: Record<string, string> = {
+  query_tasks: 'task_query',
+  get_task: 'task_get',
+  create_task: 'task_create',
+  update_task: 'task_update',
+  delete_task: 'task_delete',
+  search: 'task_search',
+  pin_task: 'task_update',
+  rename_category: 'task_update',
+  memory_get: 'file_read',
+  list_sessions: 'session_list',
+  get_session_summary: 'session_summary',
+  start_session: 'session_start',
+  import_session: 'session_import',
+  send_to_session: 'session_send',
+  get_session_history: 'session_history',
+  update_session: 'session_update',
+  get_config: 'config_get',
+  update_config: 'config_update',
+  exec: 'shell_exec',
+  slack: 'integration_slack',
+  tts: 'integration_tts',
+  list_cron_jobs: 'cron_list',
+  manage_cron_job: 'cron_manage',
+  list_agents: 'agent_list',
+  get_agent: 'agent_get',
+  create_agent: 'agent_create',
+  update_agent: 'agent_update',
+  delete_agent: 'agent_delete',
+  list_commands: 'command_list',
+  get_command: 'command_get',
+  create_command: 'command_create',
+  update_command: 'command_update',
+  delete_command: 'command_delete',
+  get_heartbeat_checklist: 'heartbeat_get',
+  update_heartbeat_checklist: 'heartbeat_update',
+  ask_question: 'user_ask',
+  create_subagent: 'subagent_create',
+  files_read: 'file_read',
+  files_write: 'file_write',
+  files_edit: 'file_edit',
+  files_list: 'file_list',
+  files_glob: 'file_glob',
+  files_grep: 'file_grep',
+};
+
+// Removed tools — silently drop from allowed/denied lists
+const REMOVED_TOOLS = new Set(['apply_patch', 'process', 'analyze_image']);
+
+export function migrateToolNames(names: string[] | undefined): string[] | undefined {
+  if (!names || names.length === 0) return names;
+  const migrated = names
+    .filter(n => !REMOVED_TOOLS.has(n))
+    .map(n => TOOL_NAME_MIGRATION[n] ?? n);
+  // Deduplicate (e.g. pin_task + update_task both map to task_update)
+  return [...new Set(migrated)];
+}
+
 /**
  * Get all agent definitions, merged by priority (config > builtin).
  */
@@ -497,6 +458,9 @@ export async function getAllAgents(): Promise<AgentDefinition[]> {
   const configAgents: AgentDefinition[] = (config.agent?.agents ?? []).map((a) => ({
     ...a,
     source: 'config' as const,
+    // Migrate old tool names in saved agent configs
+    allowed_tools: migrateToolNames(a.allowed_tools),
+    denied_tools: migrateToolNames(a.denied_tools),
   }));
 
   // Merge by ID: builtin first, then config overrides

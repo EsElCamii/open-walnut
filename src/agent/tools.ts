@@ -28,7 +28,7 @@ import {
   getPinnedTasks,
 } from '../core/task-manager.js';
 import { VALID_PHASES } from '../core/phase.js';
-import { search } from '../core/search.js';
+import { bm25ScoreTasks, expandChildTasks } from '../core/search.js';
 import {
   listSessions,
   getSessionSummaries,
@@ -39,6 +39,7 @@ import {
   checkSessionLimit,
   TRIAGE_AGENTS,
   isTriageSession,
+  isEnvironmentSession,
 } from '../core/session-tracker.js';
 import type { SessionLimitResult } from '../core/session-tracker.js';
 import { bus, EventNames } from '../core/event-bus.js';
@@ -48,21 +49,22 @@ import fsp from 'node:fs/promises';
 import path from 'node:path';
 import { log } from '../logging/index.js';
 import { CLAUDE_HOME } from '../constants.js';
-// standalone read_file, edit_file, write_file removed — unified into files_* tools
+// standalone read_file, edit_file, write_file removed — unified into file_* tools
 import { execTool } from './tools/exec-tool.js';
 import { slackTool } from './tools/slack-tool.js';
 import { ttsTool } from './tools/tts-tool.js';
-import { imageTool } from './tools/image-tool.js';
+
 import { webFetchTool } from './tools/web-fetch-tool.js';
 import { webSearchTool } from './tools/web-search-tool.js';
-import { createApplyPatchTool } from './tools/apply-patch.js';
-import { createProcessTool } from './tools/process-tool.js';
+
 import { agentCrudTools } from './tools/agent-crud-tools.js';
 import { commandCrudTools } from './tools/command-tools.js';
 import { heartbeatTools } from './tools/heartbeat-tools.js';
 import { askQuestionTool } from './tools/ask-question-tool.js';
 import { createSubagentTool } from './tools/create-subagent.js';
 import { filesTools } from './tools/files-tools.js';
+import { memoryNotesSearchTool } from './tools/memory-notes-search-tool.js';
+
 
 
 /** Escape double-quotes in a string for use inside an XML attribute value. */
@@ -108,7 +110,7 @@ function json(data: unknown): string {
 
 /**
  * Resolve host and working directory for a session via the 5-priority inheritance chain.
- * Shared by start_session and import_session.
+ * Shared by session_start and session_import.
  *
  * Resolution chain:
  *   CWD:  ① explicit param → ② task.cwd → ③ parent chain walk → ④ project metadata (default_cwd) → ⑤ project memory dir
@@ -175,7 +177,7 @@ function buildSessionLimitBlocked(host: string | undefined, limitResult: Session
       process_status: s.process_status,
       started_at: s.startedAt,
     })),
-    hint: 'Wait for an active session to finish, use send_to_session to reuse an existing session, or increase the limit in config.yaml under session_limits.',
+    hint: 'Wait for an active session to finish, use session_send to reuse an existing session, or increase the limit in config.yaml under session_limits.',
   };
   if (limitResult.totalAlive != null) result.total_alive = limitResult.totalAlive;
   if (limitResult.evicted) {
@@ -189,9 +191,9 @@ function buildSessionLimitBlocked(host: string | undefined, limitResult: Session
 }
 
 export const tools: ToolDefinition[] = [
-  // ── Task Tools (kubectl-style: query_tasks, get_task, create_task, update_task, delete_task) ──
+  // ── Task Tools ──
   {
-    name: 'query_tasks',
+    name: 'task_query',
     description: 'Query tasks, categories, or projects. Use `type` to pick the entity level. For tasks: defaults to non-completed. Use where.phase=\'COMPLETE\' (or where.status=\'done\') when the user asks about completed tasks or wants to delete/clean up.',
     input_schema: {
       type: 'object',
@@ -422,7 +424,7 @@ export const tools: ToolDefinition[] = [
   },
 
   {
-    name: 'get_task',
+    name: 'task_get',
     description: 'Get full details of a task or project.',
     input_schema: {
       type: 'object',
@@ -500,7 +502,7 @@ export const tools: ToolDefinition[] = [
   },
 
   {
-    name: 'create_task',
+    name: 'task_create',
     description: `Create a task, category, or project. Order matters: category first, then project, then task.
 
 - type=category: Create a new category with a source (local or ms-todo). MUST be created before tasks can be added. Plugin-reserved categories are managed by their respective sync plugins.
@@ -573,13 +575,13 @@ export const tools: ToolDefinition[] = [
           const categories = await getStoreCategories();
           const catLower = category.toLowerCase();
           let catExists = Object.keys(categories).some(k => k.toLowerCase() === catLower);
-          // Also check task-derived categories (consistent with query_tasks behavior)
+          // Also check task-derived categories (consistent with task_query behavior)
           if (!catExists) {
             const tasks = await listTasks();
             catExists = tasks.some(t => t.category.toLowerCase() === catLower);
           }
           if (!catExists) {
-            return `Error: Category "${category}" does not exist. Create it first:\n  create_task type=category, name="${category}", source="local" (or "ms-todo")`;
+            return `Error: Category "${category}" does not exist. Create it first:\n  task_create type=category, name="${category}", source="local" (or "ms-todo")`;
           }
 
           // Project must also exist if explicitly specified and different from category
@@ -592,7 +594,7 @@ export const tools: ToolDefinition[] = [
                 t.project.toLowerCase() === project.toLowerCase(),
               );
               if (!projExists) {
-                return `Error: Project "${project}" does not exist in category "${category}". Create it first:\n  create_task type=project, category="${category}", project="${project}"`;
+                return `Error: Project "${project}" does not exist in category "${category}". Create it first:\n  task_create type=project, category="${category}", project="${project}"`;
               }
             }
           }
@@ -625,16 +627,18 @@ export const tools: ToolDefinition[] = [
   },
 
   {
-    name: 'update_task',
-    description: `Update a task or project settings. Supports multiple fields in a single call.
+    name: 'task_update',
+    description: `Update a task, project, or category. Supports multiple fields in a single call.
 
-For tasks (type='task'): update structural fields (priority, phase, category, project, starred, needs_attention, due_date, title) and/or text fields (description, summary, note, append_note) in one call. Use phase='AGENT_COMPLETE' to mark a task done (only humans can set COMPLETE).
+For tasks (type='task'): update structural fields (priority, phase, category, project, starred, needs_attention, due_date, title, pinned, focus_tier) and/or text fields (description, summary, note, append_note) in one call. Use phase='AGENT_COMPLETE' to mark a task done (only humans can set COMPLETE). Use pinned + focus_tier to pin/unpin tasks for the Focus Bar.
 
-For projects (type='project'): set default_host and default_cwd for remote session defaults.`,
+For projects (type='project'): set default_host and default_cwd for remote session defaults.
+
+For categories (type='category'): rename a category across all tasks (requires old_name and new_name).`,
     input_schema: {
       type: 'object',
       properties: {
-        type: { type: 'string', enum: ['task', 'project'], description: 'Entity type. Default: "task".' },
+        type: { type: 'string', enum: ['task', 'project', 'category'], description: 'Entity type. Default: "task".' },
         // Task fields
         id: { type: 'string', description: 'Task ID or prefix. Required for type=task.' },
         title: { type: 'string', description: 'New title. Format: "<≤3-word prefix> — <short description>". Prefix MUST be the most unique identifier of the task (max 3 words) — the thing that instantly tells you WHICH task this is. Use em-dash (—). Good: "Sprint选择器 — 查询/选择当前sprint", "Task不跳转 — 点击task不定位到列表位置". Bad: generic prefixes like "Sprint功能增强", "Bug:", "Tool Description".' },
@@ -662,9 +666,15 @@ For projects (type='project'): set default_host and default_cwd for remote sessi
         set_depends_on: { type: 'array', items: { type: 'string' }, description: 'Replace all dependencies (overwrite). Pass empty array to clear.' },
         // Task-level cwd
         cwd: { type: 'string', description: 'Task-level working directory override. Takes precedence over project default_cwd when starting sessions. Empty string clears.' },
+        // Pin / Focus tier
+        pinned: { type: 'boolean', description: 'Pin or unpin the task. Pinned tasks appear in the Focus Bar sidebar.' },
+        focus_tier: { type: 'string', enum: ['focus', 'next', 'satellite', 'wait'], description: 'Set focus tier (task must be pinned). focus=current sprint (max 3), next=queued, satellite=backlog, wait=parked/blocked.' },
         // Project fields
         default_host: { type: 'string', description: 'SSH host alias for remote sessions (type=project).' },
         default_cwd: { type: 'string', description: 'Default working directory (type=project).' },
+        // Category rename fields
+        old_name: { type: 'string', description: 'Current category name (required for type=category).' },
+        new_name: { type: 'string', description: 'New category name (required for type=category).' },
       },
     },
     async execute(params) {
@@ -681,6 +691,20 @@ For projects (type='project'): set default_host and default_cwd for remote sessi
         try {
           const merged = await setProjectMetadata(category, project, settings);
           return `Project "${category} / ${project}" updated: ${json(merged)}`;
+        } catch (err) {
+          return `Error: ${err instanceof Error ? err.message : String(err)}`;
+        }
+      }
+
+      // type === 'category'
+      if (type === 'category') {
+        const oldName = params.old_name as string;
+        const newName = params.new_name as string;
+        if (!oldName || !newName) return 'Error: old_name and new_name are required for type=category.';
+        try {
+          const { count } = await renameCategory(oldName, newName);
+          bus.emit(EventNames.TASK_UPDATED, { oldCategory: oldName, newCategory: newName, count }, ['web-ui'], { source: 'agent' });
+          return `Renamed category "${oldName}" to "${newName}" (${count} tasks updated)`;
         } catch (err) {
           return `Error: ${err instanceof Error ? err.message : String(err)}`;
         }
@@ -766,6 +790,38 @@ For projects (type='project'): set default_host and default_cwd for remote sessi
           results.push('conversation log appended');
         }
 
+        // Pin / Focus tier
+        if (params.pinned !== undefined) {
+          const task = await getTask(id);
+          const wantPinned = params.pinned === true || params.pinned === 'true';
+          if (wantPinned && !task.pinned) {
+            await togglePin(task.id);
+            const tier = (params.focus_tier as string) || 'satellite';
+            await setFocusTier(task.id, tier as 'focus' | 'next' | 'satellite' | 'wait');
+            results.push(`pinned → ${tier} tier`);
+          } else if (!wantPinned && task.pinned) {
+            await togglePin(task.id);
+            results.push('unpinned');
+          } else if (wantPinned && task.pinned && params.focus_tier) {
+            // Already pinned, just change tier
+            await setFocusTier(task.id, params.focus_tier as 'focus' | 'next' | 'satellite' | 'wait');
+            results.push(`tier → ${params.focus_tier}`);
+          } else if (wantPinned && task.pinned) {
+            // Already pinned, no tier change requested
+            results.push('already pinned');
+          } else if (!wantPinned && !task.pinned) {
+            results.push('already unpinned');
+          }
+        } else if (params.focus_tier !== undefined) {
+          const task = await getTask(id);
+          if (!task.pinned) {
+            results.push('Error: task is not pinned — pin it first with pinned=true');
+          } else {
+            await setFocusTier(task.id, params.focus_tier as 'focus' | 'next' | 'satellite' | 'wait');
+            results.push(`tier → ${params.focus_tier}`);
+          }
+        }
+
         if (results.length === 0) {
           return 'Error: no update fields provided.';
         }
@@ -780,8 +836,8 @@ For projects (type='project'): set default_host and default_cwd for remote sessi
   },
 
   {
-    name: 'delete_task',
-    description: 'Permanently delete a task. Any active sessions will be stopped automatically.',
+    name: 'task_delete',
+    description: 'Permanently delete a task. Fails if the task has active sessions — complete or stop those sessions first.',
     input_schema: {
       type: 'object',
       properties: {
@@ -797,58 +853,119 @@ For projects (type='project'): set default_host and default_cwd for remote sessi
         return `Task deleted: ${taskRef(task.id, task.title)}`;
       } catch (err) {
         if (err instanceof ActiveSessionError) {
-          // Auto-stop active sessions and retry
-          const { completeTaskSessions } = await import('../core/session-tracker.js');
-          const { clearSessionSlot } = await import('../core/task-manager.js');
-          const { sessionRunner } = await import('../providers/claude-code-session.js');
-          await completeTaskSessions(err.activeSessionIds);
-          for (const sid of err.activeSessionIds) {
-            sessionRunner.findByClaudeId(sid)?.interrupt();
-            try { await clearSessionSlot(params.id as string, sid); } catch { /* best-effort */ }
-          }
-          // Retry deletion now that sessions are cleared
-          const { task } = await deleteTask(params.id as string);
-          bus.emit(EventNames.TASK_DELETED, { id: task.id, task }, ['web-ui'], { source: 'agent' });
-          return `Task deleted (stopped ${err.activeSessionIds.length} active session(s)): ${taskRef(task.id, task.title)}`;
+          return `Cannot delete: task has ${err.activeSessionIds.length} active session(s): ${err.activeSessionIds.join(', ')}. Stop or complete those sessions first.`;
         }
         return `Error: ${err instanceof Error ? err.message : String(err)}`;
       }
     },
   },
 
-  // ── Memory/Knowledge Tools ──
+  // ── Search Tools ──
   {
-    name: 'search',
-    description: 'Search across tasks and memory/knowledge files. Supports hybrid (keyword + semantic), keyword-only, or semantic-only modes.',
+    name: 'task_search',
+    description: `Search tasks via hybrid search (QMD: BM25 + vector + reranking) with BM25 keyword fallback. Indexed fields: title, description, summary, note, conversation_log, tags, category, project, IDs, external URLs. Auto-expands child tasks of matched parents.
+
+## How matching works
+
+Each query you pass runs TWICE against the task index:
+1. **BM25 keyword** (lex) — every word in the query must appear in the task text (AND logic). Uses Porter stemmer, so "allowlisting" matches "allowlist", but "AIHub" does NOT match "AI Hub" (tokenizer splits on space).
+2. **Vector similarity** (semantic) — finds tasks semantically close to the query, even if exact words differ.
+
+Results from all queries merge via RRF (Reciprocal Rank Fusion). More queries = better recall.
+
+## Why multiple queries matter
+
+A single long query is a recall disaster. Example:
+- Target task: "Track PAPINS SigV4 Allowlisting for Pipeline APIs — P382997071"
+- Task body mentions: PAPINS, SigV4, Pipeline APIs, Allowlisting, EKS AI Hub
+- Task body does NOT mention: "AIHub" (connected), "deploy", "CDK", "NGS"
+
+queries: ["AIHub pipeline API allowlist deploy CDK"]  → **0 BM25 hits** (task has no "AIHub"/"deploy"/"CDK"), falls back to vec, returns wrong tasks.
+
+queries: ["pipeline API allowlisting", "PAPINS SigV4", "pipeline allowlist"]  → first query matches (3 words all present), BM25 finds target at rank 1.
+
+## Rules
+
+1. **Split your user's mental model from the task's actual words.** User may say "AIHub deploy work" but task text uses "EKS AI Hub" and mentions no "deploy". Include BOTH: what the user said AND what might literally be in the task.
+2. **First query: natural language** (for reranker) — e.g., "pipeline API allowlisting request"
+3. **Rest: 2-3 word keyword phrases** covering acronyms/aliases/synonyms — e.g., "PAPINS", "SigV4 pipeline", "pipeline allowlist"
+4. **Prefer specific identifiers** (ticket IDs, acronyms like PAPINS/SigV4) over generic terms
+5. **Beware tokenizer splits:** "AIHub" ≠ "AI Hub" ≠ "eksaihub". Include variants if unsure.
+
+**Good:** queries: ["pipeline API allowlisting request", "PAPINS SigV4", "pipeline allowlist", "AI Hub pipeline"]
+**Bad:**  queries: ["pipeline API allowlisting NGS search deploy CDK"]   ← 6-word AND, any missing word = 0 hits`,
     input_schema: {
       type: 'object',
       properties: {
-        query: { type: 'string', description: 'Search query' },
-        mode: { type: 'string', enum: ['hybrid', 'keyword', 'semantic'], description: 'Search mode. Default: hybrid (keyword + vector). Use keyword for exact matches, semantic for meaning-based.' },
+        queries: {
+          type: 'array',
+          items: { type: 'string' },
+          minItems: 1,
+          maxItems: 5,
+          description: '1-5 focused search queries. First = natural language (for reranking), rest = short keyword phrases (2-3 words each, with synonyms/aliases). Each query runs independently; results merge via RRF.',
+        },
+        limit: { type: 'number', description: 'Max results to return. Default: 20' },
       },
-      required: ['query'],
+      required: ['queries'],
     },
     async execute(params) {
-      const mode = (params.mode as 'hybrid' | 'keyword' | 'semantic') ?? 'hybrid';
-      const results = await search(params.query as string, { limit: 10, mode });
-      if (results.length === 0) return 'No results found.';
+      const queries = Array.isArray(params.queries)
+        ? (params.queries as string[]).map(q => q.trim()).filter(q => q.length > 0)
+        : [];
+      if (queries.length === 0) return 'Error: queries is required (non-empty array of strings).';
+      const limit = (params.limit as number) ?? 20;
+
+      let results: import('../core/search.js').SearchResult[];
+      try {
+        // Primary path: QMD hybrid search (BM25 + vector + reranking), multi-query RRF fusion
+        const { memoryNotesSearch } = await import('../core/memory-search.js');
+        const qmdResults = await memoryNotesSearch(queries, ['task'], limit);
+        results = qmdResults.map(r => ({
+          type: 'task' as const,
+          title: r.title,
+          snippet: r.snippet,
+          taskId: r.taskId,
+          score: r.finalScore,
+          matchField: 'task',
+        }));
+      } catch {
+        // Graceful degradation: QMD unavailable — fallback to BM25 keyword search
+        // Run each query, keep best score per task
+        const tasks = (await listTasks()).filter(t => !t.title.startsWith('.metadata'));
+        const merged = new Map<string, import('../core/search.js').SearchResult>();
+        for (const q of queries) {
+          for (const r of bm25ScoreTasks(tasks, q)) {
+            const prev = merged.get(r.taskId!);
+            if (!prev || r.score > prev.score) merged.set(r.taskId!, r);
+          }
+        }
+        results = [...merged.values()].sort((a, b) => b.score - a.score).slice(0, limit);
+      }
+
+      // Auto-expand child tasks of matched parents
+      const allTasks = (await listTasks()).filter(t => !t.title.startsWith('.metadata'));
+      results = expandChildTasks(results.slice(0, limit), allTasks);
+      if (results.length === 0) return 'No tasks found.';
       return json(results.map((r) => ({
-        type: r.type,
+        task_id: r.taskId,
         title: r.title,
         snippet: r.snippet,
-        task_id: r.taskId,
-        path: r.path,
         score: r.score,
+        match_field: r.matchField,
+        parent_task_id: r.parentTaskId,
+        auto_expanded: r.isAutoExpanded,
       })));
     },
   },
+
+  memoryNotesSearchTool,
 
   // ── Unified Files Tools ──
   ...filesTools,
 
   // ── Session Tools ──
   {
-    name: 'list_sessions',
+    name: 'session_list',
     description: 'List tracked sessions — both CLI (Claude Code) sessions and embedded subagent runs. Archived sessions (including auto-archived plan sessions) are hidden by default.',
     input_schema: {
       type: 'object',
@@ -944,7 +1061,7 @@ For projects (type='project'): set default_host and default_cwd for remote sessi
   },
 
   {
-    name: 'get_session_summary',
+    name: 'session_summary',
     description: 'Get summaries of recent Claude Code sessions from markdown files.',
     input_schema: {
       type: 'object',
@@ -962,22 +1079,22 @@ For projects (type='project'): set default_host and default_cwd for remote sessi
 
   // ── Session Management Tools ──
   {
-    name: 'start_session',
+    name: 'session_start',
     description: `Start a NEW persistent Claude Code session that runs in the BACKGROUND. Results appear in the session panel, NOT in this conversation. A task_id, title, and prompt are required.
 
 USE FOR: Code implementation, debugging, multi-round coding, anything needing task tracking
 or persistent conversation history — work that lives in the session panel.
 
 DO NOT USE FOR: Quick research, one-shot file analysis, or codebase investigation where you
-need the answer back in THIS conversation — use create_subagent instead.
+need the answer back in THIS conversation — use subagent_create instead.
 
 Key difference:
-  start_session    → runs in BACKGROUND, results in the session panel (async, needs a task)
-  create_subagent  → result comes back INLINE to this conversation (sync, no task needed)
+  session_start    → runs in BACKGROUND, results in the session panel (async, needs a task)
+  subagent_create  → result comes back INLINE to this conversation (sync, no task needed)
 
 Each task allows exactly ONE session — ever. If the task already has a session (active, stopped,
-or completed), this tool returns a BLOCKED response. Use send_to_session to continue in the
-existing session, or create a child task (create_task with parent_task_id) for a fresh session.
+or completed), this tool returns a BLOCKED response. Use session_send to continue in the
+existing session, or create a child task (task_create with parent_task_id) for a fresh session.
 
 Per-host concurrency limits: Each host (local or remote) has a maximum number of
 concurrent CLI sessions (default: local=7, remote=20, configurable via session_limits
@@ -989,7 +1106,7 @@ For CLI sessions: working_directory is required. For embedded sessions: working_
 Remote execution (SSH):
 Sessions can run on remote machines. You usually do NOT need to set host or working_directory —
 most categories and projects already have defaults configured (default_host, default_cwd).
-Just call start_session with task_id, title, and prompt, and the correct machine is picked automatically.
+Just call session_start with task_id, title, and prompt, and the correct machine is picked automatically.
 
 Only pass host/working_directory explicitly when:
 - The user specifically asks to run on a different machine
@@ -1000,31 +1117,31 @@ Override priority: explicit params > project defaults > category defaults > loca
 Three ways to use:
 
 1. Normal session:
-   start_session({ task_id, title, prompt, working_directory })
+   session_start({ task_id, title, prompt, working_directory })
    → Full-capability session that can read, write, and execute.
 
 2. Plan-only session:
-   start_session({ task_id, title, prompt, working_directory, mode: 'plan' })
+   session_start({ task_id, title, prompt, working_directory, mode: 'plan' })
    → Read-only session. Claude explores the codebase, designs an approach,
      writes a plan file, and calls ExitPlanMode when done. Cannot edit files.
    → When plan completes, use the UI execute buttons to run the plan.
 
 3. Fork session:
-   start_session({ task_id, title, prompt, fork_session_id: "existing-session-id" })
+   session_start({ task_id, title, prompt, fork_session_id: "existing-session-id" })
    → Creates a new session with the source session's full conversation context.
    → Inherits working_directory, host, and mode from the source session.
    → Use when a session scope-creeps and you want to branch to a new task.
 
-PREFER send_to_session over start_session for follow-up work. send_to_session
+PREFER session_send over session_start for follow-up work. session_send
 preserves the full conversation history and codebase context, has no slot limits,
 and is always allowed.`,
     input_schema: {
       type: 'object',
       properties: {
-        task_id: { type: 'string', description: 'Task ID or prefix. Required — every session must be linked to a task. Create one with create_task first if needed.' },
+        task_id: { type: 'string', description: 'Task ID or prefix. Required — every session must be linked to a task. Create one with task_create first if needed.' },
         title: { type: 'string', description: 'Short human-readable title for this session (e.g. "Fix login validation", "Add API endpoint"). Required.' },
         prompt: { type: 'string', description: 'Prompt/message to send. Required.' },
-        working_directory: { type: 'string', description: 'Absolute path to working directory (required for CLI sessions). For remote sessions, this is the path on the remote machine. If not specified, uses project defaults (see update_task type=\'project\').' },
+        working_directory: { type: 'string', description: 'Absolute path to working directory (required for CLI sessions). For remote sessions, this is the path on the remote machine. If not specified, uses project defaults (see task_update type=\'project\').' },
         host: { type: 'string', description: 'SSH host alias for remote execution (matches keys in config.hosts). If not specified, uses the project default_host from project settings. Omit for local execution.' },
         mode: { type: 'string', enum: ['plan', 'bypass'], description: "Session permission mode (CLI only). 'plan' = read-only, 'bypass' = no prompts." },
         fork_session_id: { type: 'string', description: 'Fork from an existing session: copies its conversation context into a new session on a different task. When set, working_directory/host/mode are inherited from the source session and must NOT be provided.' },
@@ -1064,7 +1181,7 @@ and is always allowed.`,
           const allSessions = await getSessionsForTask(task.id);
           // Skip triage sessions — they are short-lived housekeeping runs that should
           // never block new CLI sessions. Also skip archived sessions.
-          const nonArchived = allSessions.filter(s => !s.archived && !isTriageSession(s));
+          const nonArchived = allSessions.filter(s => !s.archived && !isEnvironmentSession(s));
 
           // Auto-archive terminal sessions (stopped/error) to free the slot.
           // This preserves the strict 1-session rule while letting new sessions
@@ -1104,7 +1221,7 @@ and is always allowed.`,
                 title: latest.title,
                 process_status: latest.process_status,
               },
-              hint: `Use send_to_session({ session_id: "${latest.claudeSessionId}", message: "..." }) to continue in the existing session, or create a new task / subtask with create_task({ parent_task_id: "${task.id}", title: "..." }) for a fresh session.`,
+              hint: `Use session_send({ session_id: "${latest.claudeSessionId}", message: "..." }) to continue in the existing session, or create a new task / subtask with task_create({ parent_task_id: "${task.id}", title: "..." }) for a fresh session.`,
             });
           }
           // Fallback: check task.session_ids for IDs not in the session store
@@ -1118,7 +1235,7 @@ and is always allowed.`,
               reason: 'Task already has a session. Each task allows only ONE session (strict enforcement).',
               session_ids: orphanIds,
               existing_session: null,
-              hint: `Use send_to_session({ session_id: "${latestId}", message: "..." }) to continue in the existing session, or create a new task / subtask with create_task({ parent_task_id: "${task.id}", title: "..." }) for a fresh session.`,
+              hint: `Use session_send({ session_id: "${latestId}", message: "..." }) to continue in the existing session, or create a new task / subtask with task_create({ parent_task_id: "${task.id}", title: "..." }) for a fresh session.`,
             });
           }
         }
@@ -1219,7 +1336,7 @@ and is always allowed.`,
 
         // Validate: remote sessions MUST have a cwd
         if (resolvedHost && !resolvedCwd) {
-          return `Error: Remote host "${resolvedHost}" specified but no working directory. Set working_directory or configure via update_task(type:'project', ...).`;
+          return `Error: Remote host "${resolvedHost}" specified but no working directory. Set working_directory or configure via task_update(type:'project', ...).`;
         }
 
         // Validate host exists in config
@@ -1238,14 +1355,14 @@ and is always allowed.`,
             `The cwd must exist on the remote machine. Either:\n` +
             `  1. Provide a remote path as working_directory (e.g. /workplace/...)\n` +
             `  2. Set host=null to run locally instead of on "${resolvedHost}"\n` +
-            `  3. Update the task cwd: update_task(id:'${task?.id ?? '...'}', cwd:'/remote/path')\n` +
+            `  3. Update the task cwd: task_update(id:'${task?.id ?? '...'}', cwd:'/remote/path')\n` +
             `Note: host "${resolvedHost}" was resolved via: ${hostSource}`;
         }
 
         // Local sessions still require a cwd — give actionable guidance
         if (!resolvedCwd) {
           const hint = task
-            ? ` Set working_directory explicitly, or configure a default via update_task(id:'${task.id}', cwd:'/path') or update_task(type:'project', category:'${task.category}', project:'${task.project}', default_cwd:'/path').`
+            ? ` Set working_directory explicitly, or configure a default via task_update(id:'${task.id}', cwd:'/path') or task_update(type:'project', category:'${task.category}', project:'${task.project}', default_cwd:'/path').`
             : ' Provide working_directory for taskless sessions.';
           return `Error: No working directory resolved for this session.${hint}`;
         }
@@ -1282,14 +1399,14 @@ and is always allowed.`,
   },
 
   {
-    name: 'import_session',
+    name: 'session_import',
     description: `Import an external Claude Code session into Walnut (backfill). Use this to bring
 sessions started outside Walnut (e.g. via \`claude -p\` on a remote machine) under full Walnut
-management — history viewing, send_to_session, UI tracking, etc.
+management — history viewing, session_send, UI tracking, etc.
 
 The session must already exist as a JSONL file on the local or remote machine.
 host and working_directory are optional — if omitted, they inherit from the task's project/category
-defaults (same resolution chain as start_session).`,
+defaults (same resolution chain as session_start).`,
     input_schema: {
       type: 'object',
       properties: {
@@ -1310,18 +1427,34 @@ defaults (same resolution chain as start_session).`,
         const task = await getTask(taskIdPrefix);
 
         // ①b Strict 1-session-per-task: block if task already has a non-archived session
+        // Skip environment sessions (triage, hook, cron, embedded subagent) — they never occupy a user slot.
         const existingSessions = await getSessionsForTask(task.id);
-        const activeSessions = existingSessions.filter(s => !s.archived);
-        if (activeSessions.length > 0) {
-          const latest = activeSessions[activeSessions.length - 1];
+        const nonArchived = existingSessions.filter(s => !s.archived && !isEnvironmentSession(s));
+
+        // Auto-archive terminal sessions (stopped/error) to free the slot — same logic as session_start
+        const { clearSessionSlot } = await import('../core/task-manager.js');
+        for (const s of nonArchived.filter(s => s.process_status === 'stopped' || s.process_status === 'error')) {
+          await updateSessionRecord(s.claudeSessionId, {
+            archived: true,
+            archive_reason: 'auto_cleared_for_import',
+          });
+          if (s.taskId) {
+            try { await clearSessionSlot(s.taskId, s.claudeSessionId); } catch { /* best-effort */ }
+          }
+        }
+
+        // Block only if alive user sessions remain
+        const alive = nonArchived.filter(s => s.process_status !== 'stopped' && s.process_status !== 'error');
+        if (alive.length > 0) {
+          const latest = alive[alive.length - 1];
           return `Error: Task ${task.id} already has a session (${latest.claudeSessionId}). Each task allows only ONE session. ` +
-            `Use send_to_session to interact with the existing session, or create a subtask for a new session.`;
+            `Use session_send to interact with the existing session, or create a subtask for a new session.`;
         }
 
         // ② Check if session is already tracked
         const existing = await getSessionByClaudeId(sessionId);
         if (existing) {
-          return `Error: Session ${sessionId} is already tracked (task: ${existing.taskId}). Use send_to_session to interact with it.`;
+          return `Error: Session ${sessionId} is already tracked (task: ${existing.taskId}). Use session_send to interact with it.`;
         }
 
         // ③ Resolve host/cwd via shared inheritance chain (CWD is tentative — may be corrected by JSONL truth)
@@ -1506,8 +1639,8 @@ defaults (same resolution chain as start_session).`,
   },
 
   {
-    name: 'send_to_session',
-    description: 'Resume an existing session with a follow-up message. PREFERRED over start_session for follow-up work — preserves full conversation history and codebase context, no slot limits. Provide session_id (for CLI) or run_id (for embedded). Runs in the background. Use mode to override permissions on resume (e.g. "bypass").',
+    name: 'session_send',
+    description: 'Resume an existing session with a follow-up message. PREFERRED over session_start for follow-up work — preserves full conversation history and codebase context, no slot limits. Provide session_id (for CLI) or run_id (for embedded). Runs in the background. Use mode to override permissions on resume (e.g. "bypass").',
     input_schema: {
       type: 'object',
       properties: {
@@ -1550,6 +1683,16 @@ defaults (same resolution chain as start_session).`,
         if (sessionId) {
           const { sendMessageToSession } = await import('../core/session-message-queue.js');
           const record = await getSessionByClaudeId(sessionId);
+
+          // Pre-flight: reject resume on sessions that were auto-archived because
+          // Claude CLI lost their conversation JSONL on the remote host (clouddev
+          // cleanup, repo re-clone, etc.). Retrying --resume will just fail again;
+          // the caller should start a fresh session instead.
+          if (record?.archived && record?.archive_reason === 'remote_conversation_lost') {
+            const hostNote = record.host ? ` on host "${record.host}"` : '';
+            const cwdNote = record.cwd ? ` (cwd: ${record.cwd})` : '';
+            return `Error: Session ${sessionId.slice(0, 16)}...${hostNote} was auto-archived because its remote conversation was lost${cwdNote}. The remote JSONL file no longer exists, so --resume cannot recover it. Start a fresh session with session_start (same task_id, cwd, host) instead of resuming.`;
+          }
           await sendMessageToSession(sessionId, message, {
             source: 'agent',
             taskId: record?.taskId,
@@ -1565,7 +1708,7 @@ defaults (same resolution chain as start_session).`,
               const { applySessionPhase } = await import('../core/phase.js');
               await applySessionPhase(record.taskId, 'session:input', 'tools.ts:send-to-session', { sessionId });
             } catch (err) {
-              log.agent.warn('send_to_session: phase update failed', { taskId: record.taskId, error: err instanceof Error ? err.message : String(err) });
+              log.agent.warn('session_send: phase update failed', { taskId: record.taskId, error: err instanceof Error ? err.message : String(err) });
             }
           }
 
@@ -1582,7 +1725,7 @@ defaults (same resolution chain as start_session).`,
   },
 
   {
-    name: 'get_session_history',
+    name: 'session_history',
     description: 'Read the conversation history of a session. Default overview: each message prefixed with [index] and truncated to 500 chars. Use role to filter, index to drill into a specific message with full text + tool results.',
     input_schema: {
       type: 'object',
@@ -1780,7 +1923,7 @@ defaults (same resolution chain as start_session).`,
   },
 
   {
-    name: 'update_session',
+    name: 'session_update',
     description: 'Update a Claude Code session — title, activity, or archive state. Always set a descriptive title when a session lacks one or when the scope changes. ⚠️ NEVER set archived=true unless the user EXPLICITLY asks for it. Do NOT archive sessions proactively — even if they appear idle, error, or completed. The user may still be actively working on the task.',
     input_schema: {
       type: 'object',
@@ -1887,7 +2030,7 @@ defaults (same resolution chain as start_session).`,
             if (targetActive.length > 0) {
               const latest = targetActive[targetActive.length - 1];
               return `Error: Target task ${newTask.id} already has a session (${latest.claudeSessionId}). Each task allows only ONE session. ` +
-                `Use send_to_session to interact with the existing session, or create a subtask for a new session.`;
+                `Use session_send to interact with the existing session, or create a subtask for a new session.`;
             }
 
             await updateSessionRecord(sessionId, { taskId: newTask.id, project: newTask.project });
@@ -1925,7 +2068,7 @@ defaults (same resolution chain as start_session).`,
 
   // ── Config Tools ──
   {
-    name: 'get_config',
+    name: 'config_get',
     description: 'Read the current user configuration.',
     input_schema: {
       type: 'object',
@@ -1938,7 +2081,7 @@ defaults (same resolution chain as start_session).`,
   },
 
   {
-    name: 'update_config',
+    name: 'config_update',
     description: 'Update user configuration fields.',
     input_schema: {
       type: 'object',
@@ -1965,42 +2108,12 @@ defaults (same resolution chain as start_session).`,
     },
   },
 
-  {
-    name: 'rename_category',
-    description: 'Rename a category (top-level group) across all tasks and remote MS To-Do lists.',
-    input_schema: {
-      type: 'object',
-      properties: {
-        old_category: { type: 'string', description: 'Current category name' },
-        new_category: { type: 'string', description: 'New category name' },
-      },
-      required: ['old_category', 'new_category'],
-    },
-    async execute(params) {
-      try {
-        const { count } = await renameCategory(
-          params.old_category as string,
-          params.new_category as string,
-        );
-        bus.emit(EventNames.TASK_UPDATED, { oldCategory: params.old_category, newCategory: params.new_category, count }, ['web-ui'], { source: 'agent' });
-        return `Renamed category "${params.old_category}" to "${params.new_category}" (${count} tasks updated)`;
-      } catch (err) {
-        return `Error: ${err instanceof Error ? err.message : String(err)}`;
-      }
-    },
-  },
-
   // ── Exec Tool ──
   execTool,
-
-  // ── Patch & Process Tools ──
-  createApplyPatchTool(),
-  createProcessTool(),
 
   // ── Integration Tools ──
   slackTool,
   ttsTool,
-  imageTool,
 
   // ── Web Tools ──
   webSearchTool,
@@ -2008,7 +2121,7 @@ defaults (same resolution chain as start_session).`,
 
   // ── Cron Tools ──
   {
-    name: 'list_cron_jobs',
+    name: 'cron_list',
     description: 'List all scheduled cron jobs with their status, schedule, and last run info.',
     input_schema: {
       type: 'object',
@@ -2037,7 +2150,7 @@ defaults (same resolution chain as start_session).`,
   },
 
   {
-    name: 'manage_cron_job',
+    name: 'cron_manage',
     description: 'Manage cron jobs. Actions: add, update, remove, toggle (enable/disable), run (manual trigger), status (scheduler info).',
     input_schema: {
       type: 'object',
@@ -2128,56 +2241,6 @@ defaults (same resolution chain as start_session).`,
 
   // ── Inline Subagent ──
   createSubagentTool,
-
-  // ── Pin / Focus Tier ──
-  {
-    name: 'pin_task',
-    description: 'Pin/unpin a task and set its focus tier. Pinned tasks appear in the Focus Bar sidebar. Focus (max 3, current sprint), Next (queued), Satellite (backlog).',
-    input_schema: {
-      type: 'object',
-      properties: {
-        task_id: { type: 'string', description: 'Task ID or prefix.' },
-        action: { type: 'string', enum: ['pin', 'unpin', 'set_tier'], description: 'Action to perform.' },
-        tier: { type: 'string', enum: ['focus', 'next', 'satellite'], description: 'Target tier (required for set_tier, optional for pin — defaults to satellite).' },
-      },
-      required: ['task_id', 'action'],
-    },
-    async execute(params) {
-      const id = params.task_id as string;
-      const action = params.action as string;
-      const tier = (params.tier as string) || 'satellite';
-
-      try {
-        const task = await getTask(id);
-
-        if (action === 'pin') {
-          if (task.pinned) return `Already pinned: ${taskRef(task.id, task.title)}`;
-          const result = await togglePin(task.id);
-          if (!result.pinned) return `Error: togglePin did not pin the task.`;
-          // Set tier after pinning
-          await setFocusTier(task.id, tier as 'focus' | 'next' | 'satellite');
-          return `Pinned ${taskRef(task.id, task.title)} → ${tier} tier.`;
-        }
-
-        if (action === 'unpin') {
-          if (!task.pinned) return `Not pinned: ${taskRef(task.id, task.title)}`;
-          await togglePin(task.id);
-          return `Unpinned ${taskRef(task.id, task.title)}.`;
-        }
-
-        if (action === 'set_tier') {
-          if (!task.pinned) return `Error: task is not pinned. Pin it first with action='pin'.`;
-          if (!['focus', 'next', 'satellite'].includes(tier)) return `Error: invalid tier "${tier}". Use focus, next, or satellite.`;
-          await setFocusTier(task.id, tier as 'focus' | 'next' | 'satellite');
-          return `Moved ${taskRef(task.id, task.title)} to ${tier} tier.`;
-        }
-
-        return `Error: unknown action "${action}". Use pin, unpin, or set_tier.`;
-      } catch (err) {
-        return `Error: ${err instanceof Error ? err.message : String(err)}`;
-      }
-    },
-  },
 
 ];
 

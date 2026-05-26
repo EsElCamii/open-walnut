@@ -17,8 +17,20 @@ import { isSessionProcessAlive } from '../utils/session-liveness.js'
 import { bus, EventNames } from './event-bus.js'
 import type { SessionRecord, Task, TaskPhase } from './types.js'
 const HEALTH_CHECK_INTERVAL_MS = 30_000
-/** Default idle timeout: 30 minutes */
-const DEFAULT_IDLE_TIMEOUT_MS = 30 * 60 * 1000
+/**
+ * Default idle timeouts — local vs remote.
+ *
+ * Remote sessions run on a dev host and cost the user nothing local; premature
+ * reaping forces a slow `--resume` spawn (~10s) and leaves a misleading
+ * `[Request interrupted by user]` marker in the transcript (CLI SIGINT handler
+ * writes it — there's no "silent shutdown" path in print mode). Users leaving
+ * AWAIT_HUMAN_ACTION sessions overnight for review hit this constantly.
+ *
+ * Local sessions share the laptop's RAM/CPU, so we're stricter — but 30 min
+ * was too aggressive for turns with long think time.
+ */
+const DEFAULT_LOCAL_IDLE_TIMEOUT_MS = 60 * 60 * 1000
+const DEFAULT_REMOTE_IDLE_TIMEOUT_MS = 2 * 60 * 60 * 1000
 
 export class SessionHealthMonitor {
   private timer: ReturnType<typeof setInterval> | null = null
@@ -39,25 +51,53 @@ export class SessionHealthMonitor {
 
   async check(): Promise<void> {
     const checkT0 = Date.now()
-    const { listNonTerminalSessions, updateSessionRecord } = await import('./session-tracker.js')
+    const { listSessions, isTerminalSession, updateSessionRecord } = await import('./session-tracker.js')
 
-    // Kill orphaned processes from terminal/stopped sessions (leaked processes)
-    await this.killOrphanedProcesses()
-    const tOrphan = Date.now()
-
-    // Auto-recover remote sessions stuck in 'error' due to connection loss
-    await this.recoverConnectionLostSessions(updateSessionRecord)
-    const tRecover = Date.now()
-
-    let sessions
+    // ── Single snapshot per cycle ────────────────────────────────────────────
+    // Previously each helper re-called listSessions() / listNonTerminalSessions(),
+    // causing 3× full parse + migration of ~1000 records per 30s tick. Now we read
+    // once, derive the filtered views, and pass them down.
+    let allSessions: SessionRecord[]
     try {
-      sessions = await listNonTerminalSessions()
+      allSessions = await listSessions()
     } catch (err) {
-      log.session.warn('health monitor: failed to list non-terminal sessions', {
+      log.session.warn('health monitor: failed to list sessions', {
         error: err instanceof Error ? err.message : String(err),
       })
       return
     }
+
+    // Per-cycle liveness memo — isSessionProcessAlive is called up to 3× per session
+    // (checkIdleTimeout, main loop, reconcileTaskPhases). Cache for the cycle.
+    //
+    // Promise-valued, not bool-valued: this coalesces racing callers within the same
+    // tick who all call isSessionProcessAlive on the same session before the first
+    // resolves — they share one in-flight probe instead of starting N of them.
+    //
+    // Key includes discriminators beyond claudeSessionId because killOrphanedProcesses
+    // iterates ALL sessions (including archived). Per commit 1a93276, an archived
+    // record can share its claudeSessionId with a new live record — but they have
+    // different pid/host/process_status and must not share a cached liveness result.
+    const livenessCache = new Map<string, Promise<boolean>>()
+    const cachedIsAlive = (s: SessionRecord): Promise<boolean> => {
+      const key = `${s.claudeSessionId}|${s.archived ? 'a' : 'l'}|${s.pid ?? 'n'}|${s.host ?? 'local'}`
+      let p = livenessCache.get(key)
+      if (!p) {
+        p = isSessionProcessAlive(s)
+        livenessCache.set(key, p)
+      }
+      return p
+    }
+
+    // Kill orphaned processes from terminal/stopped sessions (leaked processes)
+    await this.killOrphanedProcesses(allSessions, cachedIsAlive)
+    const tOrphan = Date.now()
+
+    // Auto-recover remote sessions stuck in 'error' due to connection loss
+    await this.recoverConnectionLostSessions(allSessions, updateSessionRecord)
+    const tRecover = Date.now()
+
+    const sessions = allSessions.filter(s => !isTerminalSession(s) && !s.archived)
 
     if (sessions.length === 0) {
       const total = Date.now() - checkT0
@@ -90,14 +130,14 @@ export class SessionHealthMonitor {
     // Returns IDs of sessions it killed — the main loop must skip those to avoid
     // a race where the stale in-memory process_status ('idle') causes the main loop
     // to overwrite the correct 'stopped' with 'error' + "Process exited without result".
-    const idleTimedOutIds = await this.checkIdleTimeout(sessions, updateSessionRecord, taskMap)
+    const idleTimedOutIds = await this.checkIdleTimeout(sessions, updateSessionRecord, taskMap, cachedIsAlive)
 
     for (const session of sessions) {
       // Skip sessions already handled by idle timeout or hung detection (prevents stale-state race)
       if (idleTimedOutIds.has(session.claudeSessionId)) continue
       if (hungKilledIds.has(session.claudeSessionId)) continue
 
-      const alive = await isSessionProcessAlive(session)
+      const alive = await cachedIsAlive(session)
 
       // alive=true: could be 'running' or 'idle' (don't override idle→running)
       // alive=false: process is dead or unreachable past grace period
@@ -273,7 +313,7 @@ export class SessionHealthMonitor {
     }
 
     // Layer 2: Reconcile task phases from session facts (30s cycle)
-    await this.reconcileTaskPhases(sessions, taskMap)
+    await this.reconcileTaskPhases(sessions, taskMap, cachedIsAlive)
 
     // Log total check duration (> 500ms = worth investigating)
     const checkTotal = Date.now() - checkT0
@@ -355,12 +395,11 @@ export class SessionHealthMonitor {
   /**
    * Idle timeout based on SessionManager.lastEventAt (preferred) or file mtime (fallback).
    *
-   * Checks ALL non-terminal sessions with a live process. If no output has been
-   * produced in more than idle_timeout_minutes (default 30), kill the session.
-   *
-   * Data sources for "last active" time:
-   *   1. SessionManager.lastEventAt — works for both local (file mtime) and remote (in-memory)
-   *   2. Fallback: fsp.stat(outputFile) — for sessions without an active manager
+   * Checks ALL non-terminal sessions with a live process. Defaults: 1h for
+   * local, 2h for remote (remote sessions are cheap for the laptop and
+   * premature reap produces a bogus "[Request interrupted by user]" marker in
+   * the transcript — see CLI print.ts SIGINT handler). Override via
+   * config.session.idle_timeout_minutes (applies to both unless 0 = disabled).
    *
    * Skips sessions whose task phase is AWAIT_HUMAN_ACTION — they're waiting for user input, not truly idle.
    */
@@ -368,16 +407,17 @@ export class SessionHealthMonitor {
     sessions: SessionRecord[],
     updateSessionRecord: (id: string, update: Record<string, unknown>) => Promise<unknown>,
     taskMap: Map<string, Task>,
+    cachedIsAlive: (s: SessionRecord) => Promise<boolean>,
   ): Promise<Set<string>> {
     const killedIds = new Set<string>()
-    // Read config to get idle_timeout_minutes
-    let idleTimeoutMs = DEFAULT_IDLE_TIMEOUT_MS
+    // Config override applies uniformly to local + remote when set. 0 = disabled.
+    let configOverrideMs: number | null = null
     try {
       const { getConfig } = await import('./config-manager.js')
       const config = await getConfig()
       const mins = config.session?.idle_timeout_minutes
       if (mins != null) {
-        idleTimeoutMs = mins === 0 ? 0 : mins * 60 * 1000
+        configOverrideMs = mins === 0 ? 0 : mins * 60 * 1000
       }
     } catch (err) {
       log.session.debug('health monitor: config not available, using default idle timeout', {
@@ -385,8 +425,8 @@ export class SessionHealthMonitor {
       })
     }
 
-    // 0 = disabled
-    if (idleTimeoutMs <= 0) return killedIds
+    // Explicit 0 override = disabled
+    if (configOverrideMs === 0) return killedIds
 
     const now = Date.now()
 
@@ -400,6 +440,11 @@ export class SessionHealthMonitor {
     } catch { /* fallback: no team check */ }
 
     for (const session of sessions) {
+      // Per-session threshold: config override wins; otherwise remote gets 2h, local gets 1h.
+      const isRemote = !!session.host
+      const idleTimeoutMs = configOverrideMs
+        ?? (isRemote ? DEFAULT_REMOTE_IDLE_TIMEOUT_MS : DEFAULT_LOCAL_IDLE_TIMEOUT_MS)
+
       // Skip sessions whose task is awaiting human action — they're waiting for user input, not truly idle
       const taskPhase = session.taskId ? taskMap.get(session.taskId)?.phase : undefined
       if (taskPhase === 'AWAIT_HUMAN_ACTION') continue
@@ -425,7 +470,7 @@ export class SessionHealthMonitor {
       }
 
       // Check if process is actually alive before spending time on idle check
-      if (!await isSessionProcessAlive(session)) continue
+      if (!await cachedIsAlive(session)) continue
 
       // Determine last activity time:
       // 1. Prefer SessionManager.lastEventAt (works for both local and remote)
@@ -448,6 +493,26 @@ export class SessionHealthMonitor {
 
       const idleDurationMs = now - lastActiveMs
       if (idleDurationMs < idleTimeoutMs) continue
+
+      // Second-line defense: if the session record shows a recent status
+      // transition (e.g. AWAIT_HUMAN_ACTION → IN_PROGRESS triggered by a
+      // fresh user message), treat that as activity even if lastEventAt is
+      // stale. Otherwise a remote session that just received a new message
+      // — but whose first JSONL response hasn't arrived yet — would be
+      // killed mid-turn. The primary fix bumps lastEventAt on writeMessage
+      // (remote-session-manager.ts); this guard catches any other code path
+      // that moves the session record forward without touching the manager.
+      if (session.last_status_change) {
+        const statusChangeMs = Date.parse(session.last_status_change)
+        if (!Number.isNaN(statusChangeMs) && now - statusChangeMs < idleTimeoutMs) {
+          log.session.debug('health monitor: skipping idle check — recent status change', {
+            sessionId: session.claudeSessionId,
+            lastStatusChange: session.last_status_change,
+            ageMs: now - statusChangeMs,
+          })
+          continue
+        }
+      }
 
       const idleMinutes = Math.round(idleDurationMs / 60_000)
       log.session.info('health monitor: idle timeout — killing session', {
@@ -587,8 +652,17 @@ export class SessionHealthMonitor {
    * (completed/error) or marked stopped but whose process is still alive.
    * These are invisible to the normal health checks (which only scan non-terminal sessions)
    * and accumulate over time, eventually exhausting OS resources.
+   *
+   * NOTE: This function is the PID-reuse defense for Walnut. isSessionProcessAlive()
+   * no longer does `ps`-based binary verification (too expensive on the hot path) —
+   * see the header comment in src/utils/session-liveness.ts for the full rationale.
+   * The 2-minute grace period + activePids collision check below are what prevent us
+   * from killing a recycled PID that now belongs to a different, still-active session.
    */
-  private async killOrphanedProcesses(): Promise<void> {
+  private async killOrphanedProcesses(
+    sessions: SessionRecord[],
+    cachedIsAlive: (s: SessionRecord) => Promise<boolean>,
+  ): Promise<void> {
     // Grace period: don't kill processes whose session record changed very recently.
     // The reconciler or other subsystems may have just updated the record, and the
     // current state may be transient. Real orphans are always older than 2 minutes.
@@ -597,8 +671,7 @@ export class SessionHealthMonitor {
     const ORPHAN_GRACE_MS = 2 * 60 * 1000
 
     try {
-      const { listSessions, isTerminalSession } = await import('./session-tracker.js')
-      const sessions = await listSessions()
+      const { isTerminalSession } = await import('./session-tracker.js')
 
       // Build set of PIDs actively used by non-terminal, non-stopped sessions.
       // This prevents PID-reuse collisions: OS can recycle a PID from a completed
@@ -636,7 +709,7 @@ export class SessionHealthMonitor {
           continue
         }
 
-        if (!await isSessionProcessAlive(s)) continue
+        if (!await cachedIsAlive(s)) continue
 
         log.session.warn('health monitor: killing orphaned process', {
           sessionId: s.claudeSessionId,
@@ -677,12 +750,11 @@ export class SessionHealthMonitor {
    *   - Daemon not connected → update activity to "Reconnecting..." (UI shows yellow banner)
    */
   private async recoverConnectionLostSessions(
+    sessions: SessionRecord[],
     updateSessionRecord: (id: string, update: Record<string, unknown>) => Promise<unknown>,
   ): Promise<void> {
     try {
-      const { listSessions } = await import('./session-tracker.js')
       const { isDaemonConnected, probeDaemonSession } = await import('../providers/daemon-connection.js')
-      const sessions = await listSessions()
 
       for (const s of sessions) {
         // Only target remote sessions in error state with "Connection lost" message
@@ -796,6 +868,7 @@ export class SessionHealthMonitor {
   private async reconcileTaskPhases(
     sessions: SessionRecord[],
     taskMap: Map<string, Task>,
+    cachedIsAlive: (s: SessionRecord) => Promise<boolean>,
   ): Promise<void> {
     const { TERMINAL_PHASES } = await import('./phase.js')
 
@@ -821,7 +894,7 @@ export class SessionHealthMonitor {
         taskSessions.set(session.taskId, { alive: [], dead: [] })
       }
       const bucket = taskSessions.get(session.taskId)!
-      const processAlive = await isSessionProcessAlive(session)
+      const processAlive = await cachedIsAlive(session)
       ;(processAlive ? bucket.alive : bucket.dead).push(session)
     }
 

@@ -73,11 +73,11 @@ describe('Context Inspector E2E', () => {
     const tools = body.sections.tools.content as Array<{ name: string }>;
 
     const names = tools.map((t) => t.name);
-    expect(names).toContain('query_tasks');
-    expect(names).toContain('create_task');
-    expect(names).toContain('search');
+    expect(names).toContain('task_query');
+    expect(names).toContain('task_create');
+    expect(names).toContain('task_search');
     expect(names).toContain('memory');
-    expect(names).toContain('start_session');
+    expect(names).toContain('session_start');
   });
 
   it('roleAndRules section mentions current date', async () => {

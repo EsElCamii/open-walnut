@@ -1,8 +1,8 @@
 /**
- * create_subagent tool — spawn a lightweight Claude Code subprocess.
+ * subagent_create tool — spawn a lightweight Claude Code subprocess.
  *
  * Shows as a collapsible agent box in the main chat with streaming output.
- * Unlike start_session, no task is required and no persistent session is created.
+ * Unlike session_start, no task is required and no persistent session is created.
  */
 
 import { randomBytes } from 'node:crypto';
@@ -12,21 +12,21 @@ import { runInlineSubagent } from '../../providers/inline-subagent.js';
 const VALID_MODELS = new Set(['opus', 'sonnet', 'haiku']);
 
 export const createSubagentTool: ToolDefinition = {
-  name: 'create_subagent',
+  name: 'subagent_create',
   description: `Spawn a lightweight Claude Code subprocess whose result returns INLINE to THIS conversation.
 No task required. No persistent session created. Shows as a collapsible agent box in chat with streaming output.
 The subagent has access to ALL Claude Code tools (file read/write, bash, grep, glob, etc.).
 
 USE FOR: Quick research, file analysis, codebase investigation, one-shot questions, validating paths,
 running commands with AI interpretation, gathering context before starting a session (e.g., explore
-a codebase to find the right paths/files/patterns before kicking off a start_session for implementation).
+a codebase to find the right paths/files/patterns before kicking off a session_start for implementation).
 
 DO NOT USE FOR: Multi-round coding, work that needs task tracking, implementation requiring conversation
-history — use start_session instead, which creates a persistent background session.
+history — use session_start instead, which creates a persistent background session.
 
 Key difference:
-  create_subagent → result comes back to YOU (inline in this conversation)
-  start_session   → result goes to a SEPARATE session panel (background, async, needs a task)
+  subagent_create → result comes back to YOU (inline in this conversation)
+  session_start   → result goes to a SEPARATE session panel (background, async, needs a task)
 
 Two modes:
   Foreground (default): Blocks until the subagent finishes. Result returned directly.

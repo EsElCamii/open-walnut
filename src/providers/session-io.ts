@@ -160,15 +160,70 @@ export class LocalIO implements SessionIO {
   /**
    * Write the initial message to the FIFO and close the parent's fd.
    * Must be called immediately after spawn() with the pipeFd.
+   *
+   * For large messages (e.g. plan execution ~50KB), a synchronous writeSync
+   * on the parent's O_RDWR fd would deadlock the event loop because the macOS
+   * pipe buffer is only 16KB and the child hasn't started reading yet.
+   * Instead, we close the parent's fd first, then write via a NEW fd opened
+   * with O_NONBLOCK + async retry, identical to the regular write() path.
    */
-  writeInitialMessage(pipeFd: number, message: string): void {
+  async writeInitialMessage(pipeFd: number, message: string): Promise<void> {
+    // Close the parent's O_RDWR fd — the child inherited its own copy via spawn stdio.
+    // This must happen before we open a new O_WRONLY fd (FIFO semantics: writer blocks
+    // on O_WRONLY open if no reader exists; the child's inherited fd IS the reader).
+    fs.closeSync(pipeFd)
+
+    if (!this.pipePath) {
+      log.session.warn('LocalIO: writeInitialMessage skipped — no pipePath after close')
+      return
+    }
+
     const payload = JSON.stringify({
       type: 'user',
       message: { role: 'user', content: message },
     })
-    fs.writeSync(pipeFd, Buffer.from(payload + '\n'))
-    fs.closeSync(pipeFd)
-    log.session.debug('LocalIO: initial message written to FIFO', { messageLength: message.length })
+    const buf = Buffer.from(payload + '\n')
+
+    try {
+      // O_NONBLOCK prevents event-loop deadlock when payload > pipe buffer (16KB on macOS).
+      // O_WRONLY is correct here — the child process is the reader.
+      const fd = fs.openSync(this.pipePath, fs.constants.O_WRONLY | fs.constants.O_NONBLOCK)
+      try {
+        let offset = 0
+        const deadline = Date.now() + 30_000 // 30s generous deadline for large plans
+        while (offset < buf.length) {
+          try {
+            const written = fs.writeSync(fd, buf, offset)
+            if (written === 0) break
+            offset += written
+          } catch (err: any) {
+            if (err.code === 'EAGAIN' && Date.now() < deadline) {
+              // Pipe buffer full — child hasn't drained yet. Yield to event loop.
+              await new Promise(r => setTimeout(r, 10))
+              continue
+            }
+            throw err
+          }
+        }
+        if (offset < buf.length) {
+          log.session.warn('LocalIO: writeInitialMessage incomplete', {
+            written: offset, total: buf.length, pipePath: this.pipePath,
+          })
+        } else {
+          log.session.debug('LocalIO: initial message written to FIFO', {
+            messageLength: message.length, payloadBytes: buf.length,
+          })
+        }
+      } finally {
+        fs.closeSync(fd)
+      }
+    } catch (err) {
+      const code = err && typeof err === 'object' && 'code' in err
+        ? (err as { code: string }).code : undefined
+      log.session.error('LocalIO: writeInitialMessage failed', {
+        pipePath: this.pipePath, error: err instanceof Error ? err.message : String(err), code,
+      })
+    }
   }
 
   async write(message: string): Promise<boolean> {
@@ -433,15 +488,26 @@ export const REMOTE_BASE_PATH = [
     + ' */bash) [ -f "$HOME/.bashrc" ] && . "$HOME/.bashrc" >/dev/null 2>&1 ;;'
     + ' esac',
   'export PATH="$HOME/.local/bin:$HOME/.npm-global/bin:$PATH"',
-  // Fallback auto-discovery if the RC file didn't provide node (e.g., no RC file,
-  // interactive guard skipped setup, or nvm default is broken).
+  // Fallback auto-discovery if the RC file didn't provide a WORKING node.
+  //
+  // IMPORTANT: use `node -v` (execute), NOT `command -v node` (exists on PATH).
+  // On old hosts (e.g. AL2 with glibc 2.26), the node binary may be present
+  // but link against newer glibc and crash on startup. An existence check would
+  // pass and skip the fallback loop; the caller then `nohup node ...` dies with
+  // "GLIBC_2.27 not found" — exactly what bricked clouddev on 2026-05-05.
+  //
+  // The nvm loop below walks ALL installed node versions (newest first, then
+  // older — older nvm versions tend to be statically linked against older glibc
+  // so they work on old hosts). `nvm use` + `node -v` confirms both install
+  // correctness AND runtime compatibility before we accept that version.
+  //
   // Tries nvm > fnm > volta > asdf. All stdout suppressed to avoid JSONL pollution.
   // Use `||` instead of `if !` — zsh non-interactive mode has issues with `if ! cmd`.
   // Ends with `true` to ensure exit code 0 for downstream `&&` chains.
-  'command -v node >/dev/null 2>&1 || {'
+  'node -v >/dev/null 2>&1 || {'
     + ' if [ -s "$HOME/.nvm/nvm.sh" ]; then'
     + '   . "$HOME/.nvm/nvm.sh" >/dev/null 2>&1;'
-    + '   command -v node >/dev/null 2>&1 || {'
+    + '   node -v >/dev/null 2>&1 || {'
     + '     for v in $(ls -1r "$NVM_DIR/versions/node/" 2>/dev/null); do'
     + '       nvm use --delete-prefix "$v" >/dev/null 2>&1 && node -v >/dev/null 2>&1 && break;'
     + '     done; };'

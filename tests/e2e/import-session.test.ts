@@ -114,7 +114,7 @@ describe('import_session tool E2E', () => {
 
     // Call the import_session tool handler directly
     const { tools } = await import('../../src/agent/tools.js');
-    const importTool = tools.find(t => t.name === 'import_session');
+    const importTool = tools.find(t => t.name === 'session_import');
     expect(importTool).toBeDefined();
 
     const result = await importTool!.execute({
@@ -160,7 +160,7 @@ describe('import_session tool E2E', () => {
     await writeMockJsonl(dupId, MOCK_CWD);
 
     const { tools } = await import('../../src/agent/tools.js');
-    const importTool = tools.find(t => t.name === 'import_session')!;
+    const importTool = tools.find(t => t.name === 'session_import')!;
 
     // First import succeeds
     const r1 = await importTool.execute({
@@ -183,7 +183,7 @@ describe('import_session tool E2E', () => {
     const task = await createTask('Missing JSONL test', 'Work', 'AuthService');
 
     const { tools } = await import('../../src/agent/tools.js');
-    const importTool = tools.find(t => t.name === 'import_session')!;
+    const importTool = tools.find(t => t.name === 'session_import')!;
 
     const result = await importTool.execute({
       session_id: 'nonexistent-session-id',
@@ -206,7 +206,7 @@ describe('import_session tool E2E', () => {
     await writeMockJsonl(fallbackId, actualCwd);
 
     const { tools } = await import('../../src/agent/tools.js');
-    const importTool = tools.find(t => t.name === 'import_session')!;
+    const importTool = tools.find(t => t.name === 'session_import')!;
 
     // Import with wrongCwd — canonical path won't match, but fallback should find it
     const result = await importTool.execute({
@@ -232,7 +232,7 @@ describe('import_session tool E2E', () => {
     await writeMockJsonl(customId, MOCK_CWD);
 
     const { tools } = await import('../../src/agent/tools.js');
-    const importTool = tools.find(t => t.name === 'import_session')!;
+    const importTool = tools.find(t => t.name === 'session_import')!;
 
     const result = await importTool.execute({
       session_id: customId,
@@ -255,7 +255,7 @@ describe('import_session tool E2E', () => {
     await writeMockJsonl(firstId, MOCK_CWD);
 
     const { tools } = await import('../../src/agent/tools.js');
-    const importTool = tools.find(t => t.name === 'import_session')!;
+    const importTool = tools.find(t => t.name === 'session_import')!;
 
     const r1 = await importTool.execute({
       session_id: firstId,
@@ -296,7 +296,7 @@ describe('import_session CWD reconciliation', () => {
     await writeMockJsonl(sid, jsonlCwd);
 
     const { tools } = await import('../../src/agent/tools.js');
-    const importTool = tools.find(t => t.name === 'import_session')!;
+    const importTool = tools.find(t => t.name === 'session_import')!;
 
     const result = await importTool.execute({
       session_id: sid,
@@ -326,7 +326,7 @@ describe('import_session CWD reconciliation', () => {
     await writeMockJsonl(sid, jsonlCwd);
 
     const { tools } = await import('../../src/agent/tools.js');
-    const importTool = tools.find(t => t.name === 'import_session')!;
+    const importTool = tools.find(t => t.name === 'session_import')!;
 
     // Don't pass working_directory — let it resolve from task.cwd
     const result = await importTool.execute({
@@ -358,7 +358,7 @@ describe('import_session CWD reconciliation', () => {
     await writeMockJsonl(sid, jsonlCwd);
 
     const { tools } = await import('../../src/agent/tools.js');
-    const importTool = tools.find(t => t.name === 'import_session')!;
+    const importTool = tools.find(t => t.name === 'session_import')!;
 
     // Pass working_directory so JSONL can be found
     const result = await importTool.execute({
@@ -389,7 +389,7 @@ describe('import_session CWD reconciliation', () => {
     await writeMockJsonl(sid, consistentCwd);
 
     const { tools } = await import('../../src/agent/tools.js');
-    const importTool = tools.find(t => t.name === 'import_session')!;
+    const importTool = tools.find(t => t.name === 'session_import')!;
 
     const result = await importTool.execute({
       session_id: sid,
@@ -413,7 +413,7 @@ describe('import_session CWD reconciliation', () => {
     await writeMockJsonl(sid, passedCwd, null);
 
     const { tools } = await import('../../src/agent/tools.js');
-    const importTool = tools.find(t => t.name === 'import_session')!;
+    const importTool = tools.find(t => t.name === 'session_import')!;
 
     const result = await importTool.execute({
       session_id: sid,
@@ -438,7 +438,7 @@ describe('import_session CWD reconciliation', () => {
     await writeMockJsonl(sid, '/tmp/dummy-for-disk', null);
 
     const { tools } = await import('../../src/agent/tools.js');
-    const importTool = tools.find(t => t.name === 'import_session')!;
+    const importTool = tools.find(t => t.name === 'session_import')!;
 
     const result = await importTool.execute({
       session_id: sid,

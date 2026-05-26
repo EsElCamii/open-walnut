@@ -41,9 +41,17 @@ export interface StreamingPermissionBlock {
   toolName: string;
   input?: Record<string, unknown>;
   reason?: string;
+  /** Set when resolved (from snapshot or permission-resolved event). Absent = pending. */
+  status?: 'pending' | 'allowed' | 'denied';
 }
 
-export type StreamingBlock = StreamingTextBlock | StreamingToolCallBlock | StreamingSystemBlock | StreamingPermissionBlock;
+/** Model reasoning ("thinking" mode). Rendered gray/italic, collapsible. */
+export interface StreamingThinkingBlock {
+  type: 'thinking';
+  content: string;
+}
+
+export type StreamingBlock = StreamingTextBlock | StreamingToolCallBlock | StreamingSystemBlock | StreamingPermissionBlock | StreamingThinkingBlock;
 
 interface StreamSnapshot {
   blocks: StreamingBlock[];
@@ -115,25 +123,65 @@ export function useSessionStream(sessionId: string | null): UseSessionStreamRetu
       streamBuffer.current = '';
     }
 
-    // Always subscribe to get server snapshot for correction (background)
+    // Always subscribe to get server snapshot for correction (background).
+    //
+    // Non-regressive merge: this useEffect re-runs on WS reconnect too, and the
+    // server snapshot may lag behind live events that have already been applied
+    // to blocks/isStreaming via the incremental WS handlers. Clobbering them
+    // here caused the "1. 2. 3 → restart 1. 2. 3" replay bug: reattachWatcher
+    // on reconnect made daemon catch-up push bytes through the delta pipeline
+    // into blocks, then this snapshot fired a moment later with older/shorter
+    // state and overwrote the in-progress turn.
+    //
+    // Rules (mirrored from doResubscribe below):
+    //   - blocks:      only overwrite if we currently have none (initial load)
+    //   - isStreaming: only promote false→true (never regress a live turn)
     wsClient.sendRpc<StreamSnapshot>('session:stream-subscribe', { sessionId })
       .then((snapshot) => {
         // Guard: session may have changed during the async RPC
         if (activeSessionId.current !== sessionId) return;
-        if (snapshot) {
-          log.info('stream', `subscribe snapshot: blocks=${snapshot.blocks.length} isStreaming=${snapshot.isStreaming}`, { sessionId });
-          setBlocks(snapshot.blocks);
-          setIsStreaming(snapshot.isStreaming);
-          // Reconstruct text buffer from the last text block
+        if (!snapshot) return;
+        log.info('stream', `subscribe snapshot: blocks=${snapshot.blocks.length} isStreaming=${snapshot.isStreaming}`, { sessionId });
+        let appliedBlocks = false;
+        setBlocks((prev) => {
+          if (prev.length > 0) return prev;
+          appliedBlocks = true;
+          return snapshot.blocks;
+        });
+        setIsStreaming((prev) => (snapshot.isStreaming && !prev) ? true : prev);
+        if (appliedBlocks) {
           const lastText = [...snapshot.blocks].reverse().find((b): b is StreamingTextBlock => b.type === 'text');
           streamBuffer.current = lastText ? lastText.content : '';
           // Seed global cache with server snapshot for correction
           initStreamState(sessionId, snapshot.blocks, snapshot.isStreaming);
+          // Seed seenPermissionIds from snapshot (prevent duplicate blocks on re-emit)
+          for (const b of snapshot.blocks) {
+            if (b.type === 'permission') seenPermissionIds.current.add(b.requestId);
+          }
         }
       })
       .catch(() => {
         // Subscription failed — stay with current state (cache or empty)
       });
+
+    // Fallback: fetch pending permissions from REST (covers cases where buffer was pruned)
+    fetch(`/api/sessions/${sessionId}`)
+      .then(r => r.ok ? r.json() : null)
+      .then((data: { pendingPermissions?: Array<{ requestId: string; toolName?: string; input?: Record<string, unknown>; reason?: string }> } | null) => {
+        if (activeSessionId.current !== sessionId) return;
+        const perms = data?.pendingPermissions;
+        if (!perms?.length) return;
+        setBlocks(prev => {
+          const existingIds = new Set(prev.filter(b => b.type === 'permission').map(b => (b as StreamingPermissionBlock).requestId));
+          const newBlocks = perms
+            .filter(p => !existingIds.has(p.requestId))
+            .map(p => ({ type: 'permission' as const, requestId: p.requestId, toolName: p.toolName ?? 'unknown', input: p.input, reason: p.reason }));
+          if (newBlocks.length === 0) return prev;
+          for (const b of newBlocks) seenPermissionIds.current.add(b.requestId);
+          return [...prev, ...newBlocks];
+        });
+      })
+      .catch(() => {});
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionId, wsConnected]);
 
@@ -153,7 +201,22 @@ export function useSessionStream(sessionId: string | null): UseSessionStreamRetu
           // Only apply snapshot if we don't already have streaming data
           // (avoid clobbering blocks from incremental events that arrived in between)
           setBlocks((prev) => prev.length > 0 ? prev : snapshot.blocks);
-          if (snapshot.isStreaming) setIsStreaming(true);
+          // Non-regressive sync: snapshot only allowed to promote isStreaming false→true.
+          // Rationale: a stale server-side buffer (cleared 2s after previous session:result)
+          // returns isStreaming=false even while a new turn is live; unconditional sync
+          // would flip the active stream to 'done' and trigger the downstream defensive
+          // clear, wiping live blocks.  Termination of a turn now relies solely on real
+          // events: session:result / session:error / session:status-changed backstop.
+          setIsStreaming((prev) => {
+            if (snapshot.isStreaming && !prev) {
+              log.info('stream', `resubscribe snapshot → isStreaming false→true`, { sessionId: sid });
+              return true;
+            }
+            if (!snapshot.isStreaming && prev) {
+              log.info('stream', `resubscribe snapshot stale (prev=true, snap=false) — ignoring`, { sessionId: sid });
+            }
+            return prev;
+          });
           const lastText = [...snapshot.blocks].reverse().find((b): b is StreamingTextBlock => b.type === 'text');
           if (lastText) streamBuffer.current = lastText.content;
         }
@@ -171,7 +234,27 @@ export function useSessionStream(sessionId: string | null): UseSessionStreamRetu
     // Re-subscribe when session transitions to running (IN_PROGRESS phase or running process)
     const isActive = phase === 'IN_PROGRESS' || process_status === 'running';
     if (!isActive) {
-      log.info('stream', `status-changed → phase=${phase} ps=${process_status} (not active, skipping)`, { sessionId: sid });
+      // Backstop: when the process reaches a non-active state (stopped/error/idle),
+      // force-clear isStreaming. This covers cases where session:result was missed
+      // (WS disconnect, sessionId mismatch, process crash). session:status-changed
+      // is broadcast with ['*'] destinations so it's the most reliable termination signal.
+      // 'idle' is terminal for streaming: FIFO sessions stay alive between turns in
+      // 'idle', with no deltas until the next user send — so clearing here matches the
+      // actual "not streaming" state. A new turn will flip isStreaming back to true via
+      // the text-delta / tool-use handlers before any visible lag.
+      if (process_status === 'stopped' || process_status === 'error' || process_status === 'idle') {
+        // Ordering: flush BEFORE clearing isStreaming. A pending rAF text frame may
+        // still be queued from the last delta; if we flipped isStreaming first, the UI
+        // could render the "done" state before the final text chunk lands. flushPendingTextRaf
+        // drains the buffer synchronously.
+        flushPendingTextRaf();
+        setIsStreaming((prev) => {
+          if (prev) log.info('stream', `status-changed ps=${process_status} → isStreaming true→false`, { sessionId: sid });
+          return false;
+        });
+      } else {
+        log.info('stream', `status-changed → phase=${phase} ps=${process_status} (not active, skipping)`, { sessionId: sid });
+      }
       return;
     }
 
@@ -317,6 +400,49 @@ export function useSessionStream(sessionId: string | null): UseSessionStreamRetu
     });
   });
 
+  // ── Thinking delta: accumulate like text but in a separate block type ──
+  const thinkingBuffer = useRef('');
+  const thinkingDeltaRaf = useRef<number | null>(null);
+
+  useEvent('session:thinking-delta', (data) => {
+    const { sessionId: sid, delta } = data as { sessionId: string; delta: string };
+    if (!sessionId || sid !== sessionId) return;
+
+    setIsStreaming(true);
+    thinkingBuffer.current += delta;
+
+    if (thinkingDeltaRaf.current === null) {
+      thinkingDeltaRaf.current = requestAnimationFrame(() => {
+        thinkingDeltaRaf.current = null;
+        const accumulated = thinkingBuffer.current;
+        setBlocks((prev) => {
+          const last = prev[prev.length - 1];
+          if (last && last.type === 'thinking') {
+            return [...prev.slice(0, -1), { type: 'thinking', content: accumulated }];
+          }
+          return [...prev, { type: 'thinking', content: accumulated }];
+        });
+      });
+    }
+  });
+
+  // Reset thinking buffer when anything else interrupts (text/tool/system)
+  // — handled below by flushing on tool-use / system-event.
+
+  // ── Unknown-event catch-all: surface as an info system block so new CLI
+  //    event types never silently disappear from the UI. ──
+  useEvent('session:unknown-event', (data) => {
+    const { sessionId: sid, scope, eventType, snippet } = data as {
+      sessionId: string; scope: string; eventType: string; snippet: string;
+    };
+    if (!sessionId || sid !== sessionId) return;
+
+    setBlocks((prev) => [
+      ...prev,
+      { type: 'system', variant: 'info', message: `Unknown Claude event: ${scope}:${eventType}`, detail: snippet },
+    ]);
+  });
+
   // Handle system events (compact, error, info notifications)
   useEvent('session:system-event', (data) => {
     const { sessionId: sid, variant, message, detail } = data as {
@@ -344,6 +470,19 @@ export function useSessionStream(sessionId: string | null): UseSessionStreamRetu
     flushPendingTextRaf();
     streamBuffer.current = '';
     setBlocks(prev => [...prev, { type: 'permission', requestId, toolName, input, reason }]);
+  });
+
+  // Handle permission resolved events (update block status from pending → allowed/denied)
+  useEvent('session:permission-resolved', (data) => {
+    const { sessionId: sid, requestId, allowed } = data as {
+      sessionId: string; requestId: string; allowed: boolean;
+    };
+    if (!sessionId || sid !== sessionId) return;
+    setBlocks(prev => prev.map(b =>
+      b.type === 'permission' && b.requestId === requestId
+        ? { ...b, status: allowed ? 'allowed' as const : 'denied' as const }
+        : b,
+    ));
   });
 
   // Handle session result (streaming done)

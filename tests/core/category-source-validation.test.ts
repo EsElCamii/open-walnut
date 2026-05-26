@@ -8,6 +8,8 @@ vi.mock('../../src/constants.js', () => createMockConstants());
 import {
   addTask,
   updateTask,
+  updateTaskRaw,
+  getTask,
   renameCategory,
   validateCategorySource,
   CategorySourceConflictError,
@@ -16,15 +18,18 @@ import {
   updateCategorySource,
   _resetForTesting,
 } from '../../src/core/task-manager.js';
+import { closeDb } from '../../src/core/task-db.js';
 import { WALNUT_HOME, CONFIG_FILE } from '../../src/constants.js';
 import type { Task } from '../../src/core/types.js';
 
 beforeEach(async () => {
+  closeDb();
   _resetForTesting();
   await fs.rm(WALNUT_HOME, { recursive: true, force: true, maxRetries: 3, retryDelay: 50 });
 });
 
 afterEach(async () => {
+  closeDb();
   await fs.rm(WALNUT_HOME, { recursive: true, force: true, maxRetries: 3, retryDelay: 50 });
 });
 
@@ -980,15 +985,12 @@ describe('updateTask — cross-source migration', () => {
 
     const { task } = await addTask({ title: 'Has ext data', category: 'OldCat' });
 
-    // Manually patch the task file to add ext/external_url/sync_error
-    const tasksFile = path.join(WALNUT_HOME, 'tasks', 'tasks.json');
-    const raw = JSON.parse(await fs.readFile(tasksFile, 'utf-8'));
-    const t = raw.tasks.find((x: { id: string }) => x.id === task.id);
-    t.ext = { 'ms-todo': { id: 'remote-123', list_id: 'list-abc' } };
-    t.external_url = 'https://example.com/task/123';
-    t.sync_error = 'previous error';
-    await fs.writeFile(tasksFile, JSON.stringify(raw));
-    _resetForTesting(); // force re-read of store
+    // Patch ext/external_url/sync_error directly into the row via updateTaskRaw
+    await updateTaskRaw(task.id, {
+      ext: { 'ms-todo': { id: 'remote-123', list_id: 'list-abc' } },
+      external_url: 'https://example.com/task/123',
+      sync_error: 'previous error',
+    });
 
     const { task: migrated } = await updateTask(task.id, { category: 'NewCat' });
     expect(migrated.source).toBe('plugin-a');
@@ -1012,19 +1014,16 @@ describe('updateTask — cross-source migration', () => {
     const { task: migrated } = await updateTask(parent.id, { category: 'CatB' });
     expect(migrated.source).toBe('ms-todo');
 
-    // Verify children also migrated by reading the store file
-    const tasksFile = path.join(WALNUT_HOME, 'tasks', 'tasks.json');
-    const raw = JSON.parse(await fs.readFile(tasksFile, 'utf-8'));
-    const migratedChild1 = raw.tasks.find((t: { id: string }) => t.id === child1.id);
-    const migratedChild2 = raw.tasks.find((t: { id: string }) => t.id === child2.id);
-    expect(migratedChild1.source).toBe('ms-todo');
-    expect(migratedChild2.source).toBe('ms-todo');
+    const migratedChild1 = await getTask(child1.id);
+    const migratedChild2 = await getTask(child2.id);
+    expect(migratedChild1?.source).toBe('ms-todo');
+    expect(migratedChild2?.source).toBe('ms-todo');
     // Children keep their own category (not changed to CatB)
-    expect(migratedChild1.category).toBe('CatA');
-    expect(migratedChild2.category).toBe('CatA');
+    expect(migratedChild1?.category).toBe('CatA');
+    expect(migratedChild2?.category).toBe('CatA');
     // Children's IDs unchanged
-    expect(migratedChild1.id).toBe(child1.id);
-    expect(migratedChild2.id).toBe(child2.id);
+    expect(migratedChild1?.id).toBe(child1.id);
+    expect(migratedChild2?.id).toBe(child2.id);
   });
 
   it('does not migrate children with different source than parent', async () => {
@@ -1035,20 +1034,14 @@ describe('updateTask — cross-source migration', () => {
 
     // Create child, then manually change its source to something different
     const { task: child } = await addTask({ title: 'Different source child', category: 'CatA', parent_task_id: parent.id });
-    const tasksFile = path.join(WALNUT_HOME, 'tasks', 'tasks.json');
-    const raw = JSON.parse(await fs.readFile(tasksFile, 'utf-8'));
-    const childInStore = raw.tasks.find((t: { id: string }) => t.id === child.id);
-    childInStore.source = 'plugin-b';
-    await fs.writeFile(tasksFile, JSON.stringify(raw));
-    _resetForTesting();
+    await updateTaskRaw(child.id, { source: 'plugin-b' });
 
     // Migrate parent to CatB
     await updateTask(parent.id, { category: 'CatB' });
 
     // Child with different source should NOT be migrated
-    const raw2 = JSON.parse(await fs.readFile(tasksFile, 'utf-8'));
-    const childAfter = raw2.tasks.find((t: { id: string }) => t.id === child.id);
-    expect(childAfter.source).toBe('plugin-b'); // unchanged
+    const childAfter = await getTask(child.id);
+    expect(childAfter?.source).toBe('plugin-b'); // unchanged
   });
 
   it('auto-migrates to config_local reserved category', async () => {

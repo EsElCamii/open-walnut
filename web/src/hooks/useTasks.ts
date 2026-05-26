@@ -6,6 +6,7 @@ import * as tasksApi from '@/api/tasks';
 import { ApiError } from '@/api/client';
 import { perf } from '@/utils/perf-logger';
 import { log } from '@/utils/log';
+import { scrollLog } from '@/utils/scroll-debug';
 
 /**
  * Optimistic default status for a newly-linked session (before the first
@@ -22,6 +23,40 @@ const OPTIMISTIC_STARTING_STATUS = { process_status: 'running' as const };
  * If a brand-new session ID appears, an optimistic in_progress/running default is used
  * so the badge never shows "? / ?".
  */
+/**
+ * Shallow equality over UI-visible task fields. Used to suppress no-op
+ * `setTasks` calls from secondary WS echoes (e.g. plugin sync writes
+ * `ext`/`_syncedAt` and re-emits TASK_UPDATED — nothing UI-visible changed,
+ * but a naive `setTasks` still creates a new tasks array identity and
+ * re-renders every row). The list below intentionally excludes `ext`,
+ * `_syncedAt`, and other backend-only fields.
+ */
+function tasksShallowEqual(a: Task, b: Task): boolean {
+  const scalarKeys: (keyof Task)[] = [
+    'title', 'status', 'phase', 'priority', 'category', 'project',
+    'parent_task_id', 'starred', 'due_date', 'completed_at', 'updated_at',
+    'sync_error', 'external_url', 'needs_attention', 'source', 'sprint',
+    'cwd', 'session_id', 'plan_session_id', 'exec_session_id',
+  ];
+  for (const k of scalarKeys) if (a[k] !== b[k]) return false;
+  const arrKeys: (keyof Task)[] = ['tags', 'depends_on'];
+  for (const k of arrKeys) {
+    const av = (a[k] as string[] | undefined) ?? [];
+    const bv = (b[k] as string[] | undefined) ?? [];
+    if (av.length !== bv.length) return false;
+    for (let i = 0; i < av.length; i++) if (av[i] !== bv[i]) return false;
+  }
+  // Session status slots (nested objects) — compare on the process_status/activity
+  // fields we actually render; deeper equality not needed because session:status-changed
+  // is a separate WS event that delivers those changes with its own merge path.
+  const cmpStatus = (x: Task['session_status'], y: Task['session_status']): boolean =>
+    (x?.process_status ?? null) === (y?.process_status ?? null) &&
+    (x?.activity ?? null) === (y?.activity ?? null);
+  return cmpStatus(a.session_status, b.session_status)
+    && cmpStatus(a.plan_session_status, b.plan_session_status)
+    && cmpStatus(a.exec_session_status, b.exec_session_status);
+}
+
 function mergeTask(existing: Task, incoming: Task): Task {
   // Preserve enriched session_id: REST API backfills it from session records,
   // but WS events send the raw task where session_id may be unset.
@@ -189,8 +224,13 @@ interface UseTasksReturn {
   star: (id: string) => void;
   reorder: (category: string, project: string, taskIds: string[]) => void;
   moveTask: (taskId: string, category: string, project: string, insertNearTaskId?: string) => void;
-  reparentTask: (taskId: string, newParentId: string | null) => void;
-  deleteTask: (id: string) => Promise<void>;
+  reparentTask: (taskId: string, newParentId: string | null, opts?: { insertAfterId?: string }) => void;
+  /**
+   * Rearrange the local tasks array so the given IDs come first in the given order,
+   * preserving relative order of any tasks not in the list. Local-only (no backend sync).
+   * Used by manual-sort auto-switch so the display doesn't reshuffle across sort modes.
+   */
+  bakeOrder: (orderedIds: string[]) => void;
 }
 
 export function useTasks(filter?: tasksApi.TaskFilter): UseTasksReturn {
@@ -325,11 +365,23 @@ export function useTasks(filter?: tasksApi.TaskFilter): UseTasksReturn {
   useEvent('task:updated', (data) => {
     wsEventCounts.current.updated++;
     const { task } = data as { task?: Task };
-    if (!task) { log.info('tasks', 'ws task:updated bulk → refetch'); refetch(); return; }
-    if (consumeEcho(`move:${task.id}`)) return;
-    if (consumeEcho(`update:${task.id}`)) return;
-    if (consumeEcho(`phase:${task.id}`)) return;
-    setTasks((prev) => prev.map((t) => (t.id === task.id ? mergeTask(t, task) : t)));
+    if (!task) { log.info('tasks', 'ws task:updated bulk → refetch'); scrollLog('drag-trace-ws-updated-bulk-refetch'); refetch(); return; }
+    if (consumeEcho(`move:${task.id}`)) { scrollLog('drag-trace-ws-updated-echo-move', { id: task.id.slice(0,12) }); return; }
+    if (consumeEcho(`update:${task.id}`)) { scrollLog('drag-trace-ws-updated-echo-update', { id: task.id.slice(0,12) }); return; }
+    if (consumeEcho(`phase:${task.id}`)) { scrollLog('drag-trace-ws-updated-echo-phase', { id: task.id.slice(0,12) }); return; }
+    setTasks((prev) => {
+      const idx = prev.findIndex((t) => t.id === task.id);
+      if (idx === -1) return prev;
+      const merged = mergeTask(prev[idx], task);
+      if (tasksShallowEqual(prev[idx], merged)) {
+        scrollLog('drag-trace-ws-updated-bail-shallowEqual', { id: task.id.slice(0,12) });
+        return prev;
+      }
+      scrollLog('drag-trace-ws-updated-APPLY', { id: task.id.slice(0,12), parent: task.parent_task_id });
+      const next = prev.slice();
+      next[idx] = merged;
+      return next;
+    });
   });
 
   useEvent('task:completed', (data) => {
@@ -337,14 +389,30 @@ export function useTasks(filter?: tasksApi.TaskFilter): UseTasksReturn {
     const { task } = data as { task?: Task };
     if (!task) { log.info('tasks', 'ws task:completed bulk → refetch'); refetch(); return; }
     if (consumeEcho(`complete:${task.id}`)) return;
-    setTasks((prev) => prev.map((t) => (t.id === task.id ? mergeTask(t, task) : t)));
+    setTasks((prev) => {
+      const idx = prev.findIndex((t) => t.id === task.id);
+      if (idx === -1) return prev;
+      const merged = mergeTask(prev[idx], task);
+      if (tasksShallowEqual(prev[idx], merged)) return prev;
+      const next = prev.slice();
+      next[idx] = merged;
+      return next;
+    });
   });
 
   useEvent('task:starred', (data) => {
     const { task } = data as { task?: Task };
     if (!task) { refetch(); return; }
     if (consumeEcho(`star:${task.id}`)) return;
-    setTasks((prev) => prev.map((t) => (t.id === task.id ? mergeTask(t, task) : t)));
+    setTasks((prev) => {
+      const idx = prev.findIndex((t) => t.id === task.id);
+      if (idx === -1) return prev;
+      const merged = mergeTask(prev[idx], task);
+      if (tasksShallowEqual(prev[idx], merged)) return prev;
+      const next = prev.slice();
+      next[idx] = merged;
+      return next;
+    });
   });
 
   useEvent('task:deleted', (data) => {
@@ -354,7 +422,8 @@ export function useTasks(filter?: tasksApi.TaskFilter): UseTasksReturn {
 
   useEvent('task:reordered', (data) => {
     const { category, project, taskIds } = data as { category: string; project: string; taskIds: string[] };
-    if (consumeEcho(`reorder:${category}/${project}`)) return;
+    if (consumeEcho(`reorder:${category}/${project}`)) { scrollLog('drag-trace-ws-reordered-echo', { cat: category, proj: project }); return; }
+    scrollLog('drag-trace-ws-reordered-APPLY', { cat: category, proj: project, count: taskIds.length });
     setTasks((prev) => applyReorder(prev, category, project, taskIds));
   });
 
@@ -467,28 +536,116 @@ export function useTasks(filter?: tasksApi.TaskFilter): UseTasksReturn {
       .catch(onOpError);
   }, [refetch, guardEcho, onOpError]);
 
-  const reparentTask = useCallback((taskId: string, newParentId: string | null) => {
+  const reparentTask = useCallback((
+    taskId: string,
+    newParentId: string | null,
+    opts?: { insertAfterId?: string }
+  ) => {
+    scrollLog('drag-trace-reparentTask-start', { id: taskId.slice(0,12), newParent: newParentId?.slice(0,12) ?? 'null', insertAfter: opts?.insertAfterId?.slice(0,12) });
     guardEcho(`move:${taskId}`);
-    // Optimistic: update parent_task_id locally
-    setTasks((prev) => prev.map((t) =>
-      t.id === taskId
-        ? { ...t, parent_task_id: newParentId || undefined }
-        : t
-    ));
-    // Backend handles category/project inheritance from new parent
+
+    // Snapshot current state so we can derive the task's old parent + group
+    // info for the unparent-specific reorder persistence below.
+    const snapshot = tasks;
+    const current = snapshot.find((t) => t.id === taskId);
+    const isUnparent = newParentId === null;
+    const oldParentFullId = current?.parent_task_id
+      ? snapshot.find((t) => t.id.startsWith(current.parent_task_id!))?.id ?? null
+      : null;
+
+    // Position priority for optimistic reposition:
+    //   1. insertAfterId (drag drop target) — user's chosen drop spot, always respected
+    //   2. Unparent fallback: just below old parent — keeps kebab Move-left visually stable
+    //   3. Otherwise no reposition.
+    let optimisticGroupIds: { cat: string; proj: string; ids: string[] } | null = null;
+    setTasks((prev) => {
+      const next = prev.map((t) =>
+        t.id === taskId
+          ? { ...t, parent_task_id: newParentId || undefined }
+          : t
+      );
+
+      let anchorIdx = -1;
+      if (opts?.insertAfterId) {
+        anchorIdx = next.findIndex((t) => t.id === opts.insertAfterId);
+      } else if (isUnparent && oldParentFullId) {
+        anchorIdx = next.findIndex((t) => t.id === oldParentFullId);
+      }
+
+      if (anchorIdx !== -1) {
+        const fromIdx = next.findIndex((t) => t.id === taskId);
+        if (fromIdx !== -1 && fromIdx !== anchorIdx + 1) {
+          const [moved] = next.splice(fromIdx, 1);
+          // anchorIdx shifts left by 1 if we removed an item before it
+          const effectiveAnchor = fromIdx < anchorIdx ? anchorIdx - 1 : anchorIdx;
+          next.splice(effectiveAnchor + 1, 0, moved);
+        }
+      }
+
+      if (isUnparent && current) {
+        const cat = current.category;
+        const proj = current.project ?? current.category;
+        optimisticGroupIds = {
+          cat,
+          proj,
+          ids: next
+            .filter((t) => t.category === cat && (t.project ?? t.category) === proj)
+            .map((t) => t.id),
+        };
+      }
+      return next;
+    });
+
+    // Backend does NOT cascade category/project on parent change
+    // (verified in task-manager.ts updateTask: parent_task_id is the only
+    // field touched). So the optimistic state above is authoritative; the
+    // `move:<id>` echoGuard eats the primary WS event and the sync-echo
+    // is filtered by tasksShallowEqual. Do NOT refetch — replacing the
+    // whole tasks array unmounts every SortableTaskItem and causes the
+    // post-drag "flash / lost my task" the user has been hitting.
+    //
+    // Unparent still persists the new ordering via reorderTasks so the
+    // server doesn't send a stale order on next organic fetch.
     withRetry(() => tasksApi.updateTask(taskId, { parent_task_id: newParentId ?? '' }))
-      .then(() => refetch())  // refetch to get updated category/project
+      .then((freshTask) => {
+        scrollLog('drag-trace-reparentTask-response', { id: taskId.slice(0,12), isUnparent });
+        if (isUnparent && optimisticGroupIds) {
+          const { cat, proj, ids } = optimisticGroupIds;
+          guardEcho(`reorder:${cat}/${proj}`);
+          return withRetry(() => tasksApi.reorderTasks(cat, proj, ids));
+        }
+        setTasks((prev) => {
+          const idx = prev.findIndex((t) => t.id === freshTask.id);
+          if (idx === -1) return prev;
+          const merged = mergeTask(prev[idx], freshTask);
+          if (tasksShallowEqual(prev[idx], merged)) {
+            scrollLog('drag-trace-reparentTask-response-bail-shallowEqual', { id: taskId.slice(0,12) });
+            return prev;
+          }
+          scrollLog('drag-trace-reparentTask-response-APPLY', { id: taskId.slice(0,12) });
+          const next = prev.slice();
+          next[idx] = merged;
+          return next;
+        });
+      })
       .catch(onOpError);
-  }, [refetch, guardEcho, onOpError]);
+  }, [tasks, guardEcho, onOpError]);
 
-  const deleteTask = useCallback(async (id: string) => {
-    setTasks((prev) => prev.filter((t) => t.id !== id));
-    try {
-      await tasksApi.deleteTask(id, { force: true });
-    } catch (err) {
-      onOpError(err instanceof Error ? err : new Error(String(err)));
-    }
-  }, [onOpError]);
+  const bakeOrder = useCallback((orderedIds: string[]) => {
+    if (orderedIds.length === 0) return;
+    setTasks((prev) => {
+      const rank = new Map(orderedIds.map((id, i) => [id, i]));
+      // Stable sort: keep tasks not in orderedIds in place relative to each other.
+      const decorated = prev.map((t, origIdx) => ({ t, origIdx, rank: rank.get(t.id) }));
+      decorated.sort((a, b) => {
+        if (a.rank !== undefined && b.rank !== undefined) return a.rank - b.rank;
+        if (a.rank !== undefined) return -1;
+        if (b.rank !== undefined) return 1;
+        return a.origIdx - b.origIdx;
+      });
+      return decorated.map((d) => d.t);
+    });
+  }, []);
 
-  return { tasks, loading, error, operationError, clearOperationError, showOperationError, refetch, create, update, toggleComplete, setPhase, star, reorder, moveTask, reparentTask, deleteTask };
+  return { tasks, loading, error, operationError, clearOperationError, showOperationError, refetch, create, update, toggleComplete, setPhase, star, reorder, moveTask, reparentTask, bakeOrder };
 }

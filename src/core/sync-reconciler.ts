@@ -13,7 +13,13 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { SYNC_DIR } from '../constants.js';
 import { log } from '../logging/index.js';
-import { isPushInflight } from './task-manager.js';
+import {
+  addTasksBulk,
+  deleteTasksBulk,
+  isPushInflight,
+  updateTasksBulk,
+} from './task-manager.js';
+import { bus, EventNames } from './event-bus.js';
 import type { RegisteredPlugin, RemoteSyncItem, SyncPollContext } from './integration-types.js';
 import type { Task } from './types.js';
 
@@ -231,10 +237,18 @@ export class SyncReconciler {
           unchanged++;
           continue;
         }
-        // Both exist — check if remote is newer than last synced timestamp
+        // Both exist — only overwrite if remote is strictly newer than our last
+        // local modification (Last-Write-Wins). Using max(_syncedAt, updated_at)
+        // as the threshold protects local changes when push has failed (auth
+        // expired, network error, etc.): _syncedAt stays stale but updated_at
+        // reflects the unsynced local edit, so the reconciler won't clobber it.
+        // Grace period accounts for clock skew between local and remote servers.
+        const ECHO_GRACE_MS = 10_000;
         const remoteTime = new Date(remote.remoteUpdatedAt).getTime();
         const syncedAt = local._syncedAt ? new Date(local._syncedAt).getTime() : 0;
-        if (remoteTime > syncedAt) {
+        const localUpdatedAt = local.updated_at ? new Date(local.updated_at).getTime() : 0;
+        const threshold = Math.max(syncedAt, localUpdatedAt);
+        if (remoteTime > threshold + ECHO_GRACE_MS) {
           toUpdate.push({ local, remote });
         } else {
           unchanged++;
@@ -264,30 +278,38 @@ export class SyncReconciler {
     ctx: SyncPollContext,
     pluginId: string,
   ): Promise<void> {
-    // Apply creates (batch limit: 50)
+    const source = `${pluginId}-reconcile`;
+    let changeCount = 0;
+
+    // ── Creates (batch limit: 50) ──
     const createBatch = diff.toCreate.slice(0, 50);
-    for (const remote of createBatch) {
+    if (createBatch.length > 0) {
+      const creates: Array<Omit<Task, 'id'>> = createBatch.map((remote) => ({
+        ...remote.fields,
+        source: pluginId as Task['source'],
+        title: remote.fields.title ?? remote.title,
+      }) as Omit<Task, 'id'>);
       try {
-        await ctx.addTask({
-          ...remote.fields,
-          source: pluginId as Task['source'],
-          title: remote.fields.title ?? remote.title,
-        } as Omit<Task, 'id'>);
+        const created = await addTasksBulk(creates);
+        for (const task of created) {
+          bus.emit(EventNames.TASK_CREATED, { task }, [], { source });
+        }
+        changeCount += created.length;
       } catch (err) {
-        log.web.warn('sync-reconciler: failed to create task', {
+        log.web.warn('sync-reconciler: bulk create failed', {
           pluginId,
-          remoteId: remote.remoteId,
+          batchSize: creates.length,
           error: err instanceof Error ? err.message : String(err),
         });
       }
     }
 
-    // Apply updates (batch limit: 100)
-    // Protect local-only fields: note, summary, conversation_log
+    // ── Updates (batch limit: 100) — strip protected fields per row ──
     const updateBatch = diff.toUpdate.slice(0, 100);
-    for (const { local, remote } of updateBatch) {
-      try {
-        const updates = { ...remote.fields };
+    if (updateBatch.length > 0) {
+      const updatesList: Array<{ id: string; patch: Partial<Task> }> = [];
+      for (const { local, remote } of updateBatch) {
+        const updates: Partial<Task> = { ...remote.fields };
         // Never overwrite local-only fields from remote
         delete (updates as any).note;
         delete (updates as any).summary;
@@ -303,21 +325,38 @@ export class SyncReconciler {
         delete (updates as any).phase;
         delete (updates as any).status;
         delete (updates as any).needs_attention;
-
-        await ctx.updateTask(local.id, updates);
+        updatesList.push({ id: local.id, patch: updates });
+      }
+      try {
+        const { changed } = await updateTasksBulk(updatesList);
+        for (const task of changed) {
+          bus.emit(EventNames.TASK_UPDATED, { task }, [], { source });
+        }
+        changeCount += changed.length;
       } catch (err) {
-        log.web.warn('sync-reconciler: failed to update task', {
+        log.web.warn('sync-reconciler: bulk update failed', {
           pluginId,
-          taskId: local.id,
+          batchSize: updatesList.length,
           error: err instanceof Error ? err.message : String(err),
         });
       }
     }
 
-    // Apply removals — skip tasks with actively-running sessions
-    for (const task of diff.toRemove) {
+    // ── Removes — filter out tasks with actively-running sessions ──
+    if (diff.toRemove.length > 0) {
+      // Snapshot session list once instead of per-task (hasActiveSession was
+      // calling listSessions() for every candidate — O(n) filesystem reads).
+      let sessionsSnapshot: Awaited<ReturnType<typeof import('./session-tracker.js').listSessions>> | null = null;
       try {
-        if (await this.hasActiveSession(task)) {
+        const { listSessions } = await import('./session-tracker.js');
+        sessionsSnapshot = await listSessions();
+      } catch {
+        sessionsSnapshot = null;
+      }
+
+      const idsToDelete: string[] = [];
+      for (const task of diff.toRemove) {
+        if (this.hasActiveSessionSync(task, sessionsSnapshot)) {
           log.web.info('sync-reconciler: skipping removal of task with active session', {
             pluginId,
             taskId: task.id,
@@ -325,41 +364,61 @@ export class SyncReconciler {
           });
           continue;
         }
-        await ctx.deleteTask(task.id);
-        log.web.info('sync-reconciler: removed task no longer in remote', {
-          pluginId,
-          taskId: task.id,
-          title: task.title,
-        });
-      } catch (err) {
-        // ActiveSessionError or other — log and continue
-        log.web.warn('sync-reconciler: failed to remove task', {
-          pluginId,
-          taskId: task.id,
-          error: err instanceof Error ? err.message : String(err),
-        });
+        idsToDelete.push(task.id);
       }
+
+      if (idsToDelete.length > 0) {
+        try {
+          const { deleted } = await deleteTasksBulk(idsToDelete);
+          for (const task of deleted) {
+            bus.emit(EventNames.TASK_DELETED, { task }, [], { source });
+            log.web.info('sync-reconciler: removed task no longer in remote', {
+              pluginId,
+              taskId: task.id,
+              title: task.title,
+            });
+          }
+          changeCount += deleted.length;
+        } catch (err) {
+          log.web.warn('sync-reconciler: bulk delete failed', {
+            pluginId,
+            batchSize: idsToDelete.length,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
+      }
+    }
+
+    // Single bulk signal to web-ui (mirrors the delta-sync batching in server.ts
+    // so reconcile-only cycles still trigger a refetch). `ctx` is unused now
+    // that we call task-manager bulk APIs directly; keep the parameter for
+    // signature stability with the caller.
+    void ctx;
+    if (changeCount > 0) {
+      bus.emit(
+        EventNames.TASK_UPDATED,
+        { task: null } as any,
+        ['web-ui'],
+        { source: `${pluginId}-reconcile-batch` },
+      );
     }
   }
 
-  /** Check if a task has any actively-running sessions (process alive, work in progress). */
-  private async hasActiveSession(task: Task): Promise<boolean> {
+  /** Check if a task has an actively-running session, given a pre-loaded session snapshot. */
+  private hasActiveSessionSync(
+    task: Task,
+    sessions: Awaited<ReturnType<typeof import('./session-tracker.js').listSessions>> | null,
+  ): boolean {
     const sessionIds = [task.session_id, task.plan_session_id, task.exec_session_id].filter(Boolean) as string[];
     if (sessionIds.length === 0) return false;
-
-    // Look up actual session status — only block if process is actively running
-    try {
-      const { listSessions } = await import('./session-tracker.js');
-      const sessions = await listSessions();
-      for (const sid of sessionIds) {
-        const session = sessions.find(s => s.claudeSessionId === sid);
-        if (session && session.process_status === 'running') return true;
-      }
-    } catch {
-      // If we can't check, be conservative — block removal if session_id is set
-      return sessionIds.length > 0;
+    if (!sessions) {
+      // Couldn't load session list — be conservative and block removal.
+      return true;
     }
-
+    for (const sid of sessionIds) {
+      const session = sessions.find((s) => s.claudeSessionId === sid);
+      if (session && session.process_status === 'running') return true;
+    }
     return false;
   }
 

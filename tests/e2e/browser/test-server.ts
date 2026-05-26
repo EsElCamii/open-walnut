@@ -437,6 +437,60 @@ await fs.writeFile(
   }),
 )
 
+// Seed memory files for memory-v2.spec.ts
+const memoryDir = path.join(tmpBase, 'memory')
+const dailyDir = path.join(memoryDir, 'daily')
+const topicsDir = path.join(memoryDir, 'topics')
+const projectsDir = path.join(memoryDir, 'projects', 'work', 'walnut')
+const knowledgeDir = path.join(memoryDir, 'knowledge')
+await fs.mkdir(dailyDir, { recursive: true })
+await fs.mkdir(topicsDir, { recursive: true })
+await fs.mkdir(projectsDir, { recursive: true })
+await fs.mkdir(knowledgeDir, { recursive: true })
+
+// Global MEMORY.md
+await fs.writeFile(
+  path.join(tmpBase, 'MEMORY.md'),
+  '---\nname: Global Memory\n---\n\n# Global Memory\n\n## Preferences\n- Theme: dark mode\n- Language: English\n',
+)
+
+// Daily log
+const todayKey = new Date().toISOString().slice(0, 10)
+await fs.writeFile(
+  path.join(dailyDir, `${todayKey}.md`),
+  `# Daily Log ${todayKey}\n\n## Morning\n- Reviewed memory v2 search integration\n- Tested playwright browser automation\n`,
+)
+
+// Topic file
+await fs.writeFile(
+  path.join(topicsDir, 'search-architecture.md'),
+  '# Search Architecture\n\nThe search system uses BM25 for keyword scoring and QMD for semantic search.\nMemory results are merged with task results using normalized weighted scoring.\n',
+)
+
+// Project memory
+await fs.writeFile(
+  path.join(projectsDir, 'MEMORY.md'),
+  '# Walnut Project\n\nPersonal AI butler with task management and knowledge base.\nUses React frontend with Node.js backend.\n',
+)
+
+// Knowledge file
+await fs.writeFile(
+  path.join(knowledgeDir, 'testing-guide.md'),
+  '# Testing Guide\n\nE2E tests use Playwright with a real ephemeral server.\nUnit tests use vitest.\n',
+)
+
+// Working memory
+await fs.writeFile(
+  path.join(memoryDir, 'working-memory.md'),
+  '# Working Memory\n\nCurrent focus: implementing memory v2 search integration.\nActive tasks: playwright test automation, search UI improvements.\n',
+)
+
+// Index file
+await fs.writeFile(
+  path.join(memoryDir, 'index.md'),
+  '# Memory Index\n\n- daily/: Daily logs\n- topics/: Topic files\n- projects/: Project memories\n- knowledge/: Knowledge base\n- working-memory.md: Active context\n',
+)
+
 // Ensure src/web/static symlink exists → dist/web/static
 // When running via `npx tsx`, import.meta.url resolves to src/web/server.ts,
 // so the server looks for static files at src/web/static/ which doesn't exist.

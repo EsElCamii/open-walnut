@@ -128,7 +128,7 @@ export const reposHandler: FileHandler = {
     if (!opts?.contentHash) {
       try {
         await fsp.access(resolved.filePath);
-        throw new Error('content_hash is required for overwrite on existing repos. Read first with files_read.');
+        throw new Error('content_hash is required for overwrite on existing repos. Read first with file_read.');
       } catch (err: unknown) {
         if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
       }
@@ -143,7 +143,7 @@ export const reposHandler: FileHandler = {
 
   async edit(resolved, oldContent, newContent, opts) {
     if (!opts?.contentHash) {
-      throw new Error('content_hash is required for editing repos. Read first with files_read.');
+      throw new Error('content_hash is required for editing repos. Read first with file_read.');
     }
     if (!oldContent) {
       throw new Error('old_content cannot be empty.');

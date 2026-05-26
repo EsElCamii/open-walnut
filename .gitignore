@@ -50,3 +50,12 @@ isolate-*.log
 
 # Downloaded installer packages
 *.pkg
+
+# Local scratch / temp scripts and dumps
+test-*-temp.*
+test-*-tmp.*
+sessions-list-*.md
+playwright-responses/
+docs/plan/
+tests/MEMORY_V2_*_PLAN.md
+tools/

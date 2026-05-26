@@ -56,7 +56,7 @@ async function request<T>(method: string, path: string, body?: unknown, extra?: 
   return data;
 }
 
-export function apiGet<T>(path: string, params?: Record<string, string>, opts?: { signal?: AbortSignal }): Promise<T> {
+export function apiGet<T>(path: string, params?: Record<string, string>, opts?: { signal?: AbortSignal; timeoutMs?: number }): Promise<T> {
   const url = params ? `${path}?${new URLSearchParams(params)}` : path;
   return request<T>('GET', url, undefined, opts);
 }

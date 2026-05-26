@@ -421,27 +421,16 @@ describeIf('Live mode tests (real Claude CLI + Haiku)', () => {
       await assertModeAllLayers('T3', sessionId, 'acceptEdits', 'accept')
     }, 180_000)
 
-    it('T4: default — init event exists, record shows default', async () => {
+    it('T4: no mode → defaults to bypassPermissions, all 3 layers agree', async () => {
       const { sessionId } = await startSessionAndWait({
         taskId: 'mode-live-task-004',
         message: SIMPLE_PROMPT,
-        // No mode → Walnut sets 'default' → no --permission-mode flag.
-        // CLI uses ~/.claude/settings.json default (may differ from 'default').
+        // No mode → Walnut defaults to 'bypass' → --permission-mode bypassPermissions.
+        // Users shouldn't be prompted to approve every edit; plan mode must be explicit.
       })
       console.log(`T4: sessionId=${sessionId}`)
       await delay(2000)
-
-      // Stream and canonical should agree (whatever the user's default is)
-      const streamMode = await getLastStreamInitMode(sessionId)
-      const canonicalMode = await getLastCanonicalMode(sessionId)
-      expect(streamMode).toBeTruthy()
-      expect(canonicalMode).toBeTruthy()
-      expect(streamMode).toBe(canonicalMode) // both sources must agree
-      console.log(`  T4 CLI default permissionMode: "${streamMode}" (from user's claude settings)`)
-
-      // Walnut record should show 'default' (Walnut's internal tracking, not CLI's)
-      const session = await getSession(sessionId)
-      expect(session.mode).toBe('default')
+      await assertModeAllLayers('T4', sessionId, 'bypassPermissions', 'bypass')
     }, 180_000)
   })
 

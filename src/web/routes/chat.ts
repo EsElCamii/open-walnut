@@ -129,6 +129,8 @@ interface ChatPayload {
   source?: string
   mode?: 'execution' | 'plan'
   planModeFirst?: boolean
+  /** Signal that plan mode was just deactivated (plan → execution transition). */
+  planModeOff?: boolean
   /** Console agent ID — defaults to 'general'. */
   agentId?: string
 }
@@ -151,6 +153,8 @@ The user will switch to Execution mode when they are ready for you to act.
 [/PLAN MODE]`
 
 const PLAN_MODE_REMINDER = '[Reminder: Plan mode is still active — discuss and explore only, do not execute or make changes.]'
+
+const EXECUTION_MODE_MESSAGE = `[EXECUTION MODE] Plan mode has been deactivated. You may now execute changes and take actions. Previous plan-mode restrictions no longer apply.`
 
 /**
  * Build a human-readable task context prefix for the agent.
@@ -648,7 +652,7 @@ export function registerChatRpc(): void {
     const { agentId: stopAgentId } = (payload ?? {}) as { agentId?: string }
     const effectiveAgentId = stopAgentId ? validateAgentId(stopAgentId) : 'general'
     activeAbortControllers.get(abortKey(client, effectiveAgentId))?.abort()
-    cancelQuestion(effectiveAgentId) // Also cancel any pending ask_question tool
+    cancelQuestion(effectiveAgentId) // Also cancel any pending user_ask tool
   })
 
   // Answer structured questions from the QuestionCard UI
@@ -671,17 +675,17 @@ export function registerChatRpc(): void {
   })
 
   registerMethod('chat', async (payload: unknown, client: WebSocket) => {
-    const { message, taskContext, images, source: payloadSource, mode, planModeFirst, agentId: payloadAgentId } = payload as ChatPayload
+    const { message, taskContext, images, source: payloadSource, mode, planModeFirst, planModeOff, agentId: payloadAgentId } = payload as ChatPayload
     const agentId = payloadAgentId ? validateAgentId(payloadAgentId) : 'general'
     const chatSource = payloadSource === 'quick-start' ? 'quick-start' as const : undefined
     log.web.info('chat message received', { taskId: taskContext?.id, messageLength: message.length, imageCount: images?.length ?? 0, source: payloadSource ?? 'chat', agentId })
 
     // ── Intercept: if this agent is waiting for a question answer, route here ──
-    // The agent loop is blocked on ask_question tool. We must NOT enqueue a new
+    // The agent loop is blocked on user_ask tool. We must NOT enqueue a new
     // turn (that would deadlock — current turn holds the single slot).
     // Instead, resolve the pending question directly.
     if (hasPendingQuestion(agentId)) {
-      log.web.info('routing chat message to pending ask_question', { messageLength: message.length, agentId })
+      log.web.info('routing chat message to pending user_ask', { messageLength: message.length, agentId })
       // Persist the user's answer as a UI-only entry so it appears in chat history
       await chatHistory.addNotification({ role: 'user', content: message, agentId })
       broadcastEvent(EventNames.CHAT_HISTORY_UPDATED, {
@@ -785,6 +789,8 @@ export function registerChatRpc(): void {
         } else {
           planSuffix = '\n\n' + PLAN_MODE_REMINDER
         }
+      } else if (planModeOff) {
+        planPrefix = EXECUTION_MODE_MESSAGE + '\n\n'
       }
 
       const agentMessage = cronPrefix + planPrefix + contextPrefix + message
@@ -972,9 +978,23 @@ export function registerChatRpc(): void {
           if (shouldUpdateWorkingMemory(currentTokens)) {
             executeWorkingMemoryUpdate(
               async (prompt) => {
-                // TODO: Full forked agent implementation requires isolated agent turn infrastructure.
-                // For now, log the trigger — the prompt is ready for when forked turns are available.
-                log.agent.info('Working memory update triggered (forked execution pending)', { tokens: currentTokens })
+                const { runAgentLoop } = await import('../../agent/loop.js')
+                const { filesTools } = await import('../../agent/tools/files-tools.js')
+                // Restrict to file_edit only (not file_write) — the updater should EDIT sections
+                // within the existing template, never overwrite the entire file (would destroy structure).
+                const editTool = filesTools.find(t => t.name === 'file_edit')
+                const allowedTools = editTool ? [editTool] : filesTools
+                // Empty history is intentional: the update prompt contains the current working memory
+                // content inline. Full conversation context comes from the prompt cache prefix.
+                // Passing history would double token cost and defeat the lightweight extraction purpose.
+                await runAgentLoop(prompt, [], {
+                  onTextDelta: () => {},
+                }, {
+                  system: 'You are a working memory updater. Your only job is to update the working memory notes file using file_edit. Do not do anything else.',
+                  tools: allowedTools,
+                  source: 'working-memory-updater',
+                  maxToolRounds: 5,
+                })
               },
               currentTokens,
             ).catch(() => { /* non-critical */ })

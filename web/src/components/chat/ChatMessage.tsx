@@ -704,7 +704,7 @@ interface ToolCallSectionProps {
 export function ToolCallSection({ block, taskLookup, onTaskClick, onSessionClick }: ToolCallSectionProps) {
   const navigate = useNavigate();
   // Auto-expand get_session_history with plan_only: true so plan content is immediately visible
-  const defaultOpen = block.name === 'get_session_history' && block.input?.plan_only === true;
+  const defaultOpen = block.name === 'session_history' && block.input?.plan_only === true;
   const [open, setOpen] = useState(defaultOpen);
 
   const handleSessionClick = useCallback((sessionId: string) => {
@@ -861,7 +861,7 @@ function SystemMessageGroup({ blocks, sourceLabel, taskLookup, onTaskClick, onSe
                 case 'thinking':
                   return <ThinkingSection key={i} block={block} />;
                 case 'tool_call':
-                  if (block.name === 'create_subagent') return <SubagentBlock key={i} block={block} />;
+                  if (block.name === 'subagent_create') return <SubagentBlock key={i} block={block} />;
                   return <ToolCallSection key={i} block={block} taskLookup={taskLookup} onTaskClick={onTaskClick} onSessionClick={onSessionClick} />;
                 case 'text':
                   return <MemoizedTextBlock key={i} content={block.content} onClick={onContentClick} />;
@@ -1021,6 +1021,22 @@ function ChatMessageInner({ role, content, blocks, images, taskContext, routeInf
     );
   }
 
+  // Interrupt marker \u2014 render as muted system banner instead of a misleading
+  // blue "You" bubble. Claude CLI writes `[Request interrupted by user]`
+  // whenever its AbortController fires without a reason \u2014 that includes SIGINT
+  // from walnut's health-monitor idle reap, not just a user-clicked Interrupt.
+  // Showing it as a user message makes automated reaps indistinguishable from
+  // the user's own action.
+  if (role === 'user' && content.trim() === '[Request interrupted by user]') {
+    return (
+      <div className="chat-interrupt-banner">
+        <span className="chat-interrupt-icon">{'\u23F9'}</span>
+        <span className="chat-interrupt-text">Turn interrupted</span>
+        {time && <span className="chat-interrupt-time">{time}</span>}
+      </div>
+    );
+  }
+
   // Determine the display label for the message header
   const isTriage = source === 'triage';
   const isSubagent = source === 'subagent';
@@ -1145,9 +1161,9 @@ function ChatMessageInner({ role, content, blocks, images, taskContext, routeInf
                       return <ThinkingSection key={i} block={block} />;
                     case 'tool_call': {
                       // Render create_subagent as SubagentBlock
-                      if (block.name === 'create_subagent') return <SubagentBlock key={i} block={block} />;
-                      // Render ask_question as inline status (popover handled by MainPage)
-                      if (block.name === 'ask_question') {
+                      if (block.name === 'subagent_create') return <SubagentBlock key={i} block={block} />;
+                      // Render user_ask as inline status (popover handled by MainPage)
+                      if (block.name === 'user_ask') {
                         const questions = parseAskQuestionInput(block.input)
                         if (questions) {
                           if (block.status === 'calling') {

@@ -9,7 +9,6 @@ import { LoadingSpinner } from '@/components/common/LoadingSpinner';
 import { wsClient } from '@/api/ws';
 import { useEvent } from '@/hooks/useWebSocket';
 import { useSessionSend } from '@/hooks/useSessionSend';
-import { useSessionStream } from '@/hooks/useSessionStream';
 import { useSlashCommands } from '@/hooks/useSlashCommands';
 import type { ImageAttachment } from '@/api/chat';
 import type { SessionTreeResponse, SessionRecord } from '@/types/session';
@@ -54,7 +53,10 @@ export function SessionsPage() {
   const [directSession, setDirectSession] = useState<SessionRecord | null>(null);
 
   const sessionSend = useSessionSend(selectedId);
-  const { isStreaming } = useSessionStream(selectedId);
+  // isStreaming bubbles up from SessionDetailPanel → SessionChatHistory's single
+  // useSessionStream mount. Mounting a second hook here (previous pattern) doubled
+  // stream-subscribe RPCs and produced two parallel defensive-clear paths.
+  const [isStreaming, setIsStreaming] = useState(false);
   const handleBack = useCallback(() => {
     // location.key === 'default' means no prior in-app navigation (new tab, bookmark, direct URL)
     if (location.key === 'default') {
@@ -356,6 +358,7 @@ export function SessionsPage() {
           onClearCommitted={sessionSend.clearCommitted}
           onRetryFailed={handleRetryFailed}
           onDismissFailed={sessionSend.dismissFailed}
+          onStreamingChange={setIsStreaming}
         />
         {selectedSession && (
           <div className="session-chat-input-wrapper">

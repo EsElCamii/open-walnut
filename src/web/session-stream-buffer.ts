@@ -36,7 +36,21 @@ export interface StreamingSystemBlock {
   detail?: string
 }
 
-export type StreamingBlock = StreamingTextBlock | StreamingToolCallBlock | StreamingSystemBlock
+export interface StreamingPermissionBlock {
+  type: 'permission'
+  requestId: string
+  toolName: string
+  input?: Record<string, unknown>
+  reason?: string
+  status: 'pending' | 'allowed' | 'denied'
+}
+
+export interface StreamingThinkingBlock {
+  type: 'thinking'
+  content: string
+}
+
+export type StreamingBlock = StreamingTextBlock | StreamingToolCallBlock | StreamingSystemBlock | StreamingPermissionBlock | StreamingThinkingBlock
 
 export interface StreamSnapshot {
   blocks: StreamingBlock[]
@@ -52,6 +66,8 @@ interface BufferEntry {
   blocks: StreamingBlock[]
   /** Full accumulated text for the current text run (used to reconstruct streamBuffer on snapshot) */
   textAccumulator: string
+  /** Current thinking block's full accumulated text (mirrors textAccumulator's role). */
+  thinkingAccumulator: string
   lastActivity: number
 }
 
@@ -108,12 +124,51 @@ class SessionStreamBuffer {
     }
   }
 
+  /** Append a permission request block (idempotent — skips if requestId already exists). */
+  appendPermission(sessionId: string, requestId: string, toolName: string, input?: Record<string, unknown>, reason?: string): void {
+    const entry = this.getOrCreate(sessionId)
+    // Idempotent: don't add duplicate permission blocks (re-emit timer may fire multiple times)
+    const existing = entry.blocks.find(b => b.type === 'permission' && b.requestId === requestId) as StreamingPermissionBlock | undefined
+    if (existing) return
+    entry.textAccumulator = ''  // permission event breaks text flow
+    entry.lastActivity = Date.now()
+    entry.blocks.push({ type: 'permission', requestId, toolName, input, reason, status: 'pending' })
+  }
+
+  /** Update a permission block status after resolution. */
+  resolvePermission(sessionId: string, requestId: string, status: 'allowed' | 'denied'): void {
+    const entry = this.buffers.get(sessionId)
+    if (!entry) return
+    for (const b of entry.blocks) {
+      if (b.type === 'permission' && (b as StreamingPermissionBlock).requestId === requestId) {
+        (b as StreamingPermissionBlock).status = status
+        entry.lastActivity = Date.now()
+        break
+      }
+    }
+  }
+
   appendSystem(sessionId: string, variant: 'compact' | 'error' | 'info', message: string, detail?: string): void {
     const entry = this.getOrCreate(sessionId)
     entry.textAccumulator = ''  // system event breaks text flow
+    entry.thinkingAccumulator = ''
     entry.lastActivity = Date.now()
     entry.blocks.push({ type: 'system', variant, message, ...(detail ? { detail } : {}) } as StreamingSystemBlock)
   }
+
+  /** Accumulate thinking text deltas (model's reasoning, gated behind thinking mode). */
+  appendThinkingDelta(sessionId: string, delta: string): void {
+    const entry = this.getOrCreate(sessionId)
+    entry.thinkingAccumulator += delta
+    entry.lastActivity = Date.now()
+    const last = entry.blocks[entry.blocks.length - 1]
+    if (last && last.type === 'thinking') {
+      last.content = entry.thinkingAccumulator
+    } else {
+      entry.blocks.push({ type: 'thinking', content: entry.thinkingAccumulator })
+    }
+  }
+
 
   /**
    * SOLE "on"-path for the streaming flag. Must be called ONLY from lifecycle events
@@ -177,7 +232,7 @@ class SessionStreamBuffer {
   private getOrCreate(sessionId: string): BufferEntry {
     let entry = this.buffers.get(sessionId)
     if (!entry) {
-      entry = { blocks: [], textAccumulator: '', lastActivity: Date.now() }
+      entry = { blocks: [], textAccumulator: '', thinkingAccumulator: '', lastActivity: Date.now() }
       this.buffers.set(sessionId, entry)
       log.ws.debug('stream buffer created', { sessionId })
     }

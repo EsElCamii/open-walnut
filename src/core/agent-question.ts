@@ -1,12 +1,12 @@
 /**
- * Pending question state for console agents' ask_question tool.
+ * Pending question state for console agents' user_ask tool.
  *
- * When the agent calls ask_question, the tool blocks (returns a Promise
+ * When the agent calls user_ask, the tool blocks (returns a Promise
  * that doesn't resolve until the user answers). This module holds the
  * pending question state and provides the resolve/reject interface.
  *
  * Per-agent isolation: each console agent can have one pending question
- * independently. General waiting for an answer does not block Inner Space.
+ * independently. General waiting for an answer does not block Mentor.
  *
  * Mirrors the AskUserQuestion pattern: one call, multiple questions.
  * Answers are keyed by question header (or index).
@@ -42,11 +42,11 @@ let counter = 0
 
 /**
  * Block until the user answers all questions.
- * Called from the ask_question tool — blocks the agent loop.
+ * Called from the user_ask tool — blocks the agent loop.
  */
 export function waitForAnswers(questions: AskQuestionItem[], agentId = 'general'): { questionId: string; promise: Promise<Record<string, string>> } {
   if (pendingByAgent.has(agentId)) {
-    throw new Error(`Another ask_question call is already pending for agent "${agentId}". Only one at a time.`)
+    throw new Error(`Another user_ask call is already pending for agent "${agentId}". Only one at a time.`)
   }
 
   const questionId = `aq-${++counter}-${Date.now()}`
@@ -54,7 +54,7 @@ export function waitForAnswers(questions: AskQuestionItem[], agentId = 'general'
     pendingByAgent.set(agentId, { questionId, questions, resolve, reject, createdAt: Date.now() })
   })
 
-  log.agent.info('ask_question: waiting for user answers', {
+  log.agent.info('user_ask: waiting for user answers', {
     questionId,
     agentId,
     questionCount: questions.length,
@@ -85,7 +85,7 @@ export function submitAnswers(answers: Record<string, string>, agentId = 'genera
   }
   const qid = pending.questionId
   pendingByAgent.delete(agentId)
-  log.agent.info('ask_question: answers received', { questionId: qid, agentId, answerCount: Object.keys(answers).length })
+  log.agent.info('user_ask: answers received', { questionId: qid, agentId, answerCount: Object.keys(answers).length })
   pending.resolve(answers)
 }
 
@@ -117,6 +117,6 @@ export function cancelQuestion(agentId = 'general'): void {
   if (!pending) return
   const qid = pending.questionId
   pendingByAgent.delete(agentId)
-  log.agent.info('ask_question: cancelled', { questionId: qid, agentId })
+  log.agent.info('user_ask: cancelled', { questionId: qid, agentId })
   pending.reject(new Error('Question cancelled by user'))
 }

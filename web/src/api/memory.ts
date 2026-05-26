@@ -23,6 +23,10 @@ export interface MemoryBrowseTree {
   projects: BrowseItem[];
   sessions: BrowseItem[];
   knowledge: BrowseItem[];
+  repos?: BrowseItem[];
+  topics?: BrowseItem[];
+  compaction?: BrowseItem[];
+  special?: BrowseItem[];
 }
 
 export interface MemoryBrowseResponse {

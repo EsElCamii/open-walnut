@@ -140,6 +140,27 @@ export function parseClaudeJsonlLine(
     };
   }
 
+  // SSE partial event (from --include-partial-messages). InlineSubagent
+  // consumes this so tool cards appear before full input arrives and text
+  // streams progressively. We only surface text_delta and thinking_delta
+  // here — the full `assistant` line that lands later provides the canonical
+  // tool_use entry and accumulateBlock concats consecutive text blocks.
+  if (type === 'stream_event') {
+    const se = parsed as { event?: { type?: string; delta?: { type?: string; text?: string; thinking?: string } } };
+    const inner = se.event;
+    if (inner?.type !== 'content_block_delta') return null;
+    const delta = inner?.delta;
+    if (delta?.type === 'text_delta' && delta.text) {
+      return { type: 'text', content: delta.text };
+    }
+    if (delta?.type === 'thinking_delta' && delta.thinking) {
+      // Tag thinking with a system block so the UI shows it distinctly from
+      // final assistant text without requiring a new block shape here.
+      return { type: 'system', variant: 'info', message: `[thinking] ${delta.thinking}` };
+    }
+    return null;
+  }
+
   // Final result event
   if (type === 'result') {
     const result = (parsed.result ?? parsed.error ?? '') as string;
@@ -187,6 +208,17 @@ export function accumulateBlock(
       return updated;
     }
     // No matching tool_call found — add as-is
+  }
+
+  // Consecutive text blocks — concat into the last block so streamed deltas
+  // accumulate in one paragraph instead of producing many 1-char blocks.
+  if (incoming.type === 'text') {
+    const last = blocks[blocks.length - 1];
+    if (last && last.type === 'text') {
+      const updated = [...blocks];
+      updated[updated.length - 1] = { type: 'text', content: last.content + incoming.content };
+      return updated;
+    }
   }
 
   return [...blocks, incoming];

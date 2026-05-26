@@ -2,12 +2,12 @@
  * Unit tests for RemoteSessionManager + DaemonConnection — no real daemon needed.
  *
  * Tests the session manager abstraction at the unit level:
- * - B1: createSessionManager factory dispatch (LocalSessionManager vs RemoteSessionManager)
+ * - B1: createSessionManager factory dispatch (RemoteSessionManager)
  * - B2: RemoteSessionManager.writeMessage guard (before start)
  * - B3: DaemonConnection.disconnect cleanup
  * - B5: ClaudeCodeSession.transport getter
  *
- * What's real: RemoteSessionManager, DaemonConnection, LocalSessionManager, ClaudeCodeSession instances.
+ * What's real: RemoteSessionManager, DaemonConnection, ClaudeCodeSession instances.
  * What's mocked: constants.js (temp dir) — no daemon, no SSH, no network.
  */
 
@@ -19,7 +19,6 @@ import { createMockConstants } from '../helpers/mock-constants.js'
 vi.mock('../../src/constants.js', () => createMockConstants())
 
 import { WALNUT_HOME, SESSION_STREAMS_DIR } from '../../src/constants.js'
-import { LocalSessionManager } from '../../src/providers/local-session-manager.js'
 import { RemoteSessionManager } from '../../src/providers/remote-session-manager.js'
 import { DaemonConnection } from '../../src/providers/daemon-connection.js'
 import type { SessionManager } from '../../src/providers/session-manager.js'
@@ -47,62 +46,11 @@ const testSshTarget: SshTarget = {
 // ═══════════════════════════════════════════════════════════════════
 
 describe('B1: createSessionManager factory dispatch', () => {
-  it('LocalSessionManager: isRemote === false, host === null, processName === claude', () => {
-    const transport = new LocalSessionManager('local-b1-001')
-    expect(transport.isRemote).toBe(false)
-    expect(transport.host).toBeNull()
-    expect(transport.processName).toBe('claude')
-  })
-
   it('RemoteSessionManager: isRemote === true, host === myhost, processName === daemon', () => {
     const transport = new RemoteSessionManager('daemon-b1-001', 'myhost', testSshTarget)
     expect(transport.isRemote).toBe(true)
     expect(transport.host).toBe('myhost')
     expect(transport.processName).toBe('daemon')
-  })
-
-  it('LocalSessionManager has all SessionManager interface methods', () => {
-    const transport: SessionManager = new LocalSessionManager('local-b1-002')
-
-    // Startup / Attach
-    expect(typeof transport.start).toBe('function')
-    expect(typeof transport.attach).toBe('function')
-
-    // Messaging
-    expect(typeof transport.writeMessage).toBe('function')
-    expect(typeof transport.writeSyntheticUserEvent).toBe('function')
-
-    // Process Control
-    expect(typeof transport.stop).toBe('function')
-    expect(typeof transport.kill).toBe('function')
-    expect(typeof transport.interrupt).toBe('function')
-    expect(typeof transport.isAlive).toBe('function')
-
-    // Session Management
-    expect(typeof transport.renameForSession).toBe('function')
-    expect(typeof transport.detach).toBe('function')
-    expect(typeof transport.cleanup).toBe('function')
-    expect(typeof transport.deletePipe).toBe('function')
-
-    // Message Processing
-    expect(typeof transport.prepareOutbound).toBe('function')
-    expect(typeof transport.processInbound).toBe('function')
-
-    // Streaming Control
-    expect(typeof transport.flushTail).toBe('function')
-    expect(typeof transport.stopTail).toBe('function')
-
-    // Properties
-    expect('pid' in transport).toBe(true)
-    expect('outputFile' in transport).toBe(true)
-    expect('hasPipe' in transport).toBe(true)
-    expect('tailOffset' in transport).toBe(true)
-    expect('fileSize' in transport).toBe(true)
-    expect('processName' in transport).toBe(true)
-    expect('host' in transport).toBe(true)
-    expect('isRemote' in transport).toBe(true)
-    expect('imageCache' in transport).toBe(true)
-    expect('lastEventAt' in transport).toBe(true)
   })
 
   it('RemoteSessionManager has all SessionManager interface methods', () => {
@@ -155,11 +103,11 @@ describe('B1: createSessionManager factory dispatch', () => {
 // ═══════════════════════════════════════════════════════════════════
 
 describe('B2: RemoteSessionManager.writeMessage guard (before start)', () => {
-  it('writeMessage returns false without calling start()', () => {
+  it('writeMessage resolves to false without calling start()', async () => {
     const transport = new RemoteSessionManager('daemon-b2-001', 'testhost', testSshTarget)
 
-    // No start() called — should return false, not throw
-    const result = transport.writeMessage('hello')
+    // No start() called — should resolve false (no conn, no sid), not throw
+    const result = await transport.writeMessage('hello')
     expect(result).toBe(false)
   })
 
@@ -173,13 +121,13 @@ describe('B2: RemoteSessionManager.writeMessage guard (before start)', () => {
     expect(transport.pid).toBeNull()
   })
 
-  it('no exceptions thrown on writeMessage before start', () => {
+  it('no exceptions thrown/rejected on writeMessage before start', async () => {
     const transport = new RemoteSessionManager('daemon-b2-004', 'testhost', testSshTarget)
 
-    // Should not throw
-    expect(() => transport.writeMessage('hello')).not.toThrow()
-    expect(() => transport.writeMessage('')).not.toThrow()
-    expect(() => transport.writeMessage('a'.repeat(10000))).not.toThrow()
+    // Async signature — must not throw synchronously nor reject.
+    await expect(transport.writeMessage('hello')).resolves.toBe(false)
+    await expect(transport.writeMessage('')).resolves.toBe(false)
+    await expect(transport.writeMessage('a'.repeat(10000))).resolves.toBe(false)
   })
 
   it('lastEventAt is 0 before start()', () => {
@@ -203,7 +151,7 @@ describe('B2: RemoteSessionManager.writeMessage guard (before start)', () => {
 //  This block locks in the "daemon is the arbiter of pipe liveness" property.
 // ═══════════════════════════════════════════════════════════════════
 
-describe('B2b: writeMessage asks daemon as source of truth (no stale cache short-circuit)', () => {
+describe('B2b: writeMessage asks daemon as source of truth (strict ack, no stale cache short-circuit)', () => {
   // Minimal DaemonConnection-shaped mock. RemoteSessionManager only uses
   // `.connected` + `.send(...)` in writeMessage, so a plain object suffices.
   function makeMockConn(sendImpl: (cmd: string, payload: Record<string, unknown>) => Promise<Record<string, unknown>>) {
@@ -237,46 +185,43 @@ describe('B2b: writeMessage asks daemon as source of truth (no stale cache short
     const mockConn = makeMockConn(async () => ({ ok: true }))
 
     // Simulate post-WS-reconnect state: session alive on daemon, but local
-    // _hasPipe cache was cleared and never restored. This is the exact
-    // condition that previously caused every send to fall through to --resume.
+    // _hasPipe cache was cleared and never restored. Writer must ignore the
+    // stale local cache and ask the daemon (source of truth).
     injectState(transport, mockConn, 'session-abc', false)
 
-    // writeMessage is optimistic — returns true synchronously, actual send is
-    // fire-and-forget via promise chain.
-    const result = transport.writeMessage('hello')
+    // Strict-ack contract: awaits the daemon's reply before returning.
+    const result = await transport.writeMessage('hello')
     expect(result).toBe(true)
 
-    // Wait for the fire-and-forget conn.send() to be invoked.
-    await vi.waitFor(() => expect(mockConn.send).toHaveBeenCalledTimes(1))
-
+    expect(mockConn.send).toHaveBeenCalledTimes(1)
     // Exact payload match — prepareOutbound is identity for plain text. If it
     // ever starts rewriting messages, this assertion should catch it.
     expect(mockConn.send).toHaveBeenCalledWith('send', { sid: 'session-abc', message: 'hello' })
   })
 
-  it('still returns false when WS is disconnected (conn.connected=false)', () => {
+  it('resolves false when WS is disconnected (conn.connected=false)', async () => {
     const transport = new RemoteSessionManager('daemon-b2b-002', 'testhost', testSshTarget)
     const mockConn = { connected: false, send: vi.fn(async () => ({ ok: true })) }
     injectState(transport, mockConn, 'session-def', true)
 
-    const result = transport.writeMessage('hello')
+    const result = await transport.writeMessage('hello')
 
     expect(result).toBe(false)
     expect(mockConn.send).not.toHaveBeenCalled()
   })
 
-  it('still returns false when session has no sid yet (start not completed)', () => {
+  it('resolves false when session has no sid yet (start not completed)', async () => {
     const transport = new RemoteSessionManager('daemon-b2b-003', 'testhost', testSshTarget)
     const mockConn = makeMockConn(async () => ({ ok: true }))
     injectState(transport, mockConn, null, true)
 
-    const result = transport.writeMessage('hello')
+    const result = await transport.writeMessage('hello')
 
     expect(result).toBe(false)
     expect(mockConn.send).not.toHaveBeenCalled()
   })
 
-  it('clears _hasPipe and fires onExit when daemon reports ENXIO (remote process truly dead)', async () => {
+  it('resolves false and clears _hasPipe + fires onExit when daemon reports ENXIO (remote process truly dead)', async () => {
     const transport = new RemoteSessionManager('daemon-b2b-004', 'testhost', testSshTarget)
     const mockConn = makeMockConn(async () => ({ ok: false, reason: 'ENXIO' }))
     injectState(transport, mockConn, 'session-xyz', true)
@@ -286,16 +231,35 @@ describe('B2b: writeMessage asks daemon as source of truth (no stale cache short
       exitCode = code
     }
 
-    const result = transport.writeMessage('hello')
-    expect(result).toBe(true) // optimistic return still true
+    // Strict-ack: writeMessage awaits the daemon response and surfaces the
+    // failure. Caller (SessionRunner.processNext) sees `false`, leaves the
+    // message queued, and falls through to gracefulStop + --resume respawn.
+    const result = await transport.writeMessage('hello')
+    expect(result).toBe(false)
 
-    // Wait for the fire-and-forget promise chain to handle the ENXIO response.
-    // Daemon-reported dead pipe: cache should be cleared and onExit fired so
-    // session runner falls back to --resume spawn on the next processNext.
-    await vi.waitFor(() => {
-      expect(transport.hasPipe).toBe(false)
-      expect(exitCode).toBe(1)
+    // Dead-pipe bookkeeping still happens so downstream cleanup runs.
+    expect(transport.hasPipe).toBe(false)
+    expect(exitCode).toBe(1)
+  })
+
+  it('resolves false on EAGAIN (FIFO buffer full) — caller can retry via respawn path', async () => {
+    const transport = new RemoteSessionManager('daemon-b2b-005', 'testhost', testSshTarget)
+    const mockConn = makeMockConn(async () => ({ ok: false, reason: 'EAGAIN' }))
+    injectState(transport, mockConn, 'session-eagain', true)
+
+    const result = await transport.writeMessage('hello')
+    expect(result).toBe(false)
+  })
+
+  it('resolves false when daemon.send throws (transport error)', async () => {
+    const transport = new RemoteSessionManager('daemon-b2b-006', 'testhost', testSshTarget)
+    const mockConn = makeMockConn(async () => {
+      throw new Error('ws closed mid-send')
     })
+    injectState(transport, mockConn, 'session-throw', true)
+
+    const result = await transport.writeMessage('hello')
+    expect(result).toBe(false)
   })
 })
 

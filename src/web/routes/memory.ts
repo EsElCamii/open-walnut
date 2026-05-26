@@ -78,7 +78,40 @@ memoryRouter.get('/browse', async (_req: Request, res: Response, next: NextFunct
       }
     } catch { /* REPOS_MEMORY_DIR doesn't exist yet */ }
 
-    res.json({ tree: { global, daily, projects, sessions, knowledge, repos } })
+    // Topic files (Memory v2 — distilled wiki pages)
+    const topics: BrowseItem[] = []
+    try {
+      const topicsDir = path.join(MEMORY_DIR, 'topics')
+      const files = (await fsp.readdir(topicsDir)).filter(f => f.endsWith('.md'))
+      for (const f of files) {
+        const stat = await fsp.stat(path.join(topicsDir, f))
+        topics.push({ path: `topics/${f}`, title: f.replace(/\.md$/, ''), updatedAt: stat.mtime.toISOString() })
+      }
+      topics.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
+    } catch { /* no topics dir */ }
+
+    // Compaction snapshots (archived context compactions)
+    const compaction: BrowseItem[] = []
+    try {
+      const compactionDir = path.join(MEMORY_DIR, 'compaction')
+      const files = (await fsp.readdir(compactionDir)).filter(f => f.endsWith('.md')).sort().reverse()
+      for (const f of files) {
+        const stat = await fsp.stat(path.join(compactionDir, f))
+        compaction.push({ path: `compaction/${f}`, title: f.replace(/\.md$/, ''), updatedAt: stat.mtime.toISOString() })
+      }
+    } catch { /* no compaction dir */ }
+
+    // Working memory + index (top-level Memory v2 files)
+    const special: BrowseItem[] = []
+    for (const name of ['working-memory.md', 'index.md']) {
+      try {
+        const filePath = path.join(MEMORY_DIR, name)
+        const stat = await fsp.stat(filePath)
+        special.push({ path: name, title: name === 'working-memory.md' ? 'Working Memory' : 'Memory Index', updatedAt: stat.mtime.toISOString() })
+      } catch { /* file not present */ }
+    }
+
+    res.json({ tree: { global, daily, projects, sessions, knowledge, repos, topics, compaction, special } })
   } catch (err) {
     next(err)
   }

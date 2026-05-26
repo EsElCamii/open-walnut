@@ -128,8 +128,8 @@ describe('Agent streaming text deduplication', () => {
     broadcastEvent('agent:text-delta', { delta: '明白了' });
     broadcastEvent('agent:text-delta', { delta: '，让我' });
     broadcastEvent('agent:text-delta', { delta: '查一下' });
-    broadcastEvent('agent:tool-call', { toolName: 'search', input: { query: 'test' } });
-    broadcastEvent('agent:tool-result', { toolName: 'search', result: 'Found 3 results' });
+    broadcastEvent('agent:tool-call', { toolName: 'task_search', input: { query: 'test' } });
+    broadcastEvent('agent:tool-result', { toolName: 'task_search', result: 'Found 3 results' });
 
     // Simulate Round 2: more text deltas → final response
     broadcastEvent('agent:text-delta', { delta: '好的，' });
@@ -152,11 +152,11 @@ describe('Agent streaming text deduplication', () => {
 
     // Verify tool call
     expect(events[3].name).toBe('agent:tool-call');
-    expect((events[3].data as any).toolName).toBe('search');
+    expect((events[3].data as any).toolName).toBe('task_search');
 
     // Verify tool result
     expect(events[4].name).toBe('agent:tool-result');
-    expect((events[4].data as any).toolName).toBe('search');
+    expect((events[4].data as any).toolName).toBe('task_search');
 
     // Verify Round 2 text deltas — these MUST contain only the new text
     expect(events[5].name).toBe('agent:text-delta');

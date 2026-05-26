@@ -84,6 +84,14 @@ export interface SessionErrorEvent {
   taskId?: string;
   sessionId?: string;
   fromPlanSessionId?: string;
+  /**
+   * Structured error kind — lets downstream consumers (agent tools, UI) react
+   * without string-matching the error message.
+   * - 'conversation_lost': Claude CLI could not find the session JSONL on disk
+   *   (typically the remote host's conversation store was wiped). The session
+   *   record has already been auto-archived; caller should start a fresh session.
+   */
+  errorKind?: 'conversation_lost';
 }
 
 // ── Session streaming events ──
@@ -112,6 +120,25 @@ export interface SessionToolResultEvent {
   result: string;
   /** Non-null when this result belongs to a subagent Task */
   parentToolUseId?: string;
+}
+
+export interface SessionThinkingDeltaEvent {
+  sessionId: string;
+  taskId?: string;
+  delta: string;
+}
+
+/** Catch-all for Claude CLI event types we don't know how to parse.
+ *  Surfaced as a SystemBlock in the UI so new CLI fields never silently
+ *  disappear. `scope` identifies which layer saw it (top-level JSONL,
+ *  stream_event subtype, or content_block_delta delta type). */
+export interface SessionUnknownEventPayload {
+  sessionId: string;
+  taskId?: string;
+  scope: 'top_level' | 'stream_event' | 'delta';
+  eventType: string;
+  /** First 500 chars of the raw JSONL line, for diagnostics. */
+  snippet: string;
 }
 
 export interface SessionStatusChangedEvent {
@@ -377,8 +404,10 @@ export interface EventPayloadMap {
   'session:error': SessionErrorEvent;
 
   'session:text-delta': SessionTextDeltaEvent;
+  'session:thinking-delta': SessionThinkingDeltaEvent;
   'session:tool-use': SessionToolUseEvent;
   'session:tool-result': SessionToolResultEvent;
+  'session:unknown-event': SessionUnknownEventPayload;
   'session:status-changed': SessionStatusChangedEvent;
   'session:messages-delivered': SessionMessagesDeliveredEvent;
   'session:batch-completed': SessionBatchCompletedEvent;

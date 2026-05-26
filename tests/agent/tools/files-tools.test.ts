@@ -10,22 +10,24 @@ vi.mock('../../../src/constants.js', () => createMockConstants());
 
 import { WALNUT_HOME, MEMORY_FILE, PROJECTS_MEMORY_DIR, DAILY_DIR, GLOBAL_NOTES_FILE } from '../../../src/constants.js';
 import { executeTool } from '../../../src/agent/tools.js';
+import { getReadFileState } from '../../../src/agent/tools/files-tools.js';
 
 beforeEach(async () => {
   tmpDir = WALNUT_HOME;
   await fs.rm(tmpDir, { recursive: true, force: true });
   await fs.mkdir(tmpDir, { recursive: true });
+  getReadFileState().clear();
 });
 
 afterEach(async () => {
   await fs.rm(tmpDir, { recursive: true, force: true });
 });
 
-describe('files_read', () => {
+describe('file_read', () => {
   it('reads memory/global', async () => {
     await fs.writeFile(MEMORY_FILE, '# Global Memory\nSome content\n', 'utf-8');
 
-    const result = await executeTool('files_read', { source: 'memory/global' });
+    const result = await executeTool('file_read', { source: 'memory/global' });
     const parsed = JSON.parse(result as string);
     expect(parsed.content).toContain('Global Memory');
     expect(parsed.content_hash).toBeTruthy();
@@ -37,14 +39,14 @@ describe('files_read', () => {
     await fs.mkdir(projDir, { recursive: true });
     await fs.writeFile(path.join(projDir, 'MEMORY.md'), '---\nname: Work API\ndescription: API project\n---\n# Logs\n', 'utf-8');
 
-    const result = await executeTool('files_read', { source: 'memory/project/work/api' });
+    const result = await executeTool('file_read', { source: 'memory/project/work/api' });
     const parsed = JSON.parse(result as string);
     expect(parsed.content).toContain('Work API');
   });
 
   it('reads memory/daily (creates if needed)', async () => {
     // Daily log doesn't exist yet
-    const result = await executeTool('files_read', { source: 'memory/daily' });
+    const result = await executeTool('file_read', { source: 'memory/daily' });
     expect(result).toContain('not found');
   });
 
@@ -52,7 +54,7 @@ describe('files_read', () => {
     await fs.mkdir(path.dirname(GLOBAL_NOTES_FILE), { recursive: true });
     await fs.writeFile(GLOBAL_NOTES_FILE, '# My Notes\n- [ ] Buy groceries\n', 'utf-8');
 
-    const result = await executeTool('files_read', { source: 'notes/global' });
+    const result = await executeTool('file_read', { source: 'notes/global' });
     const parsed = JSON.parse(result as string);
     expect(parsed.content).toContain('My Notes');
     expect(parsed.content_hash).toBeTruthy();
@@ -62,7 +64,7 @@ describe('files_read', () => {
     const filePath = path.join(tmpDir, 'test.txt');
     await fs.writeFile(filePath, 'Hello world\nLine 2\n', 'utf-8');
 
-    const result = await executeTool('files_read', { source: filePath });
+    const result = await executeTool('file_read', { source: filePath });
     const parsed = JSON.parse(result as string);
     expect(parsed.content).toContain('Hello world');
     expect(parsed.content).toContain('Line 2');
@@ -73,7 +75,7 @@ describe('files_read', () => {
     const lines = Array.from({ length: 50 }, (_, i) => `Line ${i + 1}`);
     await fs.writeFile(filePath, lines.join('\n'), 'utf-8');
 
-    const result = await executeTool('files_read', { source: filePath, offset: 10, limit: 5 });
+    const result = await executeTool('file_read', { source: filePath, offset: 10, limit: 5 });
     const parsed = JSON.parse(result as string);
     expect(parsed.content).toContain('Line 10');
     expect(parsed.content).toContain('Line 14');
@@ -93,7 +95,7 @@ name: Test
 <task-ref id="t123" label="My Task"/>
 `, 'utf-8');
 
-    const result = await executeTool('files_read', { source: filePath, parse: true });
+    const result = await executeTool('file_read', { source: filePath, parse: true });
     const parsed = JSON.parse(result as string);
     expect(parsed.parsed).toBeDefined();
     expect(parsed.parsed.frontmatter).toEqual({ name: 'Test' });
@@ -105,26 +107,26 @@ name: Test
   });
 
   it('returns error for nonexistent source', async () => {
-    const result = await executeTool('files_read', { source: '/nonexistent/file.txt' });
+    const result = await executeTool('file_read', { source: '/nonexistent/file.txt' });
     expect(result).toContain('Error:');
   });
 
   it('returns error for invalid source pattern', async () => {
-    const result = await executeTool('files_read', { source: 'invalid/pattern' });
+    const result = await executeTool('file_read', { source: 'invalid/pattern' });
     expect(result).toContain('Error:');
   });
 });
 
-describe('files_write', () => {
+describe('file_write', () => {
   it('writes (overwrite) to memory/global with hash', async () => {
     await fs.writeFile(MEMORY_FILE, 'old content', 'utf-8');
 
     // Read to get hash
-    const readResult = await executeTool('files_read', { source: 'memory/global' });
+    const readResult = await executeTool('file_read', { source: 'memory/global' });
     const { content_hash } = JSON.parse(readResult as string);
 
     // Write with hash
-    const writeResult = await executeTool('files_write', {
+    const writeResult = await executeTool('file_write', {
       source: 'memory/global',
       content: 'new content',
       content_hash,
@@ -141,7 +143,7 @@ describe('files_write', () => {
   it('rejects overwrite without hash on memory sources', async () => {
     await fs.writeFile(MEMORY_FILE, 'content', 'utf-8');
 
-    const result = await executeTool('files_write', {
+    const result = await executeTool('file_write', {
       source: 'memory/global',
       content: 'new',
     });
@@ -152,7 +154,7 @@ describe('files_write', () => {
   it('appends to memory/daily', async () => {
     await fs.mkdir(DAILY_DIR, { recursive: true });
 
-    const result = await executeTool('files_write', {
+    const result = await executeTool('file_write', {
       source: 'memory/daily',
       content: 'Test entry',
       mode: 'append',
@@ -163,7 +165,7 @@ describe('files_write', () => {
 
   it('writes to notes/global', async () => {
     // Create new note (no hash needed for new files)
-    const result = await executeTool('files_write', {
+    const result = await executeTool('file_write', {
       source: 'notes/global',
       content: '# My Notes\n',
     });
@@ -177,7 +179,7 @@ describe('files_write', () => {
   it('writes to absolute file path', async () => {
     const filePath = path.join(tmpDir, 'output.txt');
 
-    const result = await executeTool('files_write', {
+    const result = await executeTool('file_write', {
       source: filePath,
       content: 'file content',
     });
@@ -191,8 +193,9 @@ describe('files_write', () => {
   it('appends to absolute file path', async () => {
     const filePath = path.join(tmpDir, 'append.txt');
     await fs.writeFile(filePath, 'first\n', 'utf-8');
+    await executeTool('file_read', { source: filePath });
 
-    const result = await executeTool('files_write', {
+    const result = await executeTool('file_write', {
       source: filePath,
       content: 'second\n',
       mode: 'append',
@@ -205,14 +208,14 @@ describe('files_write', () => {
   });
 });
 
-describe('files_edit', () => {
+describe('file_edit', () => {
   it('edits memory/global with hash', async () => {
     await fs.writeFile(MEMORY_FILE, 'Hello world\n', 'utf-8');
 
-    const readResult = await executeTool('files_read', { source: 'memory/global' });
+    const readResult = await executeTool('file_read', { source: 'memory/global' });
     const { content_hash } = JSON.parse(readResult as string);
 
-    const editResult = await executeTool('files_edit', {
+    const editResult = await executeTool('file_edit', {
       source: 'memory/global',
       old_content: 'Hello',
       new_content: 'Goodbye',
@@ -229,7 +232,7 @@ describe('files_edit', () => {
   it('rejects edit without hash on memory sources', async () => {
     await fs.writeFile(MEMORY_FILE, 'content', 'utf-8');
 
-    const result = await executeTool('files_edit', {
+    const result = await executeTool('file_edit', {
       source: 'memory/global',
       old_content: 'content',
       new_content: 'new',
@@ -241,8 +244,9 @@ describe('files_edit', () => {
   it('edits absolute file path (hash optional)', async () => {
     const filePath = path.join(tmpDir, 'edit.txt');
     await fs.writeFile(filePath, 'foo bar baz\n', 'utf-8');
+    await executeTool('file_read', { source: filePath });
 
-    const result = await executeTool('files_edit', {
+    const result = await executeTool('file_edit', {
       source: filePath,
       old_content: 'bar',
       new_content: 'qux',
@@ -257,8 +261,9 @@ describe('files_edit', () => {
   it('supports replace_all', async () => {
     const filePath = path.join(tmpDir, 'multi.txt');
     await fs.writeFile(filePath, 'aaa bbb aaa ccc aaa\n', 'utf-8');
+    await executeTool('file_read', { source: filePath });
 
-    const result = await executeTool('files_edit', {
+    const result = await executeTool('file_edit', {
       source: filePath,
       old_content: 'aaa',
       new_content: 'xxx',
@@ -274,8 +279,9 @@ describe('files_edit', () => {
   it('returns error for content not found', async () => {
     const filePath = path.join(tmpDir, 'nope.txt');
     await fs.writeFile(filePath, 'hello\n', 'utf-8');
+    await executeTool('file_read', { source: filePath });
 
-    const result = await executeTool('files_edit', {
+    const result = await executeTool('file_edit', {
       source: filePath,
       old_content: 'nonexistent',
       new_content: 'x',
@@ -285,7 +291,7 @@ describe('files_edit', () => {
   });
 });
 
-describe('files_list', () => {
+describe('file_list', () => {
   it('lists memory/project summaries', async () => {
     // Create a project memory
     const projDir = path.join(PROJECTS_MEMORY_DIR, 'passion/walnut');
@@ -296,7 +302,7 @@ describe('files_list', () => {
       'utf-8',
     );
 
-    const result = await executeTool('files_list', { prefix: 'memory/project' });
+    const result = await executeTool('file_list', { prefix: 'memory/project' });
     const parsed = JSON.parse(result as string);
     expect(parsed).toBeInstanceOf(Array);
     expect(parsed.length).toBeGreaterThan(0);
@@ -309,7 +315,7 @@ describe('files_list', () => {
     await fs.writeFile(path.join(DAILY_DIR, '2026-03-25.md'), 'log content', 'utf-8');
     await fs.writeFile(path.join(DAILY_DIR, '2026-03-24.md'), 'older log', 'utf-8');
 
-    const result = await executeTool('files_list', { prefix: 'memory/daily' });
+    const result = await executeTool('file_list', { prefix: 'memory/daily' });
     const parsed = JSON.parse(result as string);
     expect(parsed).toBeInstanceOf(Array);
     expect(parsed.length).toBe(2);
@@ -324,7 +330,7 @@ describe('files_list', () => {
     await fs.writeFile(GLOBAL_NOTES_FILE, '# Notes\n', 'utf-8');
     await fs.writeFile(path.join(notesDir, 'recipes.md'), '# Recipes\n', 'utf-8');
 
-    const result = await executeTool('files_list', { prefix: 'notes' });
+    const result = await executeTool('file_list', { prefix: 'notes' });
     const parsed = JSON.parse(result as string);
     expect(parsed).toBeInstanceOf(Array);
     expect(parsed.length).toBe(2); // global + recipes
@@ -338,7 +344,7 @@ describe('files_list', () => {
     await fs.writeFile(path.join(dir, 'a.txt'), 'aaa', 'utf-8');
     await fs.mkdir(path.join(dir, 'subdir'));
 
-    const result = await executeTool('files_list', { prefix: dir });
+    const result = await executeTool('file_list', { prefix: dir });
     const parsed = JSON.parse(result as string);
     expect(parsed).toBeInstanceOf(Array);
     expect(parsed.length).toBe(2);
@@ -348,7 +354,7 @@ describe('files_list', () => {
   });
 
   it('returns message for empty prefix', async () => {
-    const result = await executeTool('files_list', { prefix: 'memory/daily' });
+    const result = await executeTool('file_list', { prefix: 'memory/daily' });
     // DAILY_DIR doesn't exist yet → "No items found"
     expect(result).toContain('No items');
   });

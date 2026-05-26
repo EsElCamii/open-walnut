@@ -16,19 +16,28 @@ export function usePlanMode() {
 
   // Tracks whether the full plan instruction has been sent since last mode switch
   const planInstructionSentRef = useRef(false);
+  // Tracks plan→execution transition so we can send a one-shot [EXECUTION MODE] signal
+  const pendingModeOffRef = useRef(false);
 
   const toggleMode = useCallback(() => {
     setMode(prev => {
       const next = prev === 'execution' ? 'plan' : 'execution';
       try { localStorage.setItem(STORAGE_KEY, next); } catch { /* noop */ }
       planInstructionSentRef.current = false;
+      if (next === 'execution') pendingModeOffRef.current = true;
       return next;
     });
   }, []);
 
   /** Build the mode-related payload fields for the current turn. */
-  const getPlanPayload = useCallback((): { mode?: 'plan'; planModeFirst?: boolean } => {
-    if (mode !== 'plan') return {};
+  const getPlanPayload = useCallback((): { mode?: 'plan'; planModeFirst?: boolean; planModeOff?: boolean } => {
+    if (mode !== 'plan') {
+      if (pendingModeOffRef.current) {
+        pendingModeOffRef.current = false;
+        return { planModeOff: true };
+      }
+      return {};
+    }
     const isFirst = !planInstructionSentRef.current;
     if (isFirst) planInstructionSentRef.current = true;
     return { mode: 'plan', planModeFirst: isFirst || undefined };

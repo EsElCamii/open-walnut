@@ -82,7 +82,7 @@ describe('get_session_history tool', () => {
       msg('a1', 'assistant', longText),
     ]);
 
-    const result = await executeTool('get_session_history', { session_id: 'sess-full' });
+    const result = await executeTool('session_history', { session_id: 'sess-full' });
     const parsed = JSON.parse(result);
 
     expect(parsed).toHaveLength(2);
@@ -99,7 +99,7 @@ describe('get_session_history tool', () => {
     await seedSession('sess-under');
     await writeJsonl('sess-under', lines);
 
-    const result = await executeTool('get_session_history', { session_id: 'sess-under' });
+    const result = await executeTool('session_history', { session_id: 'sess-under' });
     const parsed = JSON.parse(result);
 
     expect(parsed).toHaveLength(10);
@@ -117,7 +117,7 @@ describe('get_session_history tool', () => {
     await seedSession('sess-over');
     await writeJsonl('sess-over', lines);
 
-    const result = await executeTool('get_session_history', { session_id: 'sess-over' });
+    const result = await executeTool('session_history', { session_id: 'sess-over' });
     const parsed = JSON.parse(result);
 
     expect(parsed).toHaveLength(10);
@@ -136,7 +136,7 @@ describe('get_session_history tool', () => {
     await seedSession('sess-floor');
     await writeJsonl('sess-floor', lines);
 
-    const result = await executeTool('get_session_history', { session_id: 'sess-floor' });
+    const result = await executeTool('session_history', { session_id: 'sess-floor' });
     const parsed = JSON.parse(result);
 
     expect(parsed).toHaveLength(2);
@@ -154,7 +154,7 @@ describe('get_session_history tool', () => {
     await seedSession('sess-tiny');
     await writeJsonl('sess-tiny', lines);
 
-    const result = await executeTool('get_session_history', { session_id: 'sess-tiny' });
+    const result = await executeTool('session_history', { session_id: 'sess-tiny' });
     const parsed = JSON.parse(result);
 
     expect(parsed).toHaveLength(2);
@@ -171,7 +171,7 @@ describe('get_session_history tool', () => {
       }),
     ]);
 
-    const result = await executeTool('get_session_history', { session_id: 'sess-tools' });
+    const result = await executeTool('session_history', { session_id: 'sess-tools' });
     const parsed = JSON.parse(result);
 
     expect(parsed[0].tools).toEqual(['Read']);
@@ -180,14 +180,14 @@ describe('get_session_history tool', () => {
   it('returns message for empty history', async () => {
     await seedSession('sess-empty');
 
-    const result = await executeTool('get_session_history', { session_id: 'sess-empty' });
+    const result = await executeTool('session_history', { session_id: 'sess-empty' });
     expect(result).toBe('No history found for this session.');
   });
 
   // ── Parameter validation ──
 
   it('rejects plan_only + summarize together', async () => {
-    const result = await executeTool('get_session_history', {
+    const result = await executeTool('session_history', {
       session_id: 'any',
       plan_only: true,
       summarize: true,
@@ -196,7 +196,7 @@ describe('get_session_history tool', () => {
   });
 
   it('rejects page without page_size', async () => {
-    const result = await executeTool('get_session_history', {
+    const result = await executeTool('session_history', {
       session_id: 'any',
       page: 2,
     });
@@ -204,7 +204,7 @@ describe('get_session_history tool', () => {
   });
 
   it('rejects plan_only + pagination', async () => {
-    const result = await executeTool('get_session_history', {
+    const result = await executeTool('session_history', {
       session_id: 'any',
       plan_only: true,
       page_size: 10,
@@ -213,7 +213,7 @@ describe('get_session_history tool', () => {
   });
 
   it('rejects summarize + pagination', async () => {
-    const result = await executeTool('get_session_history', {
+    const result = await executeTool('session_history', {
       session_id: 'any',
       summarize: true,
       page_size: 10,
@@ -222,7 +222,7 @@ describe('get_session_history tool', () => {
   });
 
   it('rejects page_size < 1', async () => {
-    const result = await executeTool('get_session_history', {
+    const result = await executeTool('session_history', {
       session_id: 'any',
       page_size: 0,
     });
@@ -230,7 +230,7 @@ describe('get_session_history tool', () => {
   });
 
   it('rejects page < 1', async () => {
-    const result = await executeTool('get_session_history', {
+    const result = await executeTool('session_history', {
       session_id: 'any',
       page_size: 10,
       page: 0,
@@ -256,7 +256,7 @@ describe('get_session_history tool', () => {
       ] } },
     ]);
 
-    const result = await executeTool('get_session_history', {
+    const result = await executeTool('session_history', {
       session_id: 'sess-plan',
       plan_only: true,
     });
@@ -270,7 +270,7 @@ describe('get_session_history tool', () => {
       msg('a1', 'assistant', 'Hi'),
     ]);
 
-    const result = await executeTool('get_session_history', {
+    const result = await executeTool('session_history', {
       session_id: 'sess-noplan',
       plan_only: true,
     });
@@ -287,7 +287,7 @@ describe('get_session_history tool', () => {
     await seedSession('sess-pag');
     await writeJsonl('sess-pag', lines);
 
-    const result = await executeTool('get_session_history', {
+    const result = await executeTool('session_history', {
       session_id: 'sess-pag',
       page_size: 3,
       page: 1,
@@ -313,7 +313,7 @@ describe('get_session_history tool', () => {
       msg('m1', 'assistant', 'Second'),
     ]);
 
-    const result = await executeTool('get_session_history', {
+    const result = await executeTool('session_history', {
       session_id: 'sess-pag-default',
       page_size: 10,
     });
@@ -327,7 +327,7 @@ describe('get_session_history tool', () => {
     await seedSession('sess-pag-empty');
     // No JSONL file
 
-    const result = await executeTool('get_session_history', {
+    const result = await executeTool('session_history', {
       session_id: 'sess-pag-empty',
       page_size: 5,
     });

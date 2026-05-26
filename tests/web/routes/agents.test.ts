@@ -56,8 +56,8 @@ describe('GET /api/agents/meta/tools', () => {
     expect(res.body.tools).toBeDefined();
     expect(Array.isArray(res.body.tools)).toBe(true);
     expect(res.body.tools.length).toBeGreaterThan(0);
-    expect(res.body.tools).toContain('query_tasks');
-    expect(res.body.tools).toContain('search');
+    expect(res.body.tools).toContain('task_query');
+    expect(res.body.tools).toContain('task_search');
   });
 });
 
@@ -184,7 +184,7 @@ describe('POST /api/agents/:id/clone', () => {
     await request(app).post('/api/agents').send({
       id: 'source-agent',
       name: 'Source',
-      allowed_tools: ['search', 'memory'],
+      allowed_tools: ['task_search', 'memory'],
     });
 
     const res = await request(app).post('/api/agents/source-agent/clone').send({
@@ -194,7 +194,7 @@ describe('POST /api/agents/:id/clone', () => {
     expect(res.status).toBe(201);
     expect(res.body.agent.id).toBe('cloned-agent');
     expect(res.body.agent.name).toBe('Source (Copy)');
-    expect(res.body.agent.allowed_tools).toEqual(['search', 'memory']);
+    expect(res.body.agent.allowed_tools).toEqual(['task_search', 'memory']);
   });
 
   it('returns 404 when cloning nonexistent agent', async () => {

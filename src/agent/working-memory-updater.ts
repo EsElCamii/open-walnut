@@ -3,7 +3,7 @@
  *
  * Inspired by Claude Code's sessionMemory.ts:
  * - Trigger: 10K tokens initial + 5K token growth + 3 tool calls
- * - Method: Forked agent turn with files_edit restricted to working-memory.md
+ * - Method: Forked agent turn with file_edit restricted to working-memory.md
  * - Uses main model for prompt cache sharing
  */
 import {
@@ -19,7 +19,9 @@ import { WORKING_MEMORY_FILE } from '../constants.js';
 import { estimateTokens } from '../core/daily-log.js';
 import { log } from '../logging/index.js';
 
-// ── Thresholds (from Claude Code) ──
+// Thresholds borrowed from Claude Code's sessionMemory.ts. 10K initial ensures enough
+// conversation context before first extraction. 5K growth + 3 tool calls ensures
+// meaningful new content (prevents updating on idle/chat-only turns).
 const INITIALIZATION_THRESHOLD = 10_000; // tokens before first update
 const UPDATE_THRESHOLD = 5_000;          // token growth between updates
 const TOOL_CALL_THRESHOLD = 3;           // min tool calls since last update
@@ -67,7 +69,8 @@ export function trackToolCall(): void {
 export function shouldUpdateWorkingMemory(currentTokens: number): boolean {
   if (state.isCompacting) return false;
 
-  // Guard against concurrent extraction (15s timeout, 1min stale)
+  // 15s: normal update should complete within this window (single LLM call + file edit).
+  // 60s: if extraction is stuck (LLM timeout, hung tool), treat as stale and allow retry.
   if (state.extractionStartedAt) {
     const elapsed = Date.now() - state.extractionStartedAt;
     if (elapsed < 15_000) return false; // still running
@@ -124,7 +127,7 @@ ${warningBlock}
 
 ## Instructions
 
-Use the files_edit tool to update the notes file. You may make multiple edit calls in parallel.
+Use the file_edit tool to update the notes file. You may make multiple edit calls in parallel.
 
 Rules:
 1. NEVER modify section headers (lines starting with "# ") or the italic descriptions.

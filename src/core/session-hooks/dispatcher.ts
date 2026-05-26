@@ -156,7 +156,7 @@ export class SessionHookDispatcher {
     // Guard: skip session:result/session:error/session:send from embedded subagent sessions.
     // Without this, a triage subagent's session:result would re-trigger triage
     // dispatch, creating an infinite loop. session:send is also guarded to prevent
-    // message-send-triage from firing when turn-complete-triage calls send_to_session.
+    // message-send-triage from firing when turn-complete-triage calls session_send.
     if ((name === EventNames.SESSION_RESULT || name === EventNames.SESSION_ERROR
         || name === EventNames.SESSION_SEND)
         && event.source === 'subagent-runner') {
@@ -222,7 +222,7 @@ export class SessionHookDispatcher {
       case EventNames.SESSION_SEND: {
         const state = this.getOrCreateState(sessionId);
         state.awaitingFirstResponse = true;
-        // Skip onMessageSend for automated sources (triage send_to_session, subagent-runner).
+        // Skip onMessageSend for automated sources (triage session_send, subagent-runner).
         // User-initiated sources (web-ui, cli, web-api) fire hooks normally.
         if (event.source !== 'agent' && event.source !== 'subagent-runner') {
           results.push({

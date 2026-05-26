@@ -66,7 +66,13 @@ export function useTaskSearch(): UseTaskSearchReturn {
       return;
     }
 
-    // Debounced server-side search
+    // Clear stale QMD results immediately so the UI falls back to client-side
+    // BM25 (zero-latency keyword match in TodoPanel's filteredTasks) while the
+    // debounced QMD request is in flight. Without this, the old query's results
+    // linger and the list looks stale.
+    setResults(null);
+
+    // Debounced server-side QMD search — fires in background, merges in when ready.
     if (debounceRef.current) clearTimeout(debounceRef.current);
     setIsSearching(true);
 

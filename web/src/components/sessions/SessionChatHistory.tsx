@@ -173,6 +173,9 @@ interface SessionChatHistoryProps {
   onTaskClick?: (taskId: string) => void;
   onSessionClick?: (sessionId: string) => void;
   onFileOpen?: (path: string, line?: number) => void;
+  /** Bubbles the hook's isStreaming up so parents don't need to mount their
+   *  own useSessionStream (which would double RPCs + defensive-clear paths). */
+  onStreamingChange?: (isStreaming: boolean) => void;
 }
 
 /** Memoized text block that caches renderMarkdownWithRefs output */
@@ -211,11 +214,12 @@ function StreamingTextBlock({ content, sessionCwd, onTaskClick, onSessionClick, 
 }
 
 /** Inline permission request card — Allow/Deny buttons for sensitive operations */
-function PermissionRequestCard({ sessionId, requestId, toolName, input, reason }: {
+function PermissionRequestCard({ sessionId, requestId, toolName, input, reason, initialStatus }: {
   sessionId: string; requestId: string; toolName: string;
   input?: Record<string, unknown>; reason?: string;
+  initialStatus?: 'pending' | 'allowed' | 'denied';
 }) {
-  const [status, setStatus] = useState<'pending' | 'loading' | 'allowed' | 'denied'>('pending');
+  const [status, setStatus] = useState<'pending' | 'loading' | 'allowed' | 'denied'>(initialStatus && initialStatus !== 'pending' ? initialStatus : 'pending');
   const [inputExpanded, setInputExpanded] = useState(false);
 
   const handleResponse = async (allow: boolean) => {
@@ -290,10 +294,25 @@ const StreamingBlockView = memo(function StreamingBlockView({ block, sessionId, 
         toolName={block.toolName}
         input={block.input}
         reason={block.reason}
+        initialStatus={block.status}
       />
     );
   }
 
+  if (block.type === 'thinking') {
+    // `open` by default so the user sees thinking tokens stream in live.
+    // Once the turn ends the user can collapse it manually; collapsing by
+    // default defeats the whole point of --include-partial-messages for
+    // thinking mode.
+    return (
+      <details open className="session-thinking-block" style={{ margin: '6px 0', opacity: 0.7, fontStyle: 'italic', fontSize: 13, borderLeft: '2px solid rgba(128,128,128,0.3)', paddingLeft: 8 }}>
+        <summary style={{ cursor: 'pointer', userSelect: 'none' }}>thinking…</summary>
+        <div style={{ whiteSpace: 'pre-wrap', marginTop: 4 }}>{block.content}</div>
+      </details>
+    );
+  }
+
+  // Below: block.type === 'tool_call'
   // ExitPlanMode with plan content → PlanCard (check planContent field, then input.plan)
   if (block.name === 'ExitPlanMode') {
     const content = block.planContent
@@ -307,6 +326,16 @@ const StreamingBlockView = memo(function StreamingBlockView({ block, sessionId, 
   if (block.name === 'Write' && typeof block.input?.file_path === 'string'
     && block.input.file_path.includes('.claude/plans/')) {
     return <CollapsedPlanWrite filePath={block.input.file_path} />;
+  }
+
+  // Suppress empty placeholder tool_call blocks from old stream buffers
+  // (leftover from when content_block_start early-emitted with empty input —
+  // see session a9f24f9a). A `calling` block with no input keys and no result
+  // is a ghost; the real block with populated input arrives from the final
+  // assistant JSONL line and replaces it.
+  const inputKeys = block.input ? Object.keys(block.input).length : 0;
+  if (block.status === 'calling' && inputKeys === 0 && !block.result) {
+    return null;
   }
 
   // Tool call block — reuse GenericToolCall for full expand/collapse support
@@ -531,7 +560,7 @@ function buildTimeline(
 // ── Auto-scroll constant ──
 const NEAR_BOTTOM_PX = 80;  // px from bottom to consider "at bottom"
 
-export const SessionChatHistory = memo(function SessionChatHistory({ sessionId, phase, initialPrompt, sessionCwd, sessionHost, optimisticMessages, onMessagesDelivered, onBatchCompleted, onEditQueued, onDeleteQueued, onAgentQueued, onClearCommitted, onRetryFailed, onDismissFailed, onTaskClick, onSessionClick, onFileOpen }: SessionChatHistoryProps) {
+export const SessionChatHistory = memo(function SessionChatHistory({ sessionId, phase, initialPrompt, sessionCwd, sessionHost, optimisticMessages, onMessagesDelivered, onBatchCompleted, onEditQueued, onDeleteQueued, onAgentQueued, onClearCommitted, onRetryFailed, onDismissFailed, onTaskClick, onSessionClick, onFileOpen, onStreamingChange }: SessionChatHistoryProps) {
   const [historyVersion, setHistoryVersion] = useState(0);
   const awaitingRefresh = useRef(false);
   const pendingBatchTotal = useRef(0);
@@ -565,6 +594,14 @@ export const SessionChatHistory = memo(function SessionChatHistory({ sessionId, 
   const { messages, loading, phase2Pending, error, forkBoundaryIndex } = useSessionHistory(sessionId, historyVersion);
   const { blocks, isStreaming, clear } = useSessionStream(sessionId);
   const containerRef = useRef<HTMLDivElement>(null);
+
+  // Propagate the single useSessionStream instance's isStreaming to parents
+  // (e.g. SessionPanel) so they can drive the ChatInput's send/interrupt state
+  // without mounting their own hook — the dual-mount pattern doubled RPCs and
+  // produced races between two defensive-clear paths.
+  useEffect(() => {
+    onStreamingChange?.(isStreaming);
+  }, [isStreaming, onStreamingChange]);
 
   // ── Team detection from history messages ──
   // Scan messages for TeamCreate + Agent tools to detect ALL teams in this session.
@@ -706,19 +743,16 @@ export const SessionChatHistory = memo(function SessionChatHistory({ sessionId, 
       // prevMsgLen = old value so the dedup scan covers the newly appeared messages
       // and removes the committed optimistic message (prevents Pattern A duplicate).
     } else {
-      // Defensive: if messages grew but awaitingRefresh was already cleared
-      // (e.g. fallback timeout fired before this fetch completed), clear stale
-      // streaming blocks to prevent 2x duplication.
-      // Guards: prevMsgLen > 0 excludes initial Phase 1/2 loading;
-      // !isStreaming excludes active streaming turns (where blocks SHOULD exist).
-      if (prevMsgLen.current > 0 && messages.length > prevMsgLen.current && blocks.length > 0 && !isStreaming) {
-        log.warn('stream', `useLayoutEffect: defensive clear — msgs grew ${prevMsgLen.current}→${messages.length} with ${blocks.length} stale blocks`, { sessionId });
-        clear();
-        blockIndexMap.current.clear();
-      }
+      // Normal growth path — just track the new length. Previously we had a
+      // "defensive clear" branch here to wipe stale blocks when messages grew
+      // without an awaitingRefresh signal, but that branch misfired during
+      // live turns whenever a stale resubscribe snapshot flipped isStreaming
+      // to false (see useSessionStream.ts non-regressive sync). The proper
+      // cleanup path is awaitingRefresh above; any block staleness past that
+      // is now handled by the hook's own lifecycle (session:result + clear()).
       prevMsgLen.current = messages.length;
     }
-  }, [messages, blocks.length, isStreaming, clear, onBatchCompleted]);
+  }, [messages, clear, onBatchCompleted]);
 
   // ═══════════════════════════════════════════════════════════════════════════
   // AUTO-SCROLL — Dead simple. Standard chat pattern.
@@ -1241,19 +1275,34 @@ export const SessionChatHistory = memo(function SessionChatHistory({ sessionId, 
                 // Group consecutive blocks under one assistant header.
                 // Show header on first block in each consecutive run.
                 // "Streaming" badge only on the last block's group header.
+                //
+                // Only text/system blocks get the assistant "bubble" (padding +
+                // rounded background). Tool-call and thinking blocks render flush
+                // to the panel — the bubble padding on the first tool_call
+                // produced a visible indent-jump against the following tool_calls.
                 const isFirst = i === 0 || timeline[i - 1].kind !== 'block';
                 const isInLastGroup = !timeline.slice(i).some(t => t.kind === 'user');
-                return (
-                  <div key={`b-${item.index}`} className={isFirst ? 'session-msg session-msg-assistant' : ''}>
-                    {isFirst && (
-                      <div className="session-msg-header">
-                        <span className="session-msg-role">Walnut</span>
-                        {isStreaming && isInLastGroup && <span className="session-streaming-badge">Streaming</span>}
+                const blockWantsBubble = item.block.type === 'text' || item.block.type === 'system';
+                const headerEl = isFirst && (
+                  <div className="session-msg-header">
+                    <span className="session-msg-role">Walnut</span>
+                    {isStreaming && isInLastGroup && <span className="session-streaming-badge">Streaming</span>}
+                  </div>
+                );
+                if (blockWantsBubble) {
+                  return (
+                    <div key={`b-${item.index}`} className={isFirst ? 'session-msg session-msg-assistant' : ''}>
+                      {headerEl}
+                      <div className={isFirst ? 'session-msg-content' : ''}>
+                        <StreamingBlockView block={item.block} sessionId={sessionId} sessionCwd={sessionCwd} onTaskClick={onTaskClick} onSessionClick={onSessionClick} onFileOpen={onFileOpen} />
                       </div>
-                    )}
-                    <div className={isFirst ? 'session-msg-content' : ''}>
-                      <StreamingBlockView block={item.block} sessionId={sessionId} sessionCwd={sessionCwd} onTaskClick={onTaskClick} onSessionClick={onSessionClick} onFileOpen={onFileOpen} />
                     </div>
+                  );
+                }
+                return (
+                  <div key={`b-${item.index}`} className="session-msg-bare">
+                    {headerEl}
+                    <StreamingBlockView block={item.block} sessionId={sessionId} sessionCwd={sessionCwd} onTaskClick={onTaskClick} onSessionClick={onSessionClick} onFileOpen={onFileOpen} />
                   </div>
                 );
               }

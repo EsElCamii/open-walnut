@@ -30,9 +30,9 @@ async function createTree(base: string, files: Record<string, string>) {
   }
 }
 
-// ── files_glob ──
+// ── file_glob ──
 
-describe('files_glob', () => {
+describe('file_glob', () => {
   it('finds files by extension pattern', async () => {
     const dir = path.join(tmpDir, 'project');
     await createTree(dir, {
@@ -42,7 +42,7 @@ describe('files_glob', () => {
       'README.md': '# Readme',
     });
 
-    const result = await executeTool('files_glob', { pattern: '**/*.ts', path: dir });
+    const result = await executeTool('file_glob', { pattern: '**/*.ts', path: dir });
     const parsed = JSON.parse(result as string);
     expect(parsed.count).toBe(2);
     expect(parsed.truncated).toBe(false);
@@ -51,7 +51,7 @@ describe('files_glob', () => {
 
   it('uses cwd when path not specified', async () => {
     // cwd is the project root which always contains package.json
-    const result = await executeTool('files_glob', { pattern: 'package.json' });
+    const result = await executeTool('file_glob', { pattern: 'package.json' });
     const parsed = JSON.parse(result as string);
     expect(parsed.count).toBeGreaterThanOrEqual(1);
     expect(parsed.matches.some((m: string) => m.includes('package.json'))).toBe(true);
@@ -62,7 +62,7 @@ describe('files_glob', () => {
     const dir = path.join(tmpDir, 'empty');
     await fs.mkdir(dir, { recursive: true });
 
-    const result = await executeTool('files_glob', { pattern: '**/*.xyz', path: dir });
+    const result = await executeTool('file_glob', { pattern: '**/*.xyz', path: dir });
     const parsed = JSON.parse(result as string);
     expect(parsed.count).toBe(0);
     expect(parsed.matches).toEqual([]);
@@ -76,7 +76,7 @@ describe('files_glob', () => {
       '.git/hooks/pre-commit.ts': 'exit 0', // .ts file inside .git/ to verify SKIP_DIRS
     });
 
-    const result = await executeTool('files_glob', { pattern: '**/*.ts', path: dir });
+    const result = await executeTool('file_glob', { pattern: '**/*.ts', path: dir });
     const parsed = JSON.parse(result as string);
     expect(parsed.count).toBe(1);
     expect(parsed.matches[0]).toContain('src/a.ts');
@@ -86,20 +86,20 @@ describe('files_glob', () => {
     const dir = path.join(tmpDir, 'abspath');
     await createTree(dir, { 'file.txt': 'hello' });
 
-    const result = await executeTool('files_glob', { pattern: '**/*', path: dir });
+    const result = await executeTool('file_glob', { pattern: '**/*', path: dir });
     const parsed = JSON.parse(result as string);
     expect(parsed.matches[0]).toMatch(/^\//);
   });
 
   it('returns error for missing pattern', async () => {
-    const result = await executeTool('files_glob', { pattern: '' });
+    const result = await executeTool('file_glob', { pattern: '' });
     expect(result).toContain('Error');
   });
 });
 
-// ── files_grep ──
+// ── file_grep ──
 
-describe('files_grep', () => {
+describe('file_grep', () => {
   let searchDir: string;
 
   beforeEach(async () => {
@@ -113,7 +113,7 @@ describe('files_grep', () => {
   });
 
   it('finds files matching pattern (files mode)', async () => {
-    const result = await executeTool('files_grep', {
+    const result = await executeTool('file_grep', {
       pattern: 'hello',
       path: searchDir,
       case_insensitive: true,
@@ -124,7 +124,7 @@ describe('files_grep', () => {
   });
 
   it('returns content with line numbers', async () => {
-    const result = await executeTool('files_grep', {
+    const result = await executeTool('file_grep', {
       pattern: 'Hello',
       path: searchDir,
       output_mode: 'content',
@@ -138,7 +138,7 @@ describe('files_grep', () => {
   });
 
   it('returns content with context lines', async () => {
-    const result = await executeTool('files_grep', {
+    const result = await executeTool('file_grep', {
       pattern: 'console\\.log',
       path: searchDir,
       output_mode: 'content',
@@ -154,7 +154,7 @@ describe('files_grep', () => {
   });
 
   it('returns per-file counts (count mode)', async () => {
-    const result = await executeTool('files_grep', {
+    const result = await executeTool('file_grep', {
       pattern: 'Hello',
       path: searchDir,
       output_mode: 'count',
@@ -167,7 +167,7 @@ describe('files_grep', () => {
   });
 
   it('filters by glob pattern', async () => {
-    const result = await executeTool('files_grep', {
+    const result = await executeTool('file_grep', {
       pattern: 'Hello',
       path: searchDir,
       glob: '*.ts',
@@ -179,7 +179,7 @@ describe('files_grep', () => {
   });
 
   it('supports case insensitive search', async () => {
-    const result = await executeTool('files_grep', {
+    const result = await executeTool('file_grep', {
       pattern: 'HELLO',
       path: searchDir,
       case_insensitive: true,
@@ -190,7 +190,7 @@ describe('files_grep', () => {
   });
 
   it('case sensitive by default', async () => {
-    const result = await executeTool('files_grep', {
+    const result = await executeTool('file_grep', {
       pattern: 'HELLO',
       path: searchDir,
       output_mode: 'count',
@@ -201,7 +201,7 @@ describe('files_grep', () => {
 
   it('searches a single file', async () => {
     const filePath = path.join(searchDir, 'src/main.ts');
-    const result = await executeTool('files_grep', {
+    const result = await executeTool('file_grep', {
       pattern: 'function',
       path: filePath,
       output_mode: 'content',
@@ -217,7 +217,7 @@ describe('files_grep', () => {
     const lines = Array.from({ length: 100 }, (_, i) => `match line ${i}`);
     await createTree(manyDir, { 'big.txt': lines.join('\n') });
 
-    const result = await executeTool('files_grep', {
+    const result = await executeTool('file_grep', {
       pattern: 'match',
       path: manyDir,
       output_mode: 'content',
@@ -229,7 +229,7 @@ describe('files_grep', () => {
   });
 
   it('returns error for invalid regex', async () => {
-    const result = await executeTool('files_grep', {
+    const result = await executeTool('file_grep', {
       pattern: '[invalid',
       path: searchDir,
     });
@@ -238,7 +238,7 @@ describe('files_grep', () => {
   });
 
   it('returns empty for no matches', async () => {
-    const result = await executeTool('files_grep', {
+    const result = await executeTool('file_grep', {
       pattern: 'zzznonexistent',
       path: searchDir,
       output_mode: 'files',
@@ -257,7 +257,7 @@ describe('files_grep', () => {
     // Create a text file
     await fs.writeFile(path.join(binDir, 'text.txt'), 'hello world', 'utf-8');
 
-    const result = await executeTool('files_grep', {
+    const result = await executeTool('file_grep', {
       pattern: 'hello',
       path: binDir,
       output_mode: 'files',
@@ -270,7 +270,7 @@ describe('files_grep', () => {
   // ── type parameter ──
 
   it('filters by type parameter', async () => {
-    const result = await executeTool('files_grep', {
+    const result = await executeTool('file_grep', {
       pattern: 'Hello',
       path: searchDir,
       type: 'ts',
@@ -282,7 +282,7 @@ describe('files_grep', () => {
   });
 
   it('type falls back to *.{type} for unknown types', async () => {
-    const result = await executeTool('files_grep', {
+    const result = await executeTool('file_grep', {
       pattern: 'hello',
       path: searchDir,
       type: 'md',
@@ -293,7 +293,7 @@ describe('files_grep', () => {
   });
 
   it('errors when both type and glob specified', async () => {
-    const result = await executeTool('files_grep', {
+    const result = await executeTool('file_grep', {
       pattern: 'Hello',
       path: searchDir,
       type: 'ts',
@@ -306,7 +306,7 @@ describe('files_grep', () => {
   // ── context_before / context_after (-B / -A) ──
 
   it('supports asymmetric context (context_before only)', async () => {
-    const result = await executeTool('files_grep', {
+    const result = await executeTool('file_grep', {
       pattern: 'console\\.log',
       path: searchDir,
       output_mode: 'content',
@@ -321,7 +321,7 @@ describe('files_grep', () => {
   });
 
   it('supports asymmetric context (context_after only)', async () => {
-    const result = await executeTool('files_grep', {
+    const result = await executeTool('file_grep', {
       pattern: 'console\\.log',
       path: searchDir,
       output_mode: 'content',
@@ -336,7 +336,7 @@ describe('files_grep', () => {
   });
 
   it('context_before/after override symmetric context', async () => {
-    const result = await executeTool('files_grep', {
+    const result = await executeTool('file_grep', {
       pattern: 'console\\.log',
       path: searchDir,
       output_mode: 'content',
@@ -361,7 +361,7 @@ describe('files_grep', () => {
     await createTree(manyDir, { 'data.txt': lines.join('\n') });
 
     // Without offset: first match is line 1
-    const resultNoOffset = await executeTool('files_grep', {
+    const resultNoOffset = await executeTool('file_grep', {
       pattern: 'match',
       path: manyDir,
       output_mode: 'content',
@@ -371,7 +371,7 @@ describe('files_grep', () => {
     expect(parsedNo.matches[0].line).toBe(1);
 
     // With offset=5: first returned match is line 6
-    const resultOffset = await executeTool('files_grep', {
+    const resultOffset = await executeTool('file_grep', {
       pattern: 'match',
       path: manyDir,
       output_mode: 'content',
@@ -392,7 +392,7 @@ describe('files_grep', () => {
       'd.txt': 'match here',
     });
 
-    const resultAll = await executeTool('files_grep', {
+    const resultAll = await executeTool('file_grep', {
       pattern: 'match',
       path: multiDir,
       output_mode: 'files',
@@ -400,7 +400,7 @@ describe('files_grep', () => {
     const parsedAll = JSON.parse(resultAll as string);
     expect(parsedAll.count).toBe(4);
 
-    const resultOffset = await executeTool('files_grep', {
+    const resultOffset = await executeTool('file_grep', {
       pattern: 'match',
       path: multiDir,
       output_mode: 'files',
@@ -418,7 +418,7 @@ describe('files_grep', () => {
       'code.ts': 'function foo() {\n  return 42;\n}\n',
     });
 
-    const result = await executeTool('files_grep', {
+    const result = await executeTool('file_grep', {
       pattern: 'function.*\\{\\n.*return',
       path: mlDir,
       output_mode: 'content',
@@ -437,7 +437,7 @@ describe('files_grep', () => {
       'code.ts': 'const a = 1;\nfunction foo() {\n  return 42;\n}\nconst b = 2;\n',
     });
 
-    const result = await executeTool('files_grep', {
+    const result = await executeTool('file_grep', {
       pattern: 'function.*\\{\\n.*return',
       path: mlDir,
       output_mode: 'content',
@@ -460,7 +460,7 @@ describe('files_grep', () => {
       'windows.txt': 'line one\r\nline two\r\nline three\r\n',
     });
 
-    const result = await executeTool('files_grep', {
+    const result = await executeTool('file_grep', {
       pattern: 'line two',
       path: crlfDir,
       output_mode: 'content',
@@ -479,7 +479,7 @@ describe('files_grep', () => {
   it('smart-wraps glob without path separator into **/', async () => {
     // When glob="*.ts" (no / or **), it should be auto-wrapped to "**/*.ts"
     // This means it should find .ts files in subdirectories too
-    const result = await executeTool('files_grep', {
+    const result = await executeTool('file_grep', {
       pattern: 'Hello',
       path: searchDir,
       glob: '*.ts',
@@ -501,7 +501,7 @@ describe('files_grep', () => {
     }
     await createTree(manyFilesDir, files);
 
-    const result = await executeTool('files_grep', {
+    const result = await executeTool('file_grep', {
       pattern: 'findme',
       path: manyFilesDir,
       output_mode: 'files',
@@ -520,7 +520,7 @@ describe('files_grep', () => {
     }
     await createTree(manyFilesDir, files);
 
-    const result = await executeTool('files_grep', {
+    const result = await executeTool('file_grep', {
       pattern: 'findme',
       path: manyFilesDir,
       output_mode: 'count',

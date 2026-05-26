@@ -95,7 +95,14 @@ async function runTodoSync(globals: GlobalOptions): Promise<{ ran: boolean; resu
 
     const { listTasks, updateTaskRaw, addTaskFull } = await import('../core/task-manager.js');
     const localTasks = await listTasks();
-    const syncResult = await syncTasks(localTasks, updateTaskRaw, addTaskFull);
+    // Wrap updateTaskRaw so its `{changed: boolean}` return matches syncTasks'
+    // `Promise<void>` signature. The boolean isn't useful at this call site —
+    // syncTasks already tracks its own pushed/pulled counters.
+    const syncResult = await syncTasks(
+      localTasks,
+      async (id, patch) => { await updateTaskRaw(id, patch); },
+      addTaskFull,
+    );
 
     if (!globals.json) {
       if (syncResult.pushed) console.log(`  \u2191 Pushed ${syncResult.pushed} task(s) to To-Do`);

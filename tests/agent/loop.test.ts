@@ -55,7 +55,7 @@ describe('runAgentLoop', () => {
     // First call: model requests tool use
     mockSendMessage.mockResolvedValueOnce({
       content: [
-        { type: 'tool_use', id: 'tool_1', name: 'query_tasks', input: {} },
+        { type: 'tool_use', id: 'tool_1', name: 'task_query', input: {} },
       ],
       stopReason: 'tool_use',
     });
@@ -81,8 +81,8 @@ describe('runAgentLoop', () => {
   it('handles multiple tool calls in one response', async () => {
     mockSendMessage.mockResolvedValueOnce({
       content: [
-        { type: 'tool_use', id: 'tool_1', name: 'query_tasks', input: {} },
-        { type: 'tool_use', id: 'tool_2', name: 'get_config', input: {} },
+        { type: 'tool_use', id: 'tool_1', name: 'task_query', input: {} },
+        { type: 'tool_use', id: 'tool_2', name: 'config_get', input: {} },
       ],
       stopReason: 'tool_use',
     });
@@ -108,7 +108,7 @@ describe('runAgentLoop', () => {
   it('calls onToolActivity callbacks', async () => {
     mockSendMessage.mockResolvedValueOnce({
       content: [
-        { type: 'tool_use', id: 'tool_1', name: 'query_tasks', input: {} },
+        { type: 'tool_use', id: 'tool_1', name: 'task_query', input: {} },
       ],
       stopReason: 'tool_use',
     });
@@ -126,8 +126,8 @@ describe('runAgentLoop', () => {
     });
 
     expect(activities).toHaveLength(2);
-    expect(activities[0]).toEqual({ toolName: 'query_tasks', status: 'calling' });
-    expect(activities[1]).toEqual({ toolName: 'query_tasks', status: 'done' });
+    expect(activities[0]).toEqual({ toolName: 'task_query', status: 'calling' });
+    expect(activities[1]).toEqual({ toolName: 'task_query', status: 'done' });
   });
 
   it('calls onText callback when text blocks appear', async () => {
@@ -173,7 +173,7 @@ describe('runAgentLoop', () => {
   it('handles tool execution errors gracefully', async () => {
     mockSendMessage.mockResolvedValueOnce({
       content: [
-        { type: 'tool_use', id: 'tool_1', name: 'get_task', input: { id: 'nonexistent' } },
+        { type: 'tool_use', id: 'tool_1', name: 'task_get', input: { id: 'nonexistent' } },
       ],
       stopReason: 'tool_use',
     });
@@ -256,7 +256,7 @@ describe('prompt caching integration', () => {
     // First call: tool use
     mockSendMessage.mockResolvedValueOnce({
       content: [
-        { type: 'tool_use', id: 't1', name: 'query_tasks', input: {} },
+        { type: 'tool_use', id: 't1', name: 'task_query', input: {} },
       ],
       stopReason: 'tool_use',
     });

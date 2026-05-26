@@ -15,9 +15,11 @@ import { log } from '../logging/index.js';
 import {
   encodeProjectPath,
   findLocalJsonlPath,
+  isSafeForProjectEncoding,
   readSessionJsonlContent,
   readSubagentContents,
   readSingleSubagentContent,
+  remoteJsonlPath,
 } from './session-file-reader.js';
 import os from 'node:os';
 import path from 'node:path';
@@ -37,13 +39,42 @@ interface ParsedHistoryCacheEntry {
 const MAX_HISTORY_CACHE = 30;
 const parsedHistoryCache = new Map<string, ParsedHistoryCacheEntry>();
 
-function cacheGet(sessionId: string): ParsedHistoryCacheEntry | undefined {
-  return parsedHistoryCache.get(sessionId);
+/**
+ * Resolved remote path cache — sessionId@host → full remote path of the JSONL
+ * as it actually exists on the remote host. Populated after the first successful
+ * `readSessionJsonlContent` for sessions whose cwd encoding is unsafe (> 200
+ * chars, Claude Code hashes them and we can't replicate the hash). Lets the
+ * mtime-stat fast path work for these sessions on subsequent reads.
+ */
+const remoteResolvedPaths = new Map<string, string>();
+const MAX_RESOLVED_PATHS = 200;
+function resolvedPathKey(sessionId: string, host: string): string { return `${sessionId}@${host}`; }
+function getResolvedRemotePath(sessionId: string, host: string): string | undefined {
+  return remoteResolvedPaths.get(resolvedPathKey(sessionId, host));
+}
+function setResolvedRemotePath(sessionId: string, host: string, fullPath: string): void {
+  const key = resolvedPathKey(sessionId, host);
+  remoteResolvedPaths.delete(key);
+  remoteResolvedPaths.set(key, fullPath);
+  if (remoteResolvedPaths.size > MAX_RESOLVED_PATHS) {
+    const oldest = remoteResolvedPaths.keys().next().value;
+    if (oldest) remoteResolvedPaths.delete(oldest);
+  }
 }
 
-function cacheSet(sessionId: string, entry: ParsedHistoryCacheEntry): void {
-  parsedHistoryCache.delete(sessionId);
-  parsedHistoryCache.set(sessionId, entry);
+/** Compose cache key so local and remote entries for the same sessionId don't collide. */
+function cacheKey(sessionId: string, host?: string): string {
+  return host ? `${sessionId}@${host}` : sessionId;
+}
+
+function cacheGet(sessionId: string, host?: string): ParsedHistoryCacheEntry | undefined {
+  return parsedHistoryCache.get(cacheKey(sessionId, host));
+}
+
+function cacheSet(sessionId: string, entry: ParsedHistoryCacheEntry, host?: string): void {
+  const key = cacheKey(sessionId, host);
+  parsedHistoryCache.delete(key);
+  parsedHistoryCache.set(key, entry);
   if (parsedHistoryCache.size > MAX_HISTORY_CACHE) {
     const oldest = parsedHistoryCache.keys().next().value;
     if (oldest) parsedHistoryCache.delete(oldest);
@@ -590,17 +621,21 @@ export interface ReadHistoryOptions {
 export async function readSessionHistory(sessionId: string, cwd?: string, host?: string, outputFile?: string, options?: ReadHistoryOptions): Promise<SessionHistoryMessage[]> {
   let messages: SessionHistoryMessage[] | null = null;
 
-  // Server-side mtime cache: for local sessions, check if JSONL hasn't changed since last parse.
+  // Server-side mtime cache: check if JSONL hasn't changed since last parse.
   // Primarily benefits completed/historical sessions viewed repeatedly.
-  let localMtimeMs: number | undefined;
+  //
+  // Local: fs.stat on the canonical path (cheap).
+  // Remote: one fs.stat RPC to the daemon — ~50ms and avoids re-fetching the
+  //   whole JSONL over the tunnel (seconds for large sessions).
+  let mtimeMs: number | undefined;
   if (!host) {
     const localPath = await findLocalJsonlPath(sessionId, cwd);
     if (localPath) {
       try {
         const stat = await fsp.stat(localPath);
-        localMtimeMs = stat.mtimeMs;
+        mtimeMs = stat.mtimeMs;
         const cached = cacheGet(sessionId);
-        if (cached && cached.mtimeMs === localMtimeMs) {
+        if (cached && cached.mtimeMs === mtimeMs) {
           // Cache hit — return cached messages (skipSubagents is the common path now,
           // so cached messages don't include childMessages and no mutation concern)
           return cached.messages;
@@ -609,10 +644,49 @@ export async function readSessionHistory(sessionId: string, cwd?: string, host?:
         // stat failed — proceed with full read
       }
     }
+  } else {
+    // Remote session: stat the JSONL path and compare mtime against the cache.
+    // Path resolution:
+    //   1. If cwd is safe for our encoding (<=200 chars encoded), build the
+    //      exact canonical path from cwd.
+    //   2. Otherwise (cwd missing or hashed by Claude Code), use a previously
+    //      resolved full path if we've discovered one via a prior full read.
+    let statPath: string | undefined;
+    if (cwd && isSafeForProjectEncoding(cwd)) {
+      statPath = remoteJsonlPath(sessionId, cwd);
+    } else {
+      statPath = getResolvedRemotePath(sessionId, host);
+    }
+    if (statPath) {
+      try {
+        const { DaemonFileReader } = await import('./daemon-file-reader.js');
+        const reader = new DaemonFileReader(host);
+        const statResult = await reader.stat(statPath);
+        if (statResult) {
+          mtimeMs = statResult.mtimeMs;
+          const cached = cacheGet(sessionId, host);
+          if (cached && cached.mtimeMs === mtimeMs) {
+            return cached.messages;
+          }
+        }
+      } catch (err) {
+        // stat failed (old daemon without fs.stat, or transport error) — skip
+        // the cache and fall through to a full read. Not fatal.
+        log.session.debug('remote fs.stat failed, skipping history cache', {
+          sessionId, host,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
   }
 
   const result = await readSessionJsonlContent(sessionId, cwd, host, outputFile);
   if (result) {
+    // Remember the resolved remote path so the next read can use the mtime
+    // fast-path even when cwd is unsafe for our canonical path encoding.
+    if (host && result.resolvedRemotePath) {
+      setResolvedRemotePath(sessionId, host, result.resolvedRemotePath);
+    }
     try {
       messages = parseSessionMessages(result.content);
 
@@ -697,8 +771,8 @@ export async function readSessionHistory(sessionId: string, cwd?: string, host?:
 
   // Only cache when skipSubagents — attachSubagentMessages mutates tool.childMessages
   // in place, so caching with children attached would share mutable state across consumers.
-  if (localMtimeMs !== undefined && options?.skipSubagents) {
-    cacheSet(sessionId, { mtimeMs: localMtimeMs, messages });
+  if (mtimeMs !== undefined && options?.skipSubagents) {
+    cacheSet(sessionId, { mtimeMs, messages }, host);
   }
 
   return messages;

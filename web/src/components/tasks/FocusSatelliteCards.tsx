@@ -92,10 +92,10 @@ export const SortableTierCard = memo(function SortableTierCard({ task, tier, isF
     };
     const handleScroll = () => setPhaseMenuOpen(false);
     document.addEventListener('mousedown', handleClick);
-    window.addEventListener('scroll', handleScroll, true);
+    window.addEventListener('scroll', handleScroll);
     return () => {
       document.removeEventListener('mousedown', handleClick);
-      window.removeEventListener('scroll', handleScroll, true);
+      window.removeEventListener('scroll', handleScroll);
     };
   }, [phaseMenuOpen]);
 

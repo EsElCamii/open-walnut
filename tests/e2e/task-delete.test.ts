@@ -17,7 +17,7 @@ vi.mock('../../src/constants.js', () => createMockConstants());
 
 import { WALNUT_HOME } from '../../src/constants.js';
 import { startServer, stopServer } from '../../src/web/server.js';
-import { linkActiveSession, clearActiveSession, linkSessionSlot } from '../../src/core/task-manager.js';
+import { linkSessionSlot, clearSessionSlot } from '../../src/core/task-manager.js';
 
 let server: HttpServer;
 let port: number;
@@ -104,7 +104,7 @@ describe('Task deletion — no active sessions', () => {
 describe('Task deletion — blocked by active sessions', () => {
   it('DELETE returns 409 when task has one active session', async () => {
     const task = await createTask('Has active session');
-    await linkActiveSession(task.id, 'sess-block-1');
+    await linkSessionSlot(task.id, 'sess-block-1', 'exec');
 
     const deleteRes = await fetch(apiUrl(`/api/tasks/${task.id}`), { method: 'DELETE' });
     expect(deleteRes.status).toBe(409);
@@ -144,7 +144,7 @@ describe('Task deletion — blocked by active sessions', () => {
     expect(failRes.status).toBe(409);
 
     // Clear all active sessions
-    await clearActiveSession(task.id);
+    await clearSessionSlot(task.id);
 
     // Now should succeed
     const okRes = await fetch(apiUrl(`/api/tasks/${task.id}`), { method: 'DELETE' });

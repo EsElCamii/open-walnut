@@ -8,14 +8,18 @@ import { createMockConstants } from '../helpers/mock-constants.js';
 
 vi.mock('../../src/constants.js', () => createMockConstants());
 
-import { addTask, toggleComplete, completeTask, updateTask, linkSessionSlot, ActiveChildrenError } from '../../src/core/task-manager.js';
+import { addTask, toggleComplete, completeTask, updateTask, linkSessionSlot, ActiveChildrenError, _resetForTesting } from '../../src/core/task-manager.js';
+import { closeDb } from '../../src/core/task-db.js';
 import { WALNUT_HOME } from '../../src/constants.js';
 
 beforeEach(async () => {
+  closeDb();
+  _resetForTesting();
   await fs.rm(WALNUT_HOME, { recursive: true, force: true });
 });
 
 afterEach(async () => {
+  closeDb();
   await fs.rm(WALNUT_HOME, { recursive: true, force: true });
 });
 

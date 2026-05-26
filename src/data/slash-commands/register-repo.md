@@ -8,6 +8,6 @@ The user wants to register a repository. Delegate to a Claude Code session.
 3. **Start a session** with:
    - `working_directory`: the target repo path
    - `prompt`: "Read the skill at {location} and follow its instructions to explore this codebase and register it as a repository." Include any extra context the user provided.
-4. **After session completes** — verify with `files_read source='repos/{slug}'`.
+4. **After session completes** — verify with `file_read source='repos/{slug}'`.
 
 Do NOT investigate the codebase yourself. Do NOT ask the user a bunch of questions. The session + skill handles everything.

@@ -28,6 +28,7 @@ export interface PricingEntry {
  */
 export const DEFAULT_PRICING: PricingEntry[] = [
   // ── Claude models (Anthropic/Bedrock on-demand) ──
+  { pattern: 'claude-opus-4-7',     input: 5.00,  output: 25.00, cacheWrite: 6.25,   cacheRead: 0.50 },
   { pattern: 'claude-opus-4-6',     input: 5.00,  output: 25.00, cacheWrite: 6.25,   cacheRead: 0.50 },
   { pattern: 'claude-opus-4-5',     input: 5.00,  output: 25.00, cacheWrite: 6.25,   cacheRead: 0.50 },
   { pattern: 'claude-opus-4-1',     input: 15.00, output: 75.00, cacheWrite: 18.75,  cacheRead: 1.50 },

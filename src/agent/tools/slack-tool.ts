@@ -42,7 +42,7 @@ function formatMessages(messages: SlackMessage[]): string {
 }
 
 export const slackTool: ToolDefinition = {
-  name: 'slack',
+  name: 'integration_slack',
   description:
     'Interact with Slack. Actions: "send_message" (send to channel/thread), "read_messages" (read channel history), "react" (add emoji reaction), "pin" (pin a message).',
   input_schema: {

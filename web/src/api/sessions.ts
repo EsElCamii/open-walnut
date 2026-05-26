@@ -30,8 +30,11 @@ export interface SessionHistoryResult {
 export async function fetchSessionHistory(sessionId: string, opts?: { source?: 'streams'; signal?: AbortSignal }): Promise<SessionHistoryResult> {
   const params: Record<string, string> = {};
   if (opts?.source) params.source = opts.source;
+  // Remote sessions + fork chains can take 20-30s on first load (SSH pulls 3+ MB JSONL
+  // serially through corp proxy). Streams path is local-only and fast; full path may be slow.
+  const timeoutMs = opts?.source === 'streams' ? 15_000 : 60_000;
   const res = await apiGet<{ messages: SessionHistoryMessage[]; forkBoundaryIndex?: number }>(
-    `/api/sessions/${sessionId}/history`, params, { signal: opts?.signal },
+    `/api/sessions/${sessionId}/history`, params, { signal: opts?.signal, timeoutMs },
   );
   return { messages: res.messages, forkBoundaryIndex: res.forkBoundaryIndex };
 }
@@ -179,7 +182,7 @@ export async function retrySession(sessionId: string): Promise<
 }
 
 export async function restartSession(sessionId: string): Promise<
-  { status: 'restarting'; taskId: string; oldSessionId: string }
+  { status: 'restarted'; sessionId: string }
 > {
   return apiPost(`/api/sessions/${sessionId}/restart`, {});
 }

@@ -15,16 +15,16 @@ type ToolMode = 'all' | 'allow' | 'deny';
 
 // Tool categories for the picker
 const TOOL_CATEGORIES: Record<string, string[]> = {
-  Task: ['query_tasks', 'get_task', 'create_task', 'update_task', 'delete_task'],
-  Memory: ['search', 'memory'],
-  Sessions: ['list_sessions', 'get_session_summary', 'start_session', 'send_to_session', 'get_session_history', 'update_session'],
-  Config: ['get_config', 'update_config', 'rename_category'],
-  Files: ['read_file', 'write_file', 'edit_file'],
-  Execution: ['exec', 'apply_patch', 'process'],
-  Integration: ['slack', 'tts', 'analyze_image'],
+  Task: ['task_query', 'task_get', 'task_create', 'task_update', 'task_delete', 'task_search'],
+  Memory: ['memory_notes_search'],
+  Sessions: ['session_list', 'session_summary', 'session_start', 'session_send', 'session_history', 'session_update', 'session_import'],
+  Config: ['config_get', 'config_update'],
+  Files: ['file_read', 'file_write', 'file_edit', 'file_list', 'file_glob', 'file_grep'],
+  Execution: ['shell_exec'],
+  Integration: ['integration_slack', 'integration_tts'],
   Web: ['web_search', 'web_fetch'],
-  Cron: ['list_cron_jobs', 'manage_cron_job'],
-  Agents: ['list_agents', 'get_agent', 'create_agent', 'update_agent', 'delete_agent'],
+  Cron: ['cron_list', 'cron_manage'],
+  Agents: ['agent_list', 'agent_get', 'agent_create', 'agent_update', 'agent_delete'],
 };
 
 function ToolPicker({ value, onChange, toolNames }: { value: string[]; onChange: (tools: string[]) => void; toolNames: string[] }) {

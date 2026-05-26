@@ -46,8 +46,10 @@ export const EventNames = {
 
   // Session streaming events (from --output-format stream-json)
   SESSION_TEXT_DELTA: 'session:text-delta',
+  SESSION_THINKING_DELTA: 'session:thinking-delta',
   SESSION_TOOL_USE: 'session:tool-use',
   SESSION_TOOL_RESULT: 'session:tool-result',
+  SESSION_UNKNOWN_EVENT: 'session:unknown-event',
   SESSION_STATUS_CHANGED: 'session:status-changed',
   SESSION_MESSAGES_DELIVERED: 'session:messages-delivered',
   SESSION_BATCH_COMPLETED: 'session:batch-completed',
@@ -55,6 +57,7 @@ export const EventNames = {
   SESSION_SYSTEM_EVENT: 'session:system-event',
   SESSION_USAGE_UPDATE: 'session:usage-update',
   SESSION_PERMISSION_REQUEST: 'session:permission-request',
+  SESSION_PERMISSION_RESOLVED: 'session:permission-resolved',
 
   // Team events (Claude Code Teams — parallel agents)
   SESSION_TEAM_INFO: 'session:team-info',

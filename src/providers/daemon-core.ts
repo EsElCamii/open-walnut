@@ -269,20 +269,41 @@ export function createDaemonCore<S extends CoreSessionData = CoreSessionData>(
     // if the CLI finished a turn cleanly, report code=0 so the walnut client
     // treats this as a normal turn boundary, not an error.
     const cleanExit = isTurnCompleteExit(session.jsonlPath)
+    // Age of JSONL matters: a fresh spawn that dies within a few seconds
+    // almost certainly never wrote its own type:result, so `cleanExit=true`
+    // would be reading the previous turn's residue. Log it so we can spot
+    // mis-normalized deaths instead of silently changing code=-1 → 0.
+    let jsonlAgeMs: number | null = null
+    try { jsonlAgeMs = clock() - fs.statSync(session.jsonlPath).mtimeMs } catch {}
     if (cleanExit && code !== 0) {
       logger('info', 'reapSession: turn-complete detected, normalizing exit code', {
-        sid, pid: session.pid, originalCode: code, originalReason: reason,
+        sid, pid: session.pid, originalCode: code, originalReason: reason, jsonlAgeMs,
       })
       code = 0
       reason = reason + '+turn-complete'
     }
 
+    // Emit state_transition BEFORE the mutation so any concurrent reader
+    // observing logger output sees the transition intent before the fact.
+    logger('info', 'state_transition', {
+      sid,
+      oldState: 'running',
+      newState: 'dead',
+      reason,
+      source: 'reapSession',
+      pid: session.pid,
+      code,
+      cleanExit,
+      jsonlAgeMs,
+    })
     session.state = 'dead'
     session.exitCode = code
     session.exitReason = reason
     session.exitedAt = clock()
 
-    logger('info', 'reapSession', { sid, pid: session.pid, code, reason })
+    logger('info', 'reapSession', {
+      sid, pid: session.pid, code, reason, cleanExit, jsonlAgeMs,
+    })
 
     // Stop orphan watchdog if we were polling kill(pid,0) for this session.
     if (session.orphanPollTimer) {
@@ -344,7 +365,9 @@ export function createDaemonCore<S extends CoreSessionData = CoreSessionData>(
     if (!session.pid) return
     if (session.orphanPollTimer) return  // idempotent
     const pid = session.pid
-    session.orphanPollTimer = setIntervalFn(() => {
+    const capturedStartTime = session.startTime
+    logger('info', 'startOrphanPoll: started', { sid, pid, startTime: capturedStartTime })
+    const timer = setIntervalFn(() => {
       const s = sessions.get(sid)
       if (!s || s.state !== 'running') {
         if (s?.orphanPollTimer) {
@@ -353,19 +376,42 @@ export function createDaemonCore<S extends CoreSessionData = CoreSessionData>(
         }
         return
       }
+      // Stale-timer guard: if cmdStart replaced the session under us, this
+      // interval's captured `pid` no longer matches `s.pid`. Do NOT reap —
+      // the newer session has its own lifecycle. Just self-terminate.
+      //
+      // Before this guard, a stale timer from an adopted orphan would still
+      // be comparing the captured (old) pid's /proc start_time against the
+      // freshly-written s.startTime (new pid), see them differ, and mis-fire
+      // `reapSession(sid, -1, 'pid-recycled')` — killing the newborn CLI
+      // while the old pid kept running unreaped. Symptom: every `--resume`
+      // spawn died ~1s after starting with reason `pid-recycled+turn-complete`.
+      if (s.pid !== pid) {
+        logger('warn', 'orphan poll: stale timer detected (session replaced), self-terminating', {
+          sid, capturedPid: pid, currentPid: s.pid,
+        })
+        try { clearIntervalFn(timer) } catch {}
+        // Don't null s.orphanPollTimer — it belongs to the new session now.
+        return
+      }
       try { killFn(pid, 0) } catch {
+        logger('info', 'orphan poll: kill(pid,0) ESRCH — reaping', { sid, pid })
         reapSession(sid, -1, 'orphan-poll-dead')
         return
       }
       // PID recycling defence: different start_time means the kernel handed
       // the pid to somebody else after the original CLI died.
-      if (s.startTime) {
+      if (capturedStartTime) {
         const current = readStartTimeFn(pid)
-        if (current && current !== s.startTime) {
+        if (current && current !== capturedStartTime) {
+          logger('warn', 'orphan poll: pid recycled (start_time drift) — reaping', {
+            sid, pid, captured: capturedStartTime, current,
+          })
           reapSession(sid, -1, 'pid-recycled')
         }
       }
     }, orphanPollIntervalMs)
+    session.orphanPollTimer = timer
   }
 
   /**
@@ -413,6 +459,14 @@ export function createDaemonCore<S extends CoreSessionData = CoreSessionData>(
       }
 
       // Genuine orphan — adopt and kick off 1s tight poll.
+      logger('info', 'state_transition', {
+        sid,
+        oldState: 'none',
+        newState: 'running',
+        reason: 'reconcile-adopt',
+        source: 'reconcileRegistry',
+        pid,
+      })
       logger('info', 'reconcile: adopted orphan session', { sid, pid })
       startOrphanPoll(sid)
       broadcastSessionState(sid, 'running', { pid, adopted: true })

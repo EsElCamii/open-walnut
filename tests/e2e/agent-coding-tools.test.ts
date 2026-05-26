@@ -1,5 +1,5 @@
 /**
- * E2E tests for the agent coding tools: read_file, write_file, edit_file.
+ * E2E tests for the agent coding tools: file_read, file_write, file_edit.
  *
  * Starts a real server on a random port, executes tools via executeTool(),
  * and verifies persistence on the real filesystem (tmpdir via mock constants).
@@ -41,13 +41,13 @@ describe('write_file → read_file round-trip', () => {
   const content = 'Hello from E2E test!\nLine two.\nLine three.';
 
   it('write_file creates the file and returns success', async () => {
-    const result = await executeTool('write_file', { path: filePath, content });
+    const result = await executeTool('file_write', { path: filePath, content });
     expect(result).toContain('File written');
     expect(result).toContain(filePath);
   });
 
   it('read_file returns the same content with line numbers', async () => {
-    const result = await executeTool('read_file', { path: filePath });
+    const result = await executeTool('file_read', { path: filePath });
     expect(result).toContain('Hello from E2E test!');
     expect(result).toContain('Line two.');
     expect(result).toContain('Line three.');
@@ -66,7 +66,7 @@ describe('write_file with nested directories', () => {
   const content = 'nested content';
 
   it('creates parent directories and writes file', async () => {
-    const result = await executeTool('write_file', { path: filePath, content });
+    const result = await executeTool('file_write', { path: filePath, content });
     expect(result).toContain('File written');
   });
 
@@ -80,7 +80,7 @@ describe('write_file with nested directories', () => {
 
 describe('read_file on non-existent file', () => {
   it('returns an error message', async () => {
-    const result = await executeTool('read_file', {
+    const result = await executeTool('file_read', {
       path: '/tmp/nonexistent-xyz-e2e-test-12345.txt',
     });
     expect(result.toLowerCase()).toMatch(/not found|enoent/);
@@ -95,10 +95,10 @@ describe('read_file with offset and limit', () => {
   it('returns only the requested slice of lines', async () => {
     // Create a 25-line file
     const lines = Array.from({ length: 25 }, (_, i) => `Line ${i + 1}`);
-    await executeTool('write_file', { path: filePath, content: lines.join('\n') });
+    await executeTool('file_write', { path: filePath, content: lines.join('\n') });
 
     // Read with offset=5, limit=3 (1-based: lines 5, 6, 7)
-    const result = await executeTool('read_file', {
+    const result = await executeTool('file_read', {
       path: filePath,
       offset: 5,
       limit: 3,
@@ -129,7 +129,7 @@ describe('read_file on image file', () => {
     await fs.mkdir(path.dirname(filePath), { recursive: true });
     await fs.writeFile(filePath, pngHeader);
 
-    const result = await executeTool('read_file', { path: filePath });
+    const result = await executeTool('file_read', { path: filePath });
     // Vision-supported images return an array: [image content block, text metadata]
     expect(Array.isArray(result)).toBe(true);
     const blocks = result as Array<{ type: string; text?: string; source?: { type: string; media_type: string; data: string } }>;
@@ -149,9 +149,9 @@ describe('edit_file basic replacement', () => {
   const original = 'The quick brown fox jumps over the lazy dog.';
 
   it('replaces a unique string and confirms via read_file', async () => {
-    await executeTool('write_file', { path: filePath, content: original });
+    await executeTool('file_write', { path: filePath, content: original });
 
-    const editResult = await executeTool('edit_file', {
+    const editResult = await executeTool('file_edit', {
       path: filePath,
       old_string: 'brown fox',
       new_string: 'red panda',
@@ -160,7 +160,7 @@ describe('edit_file basic replacement', () => {
     expect(editResult).toContain('1 replacement');
 
     // Verify via read_file
-    const readResult = await executeTool('read_file', { path: filePath });
+    const readResult = await executeTool('file_read', { path: filePath });
     expect(readResult).toContain('red panda');
     expect(readResult).not.toContain('brown fox');
 
@@ -177,9 +177,9 @@ describe('edit_file non-unique match error', () => {
 
   it('returns error when old_string matches multiple times', async () => {
     const content = 'hello world\nhello again\nhello once more';
-    await executeTool('write_file', { path: filePath, content });
+    await executeTool('file_write', { path: filePath, content });
 
-    const result = await executeTool('edit_file', {
+    const result = await executeTool('file_edit', {
       path: filePath,
       old_string: 'hello',
       new_string: 'goodbye',
@@ -196,9 +196,9 @@ describe('edit_file replace_all', () => {
 
   it('replaces all occurrences when replace_all is true', async () => {
     const content = 'hello world\nhello again\nhello once more';
-    await executeTool('write_file', { path: filePath, content });
+    await executeTool('file_write', { path: filePath, content });
 
-    const editResult = await executeTool('edit_file', {
+    const editResult = await executeTool('file_edit', {
       path: filePath,
       old_string: 'hello',
       new_string: 'goodbye',
@@ -207,7 +207,7 @@ describe('edit_file replace_all', () => {
     expect(editResult).toContain('3 replacement');
 
     // Verify via read_file
-    const readResult = await executeTool('read_file', { path: filePath });
+    const readResult = await executeTool('file_read', { path: filePath });
     expect(readResult).not.toContain('hello');
     expect(readResult).toContain('goodbye world');
     expect(readResult).toContain('goodbye again');
@@ -221,12 +221,12 @@ describe('edit_file string not found', () => {
   const filePath = testFile('edit-notfound.txt');
 
   it('returns error when old_string is not in the file', async () => {
-    await executeTool('write_file', {
+    await executeTool('file_write', {
       path: filePath,
       content: 'some existing content',
     });
 
-    const result = await executeTool('edit_file', {
+    const result = await executeTool('file_edit', {
       path: filePath,
       old_string: 'nonexistent string xyz',
       new_string: 'replacement',
@@ -251,14 +251,14 @@ describe('full lifecycle: write → edit → read → edit → read', () => {
       'export default greet;',
     ].join('\n');
 
-    const writeResult = await executeTool('write_file', {
+    const writeResult = await executeTool('file_write', {
       path: filePath,
       content: initial,
     });
     expect(writeResult).toContain('File written');
 
     // Step 2: First edit — change function name
-    const edit1Result = await executeTool('edit_file', {
+    const edit1Result = await executeTool('file_edit', {
       path: filePath,
       old_string: 'function greet(name: string)',
       new_string: 'function sayHello(name: string)',
@@ -266,12 +266,12 @@ describe('full lifecycle: write → edit → read → edit → read', () => {
     expect(edit1Result).toContain('File edited');
 
     // Step 3: Read and verify first edit
-    const read1Result = await executeTool('read_file', { path: filePath });
+    const read1Result = await executeTool('file_read', { path: filePath });
     expect(read1Result).toContain('sayHello');
     expect(read1Result).not.toContain('function greet(');
 
     // Step 4: Second edit — change the return value
-    const edit2Result = await executeTool('edit_file', {
+    const edit2Result = await executeTool('file_edit', {
       path: filePath,
       old_string: 'return `Hello, ${name}!`',
       new_string: 'return `Hi there, ${name}! Welcome.`',
@@ -279,7 +279,7 @@ describe('full lifecycle: write → edit → read → edit → read', () => {
     expect(edit2Result).toContain('File edited');
 
     // Step 5: Read and verify final state
-    const read2Result = await executeTool('read_file', { path: filePath });
+    const read2Result = await executeTool('file_read', { path: filePath });
     expect(read2Result).toContain('sayHello');
     expect(read2Result).toContain('Hi there');
     expect(read2Result).toContain('Welcome.');

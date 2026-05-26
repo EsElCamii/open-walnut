@@ -92,7 +92,7 @@ describe('Starred via REST API', () => {
 
 describe('Starred via agent update_task tool', () => {
   let taskId: string;
-  const updateTool = tools.find((t) => t.name === 'update_task')!;
+  const updateTool = tools.find((t) => t.name === 'task_update')!;
 
   it('update_task tool exists', () => {
     expect(updateTool).toBeDefined();

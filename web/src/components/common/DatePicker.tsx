@@ -119,8 +119,17 @@ function DatePickerContent({ date, onChange }: Pick<DatePickerProps, 'date' | 'o
 
   return (
     <div className="dp-content">
-      {/* Time-level pills: 30m, 2h, 4h, 8h */}
+      {/* Time-level pills: None (if set), 30m, 2h, 4h, 8h */}
       <div className="dp-pills">
+        {date && (
+          <button
+            className="dp-pill dp-pill-none"
+            onClick={(e) => { e.stopPropagation(); onChange(null); }}
+            title="Clear date"
+          >
+            None
+          </button>
+        )}
         {TIME_PILLS.map((p) => (
           <button
             key={p.label}
@@ -184,10 +193,10 @@ export function DatePicker({ date, onChange, inline }: DatePickerProps) {
     };
     const handleScroll = () => close();
     document.addEventListener('mousedown', handleClick);
-    window.addEventListener('scroll', handleScroll, true);
+    window.addEventListener('scroll', handleScroll);
     return () => {
       document.removeEventListener('mousedown', handleClick);
-      window.removeEventListener('scroll', handleScroll, true);
+      window.removeEventListener('scroll', handleScroll);
     };
   }, [open, close]);
 

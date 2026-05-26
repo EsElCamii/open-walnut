@@ -17,10 +17,27 @@ import { log } from '../logging/index.js';
 
 /**
  * Encode a working directory path the way Claude Code does.
- * /Users/foo/bar → -Users-foo-bar
+ * Mirrors Claude Code's `sanitizePath` at claude-code-source-code/src/utils/sessionStoragePortable.ts:311:
+ *   replaces ALL non-alphanumeric characters with '-', not just '/'.
+ * Examples:
+ *   /Users/foo/bar       → -Users-foo-bar
+ *   /Users/foo-bar/baz   → -Users-foo-bar-baz    (dash gets re-encoded)
+ *   /Users/foo_bar/baz   → -Users-foo-bar-baz    (underscore collides with dash)
+ * Caveat: paths >200 chars are truncated + hashed (Bun.hash) by Claude Code —
+ * not yet handled here; callers that rely on exact parity for long paths
+ * should use `isSafeForProjectEncoding` to detect and skip.
  */
 export function encodeProjectPath(cwd: string): string {
-  return cwd.replaceAll('/', '-');
+  return cwd.replace(/[^a-zA-Z0-9]/g, '-');
+}
+
+/**
+ * Returns true if Claude Code would encode this cwd without the >200 char
+ * hash-suffix path. Migration callers should skip when this is false (we
+ * don't replicate Bun.hash). Most real cwds are far under this limit.
+ */
+export function isSafeForProjectEncoding(cwd: string): boolean {
+  return cwd.replace(/[^a-zA-Z0-9]/g, '-').length <= 200;
 }
 
 /** Build the canonical JSONL path for a session (local absolute path). */
@@ -173,6 +190,13 @@ export type ReadSessionResult = {
   source: 'local' | 'stream' | 'outputFile' | 'remote';
   /** CWD extracted from JSONL content — may differ from the cwd parameter when found via fallback search. */
   foundCwd?: string;
+  /**
+   * Remote absolute path where the JSONL was located. Set only for 'remote'
+   * source when the file was found via glob/find fallback (i.e. cwd was
+   * missing or unsafe for our path encoding). Callers can cache this to
+   * skip the search on the next read.
+   */
+  resolvedRemotePath?: string;
 };
 
 /**
@@ -192,9 +216,13 @@ export async function readSessionJsonlContent(
   const { SESSION_STREAMS_DIR } = await import('../constants.js');
 
   // Helper: attach foundCwd from JSONL content
-  const withFoundCwd = (content: string, source: ReadSessionResult['source']): ReadSessionResult => {
+  const withFoundCwd = (content: string, source: ReadSessionResult['source'], resolvedRemotePath?: string): ReadSessionResult => {
     const foundCwd = extractCwdFromJsonlContent(content);
-    return { content, source, ...(foundCwd ? { foundCwd } : {}) };
+    return {
+      content, source,
+      ...(foundCwd ? { foundCwd } : {}),
+      ...(resolvedRemotePath ? { resolvedRemotePath } : {}),
+    };
   };
 
   // Helper: extract synthetic walnut-injected user events from the local streams file.
@@ -241,21 +269,32 @@ export async function readSessionJsonlContent(
     const REMOTE_READ_TIMEOUT = 30_000;
     const { DaemonFileReader } = await import('./daemon-file-reader.js');
     const reader = new DaemonFileReader(host);
-    const exactPath = cwd ? remoteJsonlPath(sessionId, cwd) : null;
+    // Claude Code hashes cwds whose encoded form exceeds 200 chars; we don't
+    // replicate that hashing, so the computed exactPath will be wrong. In that
+    // case, skip the exact-path attempt and fall through to glob/find.
+    const cwdSafeForExactPath = cwd ? isSafeForProjectEncoding(cwd) : false;
+    const exactPath = cwdSafeForExactPath ? remoteJsonlPath(sessionId, cwd!) : null;
     const globPath = remoteJsonlPath(sessionId); // ~/.claude/projects/*/${sessionId}.jsonl
 
     try {
       const result = await Promise.race([
         (async () => {
-          // Try exact encoded path first, then glob fallback, then find fallback.
+          // Try exact encoded path first.
+          // DaemonFileReader.readFile() now distinguishes ENOENT (returns null)
+          // from transport/RPC errors (throws). When cwd is known AND is safe
+          // for our encoding and exact path returns null, the file genuinely
+          // doesn't exist — no amount of globbing will conjure it.
           if (exactPath) {
             const content = await reader.readFile(exactPath);
-            if (content) return withFoundCwd(await mergeSyntheticFromLocalStreams(content), 'remote');
+            if (content) return withFoundCwd(await mergeSyntheticFromLocalStreams(content), 'remote', exactPath);
+            return null;
           }
+          // cwd unknown OR unsafe-for-encoding (>200 chars, hashed by Claude Code):
+          // fall back to glob, then find.
           const content = await reader.readFile(globPath);
           if (content) return withFoundCwd(await mergeSyntheticFromLocalStreams(content), 'remote');
-          const findContent = await reader.findSession(sessionId);
-          if (findContent) return withFoundCwd(await mergeSyntheticFromLocalStreams(findContent), 'remote');
+          const findResult = await reader.findSession(sessionId);
+          if (findResult) return withFoundCwd(await mergeSyntheticFromLocalStreams(findResult.content), 'remote', findResult.path);
           return null;
         })(),
         new Promise<never>((_, reject) =>

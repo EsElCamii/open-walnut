@@ -204,7 +204,7 @@ describe('Token Budget Guard', () => {
       { role: 'user', content: 'question 2' },
       { role: 'assistant', content: [
         { type: 'text', text: 'thinking' },
-        { type: 'tool_use', id: 't1', name: 'search', input: {} },
+        { type: 'tool_use', id: 't1', name: 'task_search', input: {} },
       ]},
       { role: 'user', content: [
         { type: 'tool_result', tool_use_id: 't1', content: 'result' },

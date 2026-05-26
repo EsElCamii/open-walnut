@@ -153,7 +153,7 @@ async function loadConversationLog(task: Task, budget: number): Promise<string> 
   return '[...earlier entries omitted]\n\n' + clean;
 }
 
-/** Load recent diary entries from the Obsidian vault (for Inner Space). */
+/** Load recent diary entries from the Obsidian vault (for Mentor). */
 async function loadJournalRecent(budget: number): Promise<string> {
   const fs = await import('node:fs');
   const path = await import('node:path');

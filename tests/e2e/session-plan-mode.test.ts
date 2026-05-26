@@ -327,7 +327,7 @@ describe('from_plan fallback to resume mode', () => {
     // Listen for session result (the resumed session will produce one)
     const resultPromise = waitForWsEvent(ws, 'session:result', 20000)
 
-    const toolResult = await executeTool('start_session', {
+    const toolResult = await executeTool('session_start', {
       task_id: 'plan-task-001',
       from_plan: planSessionId,
       working_directory: process.cwd(),
@@ -358,7 +358,7 @@ describe('from_plan fallback to resume mode', () => {
   it('from_plan still hard-errors for nonexistent session', async () => {
     const { executeTool } = await import('../../src/agent/tools.js')
 
-    const result = await executeTool('start_session', {
+    const result = await executeTool('session_start', {
       task_id: 'plan-task-001',
       from_plan: 'nonexistent-session-id-12345',
       working_directory: process.cwd(),
@@ -394,7 +394,7 @@ describe('send_to_session mode override', () => {
     const resumeResultPromise = waitForWsEvent(ws2, 'session:result', 20000)
 
     const { executeTool } = await import('../../src/agent/tools.js')
-    const toolResult = await executeTool('send_to_session', {
+    const toolResult = await executeTool('session_send', {
       session_id: normalSessionId,
       message: 'follow up with bypass mode',
       mode: 'bypass',

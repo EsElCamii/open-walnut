@@ -10,6 +10,18 @@ vi.mock('../../src/utils/process.js', () => ({
   isProcessAlive: () => true,
   isProcessAliveAsync: async () => true,
 }));
+vi.mock('../../src/utils/session-liveness.js', () => ({
+  // Mirror real semantics enough for these tests:
+  //  - stopped/error → dead
+  //  - remote (has host) → alive (daemon assumed connected)
+  //  - local with pid → alive
+  //  - local without pid → dead
+  isSessionProcessAlive: async (s: { process_status?: string; host?: string; pid?: number | null }) => {
+    if (s.process_status === 'stopped' || s.process_status === 'error') return false;
+    if (s.host) return true;
+    return s.pid != null;
+  },
+}));
 vi.mock('../../src/providers/daemon-connection.js', () => ({
   isDaemonConnected: () => true,
   getDaemonDisconnectedSince: () => null,
@@ -24,21 +36,28 @@ import {
   updateSessionRecord,
   linkSessionToTask,
   getRecentSessions,
-  getRunningSessionsByHost,
   getActiveSessionsByHost,
   getAllAliveSessionsByHost,
   checkSessionLimit,
   isTerminalSession,
+  _resetSessionTrackerForTesting,
 } from '../../src/core/session-tracker.js';
+import { closeDb } from '../../src/core/session-db.js';
 import { WALNUT_HOME } from '../../src/constants.js';
 
 beforeEach(async () => {
   tmpDir = WALNUT_HOME;
+  // Close the shared SQLite handle (opened against the prior test's WALNUT_HOME,
+  // which is about to be wiped) so the next open targets the fresh tmp dir.
+  closeDb();
+  _resetSessionTrackerForTesting();
   await fsp.rm(tmpDir, { recursive: true, force: true });
   await fsp.mkdir(tmpDir, { recursive: true });
 });
 
 afterEach(async () => {
+  closeDb();
+  _resetSessionTrackerForTesting();
   // Retry cleanup to handle macOS ENOTEMPTY race (concurrent file writes during rm)
   for (let i = 0; i < 3; i++) {
     try {
@@ -62,10 +81,21 @@ describe('createSessionRecord', () => {
     expect(session.messageCount).toBe(1);
   });
 
-  it('increments messageCount on duplicate claudeSessionId', async () => {
-    await createSessionRecord('claude-sess-dup', 'task-1', 'proj');
-    const session = await createSessionRecord('claude-sess-dup', 'task-1', 'proj');
+  it('increments messageCount on duplicate claudeSessionId when extras change', async () => {
+    // Plain duplicate with identical args is a no-op (see createSessionRecord no-op guard).
+    // Only advance messageCount when the caller brings a material change (e.g. a new pid).
+    await createSessionRecord('claude-sess-dup', 'task-1', 'proj', undefined, { pid: 100 });
+    const session = await createSessionRecord('claude-sess-dup', 'task-1', 'proj', undefined, { pid: 101 });
     expect(session.messageCount).toBe(2);
+  });
+
+  it('treats duplicate createSessionRecord with identical fields as a no-op', async () => {
+    const first = await createSessionRecord('claude-sess-noop', 'task-1', 'proj');
+    await new Promise((r) => setTimeout(r, 15));
+    const second = await createSessionRecord('claude-sess-noop', 'task-1', 'proj');
+    // Same messageCount and lastActiveAt proves no writeStore happened on the 2nd call
+    expect(second.messageCount).toBe(first.messageCount);
+    expect(second.lastActiveAt).toBe(first.lastActiveAt);
   });
 
   it('persists session to store', async () => {
@@ -158,6 +188,24 @@ describe('updateSessionRecord', () => {
     const found = await getSessionByClaudeId('upd-3');
     expect(found!.process_status).toBe('stopped');
   });
+
+  it('skips writes when every field already equals current (no-op guard)', async () => {
+    const created = await createSessionRecord('noop-1', 'task-1', 'proj');
+    const firstActive = created.lastActiveAt;
+
+    // Small delay — if the update path ran, lastActiveAt would be bumped
+    await new Promise((r) => setTimeout(r, 15));
+
+    // Same value as created — should be a no-op
+    const result = await updateSessionRecord('noop-1', { process_status: 'running' });
+    expect(result.lastActiveAt).toBe(firstActive);
+
+    // Real change after no-op still works
+    await new Promise((r) => setTimeout(r, 15));
+    const changed = await updateSessionRecord('noop-1', { process_status: 'stopped' });
+    expect(changed.lastActiveAt).not.toBe(firstActive);
+    expect(changed.process_status).toBe('stopped');
+  });
 });
 
 describe('linkSessionToTask', () => {
@@ -249,7 +297,7 @@ describe('resume status reset', () => {
   });
 });
 
-describe('getRunningSessionsByHost', () => {
+describe('getActiveSessionsByHost', () => {
   // Note: isProcessAlive is mocked to return true, so any non-null PID passes liveness check.
   it('groups running sessions by host', async () => {
     await createSessionRecord('local-1', 'task-1', 'proj', undefined, { pid: 1001 });
@@ -258,7 +306,7 @@ describe('getRunningSessionsByHost', () => {
     await createSessionRecord('remote-2', 'task-4', 'proj', undefined, { host: 'devbox', pid: 2002 });
     await createSessionRecord('remote-3', 'task-5', 'proj', undefined, { host: 'remotehost', pid: 3001 });
 
-    const byHost = await getRunningSessionsByHost();
+    const byHost = await getActiveSessionsByHost();
     expect(byHost['local']).toHaveLength(2);
     expect(byHost['devbox']).toHaveLength(2);
     expect(byHost['remotehost']).toHaveLength(1);
@@ -269,7 +317,7 @@ describe('getRunningSessionsByHost', () => {
     await updateSessionRecord('s1', { process_status: 'stopped' });
     await createSessionRecord('s2', 'task-2', 'proj', undefined, { pid: 1002 });
 
-    const byHost = await getRunningSessionsByHost();
+    const byHost = await getActiveSessionsByHost();
     expect(byHost['local']).toHaveLength(1);
     expect(byHost['local']![0].claudeSessionId).toBe('s2');
   });
@@ -278,13 +326,13 @@ describe('getRunningSessionsByHost', () => {
     await createSessionRecord('no-pid', 'task-1', 'proj'); // No PID
     await createSessionRecord('has-pid', 'task-2', 'proj', undefined, { pid: 1001 });
 
-    const byHost = await getRunningSessionsByHost();
+    const byHost = await getActiveSessionsByHost();
     expect(byHost['local']).toHaveLength(1);
     expect(byHost['local']![0].claudeSessionId).toBe('has-pid');
   });
 
   it('returns empty object when no running sessions', async () => {
-    const byHost = await getRunningSessionsByHost();
+    const byHost = await getActiveSessionsByHost();
     expect(byHost).toEqual({});
   });
 });
@@ -658,5 +706,54 @@ describe('listNonTerminalSessions', () => {
     const nonTerminal = await listNonTerminalSessions();
     const ids = nonTerminal.map(s => s.claudeSessionId);
     expect(ids).not.toContain('archived-1');
+  });
+});
+
+// ── Fix 3: hot-cache verification (mtime+size keyed) ─────────────────────────
+
+describe('session store hot cache', () => {
+  it('avoids re-reading sessions.json when mtime is unchanged', async () => {
+    // Seed the store so the first listSessions() primes the cache.
+    await createSessionRecord('cache-seed', 'task-1', 'proj', undefined, { pid: 1001 });
+
+    const { SESSIONS_FILE } = await import('../../src/constants.js');
+
+    // Now spy on fs.readFile and count calls that target sessions.json.
+    const readFileSpy = vi.spyOn(fsp, 'readFile');
+
+    // 50 consecutive reads should hit the cache — zero actual readFile calls
+    // against SESSIONS_FILE because mtime+size haven't changed.
+    for (let i = 0; i < 50; i++) {
+      await listSessions();
+    }
+
+    const sessionFileReads = readFileSpy.mock.calls.filter(call =>
+      String(call[0]) === SESSIONS_FILE
+    );
+    expect(sessionFileReads.length).toBe(0);
+
+    readFileSpy.mockRestore();
+  });
+
+  it('refreshes cache after writeStore so next read is still a cache hit', async () => {
+    await createSessionRecord('write-1', 'task-1', 'proj', undefined, { pid: 1001 });
+
+    // Mutation goes through writeStore — it should refresh the cache, not invalidate it.
+    await updateSessionRecord('write-1', { process_status: 'stopped' });
+
+    const { SESSIONS_FILE } = await import('../../src/constants.js');
+    const readFileSpy = vi.spyOn(fsp, 'readFile');
+
+    // First post-write read — should be a cache hit (no readFile on sessions.json).
+    const sessions = await listSessions();
+    expect(sessions).toHaveLength(1);
+    expect(sessions[0].process_status).toBe('stopped');
+
+    const sessionFileReads = readFileSpy.mock.calls.filter(call =>
+      String(call[0]) === SESSIONS_FILE
+    );
+    expect(sessionFileReads.length).toBe(0);
+
+    readFileSpy.mockRestore();
   });
 });

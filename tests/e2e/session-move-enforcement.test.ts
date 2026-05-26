@@ -58,7 +58,7 @@ async function writeMockJsonl(sessionId: string, cwd: string): Promise<string> {
 
 async function importSession(sessionId: string, taskId: string): Promise<string> {
   const { tools } = await import('../../src/agent/tools.js');
-  const importTool = tools.find(t => t.name === 'import_session')!;
+  const importTool = tools.find(t => t.name === 'session_import')!;
   return importTool.execute({
     session_id: sessionId,
     task_id: taskId,
@@ -68,7 +68,7 @@ async function importSession(sessionId: string, taskId: string): Promise<string>
 
 async function updateSession(sessionId: string, params: Record<string, unknown>): Promise<string> {
   const { tools } = await import('../../src/agent/tools.js');
-  const updateTool = tools.find(t => t.name === 'update_session')!;
+  const updateTool = tools.find(t => t.name === 'session_update')!;
   return updateTool.execute({ session_id: sessionId, ...params }) as Promise<string>;
 }
 

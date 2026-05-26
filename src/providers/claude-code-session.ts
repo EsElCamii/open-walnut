@@ -1037,12 +1037,41 @@ export class ClaudeCodeSession {
 
     // Attach the transport: recovers FIFO (local) or reconnects WebSocket (daemon),
     // then starts tailing from AFTER the data we already recovered.
-    // For remote sessions, transport.fileSize is 0 (no local file) — use the JSONL
-    // byte length from recovery so the daemon skips already-processed events.
-    // Without this, the daemon replays from byte 0, re-sending stale result events
-    // that override the session's current running/idle state.
+    //
+    // fromOffset semantics: the daemon stream file is /tmp/open-walnut-streams/<sid>.jsonl,
+    // which is DIFFERENT from the canonical claude-projects JSONL. The daemon's
+    // addSubscriber() replays bytes [fromOffset, currentOffset) of its stream file.
+    //
+    // For LOCAL sessions: transport.fileSize reflects the local FIFO capture, which
+    // is the same file the daemon streams — so fileSize is a valid offset.
+    //
+    // For REMOTE sessions on a fresh attachToExisting: transport.fileSize is 0 (this
+    // RemoteSessionManager instance hasn't received any live events yet). We used to
+    // fall back to `jsonlByteLength` from canonical-JSONL recovery here, but that's
+    // the byte length of the CLI's canonical JSONL in ~/.claude/projects/ — a totally
+    // different file, usually much smaller than the daemon stream (because it doesn't
+    // include every tool_use/tool_result delta). Passing the canonical size as
+    // `fromOffset` made the daemon replay [canonical_size, stream_size) of its stream,
+    // i.e. potentially megabytes of historical tool_use/tool_result events that the
+    // session already processed. UI symptom: pressing Enter seemed to "replay the
+    // whole conversation" because handleStreamLine consumed every old event.
+    //
+    // Fix: treat "I just rehydrated — don't replay anything" as the signal. Sending
+    // Number.MAX_SAFE_INTEGER makes daemon's `start < currentOffset` check fail, so
+    // it subscribes to future events only. History was already loaded via the
+    // session-history API separately — we don't need the daemon to re-emit it.
     if (session._transport && record.claudeSessionId) {
-      const fromOffset = session._transport.fileSize || jsonlByteLength
+      const isRemote = !!session._transport.isRemote
+      const fromOffset = isRemote
+        ? Number.MAX_SAFE_INTEGER  // remote fresh-attach: subscribe future-only
+        : (session._transport.fileSize || jsonlByteLength)
+      log.session.info('attachToExisting: attach fromOffset chosen', {
+        sessionId: record.claudeSessionId,
+        isRemote,
+        transportFileSize: session._transport.fileSize,
+        canonicalJsonlByteLength: jsonlByteLength,
+        fromOffset: fromOffset === Number.MAX_SAFE_INTEGER ? 'MAX_SAFE_INTEGER (skip replay)' : fromOffset,
+      })
       try {
         const attachResult = await session._transport.attach({
           sessionId: record.claudeSessionId,
@@ -1586,6 +1615,29 @@ export class ClaudeCodeSession {
         outputFile: this._outputFile,
         usingTransport: !!this._transport,
       })
+
+      // Self-heal: if a remote session is alive but we haven't seen JSONL bytes,
+      // the daemon's session.subscribers set is probably missing our ws (e.g. a
+      // reconnect path that didn't call reattachWatcher). Try reattaching once —
+      // the daemon will re-add this ws and catch-up push bytes from fromOffset.
+      // Cheap and idempotent: _seenUuids dedup prevents any double-rendering.
+      if (pidAlive && !fileSizeGrew && this._transport?.isRemote) {
+        type Reattachable = { reattachWatcher?: () => Promise<boolean> }
+        const reattachable = this._transport as unknown as Reattachable
+        if (reattachable.reattachWatcher) {
+          try {
+            const ok = await reattachable.reattachWatcher()
+            log.session.info('STALL self-heal: reattachWatcher attempted', {
+              sessionId: this.claudeSessionId, ok,
+            })
+          } catch (err) {
+            log.session.warn('STALL self-heal: reattachWatcher threw', {
+              sessionId: this.claudeSessionId,
+              error: err instanceof Error ? err.message : String(err),
+            })
+          }
+        }
+      }
     }, 30_000)
   }
 

@@ -58,9 +58,13 @@ interface TaskQuickActionsProps {
   onPinTask?: (id: string) => void;
   onUnpinTask?: (id: string) => void;
   onSetTier?: (id: string, tier: FocusTier) => void;
+  /** Icon-only phase button (hides the phase label text). */
+  compact?: boolean;
+  /** Which sub-element(s) to render. 'all' (default) = phase + kebab; 'phase' or 'kebab' = only that part. */
+  slot?: 'all' | 'phase' | 'kebab';
 }
 
-export function TaskQuickActions({ taskId, task: externalTask, isPinned, pinnedTier, onPinTask, onUnpinTask, onSetTier }: TaskQuickActionsProps) {
+export function TaskQuickActions({ taskId, task: externalTask, isPinned, pinnedTier, onPinTask, onUnpinTask, onSetTier, compact, slot = 'all' }: TaskQuickActionsProps) {
   const integrations = useIntegrations();
   const [task, setTask] = useState<Task | null>(externalTask ?? null);
   const [phaseMenuOpen, setPhaseMenuOpen] = useState(false);
@@ -110,10 +114,10 @@ export function TaskQuickActions({ taskId, task: externalTask, isPinned, pinnedT
     };
     const handleScroll = () => setPhaseMenuOpen(false);
     document.addEventListener('mousedown', handleClick);
-    window.addEventListener('scroll', handleScroll, true);
+    window.addEventListener('scroll', handleScroll);
     return () => {
       document.removeEventListener('mousedown', handleClick);
-      window.removeEventListener('scroll', handleScroll, true);
+      window.removeEventListener('scroll', handleScroll);
     };
   }, [phaseMenuOpen]);
 
@@ -127,10 +131,10 @@ export function TaskQuickActions({ taskId, task: externalTask, isPinned, pinnedT
     };
     const handleScroll = () => closeKebab();
     document.addEventListener('mousedown', handleClick);
-    window.addEventListener('scroll', handleScroll, true);
+    window.addEventListener('scroll', handleScroll);
     return () => {
       document.removeEventListener('mousedown', handleClick);
-      window.removeEventListener('scroll', handleScroll, true);
+      window.removeEventListener('scroll', handleScroll);
     };
   }, [kebabOpen, closeKebab]);
 
@@ -225,6 +229,7 @@ export function TaskQuickActions({ taskId, task: externalTask, isPinned, pinnedT
   return (
     <div className="task-quick-actions">
       {/* Phase picker — stays inline */}
+      {slot !== 'kebab' && (
       <div className="task-quick-phase" ref={phaseRef}>
         <button
           ref={phaseBtnRef}
@@ -247,7 +252,7 @@ export function TaskQuickActions({ taskId, task: externalTask, isPinned, pinnedT
           title={PHASE_LABEL[task.phase] ?? 'Change phase'}
         >
           <span className="task-quick-phase-icon">{PHASE_ICON[task.phase] ?? '○'}</span>
-          <span className="task-quick-phase-label">{PHASE_LABEL[task.phase] ?? task.phase}</span>
+          {!compact && <span className="task-quick-phase-label">{PHASE_LABEL[task.phase] ?? task.phase}</span>}
         </button>
         {phaseMenuOpen && phaseMenuPos && (
           <div
@@ -274,8 +279,10 @@ export function TaskQuickActions({ taskId, task: externalTask, isPinned, pinnedT
           </div>
         )}
       </div>
+      )}
 
       {/* Kebab menu button */}
+      {slot !== 'phase' && (
       <button
         ref={kebabBtnRef}
         className="task-kebab-btn"
@@ -286,7 +293,8 @@ export function TaskQuickActions({ taskId, task: externalTask, isPinned, pinnedT
       >
         ⋮
       </button>
-      {kebabOpen && (
+      )}
+      {slot !== 'phase' && kebabOpen && (
         <div
           ref={kebabMenuRef}
           className="task-kebab-menu"

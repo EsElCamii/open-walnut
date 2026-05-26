@@ -20,7 +20,7 @@ export function ChatPage() {
 
   const handleSend = useCallback((text: string, images?: Parameters<typeof sendMessage>[2]) => {
     const plan = getPlanPayload();
-    sendMessage(text, undefined, images, undefined, plan.mode, plan.planModeFirst);
+    sendMessage(text, undefined, images, undefined, plan.mode, plan.planModeFirst, plan.planModeOff);
   }, [sendMessage, getPlanPayload]);
 
   const handleCommand = useCallback((cmd: SlashCommand, args?: string) => {

@@ -1,0 +1,98 @@
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import fsp from 'node:fs/promises';
+import { createMockConstants } from '../helpers/mock-constants.js';
+
+let tmpDir: string;
+
+vi.mock('../../src/constants.js', () => createMockConstants());
+
+// Mock the QMD search to avoid real model initialization
+vi.mock('../../src/core/memory-search.js', () => ({
+  memoryNotesSearch: vi.fn(),
+}));
+
+// Mock the files handler to avoid complex dependency chain
+vi.mock('../../src/agent/tools/files/index.js', () => ({
+  memoryHandler: {
+    read: vi.fn(),
+  },
+  notesHandler: {
+    read: vi.fn(),
+  },
+  resolveSource: vi.fn(() => {
+    throw new Error('not a source URI');
+  }),
+}));
+
+import { WALNUT_HOME } from '../../src/constants.js';
+import { memoryNotesSearchTool } from '../../src/agent/tools/memory-notes-search-tool.js';
+import { memoryNotesSearch } from '../../src/core/memory-search.js';
+
+/**
+ * Suite 9: Agent Tools (Unit)
+ */
+
+beforeEach(async () => {
+  tmpDir = WALNUT_HOME;
+  await fsp.rm(tmpDir, { recursive: true, force: true });
+  await fsp.mkdir(tmpDir, { recursive: true });
+  vi.mocked(memoryNotesSearch).mockClear();
+});
+
+afterEach(async () => {
+  await fsp.rm(tmpDir, { recursive: true, force: true });
+});
+
+describe('memory_notes_search tool', () => {
+  it('9.1: returns formatted results', async () => {
+    vi.mocked(memoryNotesSearch).mockResolvedValue([
+      {
+        filepath: '/memory/daily/2026-04-12.md',
+        title: 'Today',
+        snippet: 'Worked on tests',
+        score: 0.85,
+        finalScore: 0.7654321,
+        source: 'daily',
+        collection: 'daily',
+      },
+      {
+        filepath: '/memory/topics/walnut.md',
+        title: 'Walnut',
+        snippet: 'TypeScript React frontend',
+        score: 0.9,
+        finalScore: 0.9123456,
+        source: 'topic',
+        collection: 'topic',
+      },
+    ]);
+
+    const result = await memoryNotesSearchTool.execute({ query: 'test', limit: 5 });
+    expect(typeof result).toBe('string');
+    const parsed = JSON.parse(result as string);
+    expect(parsed).toHaveLength(2);
+    // Each result has expected fields
+    for (const r of parsed) {
+      expect(r).toHaveProperty('source');
+      expect(r).toHaveProperty('title');
+      expect(r).toHaveProperty('snippet');
+      expect(r).toHaveProperty('filepath');
+      expect(r).toHaveProperty('score');
+    }
+    // Score should be rounded to 3 decimal places
+    expect(parsed[0].score).toBe(0.765);
+    expect(parsed[1].score).toBe(0.912);
+  });
+
+  it('9.2: returns "No results found." for empty results', async () => {
+    vi.mocked(memoryNotesSearch).mockResolvedValue([]);
+    const result = await memoryNotesSearchTool.execute({ query: 'nonexistent' });
+    expect(result).toBe('No results found.');
+  });
+
+  it('9.3: passes sources parameter correctly', async () => {
+    vi.mocked(memoryNotesSearch).mockResolvedValue([]);
+    await memoryNotesSearchTool.execute({ query: 'test', sources: ['daily', 'note_areas'] });
+    expect(memoryNotesSearch).toHaveBeenCalledWith('test', ['daily', 'note_areas'], 8);
+  });
+});
+

@@ -42,7 +42,7 @@ export const memoryHandler: FileHandler = {
 
     // Overwrite — require hash for memory sources
     if (!opts?.contentHash) {
-      throw new Error('content_hash is required for overwrite on memory sources. Read first with files_read.');
+      throw new Error('content_hash is required for overwrite on memory sources. Read first with file_read.');
     }
 
     // Ensure directories exist
@@ -68,7 +68,7 @@ export const memoryHandler: FileHandler = {
       throw new Error('Main agent memory/daily is read-only. Edit memory/global or memory/daily instead (your own agent storage).');
     }
     if (!opts?.contentHash) {
-      throw new Error('content_hash is required for editing memory sources. Read first with files_read.');
+      throw new Error('content_hash is required for editing memory sources. Read first with file_read.');
     }
     if (!oldContent) {
       throw new Error('old_content cannot be empty.');
@@ -106,7 +106,7 @@ export const memoryHandler: FileHandler = {
       }));
     }
 
-    // memory/daily (used from files_list prefix="memory/daily")
+    // memory/daily (used from file_list prefix="memory/daily")
     // List all daily log files, most recent first
     const dailyDir = resolved.agentId ? agentDailyDir(resolved.agentId) : DAILY_DIR;
     const items: FilesListItem[] = [];
