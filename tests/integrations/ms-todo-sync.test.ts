@@ -5,6 +5,7 @@
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { reconcilePulledTasks } from '../../src/integrations/microsoft-todo.js';
+import * as taskManager from '../../src/core/task-manager.js';
 import type { Task, TaskPhase } from '../../src/core/types.js';
 
 // ── Helpers ──
@@ -45,7 +46,25 @@ function createMsTask(overrides?: Record<string, unknown>) {
 
 // ── Tests ──
 
+/**
+ * Mock `findTaskByExtId` to emulate the SQLite-indexed lookup that
+ * replaced the pre-built `localByMsId` Map. Each test registers the local
+ * tasks it wants to be findable by ms-id; the spy returns them accordingly.
+ */
+function mockFindByExtId(local: Map<string, Task>) {
+  return vi
+    .spyOn(taskManager, 'findTaskByExtId')
+    .mockImplementation(async (source, extId) => {
+      if (source !== 'ms-todo') return undefined;
+      return local.get(extId);
+    });
+}
+
 describe('reconcilePulledTasks — categoryMismatch fix', () => {
+  beforeEach(() => {
+    vi.restoreAllMocks();
+  });
+
   it('does NOT roll back local project when local is newer than remote', async () => {
     // Local: project='Walnut', _syncedAt 12:00 (NEWER)
     // Remote: in "Passion / MyBot" list, modified 06:00 (OLDER)
@@ -60,14 +79,13 @@ describe('reconcilePulledTasks — categoryMismatch fix', () => {
       lastModifiedDateTime: '2026-02-25T06:00:00Z',
     });
 
-    const localByMsId = new Map([['ms-task-1', localTask]]);
+    mockFindByExtId(new Map([['ms-task-1', localTask]]));
     const updateSpy = vi.fn();
     const addSpy = vi.fn().mockResolvedValue({} as Task);
 
     const count = await reconcilePulledTasks(
       [msTask],
       { id: 'list-mybot', displayName: 'Passion / MyBot' },
-      localByMsId,
       updateSpy,
       addSpy,
     );
@@ -91,14 +109,13 @@ describe('reconcilePulledTasks — categoryMismatch fix', () => {
       lastModifiedDateTime: '2026-02-25T18:00:00Z',
     });
 
-    const localByMsId = new Map([['ms-task-1', localTask]]);
+    mockFindByExtId(new Map([['ms-task-1', localTask]]));
     const updateSpy = vi.fn();
     const addSpy = vi.fn().mockResolvedValue({} as Task);
 
     const count = await reconcilePulledTasks(
       [msTask],
       { id: 'list-mybot', displayName: 'Passion / MyBot' },
-      localByMsId,
       updateSpy,
       addSpy,
     );
@@ -125,14 +142,13 @@ describe('reconcilePulledTasks — categoryMismatch fix', () => {
       lastModifiedDateTime: '2026-02-25T01:00:00Z', // old remote
     });
 
-    const localByMsId = new Map([['ms-task-1', localTask]]);
+    mockFindByExtId(new Map([['ms-task-1', localTask]]));
     const updateSpy = vi.fn();
     const addSpy = vi.fn().mockResolvedValue({} as Task);
 
     const count = await reconcilePulledTasks(
       [msTask],
       { id: 'list-homelab', displayName: 'Work / HomeLab' },
-      localByMsId,
       updateSpy,
       addSpy,
     );
@@ -143,14 +159,13 @@ describe('reconcilePulledTasks — categoryMismatch fix', () => {
 
   it('creates new task for unknown remote task', async () => {
     const msTask = createMsTask({ id: 'ms-new-1', title: 'Brand new' });
-    const localByMsId = new Map<string, Task>();
+    mockFindByExtId(new Map());
     const updateSpy = vi.fn();
     const addSpy = vi.fn().mockResolvedValue({ id: 'new-local' } as Task);
 
     const count = await reconcilePulledTasks(
       [msTask],
       { id: 'list-1', displayName: 'Passion / Walnut' },
-      localByMsId,
       updateSpy,
       addSpy,
     );
@@ -165,14 +180,13 @@ describe('reconcilePulledTasks — categoryMismatch fix', () => {
 
   it('skips tasks in deletedMsIds set', async () => {
     const msTask = createMsTask({ id: 'ms-deleted-1' });
-    const localByMsId = new Map<string, Task>();
+    mockFindByExtId(new Map());
     const updateSpy = vi.fn();
     const addSpy = vi.fn().mockResolvedValue({} as Task);
 
     const count = await reconcilePulledTasks(
       [msTask],
       { id: 'list-1', displayName: 'Passion / Walnut' },
-      localByMsId,
       updateSpy,
       addSpy,
       undefined,
@@ -186,19 +200,59 @@ describe('reconcilePulledTasks — categoryMismatch fix', () => {
 
   it('skips tasks with empty titles (tombstones)', async () => {
     const msTask = createMsTask({ id: 'ms-tombstone', title: '' });
-    const localByMsId = new Map<string, Task>();
+    mockFindByExtId(new Map());
     const updateSpy = vi.fn();
     const addSpy = vi.fn().mockResolvedValue({} as Task);
 
     const count = await reconcilePulledTasks(
       [msTask],
       { id: 'list-1', displayName: 'Passion / Walnut' },
-      localByMsId,
       updateSpy,
       addSpy,
     );
 
     expect(addSpy).not.toHaveBeenCalled();
     expect(count).toBe(0);
+  });
+
+  it('falls back to previousIdsMap when primary lookup misses', async () => {
+    // Local task was renamed: its current ms-id is "ms-task-new", but an older
+    // id "ms-task-old" is still listed in its ext.previous_ids. When the delta
+    // returns an update for the old id, reconcile should match it via the map.
+    const localTask = createLocalTask({
+      ext: {
+        'ms-todo': {
+          id: 'ms-task-new',
+          list_id: 'list-mybot',
+          previous_ids: ['ms-task-old'],
+        },
+      },
+      updated_at: '2026-02-24T06:00:00Z',
+    });
+    const msTask = createMsTask({
+      id: 'ms-task-old',
+      title: 'Late-arriving update for renamed task',
+      lastModifiedDateTime: '2026-02-25T18:00:00Z',
+    });
+
+    // Primary lookup misses — emulate a store that doesn't know "ms-task-old".
+    mockFindByExtId(new Map());
+    const updateSpy = vi.fn();
+    const addSpy = vi.fn().mockResolvedValue({} as Task);
+
+    const count = await reconcilePulledTasks(
+      [msTask],
+      { id: 'list-mybot', displayName: 'Passion / MyBot' },
+      updateSpy,
+      addSpy,
+      undefined,
+      undefined,
+      new Map([['ms-task-old', localTask]]),
+    );
+
+    expect(addSpy).not.toHaveBeenCalled();
+    expect(updateSpy).toHaveBeenCalledTimes(1);
+    expect(updateSpy).toHaveBeenCalledWith('task-001', expect.any(Object));
+    expect(count).toBe(1);
   });
 });

@@ -1,17 +1,18 @@
+import fsSync from 'node:fs';
 import { TASKS_FILE } from '../constants.js';
-import { readJsonFile, writeJsonFile } from '../utils/fs.js';
 import { withFileLock } from '../utils/file-lock.js';
 import { log } from '../logging/index.js';
 import { generateId, parseGroupFromCategory } from '../utils/format.js';
 import { initDirectories } from './init.js';
 import { getConfig, updateConfig } from './config-manager.js';
 import { bus, EventNames } from './event-bus.js';
-import { VALID_PRIORITIES as VALID_PRIORITIES_ARRAY, type Task, type TaskStore, type TaskStatus, type TaskPhase, type TaskPriority, type TaskSource, type DashboardData } from './types.js';
-import { applyPhase, deriveStatusFromPhase, phaseFromStatus, VALID_PHASES, TERMINAL_PHASES, migratePhase as migratePhaseValue } from './phase.js';
+import { VALID_PRIORITIES as VALID_PRIORITIES_ARRAY, type Task, type TaskStore, type TaskStatus, type TaskPhase, type TaskPriority, type TaskSource, type DashboardData, type CategoryRecord } from './types.js';
+import { applyPhase, deriveStatusFromPhase, phaseFromStatus, VALID_PHASES, TERMINAL_PHASES } from './phase.js';
 import { registry } from './integration-registry.js';
+import { getDb, rowToTask, taskToRow, TASK_COLUMNS, transaction as dbTransaction, TASK_DB_PATH } from './task-db.js';
+import { runMigrationIfNeeded } from './task-db-migration.js';
+import { getExtIndexSpec } from './ext-index-registry.js';
 import yaml from 'js-yaml';
-
-const EMPTY_STORE: TaskStore = { version: 1, tasks: [] };
 
 /** Ask the task's plugin to validate content before writing. Throws on rejection. */
 function runPluginContentValidation(task: { source: string; id?: string }, field: string, value: string): void {
@@ -29,12 +30,10 @@ function runPluginContentValidation(task: { source: string; id?: string }, field
 }
 
 let initialized = false;
-let migrated = false;
 
 /** Reset internal flags for test isolation (call in beforeEach). */
 export function _resetForTesting(): void {
   initialized = false;
-  migrated = false;
 }
 
 // ── Write lock: serializes all read-modify-write operations ──
@@ -53,145 +52,79 @@ function withWriteLock<T>(fn: () => Promise<T>): Promise<T> {
 async function ensureInit(): Promise<void> {
   if (!initialized) {
     await initDirectories();
+    // Open the SQLite handle (creates schema on first touch) and run the
+    // one-shot JSON→SQLite migration if the DB is still empty. Both are
+    // idempotent no-ops on subsequent calls.
+    getDb();
+    await runMigrationIfNeeded();
+    await seedCategoriesFromConfig();
     initialized = true;
   }
 }
 
 /**
- * One-time migration: split slash-separated categories into category + project.
- * e.g. category "idea / work idea" → category="idea", project="work idea"
+ * Idempotently seed task_categories rows that must exist:
+ *   - 'Local' built-in for Quick Start (always seeded with source=local)
+ *   - every category in config.local.categories (source=local)
+ *   - every plugins.*.category reservation (source=<plugin id>)
+ *   - every distinct category already present on existing tasks (source derived
+ *     from that task's source) — keeps behavior of the old
+ *     migrateToV3Categories intact for restores that dropped the categories
+ *     table but kept task rows.
+ *
+ * Config / plugin reservations take precedence over task-derived sources; if
+ * a category name is already in the table we leave it alone.
  */
-async function migrateSlashCategories(store: TaskStore): Promise<boolean> {
-  let changed = false;
-  for (const task of store.tasks) {
-    if (task.category && task.category.includes(' / ')) {
-      const oldCategory = task.category;
-      const parsed = parseGroupFromCategory(oldCategory);
-      task.category = parsed.group;
-      // Only set project if it wasn't explicitly set to something different
-      if (!task.project || task.project === oldCategory || task.project.includes(' / ')) {
-        task.project = parsed.listName;
-      }
-      changed = true;
-    }
+async function seedCategoriesFromConfig(): Promise<void> {
+  const db = getDb()!;
+  const existingRows = db.prepare('SELECT name, source FROM task_categories').all() as
+    { name: string; source: string }[];
+  const existing = new Map<string, string>();
+  for (const row of existingRows) existing.set(row.name.toLowerCase(), row.name);
+
+  const config = await getConfig();
+  const desired: Array<{ name: string; source: TaskSource }> = [];
+  const seen = new Set<string>();
+  const addIfNew = (name: string, source: TaskSource) => {
+    if (!name) return;
+    const key = name.toLowerCase();
+    if (seen.has(key)) return;
+    seen.add(key);
+    if (existing.has(key)) return;
+    desired.push({ name, source });
+  };
+
+  addIfNew('Local', 'local');
+  for (const cat of config.local?.categories ?? []) addIfNew(cat, 'local');
+  const plugins = (config.plugins ?? {}) as Record<string, Record<string, unknown>>;
+  for (const [pluginId, cfg] of Object.entries(plugins)) {
+    const cat = (cfg as Record<string, unknown>).category;
+    if (typeof cat === 'string' && cat) addIfNew(cat, pluginId as TaskSource);
   }
-  return changed;
-}
 
-
-/**
- * One-time migration: active_session_id (string) → active_session_ids (string[]).
- * (Legacy — kept for backward compat with very old stores.)
- */
-function migrateActiveSessionIds(store: TaskStore): boolean {
-  let changed = false;
-  for (const task of store.tasks) {
-    const raw = task as unknown as Record<string, unknown>;
-    if (Array.isArray(raw.active_session_ids)) continue; // already migrated
-    const oldId = raw.active_session_id as string | undefined;
-    raw.active_session_ids = oldId ? [oldId] : [];
-    delete raw.active_session_id;
-    changed = true;
+  // Task-derived categories: any distinct (category, source) pair on existing
+  // tasks that isn't already registered. Matches the legacy V3 migration.
+  const taskRows = db
+    .prepare("SELECT DISTINCT category, source FROM tasks WHERE category IS NOT NULL AND category != ''")
+    .all() as { category: string; source: string }[];
+  for (const row of taskRows) {
+    if (row.category.startsWith('.metadata')) continue;
+    addIfNew(row.category, (row.source as TaskSource) ?? 'local');
   }
-  return changed;
-}
 
-/**
- * One-time migration: active_session_ids[] → typed plan_session_id / exec_session_id slots.
- * Reads session records to determine which slot each session belongs to.
- * Keeps session_ids[] as the historical record.
- */
-async function migrateSessionSlots(store: TaskStore): Promise<boolean> {
-  let changed = false;
-  const { getSessionByClaudeId } = await import('./session-tracker.js');
-
-  for (const task of store.tasks) {
-    const raw = task as unknown as Record<string, unknown>;
-    if (!('active_session_ids' in raw)) continue;
-
-    const ids = raw.active_session_ids as string[] | undefined;
-    if (ids?.length) {
-      for (const sid of ids) {
-        let rec;
-        try {
-          rec = await getSessionByClaudeId(sid);
-        } catch (err) {
-          log.task.debug('failed to lookup session for task migration', {
-            sessionId: sid,
-            error: err instanceof Error ? err.message : String(err),
-          });
-          continue;
-        }
-        if (!rec || rec.process_status === 'error' || rec.process_status === 'stopped') continue;
-        if (rec.mode === 'plan' && !task.plan_session_id) {
-          task.plan_session_id = sid;
-        } else if (rec.mode !== 'plan' && !task.exec_session_id) {
-          task.exec_session_id = sid;
-        }
-      }
-    }
-    delete raw.active_session_ids;
-    changed = true;
+  if (desired.length === 0) return;
+  const nextOrder = (db
+    .prepare('SELECT COALESCE(MAX(order_index), -1) + 1 AS next FROM task_categories')
+    .get() as { next: number }).next;
+  const stmt = db.prepare(
+    'INSERT INTO task_categories (name, source, order_index) VALUES (?, ?, ?)'
+  );
+  let idx = nextOrder;
+  for (const { name, source } of desired) {
+    stmt.run(name, source, idx);
+    idx += 1;
   }
-  return changed;
-}
-
-/**
- * One-time migration: notes: string[] → description + summary + note string fields.
- * Joins the old array into `note`, initializes `description` and `summary` to ''.
- * Also removes obsolete plugin-specific tracking fields (e.g. *_synced_note_count).
- */
-function migrateNotesToFields(store: TaskStore): boolean {
-  let changed = false;
-  for (const task of store.tasks) {
-    const raw = task as unknown as Record<string, unknown>;
-    if (Array.isArray(raw.notes)) {
-      (task as Task).note = (raw.notes as string[]).join('\n\n');
-      delete raw.notes;
-      changed = true;
-    }
-    if (raw.description === undefined) {
-      (task as Task).description = '';
-      changed = true;
-    }
-    if (raw.summary === undefined) {
-      (task as Task).summary = '';
-      changed = true;
-    }
-    if (raw.note === undefined && !Array.isArray(raw.notes)) {
-      (task as Task).note = '';
-      changed = true;
-    }
-    // Remove obsolete plugin tracking fields (legacy migration cleanup)
-    for (const key of Object.keys(raw)) {
-      if (key.endsWith('_synced_note_count')) {
-        delete raw[key];
-        changed = true;
-      }
-    }
-  }
-  return changed;
-}
-
-/**
- * One-time migration: backfill phase from status for tasks that don't have it.
- */
-function migratePhase(store: TaskStore): boolean {
-  let changed = false;
-  for (const task of store.tasks) {
-    if (!task.phase) {
-      (task as Task).phase = phaseFromStatus(task.status);
-      changed = true;
-    } else {
-      // Migrate renamed phases: INVESTIGATION → TODO, HUMAN_VERIFICATION → AWAIT_HUMAN_ACTION
-      const migrated = migratePhaseValue(task.phase as string);
-      if (migrated !== task.phase) {
-        applyPhase(task as Task, migrated);
-        changed = true;
-      }
-    }
-  }
-  return changed;
+  log.task.info('seeded task_categories', { added: desired.length });
 }
 
 const VALID_PRIORITIES_SET = new Set<string>(VALID_PRIORITIES_ARRAY);
@@ -206,274 +139,113 @@ function sanitizePriority(p: string | undefined): TaskPriority {
   return 'none';
 }
 
-/**
- * One-time migration: convert legacy priority values to new 3-tier system.
- * 'high' → 'immediate', 'medium'/'low' → 'backlog'.
- */
-function migratePriorityToThreeTier(store: TaskStore): boolean {
-  let changed = false;
-  for (const task of store.tasks) {
-    const p = task.priority as string;
-    if (p === 'high') {
-      task.priority = 'immediate';
-      changed = true;
-    } else if (p === 'medium' || p === 'low') {
-      task.priority = 'backlog';
-      changed = true;
-    }
-  }
-  return changed;
-}
-
-/**
- * One-time migration: remove embedded subagent session IDs from task.session_ids.
- * Embedded runs (triage etc.) are agent actions, not user sessions — they were
- * incorrectly linked via linkSessionSlot before this fix.
- * Also clears plan_session_id / exec_session_id if they point to embedded sessions.
- */
-async function migrateRemoveEmbeddedSessionIds(store: TaskStore): Promise<boolean> {
-  let changed = false;
-  // Collect all embedded session IDs from session records
-  const { listSessions } = await import('./session-tracker.js');
-  const sessions = await listSessions();
-  const embeddedIds = new Set<string>();
-  for (const s of sessions) {
-    if (s.provider === 'embedded') embeddedIds.add(s.claudeSessionId);
-  }
-  if (embeddedIds.size === 0) return false;
-
-  for (const task of store.tasks) {
-    if (!task.session_ids) { task.session_ids = []; changed = true; }
-    const before = task.session_ids.length;
-    task.session_ids = task.session_ids.filter((sid) => !embeddedIds.has(sid));
-    if (task.session_ids.length !== before) changed = true;
-
-    if (task.plan_session_id && embeddedIds.has(task.plan_session_id)) {
-      task.plan_session_id = undefined;
-      changed = true;
-    }
-    if (task.exec_session_id && embeddedIds.has(task.exec_session_id)) {
-      task.exec_session_id = undefined;
-      changed = true;
-    }
-  }
-  return changed;
-}
-
-
-/**
- * One-time migration: 2-slot (plan_session_id + exec_session_id) → 1-slot (session_id).
- * Sets session_id = exec_session_id || plan_session_id when session_id is not already set.
- */
-function migrateToSingleSessionSlot(store: TaskStore): boolean {
-  let changed = false;
-  for (const task of store.tasks) {
-    if (task.session_id) continue; // already migrated
-    const candidate = task.exec_session_id || task.plan_session_id;
-    if (candidate) {
-      task.session_id = candidate;
-      changed = true;
-    }
-  }
-  return changed;
-}
-
-/**
- * V3 migration: populate store.categories from config + existing tasks.
- * Runs once when store.categories is undefined.
- */
-async function migrateToV3Categories(store: TaskStore): Promise<boolean> {
-  if (store.categories !== undefined) return false;
-
-  const categories: Record<string, { source: TaskSource }> = {};
-  const config = await getConfig();
-
-  // 1. Config-based categories (may have no tasks yet)
-  for (const cat of config.local?.categories ?? []) {
-    categories[cat] = { source: 'local' };
-  }
-  // Check plugin configs for category reservations (generic loop over all plugins)
-  const plugins = (config.plugins ?? {}) as Record<string, Record<string, unknown>>;
-  for (const [pluginId, pluginCfg] of Object.entries(plugins)) {
-    const cfg = pluginCfg as Record<string, unknown>;
-    if (cfg.category && typeof cfg.category === 'string') {
-      categories[cfg.category] = { source: pluginId };
-    }
-  }
-
-  // 2. Seed from existing tasks — fill in any categories not already mapped by config
-  for (const task of store.tasks) {
-    if (task.title.startsWith('.metadata')) continue;
-    const catLower = task.category.toLowerCase();
-    if (!Object.keys(categories).some(k => k.toLowerCase() === catLower)) {
-      categories[task.category] = { source: task.source };
-    }
-  }
-
-  store.categories = categories;
-  store.version = 3;
-  log.task.info('migrated to v3 categories', { count: Object.keys(categories).length });
-  return true;
-}
-
-/**
- * One-time migration: convert embedded subtasks[] to child tasks (parent_task_id).
- * For each task with subtasks[], creates a new full Task for each subtask entry:
- *   - Inherits category, project, source from parent
- *   - phase = COMPLETE if done, TODO otherwise
- *   - Preserves ms_checklist_id in ext['ms-todo'] and legacy plugin subtask keys in ext.*
- * Removes the subtasks[] array from the parent after migration.
- */
-function migrateSubtasksToChildTasks(store: TaskStore): boolean {
-  let changed = false;
-  const newTasks: Task[] = [];
-
-  for (const task of store.tasks) {
-    const raw = task as unknown as Record<string, unknown>;
-    const subtasks = raw.subtasks as Array<Record<string, unknown>> | undefined;
-
-    if (!subtasks || subtasks.length === 0) continue;
-
-    for (const sub of subtasks) {
-      const now = new Date().toISOString();
-      const isDone = !!sub.done;
-      const childPhase = isDone ? 'COMPLETE' as TaskPhase : 'TODO' as TaskPhase;
-      const childStatus = isDone ? 'done' as TaskStatus : 'todo' as TaskStatus;
-
-      // Build ext data from legacy subtask fields (old data may have plugin-specific keys)
-      const ext: Record<string, unknown> = {};
-      if (sub.ms_checklist_id) {
-        ext['ms-todo'] = { checklist_id: sub.ms_checklist_id };
-      }
-      // Migrate any legacy plugin subtask key (e.g. *_subtask_key fields from old data)
-      for (const [key, val] of Object.entries(sub)) {
-        if (key.endsWith('_subtask_key') && val) {
-          const pluginId = key.replace('_subtask_key', '');
-          ext[pluginId] = { issue_key: val };
-        }
-      }
-
-      const childTask: Task = {
-        id: generateId(),
-        title: sub.title as string,
-        status: childStatus,
-        priority: 'none',
-        category: task.category,
-        project: task.project,
-        session_ids: [],
-        parent_task_id: task.id,
-        description: '',
-        summary: '',
-        note: '',
-        phase: childPhase,
-        source: task.source,
-        created_at: (sub.created_at as string) || now,
-        updated_at: (sub.updated_at as string) || now,
-        ...(isDone ? { completed_at: (sub.updated_at as string) || now } : {}),
-        ...(Object.keys(ext).length > 0 ? { ext } : {}),
-      };
-
-      newTasks.push(childTask);
-    }
-
-    // Remove embedded subtasks from parent
-    delete raw.subtasks;
-    changed = true;
-  }
-
-  if (newTasks.length > 0) {
-    store.tasks.push(...newTasks);
-    log.task.info('migrated embedded subtasks to child tasks', { count: newTasks.length });
-  }
-
-  return changed;
-}
-
-/**
- * Seed built-in categories that must always exist (idempotent).
- * 'Local' is reserved for local-only tasks (e.g. Quick Start) and must never be
- * claimed by any sync plugin. Backfills for users whose store.categories was
- * populated before 'Local' was introduced.
- *
- * If a lowercase variant ('local') exists with a non-'local' source, we don't
- * rewrite it (respect user data); the hard reservation in config.local.categories
- * will still cause validateCategorySource to reject non-local tasks in that slot.
- */
-function ensureBuiltInCategories(store: TaskStore): boolean {
-  const categories = store.categories ?? {};
-  const existingKey = Object.keys(categories).find(k => k.toLowerCase() === 'local');
-  if (existingKey) {
-    if (categories[existingKey].source !== 'local') {
-      log.task.warn('built-in category "Local" has non-local source; leaving as-is', {
-        key: existingKey, source: categories[existingKey].source,
-      });
-    }
-    return false;
-  }
-  categories['Local'] = { source: 'local' };
-  store.categories = categories;
-  log.task.info('seeded built-in category', { name: 'Local' });
-  return true;
-}
-
-/**
- * No-op migration: bump version to 4 for forward-compat detection.
- * Existing tasks have no depends_on — the field is optional.
- */
-function migrateToV4DependsOn(store: TaskStore): boolean {
-  if ((store.version ?? 1) >= 4) return false;
-  store.version = 4;
-  log.task.info('migrated to v4 (depends_on field)');
-  return true;
-}
+// ── Store I/O ──────────────────────────────────────────────────────────────
+// Whole-store reads return the "legacy" TaskStore shape (version + tasks[] +
+// categories{}) so the helper functions below can keep using
+// store.tasks.filter / store.categories without restructuring. Per-row hot
+// paths (updateTaskRaw, *Bulk) query rows directly and never go through here.
 
 async function readStore(): Promise<TaskStore> {
   await ensureInit();
-  const store = await readJsonFile<TaskStore>(TASKS_FILE, { ...EMPTY_STORE, tasks: [] });
+  const db = getDb()!;
+  const taskRows = db.prepare('SELECT * FROM tasks').all() as Record<string, any>[];
+  const tasks = taskRows.map(rowToTask);
 
-  // Run one-time migrations (core only — plugin migrations run via integration-loader)
-  if (!migrated) {
-    migrated = true;
-    let changed = await migrateSlashCategories(store);
-    changed = migrateActiveSessionIds(store) || changed;
-    changed = await migrateSessionSlots(store) || changed;
-    changed = migrateNotesToFields(store) || changed;
-    changed = migratePhase(store) || changed;
-    changed = migratePriorityToThreeTier(store) || changed;
-    changed = await migrateRemoveEmbeddedSessionIds(store) || changed;
-    changed = migrateToSingleSessionSlot(store) || changed;
-    changed = await migrateToV3Categories(store) || changed;
-    changed = ensureBuiltInCategories(store) || changed;
-    changed = migrateToV4DependsOn(store) || changed;
-    changed = migrateSubtasksToChildTasks(store) || changed;
-    if (changed) {
-      await writeJsonFile(TASKS_FILE, store);
-    }
+  const catRows = db
+    .prepare('SELECT name, source FROM task_categories ORDER BY order_index ASC')
+    .all() as { name: string; source: string }[];
+  const categories: Record<string, CategoryRecord> = {};
+  for (const row of catRows) {
+    categories[row.name] = { source: row.source as CategoryRecord['source'] };
   }
 
+  const store: TaskStore = {
+    tasks,
+    ...(Object.keys(categories).length > 0 ? { categories } : {}),
+  };
   return store;
 }
 
+/**
+ * Replace the task + category tables with the full `store` snapshot.
+ *
+ * Used by every exported helper that still reads the whole store, mutates it
+ * in JS, and writes it back. One transaction, prepared INSERT/REPLACE.
+ *
+ * Per-row fast paths (updateTaskRaw, *Bulk) skip this entirely — they issue
+ * targeted UPDATEs and never rewrite unaffected rows.
+ *
+ * Backup-on-empty safety net: if we'd end up with zero rows but the DB
+ * currently has rows, copy the SQLite file aside first.
+ */
 async function writeStore(store: TaskStore): Promise<void> {
-  // Backup-on-empty safety net: if about to write 0 tasks but disk has tasks,
-  // save a backup first so data can be recovered.
+  const db = getDb()!;
+
   if (store.tasks.length === 0) {
     try {
-      const existing = await readJsonFile<TaskStore>(TASKS_FILE, EMPTY_STORE);
-      if (existing && existing.tasks && existing.tasks.length > 0) {
-        const backupPath = TASKS_FILE.replace(/\.json$/, '.backup.json');
-        await writeJsonFile(backupPath, existing);
-        log.task.warn('backup-on-empty: saved backup before writing empty store', {
-          backupPath, previousTaskCount: existing.tasks.length,
+      const existing = db.prepare('SELECT COUNT(*) AS n FROM tasks').get() as { n: number };
+      if (existing.n > 0) {
+        const backupPath = TASK_DB_PATH.replace(/\.sqlite$/, '.backup.sqlite');
+        try {
+          (db as unknown as { backup: (p: string) => Promise<unknown> }).backup(backupPath);
+        } catch {
+          try {
+            fsSync.copyFileSync(TASK_DB_PATH, backupPath);
+          } catch (err) {
+            log.task.warn('backup-on-empty (sqlite) copy failed', {
+              backupPath, err: err instanceof Error ? err.message : String(err),
+            });
+          }
+        }
+        log.task.warn('backup-on-empty: saved SQLite backup before clearing tasks', {
+          backupPath, previousTaskCount: existing.n,
         });
       }
     } catch (err) {
-      log.task.debug('no existing tasks file to back up before empty write', {
+      log.task.debug('no existing SQLite tasks to back up before empty write', {
         error: err instanceof Error ? err.message : String(err),
       });
     }
   }
-  await writeJsonFile(TASKS_FILE, store);
+
+  const insertCols = [...TASK_COLUMNS, 'payload'];
+  const insertSql =
+    'INSERT OR REPLACE INTO tasks (' + insertCols.join(', ') + ') VALUES (' +
+    insertCols.map((c) => '@' + c).join(', ') + ')';
+
+  dbTransaction((handle) => {
+    const existingIds = (handle.prepare('SELECT id FROM tasks').all() as { id: string }[])
+      .map((r) => r.id);
+    const newIds = new Set<string>();
+    for (const t of store.tasks) {
+      if (t && typeof t.id === 'string') newIds.add(t.id);
+    }
+    const toDelete = existingIds.filter((id) => !newIds.has(id));
+
+    const deleteStmt = handle.prepare('DELETE FROM tasks WHERE id = ?');
+    for (const id of toDelete) deleteStmt.run(id);
+
+    const insertStmt = handle.prepare(insertSql);
+    for (const task of store.tasks) {
+      if (!task || typeof task !== 'object' || typeof task.id !== 'string') continue;
+      const partial = taskToRow(task);
+      const bound: Record<string, unknown> = {};
+      for (const col of insertCols) {
+        bound[col] = partial[col] === undefined ? null : partial[col];
+      }
+      insertStmt.run(bound);
+    }
+
+    handle.prepare('DELETE FROM task_categories').run();
+    const catInsert = handle.prepare(
+      'INSERT INTO task_categories (name, source, order_index) VALUES (@name, @source, @order_index)'
+    );
+    let idx = 0;
+    for (const [name, rec] of Object.entries(store.categories ?? {})) {
+      catInsert.run({ name, source: rec?.source ?? 'local', order_index: idx });
+      idx += 1;
+    }
+  });
 }
 
 export interface AddTaskInput {
@@ -1058,6 +830,84 @@ export async function listTasks(filter: ListTasksFilter = {}): Promise<Task[]> {
   return tasks;
 }
 
+/**
+ * Slim variant of Task: note/conversation_log stripped, with boolean presence
+ * flags. Shape MUST match the post-process strip at /api/tasks slim path so
+ * the frontend (TodoPanel.tsx:841-843) sees the exact same keys.
+ */
+export type SlimTask = Omit<Task, 'note' | 'conversation_log'> & {
+  has_note: boolean;
+  has_conversation_log: boolean;
+};
+
+export interface ListTasksSlimFilter extends ListTasksFilter {
+  source?: string;
+}
+
+/**
+ * Slim list — omits `note` and `conversation_log` at the storage layer so we
+ * don't materialize their strings in memory when the caller only needs
+ * presence booleans. SELECT skips the heavy columns; has_note /
+ * has_conversation_log are computed in SQL.
+ */
+export async function listTasksSlim(filter: ListTasksSlimFilter = {}): Promise<SlimTask[]> {
+  await ensureInit();
+
+  const db = getDb()!;
+  // Column list mirrors EXPLICIT_TASK_COLUMNS minus note/conversation_log.
+  // Keep `payload` so custom fields (Task type additions without a dedicated
+  // column) still round-trip, matching rowToTask's payload-merge behavior.
+  const selectCols = [
+    'id', 'title', 'category', 'project', 'status', 'phase', 'priority', 'source',
+    'parent_task_id', 'due_date', 'created_at', 'updated_at', 'completed_at',
+    'sprint', 'focus_tier', 'pinned', 'ext', 'tags', 'depends_on', 'session_ids',
+    'summary', 'description', 'sync_error', '_synced_at', 'payload',
+  ];
+  // has_note mirrors JS `!!task.note` (string column; empty string is falsy).
+  // has_conversation_log mirrors `!!task.conversation_log` where the column
+  // holds the JSON-encoded form (taskToRow JSON.stringifys it). So falsy JS
+  // values '' / null / undefined encode to NULL / '""' / 'null' — explicitly
+  // reject all three.
+  const sqlCols = selectCols.join(', ')
+    + ', (note IS NOT NULL AND note != \'\') AS has_note'
+    + ', (conversation_log IS NOT NULL AND conversation_log != \'\''
+    + ' AND conversation_log != \'""\' AND conversation_log != \'null\') AS has_conversation_log';
+
+  const where: string[] = [];
+  const params: Record<string, string> = {};
+  if (filter.status) { where.push('status = @status'); params.status = filter.status; }
+  if (filter.category) { where.push('category = @category'); params.category = filter.category; }
+  if (filter.source) { where.push('source = @source'); params.source = filter.source; }
+  const whereSql = where.length ? ' WHERE ' + where.join(' AND ') : '';
+
+  const sql = `SELECT ${sqlCols} FROM tasks${whereSql} ORDER BY updated_at DESC`;
+  const rows = db.prepare(sql).all(params) as Record<string, unknown>[];
+  return rows.map(rowToSlimTask);
+}
+
+/**
+ * Row → SlimTask. Mirrors rowToTask but skips note/conversation_log columns
+ * (they aren't SELECT'd) and carries through the SQL-computed presence flags
+ * as proper booleans (SQLite returns 0/1 for boolean expressions).
+ */
+function rowToSlimTask(row: Record<string, any>): SlimTask {
+  // Feed the row into rowToTask minus note/conversation_log so we reuse the
+  // payload merge, JSON parsing, pinned coercion, and _syncedAt aliasing.
+  // Since note/conversation_log aren't in the row, rowToTask's defaulting
+  // logic will set note='' (but we strip it right after) and leave
+  // conversation_log undefined — exactly what we want for a slim object.
+  const base = rowToTask(row) as Partial<Task> & Record<string, unknown>;
+  // rowToTask defaults note to '' even when absent; remove it so the SlimTask
+  // shape doesn't accidentally carry an empty `note` alongside `has_note`.
+  delete base.note;
+  delete base.conversation_log;
+  return {
+    ...(base as Omit<Task, 'note' | 'conversation_log'>),
+    has_note: row.has_note === 1 || row.has_note === true,
+    has_conversation_log: row.has_conversation_log === 1 || row.has_conversation_log === true,
+  };
+}
+
 // ── Dependency helpers (used inside withWriteLock) ──
 
 /**
@@ -1088,7 +938,12 @@ function checkCircularDependency(store: TaskStore, taskId: string, depIds: strin
   while (queue.length > 0) {
     const current = queue.shift()!;
     if (current === taskId) {
-      throw new CircularDependencyError(taskId, depIds.find(d => depIds.includes(d)) ?? depIds[0]);
+      // depIds[0] is used as the "culprit" in the error message. The previous
+      // depIds.find(d => depIds.includes(d)) was a tautology — the predicate
+      // matches the first element, so it always returned depIds[0]. Tracking
+      // which specific dep triggered the cycle would require a different
+      // algorithm (per-dep traversal). For now, report the first one.
+      throw new CircularDependencyError(taskId, depIds[0]);
     }
     if (visited.has(current)) continue;
     visited.add(current);
@@ -2357,16 +2212,6 @@ export async function addSessionToHistory(
   });
 }
 
-// ── Backward-compat aliases ──
-
-/** @deprecated Use linkSessionSlot instead */
-export const linkActiveSession = async (idPrefix: string, sessionId: string) =>
-  linkSessionSlot(idPrefix, sessionId, 'exec');
-
-/** @deprecated Use clearSessionSlot instead */
-export const clearActiveSession = async (idPrefix: string, sessionId?: string) =>
-  clearSessionSlot(idPrefix, sessionId);
-
 /**
  * Link a session to the task's single session slot (new 1-slot model).
  * Also pushes to session_ids history.
@@ -3004,23 +2849,23 @@ function stableStringify(v: unknown): string {
 }
 
 /**
- * Update a task by exact ID with raw partial fields (used by sync pull).
- * Does NOT trigger auto-push to avoid sync loops.
- * Returns { changed: true } if any field was actually modified, { changed: false } otherwise.
+ * Apply the terminal-phase guard + dirty check + phase↔status derivation to a
+ * task/updates pair. Returns the canonicalized update dict that should be
+ * persisted, or `null` if the update is a no-op (nothing changed).
+ *
+ * Extracted from the old updateTaskRaw body so both the single-row path and
+ * the bulk path can reuse identical semantics. Must NEVER mutate `task` or
+ * `updates` — it works on a shallow copy of the patch.
  */
-export async function updateTaskRaw(id: string, updates: Partial<Task>): Promise<{ changed: boolean }> {
-  return withWriteLock(async () => {
-  const store = await readStore();
-  const task = store.tasks.find((t) => t.id === id);
-  if (!task) return { changed: false };
-
-  const { id: _ignoreId, ...safeUpdates } = updates;
+function prepareRawUpdate(task: Task, updates: Partial<Task>): Partial<Task> | null {
+  const { id: _ignoreId, ...safeUpdates } = updates as Record<string, unknown>;
   if (safeUpdates.priority !== undefined) {
-    safeUpdates.priority = sanitizePriority(safeUpdates.priority);
+    safeUpdates.priority = sanitizePriority(safeUpdates.priority as string);
   }
   // Terminal phase guard: sync pull cannot overwrite COMPLETE/HUMAN_VERIFIED
   // (only humans can reopen completed tasks, via updateTask with source='api')
-  const incomingPhase = safeUpdates.phase ?? (safeUpdates.status ? phaseFromStatus(safeUpdates.status) : undefined);
+  const incomingPhase = (safeUpdates.phase as TaskPhase | undefined)
+    ?? (safeUpdates.status ? phaseFromStatus(safeUpdates.status as TaskStatus) : undefined);
   if (TERMINAL_PHASES.has(task.phase) && incomingPhase && !TERMINAL_PHASES.has(incomingPhase)) {
     log.task.warn('terminal phase guard (raw): blocked sync phase change', {
       taskId: task.id, currentPhase: task.phase, requestedPhase: incomingPhase,
@@ -3032,17 +2877,299 @@ export async function updateTaskRaw(id: string, updates: Partial<Task>): Promise
 
   // Dirty check: skip disk write + event if nothing actually changed
   if (!hasFieldChanges(task, safeUpdates)) {
-    return { changed: false };
+    return null;
   }
 
-  Object.assign(task, safeUpdates);
-  // Re-derive phase↔status consistency when only one side is provided
+  // Derive phase↔status consistency when only one side is provided. We don't
+  // know the merged task's phase/status without applying the patch first, so
+  // do a cheap Object.assign into a local copy to resolve the derivation.
+  const merged: Task = { ...task, ...(safeUpdates as Partial<Task>) };
   if (safeUpdates.status && !safeUpdates.phase) {
-    task.phase = phaseFromStatus(task.status);
+    merged.phase = phaseFromStatus(merged.status);
+    safeUpdates.phase = merged.phase;
   } else if (safeUpdates.phase && !safeUpdates.status) {
-    task.status = deriveStatusFromPhase(task.phase);
+    merged.status = deriveStatusFromPhase(merged.phase);
+    safeUpdates.status = merged.status;
   }
-  await writeStore(store);
-  return { changed: true };
+  return safeUpdates as Partial<Task>;
+}
+
+/**
+ * Update a task by exact ID with raw partial fields (used by sync pull).
+ * Does NOT trigger auto-push to avoid sync loops.
+ * Returns { changed: true } if any field was actually modified, { changed: false } otherwise.
+ */
+export async function updateTaskRaw(id: string, updates: Partial<Task>): Promise<{ changed: boolean }> {
+  await ensureInit();
+  return withWriteLock(async () => {
+    const db = getDb()!;
+    const row = db.prepare('SELECT * FROM tasks WHERE id = ?').get(id) as Record<string, any> | undefined;
+    if (!row) return { changed: false };
+    const task = rowToTask(row);
+
+    const prepared = prepareRawUpdate(task, updates);
+    if (!prepared) return { changed: false };
+
+    // Build the UPDATE dynamically from the fields that actually changed.
+    // taskToRow() already handles column mapping + JSON encoding + payload spill.
+    const patchRow = taskToRow(prepared);
+    const cols = Object.keys(patchRow);
+    if (cols.length === 0) return { changed: false };
+
+    const setClause = cols.map((c) => `${c} = @${c}`).join(', ');
+    const bound: Record<string, unknown> = { ...patchRow, id };
+    dbTransaction((handle) => {
+      handle.prepare(`UPDATE tasks SET ${setClause} WHERE id = @id`).run(bound);
+    });
+    return { changed: true };
+  });
+}
+
+// ── Bulk APIs ───────────────────────────────────────────────────────────────
+// sync-reconciler.applyDiff (task #3) and startPluginSyncPolling (task #7)
+// used to call updateTaskRaw N times per tick, paying N full withWriteLock +
+// writeStore cycles. The bulk APIs coalesce all changes into a single
+// withWriteLock + single db.transaction, so the hot loop's main-thread cost
+// scales with "number of changed rows" rather than "N × full-store write".
+//
+// Per-item semantics are identical to the single-row calls: terminal-phase
+// guard, dirty check, phase↔status derivation all run inside the transaction.
+
+/**
+ * Apply raw field patches to many tasks in a single transaction.
+ * Missing IDs are silently skipped. Returns only the tasks whose rows were
+ * actually modified (dirty-check passed + write succeeded).
+ */
+export async function updateTasksBulk(
+  updates: Array<{ id: string; patch: Partial<Task> }>,
+): Promise<{ changed: Task[] }> {
+  if (!updates.length) return { changed: [] };
+  await ensureInit();
+  return withWriteLock(async () => {
+    const changedTasks: Task[] = [];
+    // Collect per-row work inside the transaction — read-modify-write for
+    // each id, stopping the first time a patch turns out to be a no-op for
+    // that id. One transaction, O(k) prepared statements where k = changed.
+    dbTransaction((handle) => {
+      const sel = handle.prepare('SELECT * FROM tasks WHERE id = ?');
+      for (const { id, patch } of updates) {
+        const row = sel.get(id) as Record<string, any> | undefined;
+        if (!row) continue;
+        const task = rowToTask(row);
+        const prepared = prepareRawUpdate(task, patch);
+        if (!prepared) continue;
+        const patchRow = taskToRow(prepared);
+        const cols = Object.keys(patchRow);
+        if (cols.length === 0) continue;
+        const setClause = cols.map((c) => `${c} = @${c}`).join(', ');
+        handle.prepare(`UPDATE tasks SET ${setClause} WHERE id = @id`).run({ ...patchRow, id });
+        // Apply the patch to the in-memory task object so callers see the
+        // post-update view in the returned array.
+        Object.assign(task, prepared);
+        changedTasks.push(task);
+      }
+    });
+    return { changed: changedTasks };
+  });
+}
+
+/**
+ * Insert many tasks in a single transaction. Assigns an id when the caller
+ * didn't supply one (matches generateId() semantics the single-row code
+ * path uses). Returns the inserted tasks in input order.
+ *
+ * NOTE: Unlike addTask(), this helper is for bulk-pull paths (sync-reconciler,
+ * plugin import). It does NOT run the create-time validation chain
+ * (category conflict, parent lookup, plugin content validation). Callers that
+ * need those checks should use addTask() per row.
+ */
+export async function addTasksBulk(
+  tasks: Array<Omit<Task, 'id'> & { id?: string }>,
+): Promise<Task[]> {
+  if (!tasks.length) return [];
+  await ensureInit();
+  return withWriteLock(async () => {
+    const insertCols = [...TASK_COLUMNS, 'payload'];
+    const insertSql =
+      'INSERT OR REPLACE INTO tasks (' + insertCols.join(', ') + ') VALUES (' +
+      insertCols.map((c) => '@' + c).join(', ') + ')';
+
+    const created: Task[] = [];
+    dbTransaction((handle) => {
+      const stmt = handle.prepare(insertSql);
+      for (const td of tasks) {
+        if (!td.title || td.title.trim() === '') continue;
+        const task: Task = {
+          id: td.id ?? generateId(),
+          ...td,
+          priority: sanitizePriority(td.priority),
+        } as Task;
+        const partial = taskToRow(task);
+        const bound: Record<string, unknown> = {};
+        for (const col of insertCols) {
+          bound[col] = partial[col] === undefined ? null : partial[col];
+        }
+        stmt.run(bound);
+        created.push(task);
+      }
+    });
+    return created;
+  });
+}
+
+/**
+ * Delete many tasks by id in a single transaction. Returns the tasks that
+ * were actually present and removed (missing ids silently skipped).
+ */
+export async function deleteTasksBulk(ids: string[]): Promise<{ deleted: Task[] }> {
+  if (!ids.length) return { deleted: [] };
+  await ensureInit();
+  return withWriteLock(async () => {
+    const deleted: Task[] = [];
+    dbTransaction((handle) => {
+      const sel = handle.prepare('SELECT * FROM tasks WHERE id = ?');
+      const del = handle.prepare('DELETE FROM tasks WHERE id = ?');
+      for (const id of ids) {
+        const row = sel.get(id) as Record<string, any> | undefined;
+        if (!row) continue;
+        deleted.push(rowToTask(row));
+        del.run(id);
+      }
+    });
+    return { deleted };
+  });
+}
+
+// ── Plugin ext-id lookup ────────────────────────────────────────────────────
+// Plugin sync ticks used to rebuild a 6000-entry per-plugin Map every tick by
+// iterating listTasks() and reading ext. findTaskByExtId replaces that with a
+// single indexed SELECT per remote delta row. Indexes are declared by each
+// plugin via PluginApi.registerExtIndex and opened by task-db.ensureExtIndexes
+// at load time — this module only reads the resulting registry.
+
+/** Prepared-statement cache, keyed on `${source}|${jsonPath}` so multiple
+ *  plugins (and multiple paths per plugin) share one cache without colliding. */
+const findByExtIdStmts: Map<string, ReturnType<import('better-sqlite3').Database['prepare']>> = new Map();
+
+function getFindByExtIdStmt(source: string, jsonPath: string) {
+  const cacheKey = `${source}|${jsonPath}`;
+  const cached = findByExtIdStmts.get(cacheKey);
+  if (cached) return cached;
+  const db = getDb()!;
+  // source and jsonPath were validated when the spec was registered (see
+  // PluginApi.registerExtIndex / ensureExtIndexes). The extId value is bound
+  // through `?`, never interpolated.
+  const sourceLiteral = source.replace(/'/g, "''");
+  const pathLiteral = jsonPath.replace(/'/g, "''");
+  const sql =
+    `SELECT * FROM tasks WHERE source = '${sourceLiteral}' ` +
+    `AND json_extract(ext, '${pathLiteral}') = ? LIMIT 1`;
+  const stmt = db.prepare(sql);
+  findByExtIdStmts.set(cacheKey, stmt);
+  return stmt;
+}
+
+/**
+ * Look up a single task by an id its owning plugin persists into `ext`.
+ *
+ * The plugin must have called `PluginApi.registerExtIndex` at load time to
+ * declare the json paths it owns. This function tries each declared path in
+ * order and returns the first row that matches.
+ *
+ * Returns undefined if the source has no registered ext-index (e.g. a local
+ * task whose source is `local`), if extId is empty, or if no row matches.
+ *
+ * Hot path — called once per remote delta row inside every plugin's sync tick.
+ */
+export async function findTaskByExtId(source: string, extId: string): Promise<Task | undefined> {
+  if (!extId) return undefined;
+  await ensureInit();
+
+  const spec = getExtIndexSpec(source);
+  if (!spec) return undefined;
+
+  for (const p of spec.paths) {
+    const row = getFindByExtIdStmt(source, p.json).get(extId) as Record<string, any> | undefined;
+    if (row) return rowToTask(row);
+  }
+  return undefined;
+}
+
+// ── Plugin sync tick helpers ────────────────────────────────────────────────
+// startPluginSyncPolling's two retry loops used to call `await listTasks()`
+// and filter in JS. These two helpers push the filter into SQL so the sync
+// tick no longer materializes the full task table.
+
+/** The "primary" json path inside `ext` owned by the plugin — used by the
+ *  unsynced/error retry loops as the "is this row pushed yet?" probe. By
+ *  convention this is the first entry in the plugin's registered ext-index
+ *  paths; multi-path plugins (e.g. one with both id and short_id) should put
+ *  the canonical id first. */
+function pluginPrimaryExtPath(source: string): string {
+  const spec = getExtIndexSpec(source);
+  if (!spec || spec.paths.length === 0) {
+    throw new Error(
+      `listUnsyncedTasks/listSyncErrorTasks: no ext-index registered for source "${source}". ` +
+      `The plugin must call PluginApi.registerExtIndex during load.`,
+    );
+  }
+  return spec.paths[0].json;
+}
+
+/**
+ * Tasks owned by `pluginId` that haven't been pushed yet (the plugin's primary
+ * ext path is null or missing) and are still open. Used by the unsynced retry
+ * loop inside startPluginSyncPolling — was previously `listTasks().filter(…)`.
+ */
+export async function listUnsyncedTasks(pluginId: string): Promise<Task[]> {
+  await ensureInit();
+  const extPath = pluginPrimaryExtPath(pluginId);
+
+  const db = getDb()!;
+  // extPath came from the plugin's registered spec — validated at registration time.
+  const pathLiteral = extPath.replace(/'/g, "''");
+  const sql = `SELECT * FROM tasks WHERE source = ? AND status != 'done'
+    AND (ext IS NULL OR json_extract(ext, '${pathLiteral}') IS NULL)`;
+  const rows = db.prepare(sql).all(pluginId) as Record<string, any>[];
+  return rows.map(rowToTask);
+}
+
+/**
+ * Tasks owned by `pluginId` that have a non-null `sync_error`, are still open,
+ * and have been pushed at least once. Used by the errorRetries loop inside
+ * startPluginSyncPolling.
+ */
+export async function listSyncErrorTasks(pluginId: string): Promise<Task[]> {
+  await ensureInit();
+  const extPath = pluginPrimaryExtPath(pluginId);
+
+  const db = getDb()!;
+  const pathLiteral = extPath.replace(/'/g, "''");
+  const sql = `SELECT * FROM tasks WHERE source = ? AND status != 'done'
+    AND sync_error IS NOT NULL
+    AND json_extract(ext, '${pathLiteral}') IS NOT NULL`;
+  const rows = db.prepare(sql).all(pluginId) as Record<string, any>[];
+  return rows.map(rowToTask);
+}
+
+/**
+ * Run a bulk mutation over the task array, persisting the result via SQLite.
+ * Used by one-shot plugin migrations at startup — the caller receives a
+ * snapshot of all tasks, returns the (possibly mutated) list, and the write
+ * is held under the normal write lock to serialize with other writers.
+ * Returns true if anything changed (by shallow JSON compare).
+ */
+export async function bulkMigrateTasks(
+  mutate: (tasks: Task[]) => Promise<Task[]> | Task[],
+): Promise<boolean> {
+  return withWriteLock(async () => {
+    const store = await readStore();
+    const before = JSON.stringify(store.tasks);
+    const next = await mutate(store.tasks);
+    store.tasks = next;
+    const after = JSON.stringify(store.tasks);
+    if (before === after) return false;
+    await writeStore(store);
+    return true;
   });
 }

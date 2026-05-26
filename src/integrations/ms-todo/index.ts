@@ -106,6 +106,11 @@ export default function register(api: PluginApi): void {
 
   api.registerSync(sync);
 
+  api.registerExtIndex({
+    source: 'ms-todo',
+    paths: [{ key: 'id', json: '$."ms-todo".id' }],
+  });
+
   api.registerSourceClaim((category) => {
     // MS To-Do claims categories that aren't claimed by higher-priority plugins
     // This is the default — priority 0 means it's below higher-priority plugins (10) but above local (-1)

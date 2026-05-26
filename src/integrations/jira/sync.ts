@@ -17,6 +17,7 @@ import { getConfig } from '../../core/config-manager.js';
 import { createSubsystemLogger } from '../../logging/index.js';
 import { bus, EventNames } from '../../core/event-bus.js';
 import { deriveStatusFromPhase } from '../../core/phase.js';
+import { findTaskByExtId, listUnsyncedTasks } from '../../core/task-manager.js';
 import { JiraClient, type JiraConfig } from './jira-client.js';
 import {
   PHASE_TO_JIRA_STATUS,
@@ -281,7 +282,6 @@ export async function autoPushTask(task: Task): Promise<JiraPushResult | JiraPus
 // ── Pull: incremental delta ──
 
 export async function deltaPull(
-  localTasks: Task[],
   updateLocalTask: (id: string, updates: Partial<Task>) => Promise<void>,
   addLocalTask: (task: Omit<Task, 'id'>) => Promise<Task>,
 ): Promise<boolean> {
@@ -327,19 +327,16 @@ export async function deltaPull(
     return false;
   }
 
-  // Build lookup: jira ext issue_key → local task
-  const localByJiraKey = new Map<string, Task>();
-  const localByJiraId = new Map<string, Task>();
-  for (const t of localTasks) {
-    const je = ext(t);
-    if (je?.issue_key) localByJiraKey.set(je.issue_key as string, t);
-    if (je?.issue_id) localByJiraId.set(je.issue_id as string, t);
-  }
-
   let hasChanges = false;
 
   for (const remote of searchResult.issues) {
-    const existing = localByJiraKey.get(remote.key) ?? localByJiraId.get(remote.id);
+    // Indexed SQLite lookup per delta row — avoids the 6000-row in-memory map
+    // that the old code rebuilt on every tick. `ext.jira.issue_key` is indexed
+    // in task-db.ts (idx_tasks_ext_jira_key).
+    // NOTE: Jira REST API returns `issue.key` ("PROJ-123"), which we persist
+    // as ext.jira.issue_key (renamed to avoid colliding with the REST field
+    // name). Keep this call and the index JSON path aligned.
+    const existing = await findTaskByExtId('jira', remote.key);
 
     if (existing) {
       // Check if remote is newer than last synced timestamp (echo detection)
@@ -480,7 +477,6 @@ export interface JiraSyncResult {
 }
 
 export async function syncTasks(
-  localTasks: Task[],
   updateLocalTask: (id: string, updates: Partial<Task>) => Promise<void>,
   addLocalTask: (task: Omit<Task, 'id'>) => Promise<Task>,
   updateTaskRaw: (id: string, updates: Partial<Task>) => Promise<{ changed: boolean }>,
@@ -489,10 +485,9 @@ export async function syncTasks(
   const config = await getConfig();
   const jiraConfig = getJiraConfig(config);
 
-  // Push unsynced local tasks (source=jira but no jira issue_key)
-  const unsynced = localTasks.filter(
-    (t) => t.source === 'jira' && !ext(t)?.issue_key && t.status !== 'done',
-  );
+  // Push unsynced local tasks (source=jira but no jira issue_key).
+  // SQL-filtered via listUnsyncedTasks so we don't scan the whole task table.
+  const unsynced = await listUnsyncedTasks('jira');
   for (const task of unsynced) {
     const result = await autoPushTask(task);
     if (isJiraPushSuccess(result)) {
@@ -511,7 +506,7 @@ export async function syncTasks(
   }
 
   // Pull
-  const pulled = await deltaPull(localTasks, updateLocalTask, addLocalTask);
+  const pulled = await deltaPull(updateLocalTask, addLocalTask);
 
   return { pushed, pulled };
 }

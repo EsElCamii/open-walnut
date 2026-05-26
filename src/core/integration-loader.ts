@@ -20,11 +20,12 @@ import fsp from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import yaml from 'js-yaml';
-import { WALNUT_HOME, TASKS_FILE, CONFIG_FILE } from '../constants.js';
+import { WALNUT_HOME, CONFIG_FILE } from '../constants.js';
 import { createSubsystemLogger } from '../logging/index.js';
-import { readJsonFile, writeJsonFile } from '../utils/fs.js';
 import { getConfig } from './config-manager.js';
-import type { TaskStore } from './types.js';
+import { bulkMigrateTasks } from './task-manager.js';
+import { ensureExtIndexes } from './task-db.js';
+import { setExtIndexes } from './ext-index-registry.js';
 import type { IntegrationRegistry } from './integration-registry.js';
 import type {
   PluginManifest,
@@ -35,6 +36,7 @@ import type {
   MigrateFn,
   HttpRoute,
   RegisteredPlugin,
+  ExtIndexSpec,
 } from './integration-types.js';
 
 const log = createSubsystemLogger('plugin-loader');
@@ -204,6 +206,7 @@ interface PluginApiBuilder {
     agentContext: string | null;
     migrations: MigrateFn[];
     httpRoutes: HttpRoute[];
+    extIndex: ExtIndexSpec | null;
   };
 }
 
@@ -217,6 +220,7 @@ function createPluginApiBuilder(manifest: PluginManifest, pluginConfig: Record<s
     agentContext: null,
     migrations: [],
     httpRoutes: [],
+    extIndex: null,
   };
 
   const api: PluginApi = {
@@ -250,6 +254,30 @@ function createPluginApiBuilder(manifest: PluginManifest, pluginConfig: Record<s
 
     registerHttpRoute(route: HttpRoute) {
       collected.httpRoutes.push(route);
+    },
+
+    registerExtIndex(spec: ExtIndexSpec) {
+      if (collected.extIndex) {
+        throw new Error(`Plugin "${manifest.id}" called registerExtIndex() more than once.`);
+      }
+      if (spec.source !== manifest.id) {
+        throw new Error(
+          `Plugin "${manifest.id}" tried to register ext-index for source "${spec.source}". ` +
+          `spec.source must equal the plugin id.`,
+        );
+      }
+      if (!Array.isArray(spec.paths) || spec.paths.length === 0) {
+        throw new Error(`Plugin "${manifest.id}" registerExtIndex: paths must be a non-empty array.`);
+      }
+      for (const p of spec.paths) {
+        if (!/^[a-z0-9_]+$/.test(p.key)) {
+          throw new Error(`Plugin "${manifest.id}" ext-index path key "${p.key}" must match /^[a-z0-9_]+$/.`);
+        }
+        if (!p.json.startsWith('$.') && !p.json.startsWith('$[')) {
+          throw new Error(`Plugin "${manifest.id}" ext-index path json "${p.json}" must start with '$.' or '$['.`);
+        }
+      }
+      collected.extIndex = spec;
     },
   };
 
@@ -476,6 +504,7 @@ async function loadPlugin(
     agentContext: builder.collected.agentContext ?? undefined,
     migrations: builder.collected.migrations,
     httpRoutes: builder.collected.httpRoutes,
+    extIndex: builder.collected.extIndex ?? undefined,
   };
 
   registry.register(pluginId, registered);
@@ -488,8 +517,10 @@ async function loadPlugin(
     hasDisplay: !!registered.display,
     migrations: registered.migrations.length,
     httpRoutes: registered.httpRoutes.length,
+    extIndexPaths: registered.extIndex?.paths.length ?? 0,
   });
 }
+
 
 // ── Main entry: load all plugins ──
 
@@ -528,9 +559,29 @@ export async function loadPlugins(registry: IntegrationRegistry): Promise<void> 
   }
 
   const loaded = registry.getAll();
+
+  // Collect ext-index specs from registered plugins, publish them to the
+  // shared registry, and open the corresponding SQLite indexes. Idempotent
+  // (CREATE INDEX IF NOT EXISTS).
+  const specs: ExtIndexSpec[] = [];
+  for (const p of loaded) {
+    if (p.extIndex) specs.push(p.extIndex);
+  }
+  setExtIndexes(specs);
+  if (specs.length > 0) {
+    try {
+      ensureExtIndexes(specs);
+    } catch (err) {
+      log.error('failed to open plugin ext-indexes', {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
   log.info('Plugin loading complete', {
     total: loaded.length,
     ids: loaded.map(p => p.id),
+    extIndexes: specs.length,
   });
 }
 
@@ -615,33 +666,27 @@ export async function runPluginMigrations(registry: IntegrationRegistry): Promis
     return;
   }
 
-  // Read the task store directly (bypass task-manager to avoid circular deps)
-  const EMPTY_STORE: TaskStore = { version: 1, tasks: [] };
-  const store = await readJsonFile<TaskStore>(TASKS_FILE, { ...EMPTY_STORE, tasks: [] });
-  const originalJson = JSON.stringify(store.tasks);
-
-  // Run each plugin's migrations in order
-  let tasks = store.tasks;
-  for (const { pluginId, fn } of migrationsToRun) {
-    try {
-      tasks = await fn(tasks);
-    } catch (err) {
-      log.error('Plugin migration failed', {
-        pluginId,
-        error: err instanceof Error ? err.message : String(err),
-      });
-      // Continue with other migrations — don't block on one failure
+  let finalTasks: readonly unknown[] = [];
+  const changed = await bulkMigrateTasks(async (tasks) => {
+    let next = tasks;
+    for (const { pluginId, fn } of migrationsToRun) {
+      try {
+        next = await fn(next);
+      } catch (err) {
+        log.error('Plugin migration failed', {
+          pluginId,
+          error: err instanceof Error ? err.message : String(err),
+        });
+        // Continue with other migrations — don't block on one failure
+      }
     }
-  }
+    finalTasks = next;
+    return next;
+  });
 
-  // Write back only if data changed
-  store.tasks = tasks;
-  const newJson = JSON.stringify(store.tasks);
-  if (newJson !== originalJson) {
-    await writeJsonFile(TASKS_FILE, store);
-    // Count tasks with ext data for debugging
+  if (changed) {
     const extCounts: Record<string, number> = {};
-    for (const t of tasks) {
+    for (const t of finalTasks as { ext?: Record<string, unknown> }[]) {
       if (t.ext) {
         for (const key of Object.keys(t.ext)) {
           extCounts[key] = (extCounts[key] ?? 0) + 1;
@@ -650,7 +695,7 @@ export async function runPluginMigrations(registry: IntegrationRegistry): Promis
     }
     log.info('Plugin migrations applied and saved', {
       plugins: migrationsToRun.map(m => m.pluginId),
-      totalTasks: tasks.length,
+      totalTasks: finalTasks.length,
       extCounts,
     });
   } else {

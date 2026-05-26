@@ -19,7 +19,7 @@ interface Subtask {
   updated_at: string;
 }
 import { generateId, parseGroupFromCategory } from '../utils/format.js';
-import { buildListName, getStoreCategories } from '../core/task-manager.js';
+import { buildListName, getStoreCategories, findTaskByExtId } from '../core/task-manager.js';
 import type { Config } from '../core/types.js';
 
 // ── Plugin-system helpers ──
@@ -761,6 +761,16 @@ export async function pushTask(task: Task): Promise<{ msTaskId: string; serverTi
           error: err instanceof Error ? err.message : String(err),
         });
       }
+      log.web.info('ms-todo POST create', {
+        taskId: task.id,
+        title: task.title,
+        category: task.category,
+        project: task.project,
+        oldListId,
+        newListId: listId,
+        oldMsTodoId: existingMsTodoId,
+        reason: 'list_migration',
+      });
       const created = await graphRequest<MSTodoTask>(
         token,
         'POST',
@@ -769,6 +779,12 @@ export async function pushTask(task: Task): Promise<{ msTaskId: string; serverTi
       );
       msTaskId = created.id;
       serverTimestamp = created.lastModifiedDateTime;
+      log.web.info('ms-todo ext.id assigned', {
+        taskId: task.id,
+        oldId: existingMsTodoId,
+        newId: msTaskId,
+        reason: 'list_migration',
+      });
 
       // Layer 3: track old ID in previous_ids for pull-side dedup
       const prevIds = ((msExt(task) as any)?.previous_ids as string[] ?? []).slice();
@@ -779,7 +795,11 @@ export async function pushTask(task: Task): Promise<{ msTaskId: string; serverTi
       if (!task.ext['ms-todo']) task.ext['ms-todo'] = {};
       (task.ext['ms-todo'] as Record<string, unknown>).previous_ids = prevIds;
     } else {
-      // Same list — update in place
+      // Same list — update in place.
+      // If PATCH fails (network, auth, 5xx, rate limit, or even 404), throw and let
+      // the upper layer set sync_error. The next sync tick will retry the PATCH with
+      // the same ext.id. NEVER fallback to POST create — doing so leaves the original
+      // remote task as an orphan and produces ghost duplicates on the next full pull.
       try {
         const patched = await graphRequest<MSTodoTask>(
           token,
@@ -789,30 +809,32 @@ export async function pushTask(task: Task): Promise<{ msTaskId: string; serverTi
         );
         msTaskId = existingMsTodoId;
         serverTimestamp = patched.lastModifiedDateTime;
-      } catch {
-        // PATCH failed (task not found in list) — try creating fresh
-        const created = await graphRequest<MSTodoTask>(
-          token,
-          'POST',
-          `/me/todo/lists/${listId}/tasks`,
-          msBody,
-        );
-        msTaskId = created.id;
-        serverTimestamp = created.lastModifiedDateTime;
-
-        // Track old ID as previous if we had to re-create
-        if (existingMsTodoId !== msTaskId) {
-          const prevIds = ((msExt(task) as any)?.previous_ids as string[] ?? []).slice();
-          if (!prevIds.includes(existingMsTodoId)) prevIds.push(existingMsTodoId);
-          if (prevIds.length > 10) prevIds.splice(0, prevIds.length - 10);
-          if (!task.ext) task.ext = {};
-          if (!task.ext['ms-todo']) task.ext['ms-todo'] = {};
-          (task.ext['ms-todo'] as Record<string, unknown>).previous_ids = prevIds;
-        }
+      } catch (err) {
+        // Log before re-throwing — next tick will retry with the same ext.id
+        const errMsg = err instanceof Error ? err.message : String(err);
+        const httpStatus = (err as { status?: number })?.status;
+        log.web.warn('ms-todo PATCH failed (will retry next tick with same ext.id)', {
+          taskId: task.id,
+          existingMsTodoId,
+          listId,
+          httpStatus,
+          error: errMsg,
+        });
+        throw err;
       }
     }
   } else {
-    // Create new
+    // Create new — this is the ONLY path that creates a new remote task for a task
+    // that currently has no ext.id. If you see this log firing repeatedly for the
+    // same taskId, something is clearing ext.id between calls — that's the ghost bug.
+    log.web.info('ms-todo POST create', {
+      taskId: task.id,
+      title: task.title,
+      category: task.category,
+      project: task.project,
+      listId,
+      reason: 'first_create',
+    });
     const created = await graphRequest<MSTodoTask>(
       token,
       'POST',
@@ -821,6 +843,11 @@ export async function pushTask(task: Task): Promise<{ msTaskId: string; serverTi
     );
     msTaskId = created.id;
     serverTimestamp = created.lastModifiedDateTime;
+    log.web.info('ms-todo ext.id assigned', {
+      taskId: task.id,
+      newId: msTaskId,
+      reason: 'first_create',
+    });
   }
 
   // Persist list ID change back to local task via ext
@@ -1047,15 +1074,24 @@ export async function autoPushTask(task: Task): Promise<{ msTaskId: string; serv
 
 // -- Shared pull-reconcile logic --
 
-/** @internal Exported for testing. */
+/**
+ * @internal Exported for testing.
+ *
+ * Per-item lookup via `findTaskByExtId('ms-todo', …)` replaces the
+ * former 6000-row `localByMsId` Map. `previousIdsMap` covers the rare case
+ * where a remote delta still references an old ms id recorded in a local
+ * task's `ext['ms-todo'].previous_ids` (Layer 4 rename fallback). The caller
+ * builds that tiny map from the narrow set of ms-todo local tasks that have
+ * previous_ids — typically < 20 entries across the whole fleet.
+ */
 export async function reconcilePulledTasks(
   msTasks: MSTodoTask[],
   list: MSTodoList,
-  localByMsId: Map<string, Task>,
   updateLocalTask: (id: string, updates: Partial<Task>) => Promise<void>,
   addLocalTask: (task: Omit<Task, 'id'>) => Promise<Task>,
   token?: string,
   deletedMsIds?: Set<string>,
+  previousIdsMap?: Map<string, Task>,
 ): Promise<number> {
   let count = 0;
   const { group: listCategory, listName: listProject } = parseGroupFromCategory(list.displayName);
@@ -1066,7 +1102,9 @@ export async function reconcilePulledTasks(
     // Skip tasks that were intentionally deleted locally (Layer 0b)
     if (deletedMsIds?.has(msTask.id)) continue;
 
-    const existing = localByMsId.get(msTask.id);
+    const existing =
+      (await findTaskByExtId('ms-todo', msTask.id))
+      ?? previousIdsMap?.get(msTask.id);
     if (existing) {
       const remoteUpdated = new Date(msTask.lastModifiedDateTime).getTime();
       const syncedAt = existing._syncedAt ? new Date(existing._syncedAt).getTime() : 0;
@@ -1146,17 +1184,27 @@ function mergeChecklistItems(localSubtasks: Subtask[], remoteItems: MSChecklistI
   return result;
 }
 
-function buildLocalByMsId(localTasks: Task[]): Map<string, Task> {
+/**
+ * Layer 4 rename fallback: map previous_ids → Task for the rare ms-todo tasks
+ * that carry a `previous_ids` array in their ext. The primary id lookup is now
+ * `findTaskByExtId('ms-todo', …)` (single-row indexed SELECT), so this
+ * map is intentionally narrow — it skips tasks without `previous_ids` and the
+ * current id (already indexed). Typical size: < 20 entries fleet-wide.
+ *
+ * Intentionally not an index: `previous_ids` is an unbounded JSON array and
+ * SQLite cannot build a json_extract index on array contents. Fleet-wide size
+ * is small (<20 tasks currently have previous_ids), so an in-process Map is
+ * cheaper than any index we could maintain. Not deleted either — keeping
+ * previous_ids lets renamed lists stay resolvable across migrations.
+ */
+function buildMsTodoPreviousIdsMap(localTasks: Task[]): Map<string, Task> {
   const map = new Map<string, Task>();
   for (const t of localTasks) {
-    const msId = getMsTodoId(t);
-    if (msId) map.set(msId, t);
-    // Layer 4: also map previous_ids so orphaned remote tasks are recognized
+    if (t.source !== 'ms-todo') continue;
     const prevIds = (msExt(t) as any)?.previous_ids as string[] | undefined;
-    if (prevIds) {
-      for (const oldId of prevIds) {
-        if (!map.has(oldId)) map.set(oldId, t);
-      }
+    if (!prevIds || prevIds.length === 0) continue;
+    for (const oldId of prevIds) {
+      if (!map.has(oldId)) map.set(oldId, t);
     }
   }
   return map;
@@ -1175,7 +1223,10 @@ export async function deltaPull(
 ): Promise<boolean> {
   const token = await getAccessToken();
   const lists = await fetchTaskLists(token);
-  const localByMsId = buildLocalByMsId(localTasks);
+  // Narrow the list-rename / catch-up iterations to ms-todo tasks only; reconcile
+  // no longer needs the pre-built localByMsId Map — per-item SQLite lookup replaces it.
+  const msLocalTasks = localTasks.filter((t) => t.source === 'ms-todo');
+  const previousIdsMap = buildMsTodoPreviousIdsMap(msLocalTasks);
   let hasChanges = false;
 
   // -- Detect list renames and update local tasks --
@@ -1191,7 +1242,7 @@ export async function deltaPull(
     if (oldName && oldName !== list.displayName) {
       // List was renamed — update all local tasks that belong to it
       const { group, listName } = parseGroupFromCategory(list.displayName);
-      for (const task of localTasks) {
+      for (const task of msLocalTasks) {
         if (getMsTodoList(task) === list.id && (task.category !== group || task.project !== listName)) {
           await updateLocalTask(task.id, { category: group, project: listName });
           hasChanges = true;
@@ -1210,7 +1261,7 @@ export async function deltaPull(
 
   // -- Catch-up: fix category mismatches + remove orphaned tasks from deleted lists --
   const listNameById = new Map(lists.map(l => [l.id, l.displayName]));
-  for (const task of localTasks) {
+  for (const task of msLocalTasks) {
     const taskListId = getMsTodoList(task);
     if (!taskListId) continue;
     const currentListName = listNameById.get(taskListId);
@@ -1237,7 +1288,7 @@ export async function deltaPull(
   for (const list of lists) {
     const { tasks: msTasks } = await pullTasks(list.id);
     if (msTasks.length === 0) continue;
-    const count = await reconcilePulledTasks(msTasks, list, localByMsId, updateLocalTask, addLocalTask, token, deletedMsIds);
+    const count = await reconcilePulledTasks(msTasks, list, updateLocalTask, addLocalTask, token, deletedMsIds, previousIdsMap);
     if (count > 0) hasChanges = true;
   }
 
@@ -1261,7 +1312,8 @@ export async function syncTasks(
 
   const token = await getAccessToken();
   const lists = await fetchTaskLists(token);
-  const localByMsId = buildLocalByMsId(localTasks);
+  const msLocalTasks = localTasks.filter((t) => t.source === 'ms-todo');
+  const previousIdsMap = buildMsTodoPreviousIdsMap(msLocalTasks);
 
   // Pre-resolve list IDs to avoid N+1 calls during push
   const listByName = new Map<string, string>();
@@ -1271,8 +1323,7 @@ export async function syncTasks(
   const defaultListId = lists[0]?.id;
 
   // Push local tasks that don't have ms_todo_id (only ms-todo source tasks)
-  for (const task of localTasks) {
-    if (task.source !== 'ms-todo') continue;
+  for (const task of msLocalTasks) {
     if (!getMsTodoId(task)) {
       try {
         const { msTaskId } = await pushTask(task);
@@ -1301,7 +1352,7 @@ export async function syncTasks(
   for (const list of lists) {
     try {
       const { tasks: msTasks } = await pullTasks(list.id);
-      const count = await reconcilePulledTasks(msTasks, list, localByMsId, updateLocalTask, addLocalTask, token, deletedMsIds);
+      const count = await reconcilePulledTasks(msTasks, list, updateLocalTask, addLocalTask, token, deletedMsIds, previousIdsMap);
       result.pulled += count;
     } catch (err) {
       result.errors.push(`Pull failed for list "${list.displayName}": ${err}`);

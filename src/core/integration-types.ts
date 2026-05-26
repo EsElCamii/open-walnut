@@ -131,6 +131,27 @@ export interface HttpRoute {
 
 export type MigrateFn = (tasks: Task[]) => Promise<Task[]> | Task[];
 
+// ── ExtIndexSpec: plugin-declared SQLite indexes over task.ext ──
+// Plugins own a JSON subkey inside `ext` (e.g. `ext.jira`, `ext['ms-todo']`).
+// To support O(log N) lookup by ext-id during sync ticks, each plugin declares
+// the json_extract paths it wants indexed; core opens the index on its behalf.
+
+export interface ExtIndexPath {
+  /** Stable name for this path — used in the index name + prepared-stmt cache key.
+   *  Allowed chars: [a-z0-9_]. e.g. 'id', 'short_id', 'issue_key'. */
+  key: string;
+  /** SQLite json_extract path inside the `ext` column.
+   *  e.g. '$.jira.issue_key' or '$."ms-todo".id'. */
+  json: string;
+}
+
+export interface ExtIndexSpec {
+  /** Must equal the plugin's manifest.id and the value written into Task.source. */
+  source: string;
+  /** Indexes to open. findTaskByExtId tries paths in order until one matches. */
+  paths: ExtIndexPath[];
+}
+
 // ── PluginApi: the registration interface passed to plugin entry points ──
 
 export interface PluginApi {
@@ -145,6 +166,9 @@ export interface PluginApi {
   registerAgentContext(snippet: string): void;
   registerMigration(fn: MigrateFn): void;
   registerHttpRoute(route: HttpRoute): void;
+  /** Declare ext-id indexes the plugin wants opened on the tasks table.
+   *  spec.source must equal the plugin id. May be called at most once. */
+  registerExtIndex(spec: ExtIndexSpec): void;
 }
 
 // ── RegisteredPlugin: aggregated result after plugin registration ──
@@ -161,6 +185,7 @@ export interface RegisteredPlugin {
   agentContext?: string;
   migrations: MigrateFn[];
   httpRoutes: HttpRoute[];
+  extIndex?: ExtIndexSpec;
 }
 
 // ── Manifest: plugin manifest.json schema ──

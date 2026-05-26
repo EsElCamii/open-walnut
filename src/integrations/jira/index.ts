@@ -96,9 +96,7 @@ export default function register(api: PluginApi): void {
     },
     async syncPoll(ctx) {
       const { deltaPull } = await import('./sync.js');
-      const tasks = ctx.getTasks();
       await deltaPull(
-        tasks,
         async (id, updates) => { await ctx.updateTask(id, updates); },
         async (taskData) => { const t = await ctx.addTask(taskData as any); return t as any; },
       );
@@ -108,12 +106,21 @@ export default function register(api: PluginApi): void {
       return fullPullAllIssues();
     },
     extractRemoteId(task: Task): string | undefined {
-      // Jira uses issue_key as primary ID (e.g., "PROJ-123")
+      // NOTE: Jira REST API uses `issue.key` (e.g. "PROJ-123") and `issue.id`
+      // (numeric). Walnut persists the human-readable key under
+      // ext.jira.issue_key (NOT .key, to avoid collision with the API field
+      // name). The SQLite index idx_tasks_ext_jira_key uses $.jira.issue_key —
+      // keep the JSON path and the ext write path in sync.
       return (task.ext?.jira as Record<string, unknown>)?.issue_key as string | undefined;
     },
   };
 
   api.registerSync(sync);
+
+  api.registerExtIndex({
+    source: 'jira',
+    paths: [{ key: 'issue_key', json: '$.jira.issue_key' }],
+  });
 
   api.registerSourceClaim((cat) => {
     return category ? cat.toLowerCase() === category.toLowerCase() : false;
