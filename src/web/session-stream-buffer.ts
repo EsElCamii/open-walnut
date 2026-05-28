@@ -107,6 +107,17 @@ class SessionStreamBuffer {
     // Tool call interrupts text flow — reset text accumulator
     entry.textAccumulator = ''
     entry.lastActivity = Date.now()
+    // DUP-DEBUG: detect if the same toolUseId is appended twice — that means
+    // two SESSION_TOOL_USE events reached the buffer for the same logical
+    // tool call, which is what causes the duplicate panel in the chat UI.
+    const existing = entry.blocks.find((b) => b.type === 'tool_call' && b.toolUseId === toolUseId)
+    if (existing) {
+      log.ws.warn('appendToolUse DUPLICATE — same toolUseId already in buffer', {
+        sessionId, toolUseId, toolName: name,
+        existingStatus: existing.type === 'tool_call' ? existing.status : undefined,
+        blocksTotal: entry.blocks.length,
+      })
+    }
     entry.blocks.push({ type: 'tool_call', toolUseId, name, input, status: 'calling', ...(planContent ? { planContent } : {}), ...(parentToolUseId ? { parentToolUseId } : {}) })
   }
 

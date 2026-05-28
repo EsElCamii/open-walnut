@@ -34,7 +34,14 @@ import type {
   TransportAttachResult,
 } from './session-manager.js'
 
+// DUP-DEBUG: per-process counter so each RemoteSessionManager has a stable id
+// in logs. If logs show two different `rsmId`s touching the same sid for the
+// same line, we have leaked instances; if the same rsmId logs the same uuid
+// twice, the duplication is upstream of walnut.
+let __rsmIdCounter = 0
+
 export class RemoteSessionManager implements SessionManager {
+  private readonly _rsmId: number = ++__rsmIdCounter
   private conn: DaemonConnection | null = null
   private sshTarget: SshTarget | null
   private hostKey: string
@@ -180,6 +187,8 @@ export class RemoteSessionManager implements SessionManager {
     this._fileSize = fileSize
 
     log.session.info('RemoteSessionManager: session started', {
+      // DUP-DEBUG
+      rsmId: this._rsmId,
       host: this.hostKey,
       sid: this.tmpId,
       pid: this._pid,
@@ -293,6 +302,9 @@ export class RemoteSessionManager implements SessionManager {
     const alive = (result.alive as boolean) ?? false
 
     log.session.info('RemoteSessionManager: attached to session', {
+      // DUP-DEBUG: rsmId helps pair attach calls with the RSM instance that
+      // later emits jsonl/stderr_tail logs.
+      rsmId: this._rsmId,
       host: this.hostKey,
       sid: opts.sessionId,
       pid: this._pid,
@@ -342,6 +354,10 @@ export class RemoteSessionManager implements SessionManager {
       })
       if (result.ok) {
         log.session.info('RemoteSessionManager: reattached watcher after reconnect', {
+          // DUP-DEBUG: every reattach re-subscribes onEvent. If logs show
+          // multiple reattaches without a matching detach in between, walnut
+          // may be accumulating event handlers on the conn.
+          rsmId: this._rsmId,
           host: this.hostKey, sid: this._sid, fromOffset: this._fileSize || 0,
         })
         return true
@@ -397,10 +413,16 @@ export class RemoteSessionManager implements SessionManager {
       // for the current process and the next send will need to spawn a new
       // one. Trigger the same _onExit flow used for ENXIO/not-found so the
       // client's _hasPipe state doesn't get stuck "true" after the remote died.
+      // `partial_write` / `partial write` is also terminal: the FIFO now holds
+      // a half-written JSON line, which will corrupt the CLI stdin parser on
+      // the very next send. Treat as dead so we don't wait for the orphan poll
+      // (~40min worst case) before surfacing the failure.
       const remoteDied = reason.includes('not found')
         || reason === 'ENXIO'
         || reason === 'EAGAIN'
         || reason === 'session_dead'
+        || reason === 'partial_write'
+        || reason === 'partial write'
       log.session.warn('RemoteSessionManager: send failed', {
         host: this.hostKey, sid, reason,
         exitCode: result.exitCode ?? null,
@@ -434,10 +456,13 @@ export class RemoteSessionManager implements SessionManager {
       const result = await conn.send('sendRaw', { sid, raw: json })
       if (result.ok) return true
       const reason = String(result.reason || result.error || '')
+      // See note in send() for why partial_write must be treated as terminal.
       const remoteDied = reason.includes('not found')
         || reason === 'ENXIO'
         || reason === 'EAGAIN'
         || reason === 'session_dead'
+        || reason === 'partial_write'
+        || reason === 'partial write'
       log.session.warn('RemoteSessionManager: writeRaw failed', {
         host: this.hostKey, sid, reason,
         exitCode: result.exitCode ?? null,
@@ -575,6 +600,15 @@ export class RemoteSessionManager implements SessionManager {
   }
 
   detach(): void {
+    // DUP-DEBUG: pair this with "attached to session" by rsmId. If a session
+    // duplication-bug repro shows two `attached to session` for the same sid
+    // without a `detach` for the older rsmId, we have an RSM leak.
+    log.session.info('RemoteSessionManager: detach', {
+      rsmId: this._rsmId,
+      host: this.hostKey,
+      sid: this._sid,
+      hadEventSubscription: this.unsubscribeEvent !== null,
+    })
     if (this.unsubscribeEvent) {
       this.unsubscribeEvent()
       this.unsubscribeEvent = null
@@ -726,14 +760,46 @@ export class RemoteSessionManager implements SessionManager {
           // Skip lines whose uuid we've already forwarded. Lines without a
           // uuid (e.g. system/init) always pass through — they're rare and
           // usually idempotent at the UI layer anyway.
+          //
+          // DUP-DEBUG: log uuid + dedup outcome for tool_use / tool_result
+          // lines so duplication can be traced. Two log lines for the same
+          // uuid means the daemon pushed the same line twice; two lines from
+          // different rsmId means walnut has leaked RSM instances.
+          let uuid: string | null = null
+          let lineKind: string | null = null
           try {
-            const parsed = JSON.parse(event.line) as { uuid?: unknown }
-            const uuid = typeof parsed.uuid === 'string' ? parsed.uuid : null
+            const parsed = JSON.parse(event.line) as {
+              uuid?: unknown
+              type?: unknown
+              message?: { content?: Array<{ type?: unknown }> }
+            }
+            uuid = typeof parsed.uuid === 'string' ? parsed.uuid : null
+            // Only flag the line types we care about for the duplicate-render bug.
+            if (parsed.type === 'assistant' && Array.isArray(parsed.message?.content)) {
+              const types = parsed.message.content.map((b) => b?.type).filter(Boolean)
+              if (types.includes('tool_use')) lineKind = 'tool_use'
+            } else if (parsed.type === 'user' && Array.isArray((parsed as { message?: { content?: Array<{ type?: unknown }> } }).message?.content)) {
+              const types = (parsed as { message: { content: Array<{ type?: unknown }> } }).message.content.map((b) => b?.type).filter(Boolean)
+              if (types.includes('tool_result')) lineKind = 'tool_result'
+            }
             if (uuid) {
-              if (this._seenUuids.has(uuid)) {
-                return
+              const dup = this._seenUuids.has(uuid)
+              if (lineKind) {
+                log.session.info('RSM jsonl received', {
+                  rsmId: this._rsmId,
+                  sid: this._sid,
+                  uuid,
+                  lineKind,
+                  dedupHit: dup,
+                  seenUuidCount: this._seenUuids.size,
+                })
               }
+              if (dup) return
               this._seenUuids.add(uuid)
+            } else if (lineKind) {
+              log.session.info('RSM jsonl received (no uuid)', {
+                rsmId: this._rsmId, sid: this._sid, lineKind,
+              })
             }
           } catch {
             // Non-JSON or malformed line — pass through. Downstream parser
@@ -777,6 +843,9 @@ export class RemoteSessionManager implements SessionManager {
         // Claude CLI wrote to stderr (MCP init errors, validation failures, etc).
         if ((event.sid === this._sid || event.sid === this._prevSid) && typeof event.tail === 'string') {
           log.session.info('RemoteSessionManager: CLI stderr tail', {
+            // DUP-DEBUG: rsmId tagged. If the same daemon-pushed stderr_tail
+            // appears with two different rsmIds, we have leaked RSM instances.
+            rsmId: this._rsmId,
             sessionId: this._sid, sid: event.sid, tail: event.tail,
           })
         }

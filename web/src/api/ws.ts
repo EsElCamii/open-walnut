@@ -248,6 +248,10 @@ class WsClient {
       if (d.activity) summary.activity = d.activity;
       if (d.planCompleted !== undefined) summary.planCompleted = d.planCompleted;
       if (d.title) summary.title = d.title;
+      // DUP-DEBUG: include toolUseId for tool events so duplicates are obvious in
+      // the browser-forwarded logs (`grep <toolUseId>` shows every layer that touched it).
+      if (d.toolUseId) summary.toolUseId = d.toolUseId;
+      if (d.toolName) summary.toolName = d.toolName;
       return Object.keys(summary).length > 0 ? summary : d;
     }
     // For task events, show id + title

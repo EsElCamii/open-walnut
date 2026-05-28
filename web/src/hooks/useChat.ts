@@ -2,6 +2,7 @@ import { useState, useCallback, useRef, useEffect, type MutableRefObject } from 
 import { useEvent } from './useWebSocket';
 import { wsClient } from '@/api/ws';
 import { perf } from '@/utils/perf-logger';
+import { log } from '@/utils/log';
 import {
   fetchChatHistory, clearChatHistory, fetchChatStats,
   isToolResultError,
@@ -30,7 +31,7 @@ export interface ChatMessage {
   images?: ImageAttachment[];
   taskContext?: TaskContext;
   timestamp?: string;
-  source?: 'cron' | 'triage' | 'session' | 'session-error' | 'agent-error' | 'subagent' | 'compaction' | 'compacting' | 'heartbeat' | 'quick-start';
+  source?: 'cron' | 'triage' | 'session' | 'session-error' | 'agent-error' | 'subagent' | 'compaction' | 'compacting' | 'heartbeat' | 'quick-start' | 'quick-start-echo';
   cronJobName?: string;
   notification?: boolean;
   queued?: boolean;
@@ -292,7 +293,7 @@ interface UseChatReturn {
   prependedRef: MutableRefObject<boolean>;
   sendMessage: (text: string, taskContext?: TaskContext, images?: ImageAttachment[], source?: string, mode?: 'plan', planModeFirst?: boolean, planModeOff?: boolean) => void;
   clearMessages: () => void;
-  addLocalMessage: (content: string) => void;
+  addLocalMessage: (content: string, source?: ChatMessage['source']) => void;
   stopGeneration: () => void;
   cancelQueuedMessage: (queueId: number) => void;
   clearQueue: () => void;
@@ -487,12 +488,28 @@ export function useChat(agentId: string = 'general'): UseChatReturn {
     if (!isMyAgent(data)) return;
     const { toolName, input, toolUseId } = data as { toolName: string; input: Record<string, unknown>; toolUseId?: string };
     const src = currentSourceRef.current;
-    setMessages((prev) =>
-      upsertLastAssistant(prev, (blocks, content) => ({
+    setMessages((prev) => {
+      // DUP-DEBUG: detect duplicate agent tool_call rendering. Mirror of the
+      // session:tool-use guard in useSessionStream — same UI symptom, different
+      // event source (main agent vs session).
+      if (toolUseId) {
+        for (const m of prev) {
+          if (m.role !== 'assistant' || !m.blocks) continue;
+          const dup = m.blocks.find((b) => b.type === 'tool_call' && b.toolUseId === toolUseId);
+          if (dup) {
+            log.warn('frontend', 'agent:tool-call DUPLICATE — toolUseId already in blocks', {
+              toolUseId, toolName,
+              existingStatus: dup.type === 'tool_call' ? dup.status : undefined,
+            });
+            break;
+          }
+        }
+      }
+      return upsertLastAssistant(prev, (blocks, content) => ({
         blocks: [...blocks, { type: 'tool_call', name: toolName, toolUseId, input, status: 'calling' }],
         content,
-      }), src),
-    );
+      }), src);
+    });
 
     // Desktop notification when agent asks a question
     if (toolName === 'user_ask' && typeof Notification !== 'undefined' && Notification.permission === 'granted') {
@@ -927,12 +944,13 @@ export function useChat(agentId: string = 'general'): UseChatReturn {
     nextPageRef.current = 2;
   }, [clearQueue]);
 
-  const addLocalMessage = useCallback((content: string) => {
+  const addLocalMessage = useCallback((content: string, source?: ChatMessage['source']) => {
     setMessages((prev) => [...prev, {
       key: nextMessageKey(),
       role: 'assistant',
       content,
       blocks: [{ type: 'text', content }],
+      source,
       timestamp: new Date().toISOString(),
     }]);
   }, []);

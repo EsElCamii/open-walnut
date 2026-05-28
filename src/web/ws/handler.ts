@@ -39,7 +39,20 @@ export function registerMethod(name: string, handler: RpcHandler): void {
  * Broadcast a bus event to all connected WebSocket clients.
  */
 export function broadcastEvent(name: string, data: unknown): void {
-  log.ws.debug(`broadcast ${name}`, { clientCount: clients.size })
+  // DUP-DEBUG: for tool_use / tool_result include toolUseId so each broadcast
+  // can be traced. If two `broadcast session:tool-use` lines share the same
+  // toolUseId, the duplication is upstream of the WS layer.
+  if (name === 'session:tool-use' || name === 'session:tool-result') {
+    const d = data as { toolUseId?: string; sessionId?: string; toolName?: string }
+    log.ws.info(`broadcast ${name}`, {
+      clientCount: clients.size,
+      sessionId: d?.sessionId,
+      toolUseId: d?.toolUseId,
+      toolName: d?.toolName,
+    })
+  } else {
+    log.ws.debug(`broadcast ${name}`, { clientCount: clients.size })
+  }
   for (const client of clients) {
     if (client.ws.readyState !== WebSocket.OPEN) continue
     client.seq++

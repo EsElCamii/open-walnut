@@ -373,10 +373,24 @@ export function useSessionStream(sessionId: string | null): UseSessionStreamRetu
     flushPendingTextRaf();
     streamBuffer.current = '';
 
-    setBlocks((prev) => [
-      ...prev,
-      { type: 'tool_call', toolUseId, name: toolName, input, status: 'calling', ...(planContent ? { planContent } : {}), ...(parentToolUseId ? { parentToolUseId } : {}) },
-    ]);
+    setBlocks((prev) => {
+      // DUP-DEBUG: detect duplicate tool_use rendering at the closest layer
+      // to the UI. If this WARN fires, the same toolUseId already exists in
+      // local block state when a new event arrived — that's exactly what the
+      // user sees as two identical Bash panels.
+      const existing = prev.find((b) => b.type === 'tool_call' && b.toolUseId === toolUseId);
+      if (existing) {
+        log.warn('frontend', 'session:tool-use DUPLICATE — toolUseId already in blocks', {
+          sessionId: sid, toolUseId, toolName,
+          existingStatus: existing.type === 'tool_call' ? existing.status : undefined,
+          totalBlocks: prev.length,
+        });
+      }
+      return [
+        ...prev,
+        { type: 'tool_call', toolUseId, name: toolName, input, status: 'calling', ...(planContent ? { planContent } : {}), ...(parentToolUseId ? { parentToolUseId } : {}) },
+      ];
+    });
   });
 
   // Handle tool result events

@@ -250,7 +250,18 @@ export { outputFileCheckResult }
 const MAX_FULL_TEXT = 100 * 1024 // 100KB cap on accumulated text
 const LIVENESS_INTERVAL_MS = 3000
 
+// DUP-DEBUG: per-process counter so each ClaudeCodeSession has a stable id
+// in logs. If logs show two ccsId values for the same claudeSessionId
+// processing the same JSONL line, multiple session instances are alive
+// (= leaked instance pointing at the same sid).
+let __ccsIdCounter = 0
+
 export class ClaudeCodeSession {
+  private readonly _ccsId: number = ++__ccsIdCounter
+  /** DUP-DEBUG: count of jsonl lines this instance has ingested. */
+  private _streamLinesSeen = 0
+  /** DUP-DEBUG: count of duplicate dedup hits (tool_use replay protection). */
+  private _toolUseDedupHits = 0
   private pid: number | null = null
   private fullText = ''
   /** Dedup set for streaming text/tool events — prevents replay duplicates.
@@ -737,6 +748,10 @@ export class ClaudeCodeSession {
       }
 
       log.session.info('session spawned via transport', {
+        // DUP-DEBUG: ccsId tags every CCS instance creation. Pair with the
+        // matching `session detached` to confirm clean lifecycle, or with
+        // a second `session spawned` for the same sid to spot leaked instances.
+        ccsId: this._ccsId,
         taskId: this.taskId,
         project: this.project,
         host,
@@ -1028,6 +1043,8 @@ export class ClaudeCodeSession {
     }
 
     log.session.info('attaching to existing session', {
+      // DUP-DEBUG: pair with `session detached` (same ccsId) for lifecycle audit
+      ccsId: session._ccsId,
       taskId: record.taskId,
       sessionId: record.claudeSessionId,
       pid: record.pid,
@@ -1166,7 +1183,16 @@ export class ClaudeCodeSession {
    * Stops tailing and liveness monitoring. The process continues running.
    */
   detach(): void {
-    log.session.info('session detached', { taskId: this.taskId, pid: this.pid, hasPipe: this._transport?.hasPipe })
+    log.session.info('session detached', {
+      // DUP-DEBUG: pair with the matching `session spawned` / `attaching to
+      // existing session` (same ccsId). If a sid has two spawns/attaches but
+      // only one detach, we have a leaked CCS instance still ingesting JSONL.
+      ccsId: this._ccsId,
+      sessionId: this.claudeSessionId,
+      taskId: this.taskId, pid: this.pid, hasPipe: this._transport?.hasPipe,
+      streamLinesSeen: this._streamLinesSeen,
+      toolUseDedupHits: this._toolUseDedupHits,
+    })
     this.stopMonitoring()
     this._transport?.detach()
     this._active = false
@@ -1698,6 +1724,7 @@ export class ClaudeCodeSession {
   private handleStreamLine(line: string): void {
     // Clear stall diagnostic timer — we're receiving output, session is responsive
     this._lastJsonlEventTs = Date.now()
+    this._streamLinesSeen++
     this.clearStallDiagTimer()
     // Reset team-idle timer on any new JSONL event — the team is still active.
     if (this._teamIdleTimer) {
@@ -2030,7 +2057,25 @@ export class ClaudeCodeSession {
             // Dedup: skip tool_use blocks already emitted (daemon replay protection)
             if (block.id) {
               const toolDedupKey = `${msgId}:tool_use:${block.id}`
-              if (this._emittedStreamKeys.has(toolDedupKey)) continue
+              if (this._emittedStreamKeys.has(toolDedupKey)) {
+                // DUP-DEBUG: dedup hit means we saw the same (msgId, tool_use_id)
+                // twice — daemon replay or duplicate stream. If logs show
+                // dedupHits accumulating but the UI STILL shows duplicates,
+                // the duplication must be downstream of this guard (e.g. a
+                // different msgId wrapping the same tool_use_id).
+                this._toolUseDedupHits++
+                log.session.info('tool_use dedup hit (replay protected)', {
+                  ccsId: this._ccsId,
+                  sessionId: this.claudeSessionId,
+                  taskId: this.taskId,
+                  toolUseId: block.id,
+                  toolName: block.name,
+                  msgId,
+                  totalDedupHits: this._toolUseDedupHits,
+                  totalLinesSeen: this._streamLinesSeen,
+                })
+                continue
+              }
               this._emittedStreamKeys.add(toolDedupKey)
             }
             this._activity = `Using ${block.name}`
@@ -2178,7 +2223,15 @@ export class ClaudeCodeSession {
                 ?? (typeof block.input?.plan === 'string' && block.input.plan ? block.input.plan : null))
               : null
 
-            log.session.debug('JSONL event: tool-use', { sessionId: this.claudeSessionId, taskId: this.taskId, toolName: block.name })
+            log.session.debug('JSONL event: tool-use', {
+              // DUP-DEBUG: ccsId tags each emit with its session instance.
+              // Two emits with same toolUseId but different ccsId → two
+              // ClaudeCodeSession instances alive for same sid.
+              ccsId: this._ccsId,
+              sessionId: this.claudeSessionId, taskId: this.taskId,
+              toolName: block.name, toolUseId: block.id, msgId,
+              parentToolUseId,
+            })
             bus.emit(EventNames.SESSION_TOOL_USE, {
               sessionId: this.claudeSessionId,
               taskId: this.taskId,
@@ -2275,7 +2328,12 @@ export class ClaudeCodeSession {
             }
             // Rewrite remote image paths in tool results (no-op for local sessions)
             resultContent = this.rewriteRemoteImages(resultContent)
-            log.session.debug('JSONL event: tool-result', { sessionId: this.claudeSessionId, taskId: this.taskId, toolUseId: block.tool_use_id })
+            log.session.debug('JSONL event: tool-result', {
+              // DUP-DEBUG: same ccsId scheme as tool-use — see emit above.
+              ccsId: this._ccsId,
+              sessionId: this.claudeSessionId, taskId: this.taskId,
+              toolUseId: block.tool_use_id,
+            })
             bus.emit(EventNames.SESSION_TOOL_RESULT, {
               sessionId: this.claudeSessionId,
               taskId: this.taskId,
