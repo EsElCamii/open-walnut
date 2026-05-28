@@ -37,10 +37,9 @@ export function SetupBanner({ health, onNavigateSettings }: SetupBannerProps) {
 
   const cliOk = health.claudeCliAvailable ?? true;
   const providerOk = health.hasReadyProvider ?? true;
-  const ollamaOk = health.embedding.ollamaAvailable;
 
   // All steps done — don't show banner
-  if (cliOk && providerOk && ollamaOk) return null;
+  if (cliOk && providerOk) return null;
 
   return (
     <div className="setup-banner">
@@ -71,15 +70,6 @@ export function SetupBanner({ health, onNavigateSettings }: SetupBannerProps) {
           </button>
         </SetupStep>
 
-        {/* Step 3: Ollama (optional) */}
-        <SetupStep
-          done={ollamaOk}
-          label="Install Ollama"
-          required={false}
-        >
-          <InstallButton target="ollama" />
-          <CopyCommand command="curl -fsSL https://ollama.com/install.sh | sh" />
-        </SetupStep>
       </div>
     </div>
   );

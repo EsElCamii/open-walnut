@@ -175,9 +175,6 @@ export function getSystemHealth(): SystemHealthState {
 export async function refreshSystemHealth(): Promise<SystemHealthState> {
   systemHealth.claudeCliAvailable = checkClaudeCliAvailable()
   systemHealth.hasReadyProvider = await checkHasReadyProvider()
-  const { resetAvailabilityCache, isOllamaAvailable } = await import('../core/embedding/client.js')
-  resetAvailabilityCache()
-  systemHealth.embedding.ollamaAvailable = await isOllamaAvailable()
   broadcastEvent('system:health', systemHealth)
   return systemHealth
 }
@@ -1039,12 +1036,23 @@ export async function startServer(options: ServerOptions = {}): Promise<HttpServ
     } else if (event.name === 'session:tool-use') {
       const { sessionId, toolName, toolUseId, input, planContent, parentToolUseId } = eventData<'session:tool-use'>(event)
       if (sessionId) {
+        // DUP-DEBUG: server.ts is the choke point between bus.emit and SSE
+        // fan-out. If the same toolUseId reaches this branch twice, the
+        // duplication originates at or before bus.emit (= claude-code-session
+        // / RSM / daemon). If it arrives once but the UI still shows two,
+        // duplication is in stream buffer or frontend.
+        log.ws.debug('server: session:tool-use received', {
+          sessionId, toolUseId, toolName, parentToolUseId,
+        })
         sessionStreamBuffer.appendToolUse(sessionId, toolUseId, toolName, input, planContent, parentToolUseId)
         sendStreamEvent(sessionId, event.name, event.data)
       }
     } else if (event.name === 'session:tool-result') {
       const { sessionId, toolUseId, result } = eventData<'session:tool-result'>(event)
       if (sessionId) {
+        log.ws.debug('server: session:tool-result received', {
+          sessionId, toolUseId,
+        })
         sessionStreamBuffer.appendToolResult(sessionId, toolUseId, result)
         sendStreamEvent(sessionId, event.name, event.data)
       }
