@@ -91,6 +91,58 @@ const http = require('http');
 const { spawn, execSync } = require('child_process');
 const crypto = require('crypto');
 
+// ── PATH setup ──
+// Same logic the compiled binary uses: bun/node may launch the daemon with a
+// minimal PATH that lacks claude/node/etc. Source ~/.zshrc or ~/.bashrc to pick
+// up nvm/fnm/volta/pyenv/etc., and add common tool dirs as a safety net.
+// Without this, cmdStart's spawn('claude', ...) fails ENOENT on most hosts.
+(function() {
+  const home = process.env.HOME || '/root';
+  const extraPaths = [
+    home + '/.local/bin',
+    home + '/.npm-global/bin',
+    home + '/.cargo/bin',
+    home + '/.pyenv/shims',
+    home + '/.bun/bin',
+    home + '/.toolbox/bin',
+    '/usr/local/bin', '/usr/bin', '/bin',
+    '/usr/local/sbin', '/usr/sbin', '/sbin',
+  ];
+  const rcFiles = [home + '/.zshrc', home + '/.bashrc'];
+  let pathFromRc = '';
+  for (const rcFile of rcFiles) {
+    try {
+      if (!fs.existsSync(rcFile)) continue;
+      const shells = rcFile.endsWith('.zshrc')
+        ? ['/bin/zsh', '/usr/bin/zsh', '/bin/bash']
+        : ['/bin/bash', '/bin/sh'];
+      for (const shell of shells) {
+        try {
+          if (!fs.existsSync(shell)) continue;
+          const result = execSync(
+            'source ' + JSON.stringify(rcFile) + ' 2>/dev/null; echo "$PATH"',
+            { encoding: 'utf-8', shell: shell, timeout: 5000 },
+          ).trim();
+          if (result && result.indexOf('/') >= 0 && result.length > 20) {
+            pathFromRc = result;
+            break;
+          }
+        } catch (e) { continue; }
+      }
+      if (pathFromRc) break;
+    } catch (e) { continue; }
+  }
+  const allPaths = []
+    .concat(extraPaths)
+    .concat(pathFromRc ? pathFromRc.split(':') : [])
+    .concat((process.env.PATH || '').split(':'))
+    .filter(Boolean);
+  const seen = {};
+  const deduped = [];
+  for (const p of allPaths) { if (!seen[p]) { seen[p] = true; deduped.push(p); } }
+  process.env.PATH = deduped.join(':');
+})();
+
 // ── Constants ──
 // DAEMON_DIR default is /tmp/open-walnut; tests override via env var.
 const DAEMON_DIR = process.env.WALNUT_DAEMON_DIR || '/tmp/open-walnut';
@@ -236,7 +288,7 @@ function isTurnCompleteExit(jsonlPath) {
     fs.readSync(fd, buf, 0, readLen, start);
     fs.closeSync(fd);
     const text = buf.toString('utf-8');
-    const lines = text.split('\n').map(l => l.trim()).filter(Boolean);
+    const lines = text.split('\\n').map(l => l.trim()).filter(Boolean);
     if (lines.length === 0) return false;
     const last = lines[lines.length - 1];
     const parsed = JSON.parse(last);
@@ -842,10 +894,54 @@ function buildControlResponse(requestId, request, allow, message) {
 function writeFifoRaw(pipePath, raw) {
   try {
     const buf = Buffer.from(raw.endsWith('\\n') ? raw : raw + '\\n');
-    const fd = fs.openSync(pipePath, fs.constants.O_WRONLY | fs.constants.O_NONBLOCK);
-    try { fs.writeSync(fd, buf); } finally { fs.closeSync(fd); }
-    return true;
+    return writeFifoFully(pipePath, buf) === 'ok';
   } catch { return false; }
+}
+
+// Write a full buffer to a FIFO with O_NONBLOCK + retry. PIPE_BUF on macOS is
+// 512 bytes; a single non-blocking writeSync of a larger buffer may return a
+// partial count, and stopping there leaves the pipe corrupted (CLI's stdin
+// line parser will splice the truncated fragment with whatever bytes follow,
+// causing JSON.parse to fail and the CLI to exit). Loop on partial writes,
+// short-retry on EAGAIN, surface ENXIO when the reader is gone.
+//
+// Returns: 'ok' (full write), 'ENXIO' (no reader), 'EAGAIN' (no progress
+// within budget), or 'partial' (some bytes written but not all — caller MUST
+// reap because the pipe now holds half a JSON line).
+function writeFifoFully(pipePath, buf) {
+  let fd;
+  try {
+    fd = fs.openSync(pipePath, fs.constants.O_WRONLY | fs.constants.O_NONBLOCK);
+  } catch (err) {
+    if (err && err.code === 'ENXIO') return 'ENXIO';
+    throw err;
+  }
+  try {
+    let offset = 0;
+    let consecutiveEagain = 0;
+    const MAX_EAGAIN_RETRIES = 50; // ~500ms total
+    while (offset < buf.length) {
+      try {
+        const n = fs.writeSync(fd, buf, offset, buf.length - offset);
+        if (n > 0) { offset += n; consecutiveEagain = 0; continue; }
+        consecutiveEagain++;
+      } catch (err) {
+        if (err && err.code === 'EAGAIN') {
+          if (offset === 0 && consecutiveEagain === 0) return 'EAGAIN';
+          consecutiveEagain++;
+        } else {
+          throw err;
+        }
+      }
+      if (consecutiveEagain >= MAX_EAGAIN_RETRIES) {
+        return offset === 0 ? 'EAGAIN' : 'partial';
+      }
+      try { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10); } catch {}
+    }
+    return 'ok';
+  } finally {
+    try { fs.closeSync(fd); } catch {}
+  }
 }
 
 // ── File watching for JSONL streaming ──
@@ -1089,26 +1185,21 @@ function cmdSend(ws, id, cmd) {
 
   try {
     const buf = Buffer.from(payload + '\\n');
-    const fd = fs.openSync(session.pipePath, fs.constants.O_WRONLY | fs.constants.O_NONBLOCK);
-    try {
-      const written = fs.writeSync(fd, buf);
-      if (written !== buf.length) {
-        return sendOk(ws, id, { ok: false, reason: 'partial write' });
-      }
-    } finally {
-      fs.closeSync(fd);
-    }
-    sendOk(ws, id, { ok: true });
-  } catch (err) {
-    const code = err.code;
-    if (code === 'ENXIO') {
+    const result = writeFifoFully(session.pipePath, buf);
+    if (result === 'ok') {
+      sendOk(ws, id, { ok: true });
+    } else if (result === 'ENXIO') {
       reapSession(sid, -1, 'send-enxio');
       sendOk(ws, id, { ok: false, reason: 'ENXIO', exitCode: session.exitCode });
-    } else if (code === 'EAGAIN') {
+    } else if (result === 'EAGAIN') {
       sendOk(ws, id, { ok: false, reason: 'EAGAIN', retriable: true });
     } else {
-      sendError(ws, id, 'send failed: ' + err.message);
+      // partial — pipe is now corrupted, reap so caller stops trying.
+      reapSession(sid, -1, 'send-partial-write');
+      sendOk(ws, id, { ok: false, reason: 'session_dead', exitCode: session.exitCode });
     }
+  } catch (err) {
+    sendError(ws, id, 'send failed: ' + err.message);
   }
 }
 
@@ -1133,26 +1224,20 @@ function cmdSendRaw(ws, id, cmd) {
 
   try {
     const buf = Buffer.from(raw.endsWith('\\n') ? raw : raw + '\\n');
-    const fd = fs.openSync(session.pipePath, fs.constants.O_WRONLY | fs.constants.O_NONBLOCK);
-    try {
-      const written = fs.writeSync(fd, buf);
-      if (written !== buf.length) {
-        return sendOk(ws, id, { ok: false, reason: 'partial write' });
-      }
-    } finally {
-      fs.closeSync(fd);
-    }
-    sendOk(ws, id, { ok: true });
-  } catch (err) {
-    const code = err.code;
-    if (code === 'ENXIO') {
+    const result = writeFifoFully(session.pipePath, buf);
+    if (result === 'ok') {
+      sendOk(ws, id, { ok: true });
+    } else if (result === 'ENXIO') {
       reapSession(sid, -1, 'sendRaw-enxio');
       sendOk(ws, id, { ok: false, reason: 'ENXIO', exitCode: session.exitCode });
-    } else if (code === 'EAGAIN') {
+    } else if (result === 'EAGAIN') {
       sendOk(ws, id, { ok: false, reason: 'EAGAIN', retriable: true });
     } else {
-      sendError(ws, id, 'sendRaw failed: ' + err.message);
+      reapSession(sid, -1, 'sendRaw-partial-write');
+      sendOk(ws, id, { ok: false, reason: 'session_dead', exitCode: session.exitCode });
     }
+  } catch (err) {
+    sendError(ws, id, 'sendRaw failed: ' + err.message);
   }
 }
 

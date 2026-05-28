@@ -122,6 +122,8 @@ export class DaemonConnection {
   private _controlMaster: ChildProcess | null = null
   /** Tracks whether the last deploy used source (not binary) — affects startDaemon() command. */
   private _deployedViaSource = false
+  /** Resolved path to bun on the remote host, or null if unavailable / not yet probed. */
+  private _bunPath: string | null = null
 
   constructor(hostKey: string, sshTarget: SshTarget | null) {
     this.hostKey = hostKey
@@ -217,9 +219,22 @@ export class DaemonConnection {
    */
   onEvent(handler: EventHandler): () => void {
     this.eventHandlers.push(handler)
+    // DUP-DEBUG: handler count > 1 means multiple subscribers on the same conn —
+    // every daemon-pushed event will fan out to all of them, doubling downstream
+    // processing. Used to diagnose tool_use rendered twice in remote sessions.
+    log.session.info('DaemonConnection.onEvent registered', {
+      host: this.hostKey,
+      daemonInstanceId: this._daemonInstanceId,
+      handlerCount: this.eventHandlers.length,
+    })
     return () => {
       const idx = this.eventHandlers.indexOf(handler)
       if (idx >= 0) this.eventHandlers.splice(idx, 1)
+      log.session.info('DaemonConnection.onEvent unsubscribed', {
+        host: this.hostKey,
+        daemonInstanceId: this._daemonInstanceId,
+        handlerCount: this.eventHandlers.length,
+      })
     }
   }
 
@@ -414,8 +429,10 @@ export class DaemonConnection {
   }
 
   /**
-   * Build SSH args. Set useControlMaster=false for commands that pipe large data
-   * through stdin — ControlMaster multiplexed connections don't reliably forward stdin.
+   * Build SSH args. ControlMaster muxing forwards stdin fine on OpenSSH ≥9; the
+   * `useControlMaster: false` opt-out remains for callers that explicitly want a
+   * fresh TCP connection (e.g. chunked retry path that tries to dodge a flaky
+   * mux session on transient proxy errors).
    */
   private buildSshArgs(opts: { useControlMaster: boolean } = { useControlMaster: true }): string[] {
     const args = ['-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=no']
@@ -476,6 +493,48 @@ export class DaemonConnection {
       this._controlPath = null
     }
     this._controlMaster = null
+  }
+
+  /**
+   * Stream a single buffer to a remote file in one SSH connection.
+   * Uses ControlMaster mux when available so we don't pay handshake cost.
+   * Verifies remote sha256 + size before resolving — corp SSH proxies (WSSH)
+   * sometimes truncate mid-stream while still exiting code 0.
+   * Returns true on success, false on any failure (caller decides whether to fall back).
+   */
+  private async pipeSingleStream(data: Buffer, remotePath: string, expectedSha256: string): Promise<boolean> {
+    const args = [
+      ...this.baseSshArgs,
+      this.sshHostString,
+      `cat > ${remotePath} && sha256sum ${remotePath} | awk '{print $1}' && wc -c < ${remotePath}`,
+    ]
+    const proc = spawn('ssh', args, { stdio: ['pipe', 'pipe', 'pipe'] })
+    proc.stdin!.on('error', () => {})
+
+    let stdout = ''
+    proc.stdout!.on('data', (d: Buffer) => { stdout += d.toString() })
+
+    const ok = await new Promise<boolean>((resolve) => {
+      proc.on('error', () => resolve(false))
+      // Generous timeout — 100MB at ~5MB/s = 20s; allow 3min for headroom.
+      const timer = setTimeout(() => { proc.kill('SIGTERM'); resolve(false) }, 180_000)
+      proc.on('close', (code) => { clearTimeout(timer); resolve(code === 0) })
+      proc.stdin!.end(data)
+    })
+
+    if (!ok) return false
+
+    const lines = stdout.trim().split(/\s+/).filter(Boolean)
+    const remoteSha = lines[0]
+    const remoteSize = parseInt(lines[1] ?? '0', 10)
+    if (remoteSize !== data.length || remoteSha !== expectedSha256) {
+      log.session.warn('DaemonConnection: single-stream upload verification failed', {
+        host: this.hostKey, expectedBytes: data.length, gotBytes: remoteSize,
+        expectedSha: expectedSha256.slice(0, 12), gotSha: remoteSha?.slice(0, 12),
+      })
+      return false
+    }
+    return true
   }
 
   /**
@@ -561,31 +620,41 @@ export class DaemonConnection {
       binarySshErr = err
     }
 
-    // Fallback: check old node-based daemon (may still be running from previous deploy)
-    let nodeSshErr: unknown = null
+    // Fallback: runtime-agnostic file probe. Whichever runtime started the
+    // daemon (node, bun, binary), it wrote daemon.pid + daemon.port. Reading
+    // those + `kill -0` works without knowing which runtime we used last time
+    // — important when this DaemonConnection was just constructed and
+    // _bunPath isn't populated yet, but a bun-started daemon is still alive
+    // from a previous server run.
+    let fileSshErr: unknown = null
     try {
-      const preamble = buildRemotePreamble(this.ssh.shell_setup)
-      const result = await this.sshExec(`${preamble}; node /tmp/open-walnut/daemon.cjs --status 2>/dev/null || true`)
+      const result = await this.sshExec(
+        'PID=$(cat /tmp/open-walnut/daemon.pid 2>/dev/null); ' +
+        'PORT=$(cat /tmp/open-walnut/daemon.port 2>/dev/null); ' +
+        '[ -n "$PID" ] && [ -n "$PORT" ] && kill -0 "$PID" 2>/dev/null && ' +
+        'echo "{\\"running\\":true,\\"pid\\":$PID,\\"port\\":$PORT}" || true',
+        5_000,
+      )
       if (result) {
         const status = JSON.parse(result)
         if (status.running && status.port) {
-          log.session.info('DaemonConnection: daemon already running (node)', {
+          log.session.info('DaemonConnection: daemon already running (source/bun)', {
             host: this.hostKey, port: status.port, pid: status.pid,
           })
           return status.port
         }
       }
     } catch (err) {
-      nodeSshErr = err
+      fileSshErr = err
     }
 
     // Both probes reached SSH but got back empty → daemon genuinely absent.
-    if (!binarySshErr && !nodeSshErr) return null
+    if (!binarySshErr && !fileSshErr) return null
 
     // Strict mode (reconnect path): SSH itself failed — propagate so callers can
     // retry/rebuild ControlMaster instead of misdiagnosing as "daemon died".
     if (opts.strict) {
-      throw (binarySshErr ?? nodeSshErr) as Error
+      throw (binarySshErr ?? fileSshErr) as Error
     }
     // Non-strict (initial connect): treat SSH failure as absent → deploy.
     return null
@@ -746,9 +815,16 @@ export class DaemonConnection {
         const remotePath = await this.getRemoteDaemonPath()
         await this.sshExec(`${remotePath} --stop 2>/dev/null || true`, 5_000)
       } catch {}
+      // Runtime-agnostic stop for source/bun daemons — kill by pid file.
+      // Avoids needing to know whether the running daemon was launched under
+      // node or bun (the --stop subcommand is symmetric in source).
       try {
-        const preamble = buildRemotePreamble(this.ssh.shell_setup)
-        await this.sshExec(`${preamble}; node /tmp/open-walnut/daemon.cjs --stop 2>/dev/null || true`, 5_000)
+        await this.sshExec(
+          'PID=$(cat /tmp/open-walnut/daemon.pid 2>/dev/null); ' +
+          '[ -n "$PID" ] && kill "$PID" 2>/dev/null; ' +
+          'rm -f /tmp/open-walnut/daemon.pid /tmp/open-walnut/daemon.port; true',
+          5_000,
+        )
       } catch {}
 
       // Redeploy + start + tunnel + reconnect
@@ -796,6 +872,26 @@ export class DaemonConnection {
    * binaries haven't been built yet (dev workflow).
    */
   private async deployDaemon(): Promise<void> {
+    // Preferred path: bun + ~63KB JS source. Bypasses WSSH bulk-transfer kills
+    // entirely (binary is 37MB compressed; source is gzipped to ~17KB on the
+    // wire). Bun is a single static binary so probe-or-install completes in a
+    // few seconds when missing. Falls through to binary on probe/install
+    // failure (offline hosts, restrictive networks, glibc-too-old for bun).
+    const bunPath = await this.probeOrInstallBun()
+    if (bunPath) {
+      try {
+        await this.deploySource()
+        this._bunPath = bunPath
+        this._deployedViaSource = true
+        return
+      } catch (err) {
+        log.session.warn('DaemonConnection: bun source deploy failed, falling back to binary', {
+          host: this.hostKey, error: err instanceof Error ? err.message : String(err),
+        })
+        this._bunPath = null
+      }
+    }
+
     const localBinary = await this.getLocalBinaryPath()
 
     if (localBinary) {
@@ -818,6 +914,63 @@ export class DaemonConnection {
 
     await this.deploySource()
     this._deployedViaSource = true
+  }
+
+  /**
+   * Probe for bun on the remote host. If absent, attempt one-shot install via
+   * the official curl|bash script (which fetches from bun.sh — egress from the
+   * remote, NOT through WSSH). Returns the resolved bun executable path, or
+   * null if probe and install both failed.
+   */
+  private async probeOrInstallBun(): Promise<string | null> {
+    // Probe: PATH first, then the install script's default location. Returning
+    // an absolute path lets startDaemon() exec bun without depending on shell_setup.
+    const probeCmd =
+      `if command -v bun >/dev/null 2>&1; then command -v bun; ` +
+      `elif [ -x "$HOME/.bun/bin/bun" ]; then echo "$HOME/.bun/bin/bun"; ` +
+      `else echo MISSING; fi`
+    let path: string
+    try {
+      path = (await this.sshExec(probeCmd, 10_000)).trim().split('\n').pop()?.trim() || ''
+    } catch (err) {
+      log.session.warn('DaemonConnection: bun probe failed', {
+        host: this.hostKey, error: err instanceof Error ? err.message : String(err),
+      })
+      return null
+    }
+
+    if (path && path !== 'MISSING') {
+      log.session.info('DaemonConnection: bun present', { host: this.hostKey, path })
+      return path
+    }
+
+    // Install. The install script writes to ~/.bun/bin/bun and downloads ~30MB
+    // straight from bun.sh — that's a remote-host outbound HTTPS connection,
+    // bypassing WSSH entirely. 90s budget covers slow corporate egress.
+    log.session.info('DaemonConnection: bun absent, attempting one-shot install', {
+      host: this.hostKey,
+    })
+    try {
+      await this.sshExec('curl -fsSL https://bun.sh/install | bash >/dev/null 2>&1', 90_000)
+    } catch (err) {
+      log.session.warn('DaemonConnection: bun install failed — will fall back to binary', {
+        host: this.hostKey, error: err instanceof Error ? err.message : String(err),
+      })
+      return null
+    }
+
+    try {
+      const after = (await this.sshExec(probeCmd, 5_000)).trim().split('\n').pop()?.trim() || ''
+      if (after && after !== 'MISSING') {
+        log.session.info('DaemonConnection: bun installed', { host: this.hostKey, path: after })
+        return after
+      }
+    } catch {}
+
+    log.session.warn('DaemonConnection: bun install reported success but probe still missing', {
+      host: this.hostKey,
+    })
+    return null
   }
 
   /**
@@ -851,12 +1004,15 @@ export class DaemonConnection {
       } catch { /* version check failed — deploy fresh */ }
 
       if (needsDeploy) {
-        // Deploy via chunked SSH stdin pipe.
-        // Corporate SSH proxies (WSSH) kill connections that transfer >5-10MB.
-        // We split the gzipped binary into 1MB chunks, pipe each through a
-        // separate SSH connection, then reassemble on the remote host.
-        // If a chunk fails (proxy kills it), we wait 5s and retry (max 2 retries),
-        // then fall back to source deploy (~44KB) which always passes.
+        // Strategy: stream the whole gzipped binary in one SSH connection (mux'd
+        // through ControlMaster). Empirically ~5s on success for our 37MB binary,
+        // sha256-verified end-to-end. Corporate SSH proxies (WSSH) kill large
+        // transfers *probabilistically* — at 37MB roughly 60% succeed; at 40MB+
+        // success rate drops sharply (measured 0/2 at 40MB, 0/2 at 45MB). The
+        // proxy decision isn't deterministic on size alone, so we always try
+        // single-stream first (huge win when it works), then fall back to a
+        // chunked path (256KB × N over individual SSH connections) which
+        // survives proxy interference at the cost of being ~10x slower.
         const remotePath = await this.getRemoteDaemonPath()
         const gzPath = localBinaryPath + '.gz'
 
@@ -874,6 +1030,28 @@ export class DaemonConnection {
 
         const gzData = fs.readFileSync(gzPath)
         const gzSize = gzData.length
+        const gzSha256 = crypto.createHash('sha256').update(gzData).digest('hex')
+
+        // Try single-stream first.
+        const singleOk = await this.pipeSingleStream(gzData, `${remotePath}.gz`, gzSha256)
+        if (singleOk) {
+          const unpackResult = await this.sshExec(
+            `gunzip -f ${remotePath}.gz && chmod +x ${remotePath} && ${remotePath} --version`,
+            30_000,
+          )
+          const remoteBinaryName = await this.getRemoteBinaryName()
+          log.session.info('DaemonConnection: binary deployed via single SSH stream', {
+            host: this.hostKey, deployMs: Date.now() - t0,
+            bytes: binarySize, gzBytes: gzSize, binary: remoteBinaryName,
+            remoteVersion: unpackResult.trim(),
+          })
+          return
+        }
+
+        log.session.warn('DaemonConnection: single-stream deploy failed, falling back to chunked', {
+          host: this.hostKey, gzBytes: gzSize,
+        })
+        // Fall through to chunked path below.
         // 256KB — deep under WSSH's ~5MB kill threshold AND any per-connection
         // byte-rate throttling. Larger chunks (1MB) were the main failure mode
         // pre-2026-05-05: corp proxies would kill ~half the chunks on a ~40MB
@@ -1019,11 +1197,16 @@ export class DaemonConnection {
       })
 
       // Ensure 'ws' package is available for the daemon's WebSocket server.
-      // Remove any stale package.json that might cause EBADPLATFORM errors.
-      try {
-        await this.sshExec(`${preamble}; cd /tmp/open-walnut && node -e "require('ws')" 2>/dev/null || (rm -f package.json && npm install --prefix /tmp/open-walnut ws 2>/dev/null)`, 30_000)
-      } catch {
-        log.session.debug('DaemonConnection: ws install skipped', { host: this.hostKey })
+      // When bun is the runtime we skip this entirely — daemon-source.ts has a
+      // raw HTTP-upgrade fallback (createManualWsServer) that kicks in when
+      // require('ws') fails, and that's what serves WS under bun. Skipping
+      // saves 5-30s and avoids EBADPLATFORM on hosts without npm.
+      if (!this._bunPath) {
+        try {
+          await this.sshExec(`${preamble}; cd /tmp/open-walnut && node -e "require('ws')" 2>/dev/null || (rm -f package.json && npm install --prefix /tmp/open-walnut ws 2>/dev/null)`, 30_000)
+        } catch {
+          log.session.debug('DaemonConnection: ws install skipped', { host: this.hostKey })
+        }
       }
 
       log.session.info('DaemonConnection: daemon source deployed', {
@@ -1055,13 +1238,22 @@ export class DaemonConnection {
       // Binary has `--status` subcommand; source daemon doesn't, so use `kill -0`
       // on its PID file instead. See daemon-source.ts — no --status handler.
       let startCmd: string
-      if (!this._deployedViaSource && await this.getLocalBinaryPath()) {
+      if (this._deployedViaSource && this._bunPath) {
+        // Source deployed under bun — exec bun by absolute path (no preamble).
+        // The daemon source itself sources ~/.zshrc / ~/.bashrc on startup to
+        // populate process.env.PATH so cmdStart's spawn('claude', ...) finds the
+        // CLI. See daemon-source.ts "PATH setup" block.
+        startCmd = `nohup ${this._bunPath} /tmp/open-walnut/daemon.cjs --start > /tmp/open-walnut/daemon-start.log 2>&1 & ` +
+          'sleep 2 && cat /tmp/open-walnut/daemon.port && echo && ' +
+          'DPID=$(cat /tmp/open-walnut/daemon.pid 2>/dev/null) && ' +
+          '[ -n "$DPID" ] && kill -0 "$DPID" 2>/dev/null && echo "{\\"running\\":true}"'
+      } else if (!this._deployedViaSource && await this.getLocalBinaryPath()) {
         // Binary deploy — run directly, no PATH setup needed
         const remotePath = await this.getRemoteDaemonPath()
         startCmd = `nohup ${remotePath} --start > /tmp/open-walnut/daemon-start.log 2>&1 & ` +
           `sleep 2 && cat /tmp/open-walnut/daemon.port && echo && ${remotePath} --status`
       } else {
-        // Source deploy — needs node PATH discovery.
+        // Source deploy under node — needs node PATH discovery.
         // `[ -n "$DPID" ]` guards against empty pid file (cat succeeds but
         // yields empty → `kill -0 ""` behavior is shell-dependent; some emit
         // the current shell's pid).
@@ -1299,6 +1491,17 @@ export class DaemonConnection {
     // Unsolicited event (has 'ev' field)
     if ('ev' in msg) {
       const event = msg as unknown as DaemonEvent
+      // DUP-DEBUG: if handlerCount > 1, every event below fans out N times.
+      // jsonl events are high-frequency — only log when something is off
+      // (multiple handlers) or for low-frequency event types.
+      if (this.eventHandlers.length !== 1 || event.ev !== 'jsonl') {
+        log.session.debug('DaemonConnection: dispatch event', {
+          host: this.hostKey,
+          ev: event.ev,
+          sid: (event as { sid?: string }).sid,
+          handlerCount: this.eventHandlers.length,
+        })
+      }
       for (const handler of this.eventHandlers) {
         try { handler(event) } catch {}
       }
@@ -1391,9 +1594,10 @@ export class DaemonConnection {
       return
     }
 
-    // Reset deploy flag — if daemon is still alive we skip deploy entirely;
-    // if daemon died, deployDaemon() will set this correctly.
+    // Reset deploy flags — if daemon is still alive we skip deploy entirely;
+    // if daemon died, deployDaemon() will set these correctly.
     this._deployedViaSource = false
+    this._bunPath = null
 
     // Kill old tunnel if any
     if (this.tunnel) {
