@@ -28,7 +28,7 @@ interface ChatMessageProps {
   taskContext?: TaskContext;
   routeInfo?: RouteInfo;
   timestamp?: string;
-  source?: 'cron' | 'triage' | 'session' | 'session-error' | 'agent-error' | 'subagent' | 'compaction' | 'compacting' | 'heartbeat' | 'quick-start';
+  source?: 'cron' | 'triage' | 'session' | 'session-error' | 'agent-error' | 'subagent' | 'compaction' | 'compacting' | 'heartbeat' | 'quick-start' | 'quick-start-echo';
   cronJobName?: string;
   notification?: boolean;
   queued?: boolean;
@@ -1040,6 +1040,15 @@ function ChatMessageInner({ role, content, blocks, images, taskContext, routeInf
   // Determine the display label for the message header
   const isTriage = source === 'triage';
   const isSubagent = source === 'subagent';
+  const isQuickStartEcho = source === 'quick-start-echo';
+  // Generic long user-message rule: an explicitly-typed user prompt with no special
+  // source tag, that's long enough to dominate the viewport, gets the same auto-collapse
+  // treatment as Quick Start echoes.
+  const AUTO_COLLAPSE_CHARS = 600;
+  const AUTO_COLLAPSE_LINES = 20;
+  const isLongPlainUser =
+    role === 'user' && !source &&
+    (content.length > AUTO_COLLAPSE_CHARS || content.split('\n').length > AUTO_COLLAPSE_LINES);
   const roleLabel = isHeartbeat
     ? '\u2764\uFE0F Heartbeat'
     : isCron
@@ -1054,7 +1063,10 @@ function ChatMessageInner({ role, content, blocks, images, taskContext, routeInf
 
   // Auto-collapse notification messages (session results, subagent) AND all triage messages.
   // Triage always collapses regardless of notification flag — the full analysis is noisy.
-  const shouldAutoCollapse = (isNotification && !isErrorNotification) || isTriage;
+  // Quick Start local echoes and any long plain user message also auto-collapse so they
+  // don't fill the viewport — the full content is still available behind the chevron.
+  const shouldAutoCollapse =
+    (isNotification && !isErrorNotification) || isTriage || isQuickStartEcho || isLongPlainUser;
   const [isCollapsed, setIsCollapsed] = useState(shouldAutoCollapse);
 
   // CSS class: cron, heartbeat, notification, and triage messages get their own style
@@ -1069,6 +1081,13 @@ function ChatMessageInner({ role, content, blocks, images, taskContext, routeInf
   // Extract collapsed summary for auto-collapsed messages
   const collapsedSummary = useMemo(() => {
     if (!shouldAutoCollapse) return '';
+    if (isQuickStartEcho) {
+      // Content shape: "Quick Start on `<cwd>`[ (<host>)]:\n> <user text>"
+      // Show only the header line (no excerpt of the pasted body).
+      const headerLine = content.split('\n')[0] ?? content;
+      const cleaned = headerLine.replace(/`/g, '').replace(/:\s*$/, '');
+      return `⚡ ${cleaned}`.slice(0, 160);
+    }
     if (isTriage) {
       // Extract task label from <task-ref label="..."/> or legacy [id|label] format
       const xmlRefMatch = content.match(/<task-ref[^>]*label="([^"]*)"/);
@@ -1106,10 +1125,10 @@ function ChatMessageInner({ role, content, blocks, images, taskContext, routeInf
     // Default: first line, stripped of bold markers
     const firstLine = content.split('\n').find(l => l.trim()) ?? '';
     return firstLine.replace(/\*\*/g, '').slice(0, 120);
-  }, [content, shouldAutoCollapse, isTriage]);
+  }, [content, shouldAutoCollapse, isTriage, isQuickStartEcho]);
 
   // Notification header with optional UI Only badge + collapse toggle + collapsed summary
-  const notificationHeader = (isNotification || isTriage) ? (
+  const notificationHeader = (isNotification || isTriage || isQuickStartEcho || isLongPlainUser) ? (
     <div className="chat-message-header chat-notification-header" onClick={shouldAutoCollapse ? () => setIsCollapsed(c => !c) : undefined} style={shouldAutoCollapse ? { cursor: 'pointer' } : undefined}>
       <div className="chat-message-role">
         {roleLabel}

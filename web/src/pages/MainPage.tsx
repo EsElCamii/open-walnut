@@ -849,7 +849,10 @@ export function MainPage({ visible = true, navigateRef }: MainPageProps) {
     if (qsp) {
       setQuickStartPath(null);
       // Show the user's message as a local chat entry immediately
-      chat.addLocalMessage(`Quick Start on \`${qsp.cwd}\`${qsp.host ? ` (${qsp.hostLabel ?? qsp.host})` : ''}:\n> ${text}`);
+      chat.addLocalMessage(
+        `Quick Start on \`${qsp.cwd}\`${qsp.host ? ` (${qsp.hostLabel ?? qsp.host})` : ''}:\n> ${text}`,
+        'quick-start-echo',
+      );
 
       // Set pending ref BEFORE the async call so WS events that arrive
       // during the HTTP round-trip can still match via taskId
