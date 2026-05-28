@@ -53,12 +53,21 @@ async function bundleExternalPlugin(
 ): Promise<string | null> {
   try {
     const { build } = await import('esbuild');
-    const os = await import('node:os');
     const pluginName = path.basename(pluginDir);
-    const outfile = path.join(os.tmpdir(), `open-walnut-plugin-${pluginName}-${Date.now()}.mjs`);
 
     // BUILTIN_DIR is always {root}/dist/integrations or {root}/src/integrations
     const projectRoot = path.dirname(path.dirname(BUILTIN_DIR));
+
+    // CRITICAL: write the bundled mjs INSIDE the walnut project so Node's
+    // ESM resolver can walk up from the bundle file to walnut's node_modules
+    // when resolving externals like 'better-sqlite3'. If we write to os.tmpdir(),
+    // Node looks for node_modules in /private/var/folders/... and fails.
+    // esbuild's `nodePaths` option only affects build-time resolution — Node
+    // ignores it at runtime, so the file's actual on-disk location matters.
+    const cacheDir = path.join(projectRoot, '.plugin-cache');
+    try { fs.mkdirSync(cacheDir, { recursive: true }); } catch { /* exists */ }
+    const outfile = path.join(cacheDir, `${pluginName}-${Date.now()}.mjs`);
+
     await build({
       entryPoints: [entryFile],
       outfile,
