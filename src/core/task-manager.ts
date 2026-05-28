@@ -14,11 +14,27 @@ import { runMigrationIfNeeded } from './task-db-migration.js';
 import { getExtIndexSpec } from './ext-index-registry.js';
 import yaml from 'js-yaml';
 
+// CJK detection regex — used only for log enrichment so that "plugin not loaded"
+// warnings flag the cases that an external sync plugin's validateContent would
+// have rejected.
+const CJK_DETECT_REGEX = /[一-鿿㐀-䶿぀-ヿ]/;
+
 /** Ask the task's plugin to validate content before writing. Throws on rejection. */
 function runPluginContentValidation(task: { source: string; id?: string }, field: string, value: string): void {
   const plugin = registry.get(task.source);
   if (!plugin) {
-    log.task.warn('content validation skipped: plugin not loaded', { source: task.source, field, taskId: (task as Task).id });
+    // Loophole detector: plugin failed to load → silent-pass means content guards
+    // are fully bypassed. Surface CJK content explicitly so we can trace any new
+    // Chinese-into-external-system regression back to a concrete write site.
+    const hasCJK = typeof value === 'string' && CJK_DETECT_REGEX.test(value);
+    log.task.warn('content validation skipped: plugin not loaded', {
+      source: task.source,
+      field,
+      taskId: (task as Task).id,
+      hasCJK,
+      preview: typeof value === 'string' ? value.slice(0, 200) : undefined,
+      stack: hasCJK ? new Error().stack : undefined,
+    });
     return;
   }
   if (!plugin.sync.validateContent) return;
@@ -1028,95 +1044,103 @@ function guardActiveChildren(store: TaskStore, task: Task): void {
  * Throws if no match or ambiguous match.
  */
 export async function completeTask(idPrefix: string): Promise<{ task: Task }> {
-  return withWriteLock(async () => {
-  const store = await readStore();
-  const matches = store.tasks.filter((t) => t.id.startsWith(idPrefix));
+  // Lock-internal phase: write local store. Push runs OUTSIDE the lock because
+  // autoPushIfConfigured() acquires the same lock when setting sync_error;
+  // holding the lock during the await would self-deadlock the whole task system.
+  const task = await withWriteLock(async () => {
+    const store = await readStore();
+    const matches = store.tasks.filter((t) => t.id.startsWith(idPrefix));
 
-  if (matches.length === 0) {
-    throw new Error(`No task found matching ID prefix "${idPrefix}"`);
-  }
-  if (matches.length > 1) {
-    throw new Error(
-      `Ambiguous ID prefix "${idPrefix}" matches ${matches.length} tasks. Be more specific.`,
-    );
-  }
+    if (matches.length === 0) {
+      throw new Error(`No task found matching ID prefix "${idPrefix}"`);
+    }
+    if (matches.length > 1) {
+      throw new Error(
+        `Ambiguous ID prefix "${idPrefix}" matches ${matches.length} tasks. Be more specific.`,
+      );
+    }
 
-  const task = matches[0];
-  guardActiveChildren(store, task);
-  applyPhase(task, 'COMPLETE');
-  // Auto-unpin completed tasks so they don't linger in Focus Bar
-  if (task.pinned) {
-    task.pinned = false;
-    delete task.pin_order;
-    delete task.focus_tier;
-    // Compact remaining pin orders
-    const pinned = store.tasks.filter((t) => t.pinned).sort((a, b) => (a.pin_order ?? 0) - (b.pin_order ?? 0));
-    pinned.forEach((t, i) => { t.pin_order = i; });
-  }
-  task.updated_at = new Date().toISOString();
+    const t = matches[0];
+    guardActiveChildren(store, t);
+    applyPhase(t, 'COMPLETE');
+    // Auto-unpin completed tasks so they don't linger in Focus Bar
+    if (t.pinned) {
+      t.pinned = false;
+      delete t.pin_order;
+      delete t.focus_tier;
+      // Compact remaining pin orders
+      const pinned = store.tasks.filter((x) => x.pinned).sort((a, b) => (a.pin_order ?? 0) - (b.pin_order ?? 0));
+      pinned.forEach((x, i) => { x.pin_order = i; });
+    }
+    t.updated_at = new Date().toISOString();
 
-  await writeStore(store);
-
-  // Fire-and-forget: push to To-Do + mark linked sessions completed
-  autoPushIfConfigured(task).then(r => {
-    if (!r.success) log.task.warn('sync push failed (fire-and-forget)', { taskId: task.id, source: task.source, error: r.error });
-  }).catch(err => {
-    log.task.warn('sync push rejected (fire-and-forget)', { taskId: task.id, source: task.source, error: err instanceof Error ? err.message : String(err) });
+    await writeStore(store);
+    return t;
   });
+
+  // Sync push (outside lock). Failure propagates to caller — plugin tasks must
+  // round-trip to the remote store, so a silent failure is worse than blocking.
+  const syncResult = await autoPushIfConfigured(task);
+  if (!syncResult.success) {
+    throw new Error(`Sync to ${task.source} failed: ${syncResult.error ?? 'unknown error'}`);
+  }
   autoCompleteTaskSessions(task);
 
   return { task };
-  });
 }
 
 /**
  * Toggle a task between todo and done states by partial ID match.
  */
 export async function toggleComplete(idPrefix: string): Promise<{ task: Task }> {
-  return withWriteLock(async () => {
-  const store = await readStore();
-  const matches = store.tasks.filter((t) => t.id.startsWith(idPrefix));
+  // Lock-internal: write local store. Push runs outside the lock to avoid
+  // self-deadlock (autoPushIfConfigured re-acquires the same lock on plugin
+  // not loaded → set sync_error).
+  const task = await withWriteLock(async () => {
+    const store = await readStore();
+    const matches = store.tasks.filter((t) => t.id.startsWith(idPrefix));
 
-  if (matches.length === 0) {
-    throw new Error(`No task found matching ID prefix "${idPrefix}"`);
-  }
-  if (matches.length > 1) {
-    throw new Error(
-      `Ambiguous ID prefix "${idPrefix}" matches ${matches.length} tasks. Be more specific.`,
-    );
-  }
-
-  const task = matches[0];
-  if (task.phase === 'COMPLETE') {
-    applyPhase(task, 'TODO');
-  } else {
-    guardActiveChildren(store, task);
-    applyPhase(task, 'COMPLETE');
-    // Auto-unpin completed tasks
-    if (task.pinned) {
-      task.pinned = false;
-      delete task.pin_order;
-      delete task.focus_tier;
-      const pinned = store.tasks.filter((t) => t.pinned).sort((a, b) => (a.pin_order ?? 0) - (b.pin_order ?? 0));
-      pinned.forEach((t, i) => { t.pin_order = i; });
+    if (matches.length === 0) {
+      throw new Error(`No task found matching ID prefix "${idPrefix}"`);
     }
-  }
-  task.updated_at = new Date().toISOString();
+    if (matches.length > 1) {
+      throw new Error(
+        `Ambiguous ID prefix "${idPrefix}" matches ${matches.length} tasks. Be more specific.`,
+      );
+    }
 
-  await writeStore(store);
+    const t = matches[0];
+    if (t.phase === 'COMPLETE') {
+      applyPhase(t, 'TODO');
+    } else {
+      guardActiveChildren(store, t);
+      applyPhase(t, 'COMPLETE');
+      // Auto-unpin completed tasks
+      if (t.pinned) {
+        t.pinned = false;
+        delete t.pin_order;
+        delete t.focus_tier;
+        const pinned = store.tasks.filter((x) => x.pinned).sort((a, b) => (a.pin_order ?? 0) - (b.pin_order ?? 0));
+        pinned.forEach((x, i) => { x.pin_order = i; });
+      }
+    }
+    t.updated_at = new Date().toISOString();
 
-  // Fire-and-forget: push to To-Do + mark linked sessions completed (only when completing)
-  autoPushIfConfigured(task).then(r => {
-    if (!r.success) log.task.warn('sync push failed (fire-and-forget)', { taskId: task.id, source: task.source, error: r.error });
-  }).catch(err => {
-    log.task.warn('sync push rejected (fire-and-forget)', { taskId: task.id, source: task.source, error: err instanceof Error ? err.message : String(err) });
+    await writeStore(store);
+    return t;
   });
+
+  // Sync push (outside lock). Failure propagates to caller — toggle should not
+  // silently desync.
+  const syncResult = await autoPushIfConfigured(task);
+  if (!syncResult.success) {
+    throw new Error(`Sync to ${task.source} failed: ${syncResult.error ?? 'unknown error'}`);
+  }
   if (task.phase === 'COMPLETE') autoCompleteTaskSessions(task);
 
   const eventName = task.phase === 'COMPLETE' ? EventNames.TASK_COMPLETED : EventNames.TASK_UPDATED;
   bus.emit(eventName, { task }, ['web-ui', 'main-agent'], { source: 'internal' });
   return { task };
-  });
 }
 
 export interface UpdateTaskInput {
@@ -1217,7 +1241,10 @@ export async function updateTask(
   updates: UpdateTaskInput,
   eventOptions?: { source?: string; extraTargets?: string[]; ifPhase?: TaskPhase },
 ): Promise<{ task: Task }> {
-  return withWriteLock(async () => {
+  // Lock-internal phase: validate + mutate + persist. Returns enough state for
+  // the post-lock push. Push runs OUTSIDE the lock because autoPushIfConfigured
+  // re-acquires the lock when stamping sync_error → self-deadlock if held.
+  const { task, migrationResult, parentChangeAction, cwdChanged, oldCwd } = await withWriteLock(async () => {
   const store = await readStore();
   const matches = store.tasks.filter((t) => t.id.startsWith(idPrefix));
 
@@ -1453,7 +1480,13 @@ export async function updateTask(
 
   await writeStore(store);
 
-  // Fire-and-forget: push to plugin + parent change + mark linked sessions completed
+  return { task, migrationResult, parentChangeAction, cwdChanged, oldCwd };
+  });
+
+  // ── Post-lock phase: push to plugin (network I/O) + side effects ──
+  // All operations below run OUTSIDE the write lock so re-entrant lock acquisitions
+  // inside autoPushIfConfigured (e.g. sync_error stamping) don't self-deadlock.
+
   if (migrationResult) {
     // Cross-source migration: handle old backend cleanup + new backend push per migrated task
     for (const m of migrationResult) {
@@ -1488,12 +1521,13 @@ export async function updateTask(
       bus.emit(EventNames.TASK_UPDATED, { task: m.task }, ['web-ui'], { source: 'migration' });
     }
   } else {
-    // Normal (non-migration) sync push
-    autoPushIfConfigured(task).then(r => {
-      if (!r.success) log.task.warn('sync push failed (fire-and-forget)', { taskId: task.id, source: task.source, error: r.error });
-    }).catch(err => {
-      log.task.warn('sync push rejected (fire-and-forget)', { taskId: task.id, source: task.source, error: err instanceof Error ? err.message : String(err) });
-    });
+    // Normal (non-migration) sync push — propagate failure to caller. Calls that
+    // wrote to plugin-backed tasks must surface push errors (plugin not loaded,
+    // remote rejection, network) so callers see "task didn't actually sync."
+    const syncResult = await autoPushIfConfigured(task);
+    if (!syncResult.success) {
+      throw new Error(`Sync to ${task.source} failed: ${syncResult.error ?? 'unknown error'}`);
+    }
   }
   if (parentChangeAction) parentChangeAction();
   if (task.phase === 'COMPLETE') autoCompleteTaskSessions(task);
@@ -1549,43 +1583,44 @@ export async function updateTask(
   }
 
   return { task };
-  });
 }
 
 /**
  * Add a note to a task by partial ID match.
  */
 export async function addNote(idPrefix: string, content: string): Promise<{ task: Task }> {
-  return withWriteLock(async () => {
-  const store = await readStore();
-  const matches = store.tasks.filter((t) => t.id.startsWith(idPrefix));
+  // Lock-internal: validate + persist. Push is moved outside the lock to prevent
+  // self-deadlock (autoPushIfConfigured re-acquires this same lock).
+  const task = await withWriteLock(async () => {
+    const store = await readStore();
+    const matches = store.tasks.filter((t) => t.id.startsWith(idPrefix));
 
-  if (matches.length === 0) {
-    throw new Error(`No task found matching ID prefix "${idPrefix}"`);
-  }
-  if (matches.length > 1) {
-    throw new Error(
-      `Ambiguous ID prefix "${idPrefix}" matches ${matches.length} tasks. Be more specific.`,
-    );
-  }
+    if (matches.length === 0) {
+      throw new Error(`No task found matching ID prefix "${idPrefix}"`);
+    }
+    if (matches.length > 1) {
+      throw new Error(
+        `Ambiguous ID prefix "${idPrefix}" matches ${matches.length} tasks. Be more specific.`,
+      );
+    }
 
-  const task = matches[0];
-  runPluginContentValidation(task, 'note', content);
-  task.note = task.note ? task.note + '\n\n' + content : content;
-  task.updated_at = new Date().toISOString();
+    const t = matches[0];
+    runPluginContentValidation(t, 'note', content);
+    t.note = t.note ? t.note + '\n\n' + content : content;
+    t.updated_at = new Date().toISOString();
 
-  await writeStore(store);
-
-  // Fire-and-forget push to provider
-  autoPushIfConfigured(task).then(r => {
-    if (!r.success) log.task.warn('sync push failed (fire-and-forget)', { taskId: task.id, source: task.source, error: r.error });
-  }).catch(err => {
-    log.task.warn('sync push rejected (fire-and-forget)', { taskId: task.id, source: task.source, error: err instanceof Error ? err.message : String(err) });
+    await writeStore(store);
+    return t;
   });
+
+  // Sync push (outside lock). Failure propagates to caller.
+  const syncResult = await autoPushIfConfigured(task);
+  if (!syncResult.success) {
+    throw new Error(`Sync to ${task.source} failed: ${syncResult.error ?? 'unknown error'}`);
+  }
 
   bus.emit(EventNames.TASK_UPDATED, { task }, ['web-ui'], { source: 'internal' });
   return { task };
-  });
 }
 
 /**
@@ -1593,145 +1628,152 @@ export async function addNote(idPrefix: string, content: string): Promise<{ task
  * Auto-prepends a timestamp heading (### MM-DD HH:MM).
  */
 export async function appendConversationLog(idPrefix: string, entry: string): Promise<{ task: Task }> {
-  return withWriteLock(async () => {
-  const store = await readStore();
-  const matches = store.tasks.filter((t) => t.id.startsWith(idPrefix));
+  // Lock-internal: validate + persist. Push moved outside lock to avoid self-deadlock.
+  const task = await withWriteLock(async () => {
+    const store = await readStore();
+    const matches = store.tasks.filter((t) => t.id.startsWith(idPrefix));
 
-  if (matches.length === 0) {
-    throw new Error(`No task found matching ID prefix "${idPrefix}"`);
-  }
-  if (matches.length > 1) {
-    throw new Error(
-      `Ambiguous ID prefix "${idPrefix}" matches ${matches.length} tasks. Be more specific.`,
-    );
-  }
+    if (matches.length === 0) {
+      throw new Error(`No task found matching ID prefix "${idPrefix}"`);
+    }
+    if (matches.length > 1) {
+      throw new Error(
+        `Ambiguous ID prefix "${idPrefix}" matches ${matches.length} tasks. Be more specific.`,
+      );
+    }
 
-  const task = matches[0];
-  runPluginContentValidation(task, 'conversation_log', entry);
-  const now = new Date();
-  const yyyy = now.getFullYear();
-  const mm = String(now.getMonth() + 1).padStart(2, '0');
-  const dd = String(now.getDate()).padStart(2, '0');
-  const hh = String(now.getHours()).padStart(2, '0');
-  const min = String(now.getMinutes()).padStart(2, '0');
-  const fullEntry = `### ${yyyy}-${mm}-${dd} ${hh}:${min}\n${entry}`;
+    const t = matches[0];
+    runPluginContentValidation(t, 'conversation_log', entry);
+    const now = new Date();
+    const yyyy = now.getFullYear();
+    const mm = String(now.getMonth() + 1).padStart(2, '0');
+    const dd = String(now.getDate()).padStart(2, '0');
+    const hh = String(now.getHours()).padStart(2, '0');
+    const min = String(now.getMinutes()).padStart(2, '0');
+    const fullEntry = `### ${yyyy}-${mm}-${dd} ${hh}:${min}\n${entry}`;
 
-  task.conversation_log = task.conversation_log
-    ? task.conversation_log + '\n\n' + fullEntry
-    : fullEntry;
-  task.updated_at = now.toISOString();
+    t.conversation_log = t.conversation_log
+      ? t.conversation_log + '\n\n' + fullEntry
+      : fullEntry;
+    t.updated_at = now.toISOString();
 
-  await writeStore(store);
-
-  // Fire-and-forget push to provider
-  autoPushIfConfigured(task).then(r => {
-    if (!r.success) log.task.warn('sync push failed (fire-and-forget)', { taskId: task.id, source: task.source, error: r.error });
-  }).catch(err => {
-    log.task.warn('sync push rejected (fire-and-forget)', { taskId: task.id, source: task.source, error: err instanceof Error ? err.message : String(err) });
+    await writeStore(store);
+    return t;
   });
+
+  // Sync push (outside lock). Failure propagates to caller.
+  const syncResult = await autoPushIfConfigured(task);
+  if (!syncResult.success) {
+    throw new Error(`Sync to ${task.source} failed: ${syncResult.error ?? 'unknown error'}`);
+  }
 
   bus.emit(EventNames.TASK_UPDATED, { task }, ['web-ui'], { source: 'internal' });
   return { task };
-  });
 }
 
 /**
  * Replace the entire note blob on a task by partial ID match.
  */
 export async function updateNote(idPrefix: string, content: string): Promise<{ task: Task }> {
-  return withWriteLock(async () => {
-  const store = await readStore();
-  const matches = store.tasks.filter((t) => t.id.startsWith(idPrefix));
+  // Lock-internal: validate + persist. Push moved outside lock to avoid self-deadlock.
+  const task = await withWriteLock(async () => {
+    const store = await readStore();
+    const matches = store.tasks.filter((t) => t.id.startsWith(idPrefix));
 
-  if (matches.length === 0) {
-    throw new Error(`No task found matching ID prefix "${idPrefix}"`);
-  }
-  if (matches.length > 1) {
-    throw new Error(
-      `Ambiguous ID prefix "${idPrefix}" matches ${matches.length} tasks. Be more specific.`,
-    );
-  }
+    if (matches.length === 0) {
+      throw new Error(`No task found matching ID prefix "${idPrefix}"`);
+    }
+    if (matches.length > 1) {
+      throw new Error(
+        `Ambiguous ID prefix "${idPrefix}" matches ${matches.length} tasks. Be more specific.`,
+      );
+    }
 
-  const task = matches[0];
-  runPluginContentValidation(task, 'note', content);
-  task.note = content;
-  task.updated_at = new Date().toISOString();
+    const t = matches[0];
+    runPluginContentValidation(t, 'note', content);
+    t.note = content;
+    t.updated_at = new Date().toISOString();
 
-  await writeStore(store);
-  autoPushIfConfigured(task).then(r => {
-    if (!r.success) log.task.warn('sync push failed (fire-and-forget)', { taskId: task.id, source: task.source, error: r.error });
-  }).catch(err => {
-    log.task.warn('sync push rejected (fire-and-forget)', { taskId: task.id, source: task.source, error: err instanceof Error ? err.message : String(err) });
+    await writeStore(store);
+    return t;
   });
+
+  const syncResult = await autoPushIfConfigured(task);
+  if (!syncResult.success) {
+    throw new Error(`Sync to ${task.source} failed: ${syncResult.error ?? 'unknown error'}`);
+  }
   bus.emit(EventNames.TASK_UPDATED, { task }, ['web-ui'], { source: 'internal' });
   return { task };
-  });
 }
 
 /**
  * Set/update the description field on a task by partial ID match.
  */
 export async function updateDescription(idPrefix: string, content: string): Promise<{ task: Task }> {
-  return withWriteLock(async () => {
-  const store = await readStore();
-  const matches = store.tasks.filter((t) => t.id.startsWith(idPrefix));
+  // Lock-internal: validate + persist. Push moved outside lock to avoid self-deadlock.
+  const task = await withWriteLock(async () => {
+    const store = await readStore();
+    const matches = store.tasks.filter((t) => t.id.startsWith(idPrefix));
 
-  if (matches.length === 0) {
-    throw new Error(`No task found matching ID prefix "${idPrefix}"`);
-  }
-  if (matches.length > 1) {
-    throw new Error(
-      `Ambiguous ID prefix "${idPrefix}" matches ${matches.length} tasks. Be more specific.`,
-    );
-  }
+    if (matches.length === 0) {
+      throw new Error(`No task found matching ID prefix "${idPrefix}"`);
+    }
+    if (matches.length > 1) {
+      throw new Error(
+        `Ambiguous ID prefix "${idPrefix}" matches ${matches.length} tasks. Be more specific.`,
+      );
+    }
 
-  const task = matches[0];
-  runPluginContentValidation(task, 'description', content);
-  task.description = content;
-  task.updated_at = new Date().toISOString();
+    const t = matches[0];
+    runPluginContentValidation(t, 'description', content);
+    t.description = content;
+    t.updated_at = new Date().toISOString();
 
-  await writeStore(store);
-  autoPushIfConfigured(task).then(r => {
-    if (!r.success) log.task.warn('sync push failed (fire-and-forget)', { taskId: task.id, source: task.source, error: r.error });
-  }).catch(err => {
-    log.task.warn('sync push rejected (fire-and-forget)', { taskId: task.id, source: task.source, error: err instanceof Error ? err.message : String(err) });
+    await writeStore(store);
+    return t;
   });
+
+  const syncResult = await autoPushIfConfigured(task);
+  if (!syncResult.success) {
+    throw new Error(`Sync to ${task.source} failed: ${syncResult.error ?? 'unknown error'}`);
+  }
   bus.emit(EventNames.TASK_UPDATED, { task }, ['web-ui'], { source: 'internal' });
   return { task };
-  });
 }
 
 /**
  * Set/update the summary field on a task by partial ID match.
  */
 export async function updateSummary(idPrefix: string, content: string): Promise<{ task: Task }> {
-  return withWriteLock(async () => {
-  const store = await readStore();
-  const matches = store.tasks.filter((t) => t.id.startsWith(idPrefix));
+  // Lock-internal: validate + persist. Push moved outside lock to avoid self-deadlock.
+  const task = await withWriteLock(async () => {
+    const store = await readStore();
+    const matches = store.tasks.filter((t) => t.id.startsWith(idPrefix));
 
-  if (matches.length === 0) {
-    throw new Error(`No task found matching ID prefix "${idPrefix}"`);
-  }
-  if (matches.length > 1) {
-    throw new Error(
-      `Ambiguous ID prefix "${idPrefix}" matches ${matches.length} tasks. Be more specific.`,
-    );
-  }
+    if (matches.length === 0) {
+      throw new Error(`No task found matching ID prefix "${idPrefix}"`);
+    }
+    if (matches.length > 1) {
+      throw new Error(
+        `Ambiguous ID prefix "${idPrefix}" matches ${matches.length} tasks. Be more specific.`,
+      );
+    }
 
-  const task = matches[0];
-  runPluginContentValidation(task, 'summary', content);
-  task.summary = content;
-  task.updated_at = new Date().toISOString();
+    const t = matches[0];
+    runPluginContentValidation(t, 'summary', content);
+    t.summary = content;
+    t.updated_at = new Date().toISOString();
 
-  await writeStore(store);
-  autoPushIfConfigured(task).then(r => {
-    if (!r.success) log.task.warn('sync push failed (fire-and-forget)', { taskId: task.id, source: task.source, error: r.error });
-  }).catch(err => {
-    log.task.warn('sync push rejected (fire-and-forget)', { taskId: task.id, source: task.source, error: err instanceof Error ? err.message : String(err) });
+    await writeStore(store);
+    return t;
   });
+
+  const syncResult = await autoPushIfConfigured(task);
+  if (!syncResult.success) {
+    throw new Error(`Sync to ${task.source} failed: ${syncResult.error ?? 'unknown error'}`);
+  }
   bus.emit(EventNames.TASK_UPDATED, { task }, ['web-ui'], { source: 'internal' });
   return { task };
-  });
 }
 
 /**
