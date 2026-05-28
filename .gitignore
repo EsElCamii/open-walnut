@@ -51,6 +51,9 @@ isolate-*.log
 # Downloaded installer packages
 *.pkg
 
+# External plugin bundle cache (written by integration-loader.ts at runtime)
+.plugin-cache/
+
 # Local scratch / temp scripts and dumps
 test-*-temp.*
 test-*-tmp.*
