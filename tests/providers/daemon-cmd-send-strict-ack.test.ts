@@ -11,7 +11,7 @@
  *   - precheck ESRCH          → reap(send-precheck-dead) + session_dead
  *   - FIFO write ENXIO        → reap(send-enxio) + reason:'ENXIO'
  *   - FIFO write EAGAIN       → reason:'EAGAIN', retriable:true (no reap)
- *   - FIFO partial write      → reason:'partial_write' (no reap)
+ *   - FIFO large payload      → loops past PIPE_BUF; full write or session_dead
  *   - successful write        → { ok:true }
  */
 
@@ -136,6 +136,50 @@ describe('L1.5 daemon cmdSend strict-ack', () => {
     expect('error' in res).toBe(true)
     // Session NOT reaped (this is a bug signal, not a dead-process signal)
     expect(ctx.sessions.get('sid')!.state).toBe('running')
+  })
+
+  // S8a — payload larger than PIPE_BUF writes fully without truncation.
+  //
+  // Regression: PIPE_BUF on macOS is 512 bytes; the pre-fix code did a single
+  // non-blocking writeSync and returned `partial_write` if the kernel didn't
+  // accept all bytes, leaving the FIFO holding half a JSON line. The CLI's
+  // stdin parser would then splice the truncated fragment with the next
+  // write's bytes, JSON.parse would throw, and the CLI would exit with no
+  // diagnostic to walnut. The fix loops in writeFifoFully(). This test sends
+  // a payload well above PIPE_BUF (and small enough to fit in the kernel's
+  // pipe buffer so the test's lazy reader doesn't deadlock) and verifies the
+  // bytes round-trip intact.
+  it('payload larger than PIPE_BUF writes fully (no truncation)', () => {
+    const core = createDaemonCore(ctx.deps)
+    const fifo = makeFifo()
+    const readerFd = fs.openSync(fifo, fs.constants.O_RDONLY | fs.constants.O_NONBLOCK)
+    try {
+      ctx.sessions.set('sid', makeTestSession({ pid: 650, pipePath: fifo }))
+      const big = 'x'.repeat(4 * 1024) // 4KB ≫ PIPE_BUF (512B), well under pipe buffer
+      const res = core.handleSendCommand('sid', big)
+      expect(res).toEqual({ ok: true })
+
+      // Drain the FIFO until we see a newline.
+      const chunks: Buffer[] = []
+      for (let i = 0; i < 100; i++) {
+        const buf = Buffer.alloc(8192)
+        let n = 0
+        try { n = fs.readSync(readerFd, buf, 0, buf.length, null) } catch (err) {
+          if ((err as NodeJS.ErrnoException).code === 'EAGAIN') {
+            try { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5) } catch {}
+            continue
+          }
+          throw err
+        }
+        if (n === 0) break
+        chunks.push(buf.slice(0, n))
+        if (buf.slice(0, n).includes(0x0a)) break
+      }
+      const parsed = JSON.parse(Buffer.concat(chunks).toString('utf-8').trim())
+      expect(parsed.message.content).toBe(big)
+    } finally {
+      fs.closeSync(readerFd)
+    }
   })
 
   // S8 — message payload is wrapped {type:'user', message:{role:'user',content}}

@@ -183,6 +183,21 @@ interface AgentSub {
 
 interface WsData {}
 
+// DUP-DEBUG: per-process counter and lookup map for stable ws ids.
+// Lets logs distinguish "same ws received twice" from "two different ws each
+// received once" — critical for diagnosing the daemon→walnut duplicate-event
+// bug where stderr_tail and tool_use both arrived twice on a single conn.
+let __wsIdCounter = 0
+const __wsIds = new WeakMap<ServerWebSocket<WsData>, number>()
+function wsId(ws: ServerWebSocket<WsData>): number {
+  let id = __wsIds.get(ws)
+  if (id === undefined) {
+    id = ++__wsIdCounter
+    __wsIds.set(ws, id)
+  }
+  return id
+}
+
 // ── Logging ──
 // Every log line includes DAEMON_INSTANCE_ID so `grep <id> daemon-*.log`
 // isolates one daemon's lifetime even when multiple daemons have run.
@@ -319,16 +334,43 @@ function buildSpawnPreamble(): string {
 }
 
 // ── Permission Policy FIFO Writer ──
+//
+// Used by the auto-allow path (which bypasses cmdSendRaw / daemon-core). Must
+// handle payloads larger than PIPE_BUF (512B on macOS) — a control_response
+// embedding a tool input can easily exceed that. See writeFifoFully docs in
+// daemon-core.ts for why a single non-blocking writeSync isn't safe.
 function writeFifoRaw(pipePath: string, raw: string): boolean {
   try {
     const buf = Buffer.from(raw.endsWith('\n') ? raw : raw + '\n')
-    const fd = fs.openSync(pipePath, fs.constants.O_WRONLY | fs.constants.O_NONBLOCK)
+    let fd: number
     try {
-      fs.writeSync(fd, buf)
-    } finally {
-      fs.closeSync(fd)
+      fd = fs.openSync(pipePath, fs.constants.O_WRONLY | fs.constants.O_NONBLOCK)
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'ENXIO') return false
+      throw err
     }
-    return true
+    try {
+      let offset = 0
+      let consecutiveEagain = 0
+      while (offset < buf.length) {
+        try {
+          const n = fs.writeSync(fd, buf, offset, buf.length - offset)
+          if (n > 0) { offset += n; consecutiveEagain = 0; continue }
+          consecutiveEagain++
+        } catch (err) {
+          if ((err as NodeJS.ErrnoException).code === 'EAGAIN') {
+            consecutiveEagain++
+          } else {
+            throw err
+          }
+        }
+        if (consecutiveEagain >= 50) return false
+        try { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10) } catch {}
+      }
+      return true
+    } finally {
+      try { fs.closeSync(fd) } catch {}
+    }
   } catch {
     return false
   }
@@ -732,12 +774,30 @@ function ensureWatcher(sid: string) {
         }
 
         // Fan out to all current subscribers, GC dead ones opportunistically.
+        // DUP-DEBUG: only log fan-out when subscribers > 1 (the duplicate
+        // smoking gun) AND only for tool_use lines (cheap to detect via
+        // substring). High-frequency text deltas would spam the log.
+        const fanCount = s.subscribers.size
+        const isToolUseLine = fanCount > 1 && line.includes('"type":"tool_use"')
+        const recipientWsIds: number[] = []
         for (const ws of s.subscribers) {
           if (ws.readyState === 1) {
+            if (isToolUseLine) recipientWsIds.push(wsId(ws))
             try { sendEvent(ws, 'jsonl', { sid, line }) } catch {}
           } else {
+            logMsg('info', 'GC dead subscriber from watcher fan-out', {
+              sid, wsId: wsId(ws), readyState: ws.readyState,
+            })
             s.subscribers.delete(ws)
           }
+        }
+        if (isToolUseLine) {
+          logMsg('info', 'jsonl fan-out (tool_use, multi-subscriber)', {
+            sid,
+            subscriberCount: fanCount,
+            recipientWsIds,
+            lineSnippet: line.slice(0, 120),
+          })
         }
         if (!sawResult && line.includes('"type":"result"')) sawResult = true
       }
@@ -755,11 +815,21 @@ function ensureWatcher(sid: string) {
             fs.closeSync(efd)
             const tail = ebuf.toString('utf-8').trim()
             if (tail) {
+              // DUP-DEBUG: stderr_tail is once-per-result. Always log fan-out
+              // size + recipient wsIds to confirm whether the daemon is
+              // sending to one ws or several.
+              const recipientWsIds: number[] = []
               for (const ws of s.subscribers) {
                 if (ws.readyState === 1) {
+                  recipientWsIds.push(wsId(ws))
                   try { sendEvent(ws, 'stderr_tail', { sid, tail }) } catch {}
                 }
               }
+              logMsg('info', 'stderr_tail fan-out', {
+                sid,
+                subscriberCount: s.subscribers.size,
+                recipientWsIds,
+              })
             }
           }
         } catch {}
@@ -788,8 +858,22 @@ function stopSessionWatcher(sid: string) {
 function addSubscriber(ws: ServerWebSocket<WsData>, sid: string, fromOffset: number): boolean {
   const session = sessions.get(sid)
   if (!session) return false
+  // DUP-DEBUG: capture the subscriber set BEFORE add so we can log who was
+  // already attached. If `before` already contains this ws's wsId, we have a
+  // double-add bug; if it contains other live wsIds for the same sid, every
+  // subsequent push will fan out to all of them, doubling downstream events.
+  const before = Array.from(session.subscribers).map((s) => ({
+    wsId: wsId(s), readyState: s.readyState,
+  }))
   session.subscribers.add(ws)
   ensureWatcher(sid)
+  logMsg('info', 'addSubscriber: attached', {
+    sid,
+    wsId: wsId(ws),
+    fromOffset,
+    subscribersBefore: before,
+    subscribersAfter: session.subscribers.size,
+  })
 
   const currentOffset = session.watcher ? session.watcher.offset : 0
   const start = typeof fromOffset === 'number' && fromOffset >= 0 ? fromOffset : 0
@@ -1646,10 +1730,20 @@ function cleanup() {
 function handleDisconnect(ws: ServerWebSocket<WsData>) {
   wsClients.delete(ws)
 
+  // DUP-DEBUG: count subscriber entries removed across all sessions for this
+  // ws. If a subscriber leak shows up, this number tells us how many sids
+  // were holding stale references to a now-closed ws.
+  let removedFromSubs = 0
+  const sidsWithRemoval: string[] = []
   // Remove this ws from every session's subscribers. The session-bound watcher
   // keeps running — it's independent of any ws. Next attach re-subscribes.
-  for (const [, session] of sessions) {
-    session.subscribers.delete(ws)
+  for (const [sid, session] of sessions) {
+    const had = session.subscribers.has(ws)
+    if (had) {
+      session.subscribers.delete(ws)
+      removedFromSubs++
+      sidsWithRemoval.push(sid)
+    }
   }
 
   // Clean up agent subs for this client
@@ -1661,7 +1755,12 @@ function handleDisconnect(ws: ServerWebSocket<WsData>) {
     }
   }
 
-  logMsg('info', 'client disconnected', { clients: wsClients.size })
+  logMsg('info', 'client disconnected', {
+    wsId: wsId(ws),
+    clients: wsClients.size,
+    removedFromSubs,
+    sidsWithRemoval,
+  })
 }
 
 // ── Main ──
@@ -1747,7 +1846,11 @@ if (action === '--start') {
     websocket: {
       open(ws) {
         wsClients.add(ws)
-        logMsg('info', 'client connected', { clients: wsClients.size })
+        // DUP-DEBUG: assign + log a stable wsId so subsequent logs can
+        // distinguish per-ws activity. Pair this with the matching close()
+        // log; if a sid still has subscribers tagged with a wsId that has
+        // already been closed, the daemon's GC of dead subscribers is broken.
+        logMsg('info', 'client connected', { wsId: wsId(ws), clients: wsClients.size })
       },
 
       message(ws, msg) {

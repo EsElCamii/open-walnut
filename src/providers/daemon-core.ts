@@ -518,25 +518,19 @@ export function createDaemonCore<S extends CoreSessionData = CoreSessionData>(
     try {
       const payload = JSON.stringify({ type: 'user', message: { role: 'user', content: message } })
       const buf = Buffer.from(payload + '\n')
-      const fd = fs.openSync(session.pipePath, fs.constants.O_WRONLY | fs.constants.O_NONBLOCK)
-      try {
-        const written = fs.writeSync(fd, buf)
-        if (written !== buf.length) return { ok: false, reason: 'partial_write' }
-      } finally {
-        fs.closeSync(fd)
-      }
-      return { ok: true }
-    } catch (err) {
-      const code = (err as NodeJS.ErrnoException).code
-      if (code === 'ENXIO') {
-        // FIFO write with no reader → CLI is dead. Reap so next send sees the
-        // dead state and skips the FIFO attempt.
+      const result = writeFifoFully(session.pipePath, buf)
+      if (result === 'ok') return { ok: true }
+      if (result === 'ENXIO') {
         reapSession(sid, -1, 'send-enxio')
         return { ok: false, reason: 'ENXIO', exitCode: session.exitCode }
       }
-      if (code === 'EAGAIN') {
-        return { ok: false, reason: 'EAGAIN', retriable: true }
-      }
+      if (result === 'EAGAIN') return { ok: false, reason: 'EAGAIN', retriable: true }
+      // partial_write here means we wrote a prefix but couldn't finish within the
+      // retry budget — pipe is now corrupted (CLI's stdin parser will choke on
+      // the truncated JSON). Treat as terminal: reap so caller sees session_dead.
+      reapSession(sid, -1, 'send-partial-write')
+      return { ok: false, reason: 'session_dead', exitCode: session.exitCode }
+    } catch (err) {
       return { error: 'send failed: ' + (err as Error).message }
     }
   }
@@ -567,24 +561,76 @@ export function createDaemonCore<S extends CoreSessionData = CoreSessionData>(
 
     try {
       const buf = Buffer.from(raw.endsWith('\n') ? raw : raw + '\n')
-      const fd = fs.openSync(session.pipePath, fs.constants.O_WRONLY | fs.constants.O_NONBLOCK)
-      try {
-        const written = fs.writeSync(fd, buf)
-        if (written !== buf.length) return { ok: false, reason: 'partial_write' }
-      } finally {
-        fs.closeSync(fd)
-      }
-      return { ok: true }
-    } catch (err) {
-      const code = (err as NodeJS.ErrnoException).code
-      if (code === 'ENXIO') {
+      const result = writeFifoFully(session.pipePath, buf)
+      if (result === 'ok') return { ok: true }
+      if (result === 'ENXIO') {
         reapSession(sid, -1, 'sendRaw-enxio')
         return { ok: false, reason: 'ENXIO', exitCode: session.exitCode }
       }
-      if (code === 'EAGAIN') {
-        return { ok: false, reason: 'EAGAIN', retriable: true }
-      }
+      if (result === 'EAGAIN') return { ok: false, reason: 'EAGAIN', retriable: true }
+      reapSession(sid, -1, 'sendRaw-partial-write')
+      return { ok: false, reason: 'session_dead', exitCode: session.exitCode }
+    } catch (err) {
       return { error: 'sendRaw failed: ' + (err as Error).message }
+    }
+  }
+
+  /**
+   * Write a full buffer to a FIFO using O_NONBLOCK + retry loop. Required for
+   * payloads larger than PIPE_BUF (512 bytes on macOS): a single non-blocking
+   * writeSync may return a partial count, and stopping there leaves the pipe
+   * in a corrupted state (the reader's line parser will splice the truncated
+   * fragment into whatever bytes arrive next, causing JSON.parse to fail and
+   * the CLI to exit). We loop on partial writes and short-retry on EAGAIN so
+   * either the whole buffer lands atomically or we surface ENXIO/EAGAIN.
+   *
+   * Returns 'ok' on full write, 'ENXIO' if reader is gone, 'EAGAIN' if the
+   * pipe stayed full past the retry budget without progress, or 'partial' if
+   * we made some progress but couldn't finish (caller should reap — pipe now
+   * holds half a JSON line).
+   */
+  function writeFifoFully(pipePath: string, buf: Buffer): 'ok' | 'ENXIO' | 'EAGAIN' | 'partial' {
+    let fd: number
+    try {
+      fd = fs.openSync(pipePath, fs.constants.O_WRONLY | fs.constants.O_NONBLOCK)
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code
+      if (code === 'ENXIO') return 'ENXIO'
+      throw err
+    }
+    try {
+      let offset = 0
+      let consecutiveEagain = 0
+      const MAX_EAGAIN_RETRIES = 50  // ~500ms total at 10ms per retry
+      while (offset < buf.length) {
+        try {
+          const n = fs.writeSync(fd, buf, offset, buf.length - offset)
+          if (n > 0) {
+            offset += n
+            consecutiveEagain = 0
+            continue
+          }
+          // n === 0 shouldn't happen on a pipe but guard anyway
+          consecutiveEagain++
+        } catch (err) {
+          const code = (err as NodeJS.ErrnoException).code
+          if (code === 'EAGAIN') {
+            if (offset === 0 && consecutiveEagain === 0) return 'EAGAIN'
+            consecutiveEagain++
+          } else {
+            throw err
+          }
+        }
+        if (consecutiveEagain >= MAX_EAGAIN_RETRIES) {
+          return offset === 0 ? 'EAGAIN' : 'partial'
+        }
+        // Brief sync sleep to let the reader drain. Keeps the FIFO write
+        // atomic from the daemon's RPC handler perspective.
+        try { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10) } catch {}
+      }
+      return 'ok'
+    } finally {
+      try { fs.closeSync(fd) } catch {}
     }
   }
 
