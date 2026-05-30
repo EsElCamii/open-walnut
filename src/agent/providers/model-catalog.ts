@@ -15,6 +15,13 @@ export const MODEL_CATALOG: Record<string, ModelEntry[]> = {
   // The API has no -1m model; 1M capability is activated via the context-1m beta header.
   // model_id therefore redirects the -1m catalog entry to the real API endpoint.
   bedrock: [
+    { id: 'global.anthropic.claude-opus-4-8', provider: 'bedrock',
+      label: 'Opus 4.8', max_tokens: 128_000, context_window: 200_000,
+      compat: { thinking_format: 'anthropic', supports_adaptive: true } },
+    { id: 'global.anthropic.claude-opus-4-8-1m', provider: 'bedrock',
+      model_id: 'global.anthropic.claude-opus-4-8',
+      label: 'Opus 4.8 (1M)', max_tokens: 128_000, context_window: 1_000_000,
+      compat: { thinking_format: 'anthropic', supports_adaptive: true } },
     { id: 'global.anthropic.claude-opus-4-7', provider: 'bedrock',
       label: 'Opus 4.7', max_tokens: 128_000, context_window: 200_000,
       compat: { thinking_format: 'anthropic', supports_adaptive: true } },
@@ -41,6 +48,13 @@ export const MODEL_CATALOG: Record<string, ModelEntry[]> = {
   ],
   // ── Anthropic Direct API ──
   anthropic: [
+    { id: 'claude-opus-4-8', provider: 'anthropic',
+      label: 'Opus 4.8', max_tokens: 128_000, context_window: 200_000,
+      compat: { thinking_format: 'anthropic', supports_adaptive: true } },
+    { id: 'claude-opus-4-8-1m', provider: 'anthropic',
+      model_id: 'claude-opus-4-8',
+      label: 'Opus 4.8 (1M)', max_tokens: 128_000, context_window: 1_000_000,
+      compat: { thinking_format: 'anthropic', supports_adaptive: true } },
     { id: 'claude-opus-4-7', provider: 'anthropic',
       label: 'Opus 4.7', max_tokens: 128_000, context_window: 200_000,
       compat: { thinking_format: 'anthropic', supports_adaptive: true } },
