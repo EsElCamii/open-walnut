@@ -12597,13 +12597,18 @@ a.task-kebab-info:hover {
 
 .quick-start-bar {
   display: flex;
-  align-items: flex-start;
-  gap: 8px;
+  flex-direction: column;
+  gap: 4px;
   padding: 6px 12px;
   border-radius: 8px;
   background: var(--accent-subtle);
   animation: taskContextSlideDown 0.15s ease-out;
-  flex-wrap: wrap;
+}
+
+.qsb-top {
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
 
 .qsb-label {
@@ -12619,7 +12624,6 @@ a.task-kebab-info:hover {
   font-family: 'SF Mono', Menlo, monospace;
   color: var(--fg);
   word-break: break-all;
-  flex: 1;
   min-width: 0;
 }
 
@@ -12643,6 +12647,7 @@ a.task-kebab-info:hover {
   line-height: 1;
   border-radius: 4px;
   flex-shrink: 0;
+  margin-left: auto;
 }
 .qsb-close:hover {
   color: var(--error);
@@ -13889,6 +13894,164 @@ a.task-kebab-info:hover {
 /* Toggled sections when opened via action chip */
 .session-action-panel {
   border-top: 1px solid var(--border);
+}
+
+/* ── Session File Explorer (VS Code-style two-pane) ── */
+.session-action-panel-files {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  /* Give the explorer real vertical space; two panes need room */
+  height: 420px;
+  max-height: 60vh;
+}
+
+.session-file-explorer {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.session-file-explorer-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-secondary);
+  font-size: 12px;
+}
+
+.session-file-explorer-toolbar .sfe-root-path {
+  flex: 1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  direction: rtl;
+  text-align: left;
+  color: var(--fg-muted);
+  font-family: var(--font-mono, monospace);
+}
+
+.sfe-toolbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.sfe-btn {
+  border: none;
+  background: var(--bg-tertiary);
+  color: var(--fg);
+  border-radius: var(--radius-sm, 8px);
+  padding: 2px 8px;
+  cursor: pointer;
+  font-size: 13px;
+  line-height: 1.4;
+}
+
+.sfe-btn:hover {
+  background: var(--bg-hover, var(--bg-tertiary));
+}
+
+.sfe-hidden-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  cursor: pointer;
+  color: var(--fg-muted);
+  user-select: none;
+}
+
+.session-file-explorer-body {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+}
+
+.session-file-explorer-tree {
+  width: 40%;
+  min-width: 180px;
+  max-width: 55%;
+  overflow: auto;
+  border-right: 1px solid var(--border);
+  padding: 4px 0;
+}
+
+.session-file-explorer-preview {
+  flex: 1;
+  min-width: 0;
+  overflow: auto;
+  background: var(--bg);
+}
+
+.session-file-explorer-node {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 8px;
+  cursor: pointer;
+  font-size: 13px;
+  white-space: nowrap;
+  user-select: none;
+}
+
+.session-file-explorer-node:hover {
+  background: var(--bg-hover, var(--bg-secondary));
+}
+
+.session-file-explorer-node.selected {
+  background: var(--accent-subtle, color-mix(in srgb, var(--accent) 12%, transparent));
+  color: var(--accent);
+}
+
+.sfe-arrow {
+  display: inline-block;
+  width: 12px;
+  flex-shrink: 0;
+  font-size: 10px;
+  color: var(--fg-muted);
+  text-align: center;
+}
+
+.sfe-icon {
+  flex-shrink: 0;
+  font-size: 12px;
+}
+
+.sfe-name {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.sfe-size {
+  flex-shrink: 0;
+  font-size: 11px;
+  color: var(--fg-muted);
+  margin-left: 8px;
+}
+
+.sfe-loading,
+.sfe-empty,
+.sfe-preview-empty {
+  padding: 12px;
+  color: var(--fg-muted);
+  font-size: 13px;
+}
+
+.sfe-error {
+  padding: 6px 12px;
+  color: var(--error, #ff3b30);
+  font-size: 12px;
+  white-space: normal;
+}
+
+.session-file-explorer-preview .file-content-view {
+  height: 100%;
 }
 
 /* Session pill status dots */

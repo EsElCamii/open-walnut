@@ -2,6 +2,7 @@ import { useState, useRef, useEffect, useCallback, useMemo, type KeyboardEvent }
 import { useNavigate } from 'react-router-dom';
 import { SessionChatHistory } from './SessionChatHistory';
 import { SessionNotes } from './SessionNotes';
+import { SessionFileExplorer } from './SessionFileExplorer';
 import { FileViewer } from '../common/FileViewer';
 import { UserMessagesSummary } from './UserMessagesSummary';
 // PlanPreviewSection replaced by inline plan popover in meta bar
@@ -218,6 +219,7 @@ export function SessionDetailPanel({ session, taskTitle, summary, onTitleChanged
   const [planPopoverOpen, setPlanPopoverOpen] = useState(false);
   const [notesOpen, setNotesOpen] = useState(false);
   const [messagesOpen, setMessagesOpen] = useState(false);
+  const [filesOpen, setFilesOpen] = useState(false);
 
   // Fetch messages for the UserMessagesSummary
   const sessionId_ = session?.claudeSessionId || '';
@@ -654,6 +656,13 @@ export function SessionDetailPanel({ session, taskTitle, summary, onTitleChanged
                 return count > 0 ? <span className="session-action-chip-count">{count}</span> : null;
               })()}
             </button>
+            <button
+              className={`session-action-chip${filesOpen ? ' session-action-chip-active' : ''}`}
+              onClick={() => setFilesOpen(o => !o)}
+              title="Browse session working directory"
+            >
+              Files
+            </button>
             {(() => {
               const LABELS: Record<string, string> = { default: 'Default', bypass: 'Bypass', plan: 'Plan', accept: 'Accept' };
               const ICONS: Record<string, string> = { default: '\u2699\uFE0F', bypass: '\u26A1', plan: '\uD83D\uDCCB', accept: '\u2705' };
@@ -781,6 +790,11 @@ export function SessionDetailPanel({ session, taskTitle, summary, onTitleChanged
               sessionId={sessionId}
               initialNote={session.human_note}
             />
+          </div>
+        )}
+        {filesOpen && (
+          <div className="session-action-panel session-action-panel-files">
+            <SessionFileExplorer cwd={session.cwd} host={session.host} />
           </div>
         )}
         {ps === 'error' && session.errorMessage && (() => {

@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback, useRef, useMemo, Component, type Reac
 import { useNavigate } from 'react-router-dom';
 import { SessionChatHistory } from './SessionChatHistory';
 import { SessionNotes } from './SessionNotes';
+import { SessionFileExplorer } from './SessionFileExplorer';
 import { FileViewer } from '../common/FileViewer';
 import { ICON_ROBOT, ICON_EXPAND, ICON_COLLAPSE, ICON_CLOSE, ICON_LOCK, ICON_UNLOCK } from '../common/Icons';
 import { UserMessagesSummary } from './UserMessagesSummary';
@@ -378,6 +379,7 @@ export const SessionPanel = memo(function SessionPanel({ sessionId, onClose, loc
   const [planPopoverOpen, setPlanPopoverOpen] = useState(false);
   const [notesOpen, setNotesOpen] = useState(false);
   const [messagesOpen, setMessagesOpen] = useState(false);
+  const [filesOpen, setFilesOpen] = useState(false);
   // planPopoverRef removed — modal uses backdrop click
 
   // Auto-refresh plan content when modal opens
@@ -763,6 +765,13 @@ export const SessionPanel = memo(function SessionPanel({ sessionId, onClose, loc
                 return count > 0 ? <span className="session-action-chip-count">{count}</span> : null;
               })()}
             </button>
+            <button
+              className={`session-action-chip${filesOpen ? ' session-action-chip-active' : ''}`}
+              onClick={() => setFilesOpen(o => !o)}
+              title="Browse session working directory"
+            >
+              Files
+            </button>
             {displayModel && (
               <span className="session-detail-model-pill" title={rawModel || ''}>
                 {displayModel}
@@ -800,6 +809,11 @@ export const SessionPanel = memo(function SessionPanel({ sessionId, onClose, loc
               sessionId={sessionId}
               initialNote={session?.human_note}
             />
+          </div>
+        )}
+        {filesOpen && (
+          <div className="session-action-panel session-action-panel-files">
+            <SessionFileExplorer cwd={session?.cwd} host={session?.host} />
           </div>
         )}
         {ps === 'error' && session?.errorMessage && (() => {

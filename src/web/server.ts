@@ -36,6 +36,7 @@ import { usageRouter } from './routes/usage.js'
 import { imagesRouter } from './routes/images.js'
 import { localImageRouter } from './routes/local-image.js'
 import { fileContentRouter } from './routes/file-content.js'
+import { filesRouter } from './routes/files.js'
 import { createCronRouter, setCronService } from './routes/cron.js'
 import { createAgentsRouter } from './routes/agents.js'
 import { createCommandsRouter } from './routes/commands.js'
@@ -482,6 +483,7 @@ export async function startServer(options: ServerOptions = {}): Promise<HttpServ
   app.use('/api/images', imagesRouter)
   app.use('/api/local-image', localImageRouter)
   app.use('/api/file-content', fileContentRouter)
+  app.use('/api/files', filesRouter)
   app.use('/api/agents', createAgentsRouter())
   app.use('/api/commands', createCommandsRouter())
   app.use('/api/skills', createSkillsRouter())
