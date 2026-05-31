@@ -61,6 +61,7 @@
     "@anthropic-ai/tokenizer": "^0.0.4",
     "@azure/msal-node": "^5.0.3",
     "@google/generative-ai": "^0.24.1",
+    "@homebridge/node-pty-prebuilt-multiarch": "^0.12.0",
     "@mozilla/readability": "^0.6.0",
     "@slack/web-api": "^7.14.0",
     "@tiptap/extension-image": "^3.20.1",

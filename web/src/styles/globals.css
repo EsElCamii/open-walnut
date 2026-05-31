@@ -17710,3 +17710,176 @@ a.file-link:hover {
   from { opacity: 0; transform: translateY(8px); }
   to { opacity: 1; transform: translateY(0); }
 }
+
+/* ── Session Terminal (embedded xterm.js modal) ───────────────────────── */
+.session-terminal-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 9999;
+  background: rgba(0, 0, 0, 0.6);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  backdrop-filter: blur(2px);
+}
+
+.session-terminal-panel {
+  background: #1a1b26;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  width: 90vw;
+  max-width: 1000px;
+  height: 80vh;
+  display: flex;
+  flex-direction: column;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.4);
+  overflow: hidden;
+}
+
+.session-terminal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 14px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-secondary);
+  flex-shrink: 0;
+}
+
+.session-terminal-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.session-terminal-icon { font-size: 14px; flex-shrink: 0; }
+
+.session-terminal-label {
+  font-family: var(--font-mono, 'SF Mono', 'Fira Code', monospace);
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--fg-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.session-terminal-host {
+  font-size: 11px;
+  color: var(--accent);
+  flex-shrink: 0;
+}
+
+.session-terminal-status {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  padding: 1px 6px;
+  border-radius: 4px;
+  flex-shrink: 0;
+  background: color-mix(in srgb, var(--fg-muted) 18%, transparent);
+  color: var(--fg-muted);
+}
+.session-terminal-status-ready { background: color-mix(in srgb, var(--success, #34c759) 22%, transparent); color: var(--success, #34c759); }
+.session-terminal-status-connecting { background: color-mix(in srgb, var(--warning, #ff9500) 22%, transparent); color: var(--warning, #ff9500); }
+.session-terminal-status-error,
+.session-terminal-status-exited,
+.session-terminal-status-no_tmux { background: color-mix(in srgb, var(--danger, #ff3b30) 22%, transparent); color: var(--danger, #ff3b30); }
+
+.session-terminal-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.session-terminal-btn {
+  font-size: 11px;
+  padding: 3px 10px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--fg-primary);
+  cursor: pointer;
+}
+.session-terminal-btn:hover { background: var(--bg-hover, var(--bg-secondary)); }
+.session-terminal-btn-kill {
+  border-color: color-mix(in srgb, var(--danger, #ff3b30) 40%, transparent);
+  color: var(--danger, #ff3b30);
+}
+
+.session-terminal-close {
+  font-size: 14px;
+  line-height: 1;
+  padding: 4px 8px;
+  border-radius: 6px;
+  border: none;
+  background: transparent;
+  color: var(--fg-muted);
+  cursor: pointer;
+}
+.session-terminal-close:hover { color: var(--fg-primary); }
+
+.session-terminal-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  padding: 8px;
+  background: #1a1b26;
+}
+
+.session-terminal-xterm {
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.session-terminal-inline-error {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  font-size: 12px;
+  color: var(--danger, #ff3b30);
+  background: color-mix(in srgb, var(--danger, #ff3b30) 10%, transparent);
+  border-top: 1px solid var(--border);
+}
+
+/* NO_TMUX error card */
+.session-terminal-error-card {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  padding: 40px;
+  text-align: center;
+  color: var(--fg-primary);
+  background: var(--bg);
+}
+.session-terminal-error-icon { font-size: 32px; }
+.session-terminal-error-title { font-size: 15px; font-weight: 600; }
+.session-terminal-error-body { font-size: 13px; color: var(--fg-muted); max-width: 480px; }
+.session-terminal-install {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+  border-radius: 8px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+}
+.session-terminal-install code {
+  font-family: var(--font-mono, 'SF Mono', 'Fira Code', monospace);
+  font-size: 13px;
+  color: var(--accent);
+}
+.session-terminal-retry {
+  margin-top: 4px;
+  padding: 6px 16px;
+}

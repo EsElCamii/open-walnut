@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { SessionChatHistory } from './SessionChatHistory';
 import { SessionNotes } from './SessionNotes';
 import { SessionFileExplorer } from './SessionFileExplorer';
+import { SessionTerminal } from './SessionTerminal';
 import { FileViewer } from '../common/FileViewer';
 import { ICON_ROBOT, ICON_EXPAND, ICON_COLLAPSE, ICON_CLOSE, ICON_LOCK, ICON_UNLOCK } from '../common/Icons';
 import { UserMessagesSummary } from './UserMessagesSummary';
@@ -380,6 +381,7 @@ export const SessionPanel = memo(function SessionPanel({ sessionId, onClose, loc
   const [notesOpen, setNotesOpen] = useState(false);
   const [messagesOpen, setMessagesOpen] = useState(false);
   const [filesOpen, setFilesOpen] = useState(false);
+  const [terminalOpen, setTerminalOpen] = useState(false);
   // planPopoverRef removed — modal uses backdrop click
 
   // Auto-refresh plan content when modal opens
@@ -772,6 +774,13 @@ export const SessionPanel = memo(function SessionPanel({ sessionId, onClose, loc
             >
               Files
             </button>
+            <button
+              className={`session-action-chip${terminalOpen ? ' session-action-chip-active' : ''}`}
+              onClick={() => setTerminalOpen(o => !o)}
+              title="Open a terminal in the session working directory"
+            >
+              Terminal
+            </button>
             {displayModel && (
               <span className="session-detail-model-pill" title={rawModel || ''}>
                 {displayModel}
@@ -815,6 +824,14 @@ export const SessionPanel = memo(function SessionPanel({ sessionId, onClose, loc
           <div className="session-action-panel session-action-panel-files">
             <SessionFileExplorer cwd={session?.cwd} host={session?.host} />
           </div>
+        )}
+        {terminalOpen && sessionId && (
+          <SessionTerminal
+            sessionId={sessionId}
+            label={session?.cwd ?? session?.host ?? 'Terminal'}
+            host={session?.host}
+            onClose={() => setTerminalOpen(false)}
+          />
         )}
         {ps === 'error' && session?.errorMessage && (() => {
           // Coupling: 'Connection lost' is set by session-health-monitor when daemon unreachable.

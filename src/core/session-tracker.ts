@@ -751,6 +751,7 @@ export async function completeTaskSessions(sessionIds: string[]): Promise<number
     const now = new Date().toISOString();
     let updated = 0;
     const pidsToKill: number[] = [];
+    const toReap: { claudeSessionId: string; host?: string }[] = [];
 
     const insertCols = [...SESSION_COLUMNS, 'payload'];
     const insertSql =
@@ -768,6 +769,7 @@ export async function completeTaskSessions(sessionIds: string[]): Promise<number
         if (session.pid != null && session.provider !== 'embedded' && session.provider !== 'sdk') {
           pidsToKill.push(session.pid);
         }
+        toReap.push({ claudeSessionId: session.claudeSessionId, host: session.host });
         session.process_status = 'stopped';
         if (session.pid != null) {
           log.session.info('clearing stale PID on task completion', { sessionId: sid, pid: session.pid });
@@ -789,6 +791,14 @@ export async function completeTaskSessions(sessionIds: string[]): Promise<number
       for (const pid of pidsToKill) {
         try { process.kill(pid, 'SIGINT'); } catch { /* already dead */ }
       }
+      // Conditionally reap each session's persistent terminal (tmux): a session
+      // still running a foreground build/test is kept; an idle shell is killed.
+      // Best-effort, fire-and-forget — terminal feature may be disabled.
+      import('../web/terminal/tmux-lifecycle.js')
+        .then(({ conditionalReap }) =>
+          Promise.all(toReap.map((r) => conditionalReap(r).catch(() => { /* per-session best-effort */ }))),
+        )
+        .catch(() => { /* terminal feature disabled */ });
     }
     return updated;
   });

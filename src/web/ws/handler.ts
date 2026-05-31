@@ -27,6 +27,18 @@ const PING_INTERVAL_MS = 30_000
 
 let pingTimer: ReturnType<typeof setInterval> | null = null
 
+/** Callbacks invoked when a client socket disconnects (close or error). */
+const disconnectListeners = new Set<(ws: WebSocket) => void>()
+
+/**
+ * Subscribe to client-disconnect events. Used by the terminal manager to
+ * detach terminals when their attached socket goes away. Registered via a
+ * callback (not a direct import) to avoid a circular dependency.
+ */
+export function onClientDisconnect(listener: (ws: WebSocket) => void): void {
+  disconnectListeners.add(listener)
+}
+
 /**
  * Register an RPC method handler.
  * When a client sends `{ type: "req", method: name, ... }`, the handler is called.
@@ -163,11 +175,13 @@ export function attachWss(server: HttpServer): WebSocketServer {
 
     ws.on('close', () => {
       clients.delete(client)
+      for (const l of disconnectListeners) { try { l(ws) } catch { /* listener error ignored */ } }
       log.ws.info('client disconnected', { clientCount: clients.size })
     })
 
     ws.on('error', () => {
       clients.delete(client)
+      for (const l of disconnectListeners) { try { l(ws) } catch { /* listener error ignored */ } }
       log.ws.warn('client error, removing', { clientCount: clients.size })
     })
   })

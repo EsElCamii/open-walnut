@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { SessionChatHistory } from './SessionChatHistory';
 import { SessionNotes } from './SessionNotes';
 import { SessionFileExplorer } from './SessionFileExplorer';
+import { SessionTerminal } from './SessionTerminal';
 import { FileViewer } from '../common/FileViewer';
 import { UserMessagesSummary } from './UserMessagesSummary';
 // PlanPreviewSection replaced by inline plan popover in meta bar
@@ -220,6 +221,7 @@ export function SessionDetailPanel({ session, taskTitle, summary, onTitleChanged
   const [notesOpen, setNotesOpen] = useState(false);
   const [messagesOpen, setMessagesOpen] = useState(false);
   const [filesOpen, setFilesOpen] = useState(false);
+  const [terminalOpen, setTerminalOpen] = useState(false);
 
   // Fetch messages for the UserMessagesSummary
   const sessionId_ = session?.claudeSessionId || '';
@@ -663,6 +665,13 @@ export function SessionDetailPanel({ session, taskTitle, summary, onTitleChanged
             >
               Files
             </button>
+            <button
+              className={`session-action-chip${terminalOpen ? ' session-action-chip-active' : ''}`}
+              onClick={() => setTerminalOpen(o => !o)}
+              title="Open a terminal in the session working directory"
+            >
+              Terminal
+            </button>
             {(() => {
               const LABELS: Record<string, string> = { default: 'Default', bypass: 'Bypass', plan: 'Plan', accept: 'Accept' };
               const ICONS: Record<string, string> = { default: '\u2699\uFE0F', bypass: '\u26A1', plan: '\uD83D\uDCCB', accept: '\u2705' };
@@ -796,6 +805,14 @@ export function SessionDetailPanel({ session, taskTitle, summary, onTitleChanged
           <div className="session-action-panel session-action-panel-files">
             <SessionFileExplorer cwd={session.cwd} host={session.host} />
           </div>
+        )}
+        {terminalOpen && (
+          <SessionTerminal
+            sessionId={sessionId}
+            label={session.cwd ?? session.host ?? 'Terminal'}
+            host={session.host}
+            onClose={() => setTerminalOpen(false)}
+          />
         )}
         {ps === 'error' && session.errorMessage && (() => {
           // Coupling: 'Connection lost' is set by session-health-monitor when daemon unreachable.
