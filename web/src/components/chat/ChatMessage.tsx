@@ -1012,13 +1012,7 @@ function ChatMessageInner({ role, content, blocks, images, taskContext, routeInf
 
   // Quick Start system banner — compact, centered, no bubble chrome
   if (source === 'quick-start' && role === 'user') {
-    return (
-      <div className="chat-quick-start-banner">
-        <span className="chat-quick-start-icon">{'\u26A1'}</span>
-        <span className="chat-quick-start-text">{content}</span>
-        {time && <span className="chat-quick-start-time">{time}</span>}
-      </div>
-    );
+    return null;
   }
 
   // Interrupt marker \u2014 render as muted system banner instead of a misleading

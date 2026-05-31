@@ -848,7 +848,10 @@ export function MainPage({ visible = true, navigateRef }: MainPageProps) {
     // Quick-start interception: when a path is selected, create task + start session
     if (qsp) {
       setQuickStartPath(null);
-      // Show the user's message as a local chat entry immediately
+      // Local echo as a collapsible bubble — auto-collapses to "⚡ Quick Start on <cwd>"
+      // with a chevron the user can click to see the full pasted prompt. The agent
+      // reorganize message sent later (source: 'quick-start') is suppressed in the UI
+      // (see ChatMessage.tsx), so this echo is the single visual confirmation.
       chat.addLocalMessage(
         `Quick Start on \`${qsp.cwd}\`${qsp.host ? ` (${qsp.hostLabel ?? qsp.host})` : ''}:\n> ${text}`,
         'quick-start-echo',
@@ -1134,10 +1137,12 @@ export function MainPage({ visible = true, navigateRef }: MainPageProps) {
           {/* Quick Start Bar — context pill when path is selected */}
           {quickStartPath && (
             <div className="quick-start-bar">
-              <span className="qsb-label">Quick Start</span>
+              <div className="qsb-top">
+                <span className="qsb-label">Quick Start</span>
+                {quickStartPath.host && <span className="qsb-host">{quickStartPath.hostLabel ?? quickStartPath.host}</span>}
+                <button className="qsb-close" onClick={() => { setQuickStartPath(null); quickStartMetaRef.current = null; }} aria-label="Cancel quick start">&times;</button>
+              </div>
               <span className="qsb-path" title={quickStartPath.cwd}>{quickStartPath.cwd}</span>
-              {quickStartPath.host && <span className="qsb-host">{quickStartPath.hostLabel ?? quickStartPath.host}</span>}
-              <button className="qsb-close" onClick={() => { setQuickStartPath(null); quickStartMetaRef.current = null; }} aria-label="Cancel quick start">&times;</button>
             </div>
           )}
 
