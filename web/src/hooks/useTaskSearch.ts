@@ -34,7 +34,12 @@ export interface UseTaskSearchReturn {
   clearSearch: () => void;
 }
 
-const DEBOUNCE_MS = 300;
+// Keystroke debouncing happens upstream in TodoSearchBar (~0.5s buffer), so
+// setQuery is only ever called after the user pauses. Keep this at 0 to avoid
+// stacking a second debounce on top (which would push backend latency to ~0.8s).
+// A 0ms setTimeout still defers the fetch one tick so the isSearching spinner
+// can render first.
+const DEBOUNCE_MS = 0;
 
 export function useTaskSearch(): UseTaskSearchReturn {
   const [query, setQueryState] = useState('');

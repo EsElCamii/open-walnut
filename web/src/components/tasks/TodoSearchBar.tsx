@@ -15,10 +15,11 @@ interface TodoSearchBarProps {
   resultCount?: number | null; // null = no server results yet
 }
 
-// Debounce keystrokes before propagating to parent. Prevents the client-side
-// filter useMemo in TodoPanel (~2600 tasks × ~10 string matches) from re-running
-// on every keystroke. Input value remains immediate for typing feel.
-const INPUT_DEBOUNCE_MS = 120;
+// Debounce keystrokes (~0.5s buffer) before propagating to parent. The input
+// value (localValue) stays immediate for typing feel; only the search trigger
+// is debounced. Prevents the client-side filter useMemo in TodoPanel
+// (~2600 tasks) and the server /api/search request from firing on every keystroke.
+const INPUT_DEBOUNCE_MS = 500;
 
 export function TodoSearchBar({
   query,
@@ -30,24 +31,41 @@ export function TodoSearchBar({
   const inputRef = useRef<HTMLInputElement>(null);
   const [localValue, setLocalValue] = useState(query);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Tracks the last value this component propagated to the parent. The parent's
+  // `query` prop lags behind our local input (it only updates after debounce),
+  // so when it flows back via the effect below it can be a STALE value. Without
+  // this guard, the sync-back would overwrite a freshly-typed character with the
+  // old query — the dropped-keystroke bug (type "123" fast → parent echoes "1"
+  // back → localValue reverts → "2" is lost → backend only ever sees "13").
+  const lastPropagatedRef = useRef(query);
 
-  // Sync external query changes (clear, programmatic updates) into local input
+  // Only adopt EXTERNAL query changes (programmatic clear/set from parent).
+  // Ignore the lagging echo of our own propagated value so the input never
+  // reverts mid-typing.
   useEffect(() => {
-    setLocalValue(query);
+    if (query !== lastPropagatedRef.current) {
+      lastPropagatedRef.current = query;
+      setLocalValue(query);
+    }
   }, [query]);
+
+  const propagate = useCallback((value: string) => {
+    lastPropagatedRef.current = value;
+    onQueryChange(value);
+  }, [onQueryChange]);
 
   const handleChange = useCallback((value: string) => {
     setLocalValue(value);
     if (debounceRef.current) clearTimeout(debounceRef.current);
     // Empty string propagates immediately (clear is snappy)
     if (value === '') {
-      onQueryChange('');
+      propagate('');
       return;
     }
     debounceRef.current = setTimeout(() => {
-      onQueryChange(value);
+      propagate(value);
     }, INPUT_DEBOUNCE_MS);
-  }, [onQueryChange]);
+  }, [propagate]);
 
   useEffect(() => () => {
     if (debounceRef.current) clearTimeout(debounceRef.current);
@@ -75,6 +93,7 @@ export function TodoSearchBar({
   const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
     if (e.key === 'Escape') {
       if (debounceRef.current) clearTimeout(debounceRef.current);
+      lastPropagatedRef.current = '';
       setLocalValue('');
       onClear();
       inputRef.current?.blur();
@@ -102,6 +121,7 @@ export function TodoSearchBar({
           className="todo-search-clear"
           onClick={() => {
             if (debounceRef.current) clearTimeout(debounceRef.current);
+            lastPropagatedRef.current = '';
             setLocalValue('');
             onClear();
           }}
@@ -110,7 +130,7 @@ export function TodoSearchBar({
           &#x2715;
         </button>
       )}
-      <MicButton size="sm" onTranscribe={(text) => { setLocalValue(text); onQueryChange(text); }} />
+      <MicButton size="sm" onTranscribe={(text) => { setLocalValue(text); propagate(text); }} />
     </div>
   );
 }
