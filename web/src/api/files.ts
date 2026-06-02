@@ -31,6 +31,29 @@ export interface DirEntry {
 export interface DirListResponse {
   path: string;
   entries: DirEntry[];
+  /** Set when the requested path was a file: the listing is its parent dir and
+   *  this is the file's basename, so the UI can select/preview it (VS Code style). */
+  selectedFile?: string;
+}
+
+/**
+ * Resolve a relative (possibly extensionless, package-relative) path against a
+ * session cwd. Backend tries cwd, then walks up parent dirs to the repo root,
+ * returning the first base where the path exists. Falls back to cwd/rel.
+ */
+export async function resolvePath(
+  rel: string,
+  cwd: string,
+  host?: string,
+): Promise<{ path: string; resolved: boolean }> {
+  const params = new URLSearchParams({ rel, cwd });
+  if (host) params.set('host', host);
+  const res = await fetch(`/api/files/resolve-path?${params}`);
+  if (!res.ok) {
+    // Best-effort fallback: naive join so the click still does something.
+    return { path: `${cwd.replace(/\/$/, '')}/${rel.replace(/^\.\//, '')}`, resolved: false };
+  }
+  return res.json();
 }
 
 /** List one level of a directory (lazy-loaded tree). Supports local + remote (host). */

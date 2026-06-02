@@ -180,10 +180,10 @@ interface SessionChatHistoryProps {
 }
 
 /** Memoized text block that caches renderMarkdownWithRefs output */
-function StreamingTextBlock({ content, sessionCwd, onTaskClick, onSessionClick, onFileOpen }: { content: string; sessionCwd?: string; onTaskClick?: (taskId: string) => void; onSessionClick?: (sessionId: string) => void; onFileOpen?: (path: string, line?: number) => void }) {
+function StreamingTextBlock({ content, sessionCwd, sessionHost, onTaskClick, onSessionClick, onFileOpen }: { content: string; sessionCwd?: string; sessionHost?: string; onTaskClick?: (taskId: string) => void; onSessionClick?: (sessionId: string) => void; onFileOpen?: (path: string, line?: number) => void }) {
   const html = useMemo(() => renderMarkdownWithRefs(content, sessionCwd), [content, sessionCwd]);
   const imagePaths = useMemo(() => findImagePaths(content), [content]);
-  const handleClick = useEntityClickHandler(onTaskClick, onSessionClick, onFileOpen);
+  const handleClick = useEntityClickHandler(onTaskClick, onSessionClick, onFileOpen, sessionHost);
   return (
     <>
       <div
@@ -270,9 +270,9 @@ function PermissionRequestCard({ sessionId, requestId, toolName, input, reason, 
 }
 
 /** Render a single streaming block */
-const StreamingBlockView = memo(function StreamingBlockView({ block, sessionId, sessionCwd, onTaskClick, onSessionClick, onFileOpen }: { block: StreamingBlock; sessionId: string; sessionCwd?: string; onTaskClick?: (taskId: string) => void; onSessionClick?: (sessionId: string) => void; onFileOpen?: (path: string, line?: number) => void }) {
+const StreamingBlockView = memo(function StreamingBlockView({ block, sessionId, sessionCwd, sessionHost, onTaskClick, onSessionClick, onFileOpen }: { block: StreamingBlock; sessionId: string; sessionCwd?: string; sessionHost?: string; onTaskClick?: (taskId: string) => void; onSessionClick?: (sessionId: string) => void; onFileOpen?: (path: string, line?: number) => void }) {
   if (block.type === 'text') {
-    return <StreamingTextBlock content={block.content} sessionCwd={sessionCwd} onTaskClick={onTaskClick} onSessionClick={onSessionClick} onFileOpen={onFileOpen} />;
+    return <StreamingTextBlock content={block.content} sessionCwd={sessionCwd} sessionHost={sessionHost} onTaskClick={onTaskClick} onSessionClick={onSessionClick} onFileOpen={onFileOpen} />;
   }
 
   if (block.type === 'system') {
@@ -348,6 +348,7 @@ const StreamingBlockView = memo(function StreamingBlockView({ block, sessionId, 
       status={status}
       result={block.result}
       sessionCwd={sessionCwd}
+      sessionHost={sessionHost}
       onTaskClick={onTaskClick}
       onSessionClick={onSessionClick}
       onFileOpen={onFileOpen ? (p) => onFileOpen(p) : undefined}
@@ -361,12 +362,13 @@ interface StreamingTaskGroupProps {
   childBlocks: StreamingBlock[];
   sessionId: string;
   sessionCwd?: string;
+  sessionHost?: string;
   onTaskClick?: (taskId: string) => void;
   onSessionClick?: (sessionId: string) => void;
   onFileOpen?: (path: string, line?: number) => void;
 }
 
-function StreamingTaskGroup({ taskBlock, childBlocks, sessionId, sessionCwd, onTaskClick, onSessionClick, onFileOpen }: StreamingTaskGroupProps) {
+function StreamingTaskGroup({ taskBlock, childBlocks, sessionId, sessionCwd, sessionHost, onTaskClick, onSessionClick, onFileOpen }: StreamingTaskGroupProps) {
   const [open, setOpen] = useState(true); // Default open during streaming
   const description = typeof taskBlock.input?.description === 'string'
     ? taskBlock.input.description
@@ -396,7 +398,7 @@ function StreamingTaskGroup({ taskBlock, childBlocks, sessionId, sessionCwd, onT
       {open && (
         <div className="task-group-body">
           {childBlocks.map((child, ci) => (
-            <StreamingBlockView key={ci} block={child} sessionId={sessionId} sessionCwd={sessionCwd} onTaskClick={onTaskClick} onSessionClick={onSessionClick} onFileOpen={onFileOpen} />
+            <StreamingBlockView key={ci} block={child} sessionId={sessionId} sessionCwd={sessionCwd} sessionHost={sessionHost} onTaskClick={onTaskClick} onSessionClick={onSessionClick} onFileOpen={onFileOpen} />
           ))}
           {childBlocks.length === 0 && !isDone && (
             <div className="task-group-empty">Working...</div>
@@ -1209,7 +1211,7 @@ export const SessionChatHistory = memo(function SessionChatHistory({ sessionId, 
                         <span className="session-fork-divider-label">Forked session starts here</span>
                       </div>
                     )}
-                    <SessionMessage message={m} sessionId={sessionId} sessionCwd={sessionCwd} onTaskClick={onTaskClick} onSessionClick={onSessionClick} onFileOpen={onFileOpen} />
+                    <SessionMessage message={m} sessionId={sessionId} sessionCwd={sessionCwd} sessionHost={sessionHost} onTaskClick={onTaskClick} onSessionClick={onSessionClick} onFileOpen={onFileOpen} />
                   </div>
                 );
               })}
@@ -1274,6 +1276,7 @@ export const SessionChatHistory = memo(function SessionChatHistory({ sessionId, 
                           childBlocks={grouped.childBlocks}
                           sessionId={sessionId}
                           sessionCwd={sessionCwd}
+                          sessionHost={sessionHost}
                           onTaskClick={onTaskClick}
                           onSessionClick={onSessionClick}
                           onFileOpen={onFileOpen}
@@ -1306,7 +1309,7 @@ export const SessionChatHistory = memo(function SessionChatHistory({ sessionId, 
                     <div key={`b-${item.index}`} className={isFirst ? 'session-msg session-msg-assistant' : ''}>
                       {headerEl}
                       <div className={isFirst ? 'session-msg-content' : ''}>
-                        <StreamingBlockView block={item.block} sessionId={sessionId} sessionCwd={sessionCwd} onTaskClick={onTaskClick} onSessionClick={onSessionClick} onFileOpen={onFileOpen} />
+                        <StreamingBlockView block={item.block} sessionId={sessionId} sessionCwd={sessionCwd} sessionHost={sessionHost} onTaskClick={onTaskClick} onSessionClick={onSessionClick} onFileOpen={onFileOpen} />
                       </div>
                     </div>
                   );
@@ -1314,7 +1317,7 @@ export const SessionChatHistory = memo(function SessionChatHistory({ sessionId, 
                 return (
                   <div key={`b-${item.index}`} className="session-msg-bare">
                     {headerEl}
-                    <StreamingBlockView block={item.block} sessionId={sessionId} sessionCwd={sessionCwd} onTaskClick={onTaskClick} onSessionClick={onSessionClick} onFileOpen={onFileOpen} />
+                    <StreamingBlockView block={item.block} sessionId={sessionId} sessionCwd={sessionCwd} sessionHost={sessionHost} onTaskClick={onTaskClick} onSessionClick={onSessionClick} onFileOpen={onFileOpen} />
                   </div>
                 );
               }
@@ -1343,7 +1346,7 @@ export const SessionChatHistory = memo(function SessionChatHistory({ sessionId, 
 
               return (
                 <div key={`u-${m.queueId}`} className={wrapperClass}>
-                  <SessionMessage message={m} sessionId={sessionId} sessionCwd={sessionCwd} onTaskClick={onTaskClick} onSessionClick={onSessionClick} onFileOpen={onFileOpen} />
+                  <SessionMessage message={m} sessionId={sessionId} sessionCwd={sessionCwd} sessionHost={sessionHost} onTaskClick={onTaskClick} onSessionClick={onSessionClick} onFileOpen={onFileOpen} />
                   <OptimisticImagePreviews images={m.images} />
                   {m.status === 'received' && (
                     <>

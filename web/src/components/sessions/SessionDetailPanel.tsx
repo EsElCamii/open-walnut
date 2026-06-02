@@ -12,7 +12,7 @@ import { SessionCopyButtons } from './SessionCopyButtons';
 import { TaskQuickActions } from './TaskQuickActions';
 import { updateSession, executePlanSession, executePlanContinue, restartSession } from '@/api/sessions';
 import { log } from '@/utils/log';
-import { fetchTask } from '@/api/tasks';
+import { fetchTask, updateTask } from '@/api/tasks';
 import { fetchPinnedTasks, pinTask, unpinTask, setTaskTier } from '@/api/focus';
 import type { FocusTier } from '@/api/focus';
 import { SessionRetryButton } from './SessionRetryButton';
@@ -25,7 +25,7 @@ import type { SessionRecord, TaskPhase } from '@/types/session';
 import { useEnabledModes } from '@/hooks/useEnabledModes';
 import { timeAgo } from '@/utils/time';
 import { wsClient } from '@/api/ws';
-import { ICON_CLIPBOARD, ICON_LIGHTNING, ICON_WARNING } from '@/components/common/Icons';
+import { ICON_CLIPBOARD, ICON_LIGHTNING, ICON_WARNING, ICON_LOCATE } from '@/components/common/Icons';
 import { renderMarkdownWithRefs } from '@/utils/markdown';
 
 interface SessionDetailPanelProps {
@@ -90,7 +90,7 @@ function CopyableId({ value, truncate }: { value: string; truncate?: number }) {
   );
 }
 
-function EditableTitle({ sessionId, title, onSaved }: { sessionId: string; title: string; onSaved?: () => void }) {
+function EditableTitle({ sessionId, taskId, title, onSaved }: { sessionId: string; taskId?: string; title: string; onSaved?: () => void }) {
   const [editing, setEditing] = useState(false);
   const [value, setValue] = useState(title);
   const [saving, setSaving] = useState(false);
@@ -107,7 +107,10 @@ function EditableTitle({ sessionId, title, onSaved }: { sessionId: string; title
       return;
     }
     setSaving(true);
-    updateSession(sessionId, { title: trimmed })
+    const req = taskId
+      ? updateTask(taskId, { title: trimmed })
+      : updateSession(sessionId, { title: trimmed });
+    req
       .then(() => {
         setEditing(false);
         onSaved?.();
@@ -144,7 +147,7 @@ function EditableTitle({ sessionId, title, onSaved }: { sessionId: string; title
     <h2
       className="session-detail-title session-detail-title-editable"
       onClick={() => setEditing(true)}
-      title="Click to rename"
+      title={taskId ? 'Click to rename task' : 'Click to rename session'}
     >
       {title}
     </h2>
@@ -365,7 +368,8 @@ export function SessionDetailPanel({ session, taskTitle, summary, onTitleChanged
   }
 
   const sessionId = session.claudeSessionId || '';
-  const title = session.title || session.description || session.slug || sessionId || 'Untitled session';
+  const sessionFallbackTitle = session.title || session.description || session.slug || sessionId || 'Untitled session';
+  const title = (session.taskId ? taskTitle : null) || sessionFallbackTitle;
   const ps = session.process_status ?? 'stopped';
   // SessionsPage doesn't pass task phase; hardcoded 'TODO' is safe because
   // SessionChatHistory only uses it for resume detection (checking IN_PROGRESS),
@@ -414,7 +418,6 @@ export function SessionDetailPanel({ session, taskTitle, summary, onTitleChanged
   };
 
   // Build compact meta bar items
-  const taskLabel = taskTitle || session.taskId;
   const hasDetails = !!(session.project || session.startedAt || session.cwd || session.host || session.activity || session.description);
 
   const planContentValue = plan?.content ?? null;
@@ -425,7 +428,17 @@ export function SessionDetailPanel({ session, taskTitle, summary, onTitleChanged
         <div className="session-detail-header">
           {/* Title row with badges */}
           <div className="session-detail-title-row">
-            <EditableTitle sessionId={sessionId} title={title} onSaved={onTitleChanged} />
+            <EditableTitle sessionId={sessionId} taskId={session.taskId} title={title} onSaved={onTitleChanged} />
+            {session.taskId && (
+              <button
+                className="task-action-btn session-detail-locate"
+                onClick={() => navigate(`/tasks/${session.taskId}`)}
+                title={taskTitle ? `Go to task: ${taskTitle}` : `Go to task ${session.taskId}`}
+                aria-label="Locate task"
+              >
+                {ICON_LOCATE}
+              </button>
+            )}
             <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
               {session.mode && session.mode !== 'default' && (
                 <span
@@ -475,9 +488,6 @@ export function SessionDetailPanel({ session, taskTitle, summary, onTitleChanged
                   slot="phase"
                   compact
                 />
-                <a href={`/tasks/${session.taskId}`} className="session-detail-link" title={`Task: ${session.taskId}`}>
-                  {taskLabel}
-                </a>
                 <TaskQuickActions
                   taskId={session.taskId}
                   task={sessionTask}

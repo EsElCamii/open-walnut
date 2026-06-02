@@ -16,13 +16,14 @@ const REAL_DAEMON_BINARIES_DIR = path.resolve(
   '../../dist/daemon-binaries',
 );
 
-export function createMockConstants(prefix = 'walnut-test') {
+export function createMockConstants(prefix = 'walnut-test', overrides: Record<string, unknown> = {}) {
   const tmpBase = path.join(
     os.tmpdir(),
     `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2)}`,
   );
   const tasksDir = path.join(tmpBase, 'tasks');
   return {
+    IS_EPHEMERAL: false,
     WALNUT_HOME: tmpBase,
     TASKS_DIR: tasksDir,
     TASKS_FILE: path.join(tasksDir, 'tasks.json'),
@@ -37,6 +38,8 @@ export function createMockConstants(prefix = 'walnut-test') {
     SYNC_DIR: path.join(tmpBase, 'sync'),
     SESSIONS_FILE: path.join(tmpBase, 'sessions.json'),
     CLAUDE_HOME: path.join(tmpBase, '.claude'),
+    CLAUDE_SETTINGS_FILE: path.join(tmpBase, '.claude', 'settings.json'),
+    CLAUDE_PLUGINS_DIR: path.join(tmpBase, '.claude', 'plugins'),
     HOOK_LOG_FILE: path.join(tmpBase, 'hook-errors.log'),
     GLOBAL_SKILLS_DIR: path.join(tmpBase, 'skills'),
     BUILTIN_SKILLS_DIR: path.join(tmpBase, 'data', 'skills'),
@@ -81,5 +84,6 @@ export function createMockConstants(prefix = 'walnut-test') {
     MEMORY_INDEX_FILE: path.join(tmpBase, 'memory', 'index.md'),
     WORKING_MEMORY_FILE: path.join(tmpBase, 'memory', 'working-memory.md'),
     RECORDINGS_DIR: path.join(tmpBase, 'recordings'),
+    ...overrides,
   };
 }

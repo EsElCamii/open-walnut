@@ -31,12 +31,14 @@ export function GeneralSection({ config, onSave }: Props) {
   const [defaultPriority, setDefaultPriority] = useState<TaskPriority>(config.defaults?.priority ?? 'none');
   const [defaultCategory, setDefaultCategory] = useState(config.defaults?.category ?? '');
   const [localCategories, setLocalCategories] = useState<string[]>(config.local?.categories ?? []);
+  const [bumpPinnedOnChat, setBumpPinnedOnChat] = useState(config.ui?.bump_pinned_on_chat !== false);
 
   useEffect(() => {
     setUserName(config.user?.name ?? '');
     setDefaultPriority(config.defaults?.priority ?? 'none');
     setDefaultCategory(config.defaults?.category ?? '');
     setLocalCategories(config.local?.categories ?? []);
+    setBumpPinnedOnChat(config.ui?.bump_pinned_on_chat !== false);
   }, [config]);
 
   const handleSave = async () => {
@@ -44,6 +46,7 @@ export function GeneralSection({ config, onSave }: Props) {
       user: { name: userName },
       defaults: { priority: defaultPriority, category: defaultCategory },
       local: { ...config.local, categories: localCategories },
+      ui: { ...config.ui, bump_pinned_on_chat: bumpPinnedOnChat },
     });
   };
 
@@ -102,6 +105,20 @@ export function GeneralSection({ config, onSave }: Props) {
         <p className="text-sm text-muted" style={{ margin: '4px 0 0' }}>
           Max cards visible per tier before scrolling
         </p>
+      </div>
+
+      <div className="form-group">
+        <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer' }}>
+          <input
+            type="checkbox"
+            checked={bumpPinnedOnChat}
+            onChange={(e) => setBumpPinnedOnChat(e.target.checked)}
+            style={{ width: 16, height: 16, accentColor: 'var(--accent)' }}
+            data-testid="bump-pinned-on-chat"
+          />
+          Move chatted task to top of its tier
+          <span className="text-sm text-muted" style={{ marginLeft: 4 }}>&mdash; chatting with a pinned task bubbles it to the front</span>
+        </label>
       </div>
 
       <div className="form-group">

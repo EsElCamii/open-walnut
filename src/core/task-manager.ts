@@ -1476,7 +1476,12 @@ export async function updateTask(
     applyDependencyMutations(store, task, updates);
   }
 
-  task.updated_at = new Date().toISOString();
+  // `needs_attention` is a read/seen marker, not task content. Clearing it on
+  // focus must NOT bump updated_at — otherwise the task jumps to the top of any
+  // updated_at-ordered list a few seconds after the user merely selects it.
+  const changedKeys = Object.keys(updates).filter((k) => (updates as Record<string, unknown>)[k] !== undefined);
+  const onlyAttentionMarker = changedKeys.length > 0 && changedKeys.every((k) => k === 'needs_attention');
+  if (!onlyAttentionMarker) task.updated_at = new Date().toISOString();
 
   await writeStore(store);
 
@@ -1509,12 +1514,14 @@ export async function updateTask(
         }
       }
 
-      // 2. Push to new backend (fire-and-forget — sync will retry if this fails)
-      autoPushIfConfigured(m.task).catch(err => log.task.warn(
-        'cross-source migration: new backend push failed', {
-          taskId: m.task.id, newSource: m.task.source,
-          error: err instanceof Error ? err.message : String(err),
-        }));
+      // 2. Push to new backend — AWAITED so failures (e.g. plugin rejects CJK
+      //    content at the push gate) propagate to the caller. The AI/tool sees
+      //    the error synchronously and can fix + retry, instead of a silent
+      //    fire-and-forget that reports success while the push actually failed.
+      const migSync = await autoPushIfConfigured(m.task);
+      if (!migSync.success) {
+        throw new Error(`Sync to ${m.task.source} failed: ${migSync.error ?? 'unknown error'}`);
+      }
 
       // 3. Notify UI for each migrated task (primary task gets a second emit from the centralized
       //    emission below — harmless because the frontend mergeTask is idempotent).
@@ -2293,8 +2300,32 @@ export async function linkSession(
 }
 
 /**
+ * Move a pinned task to the front of its own tier by reassigning pin_order.
+ * Tiers are derived by filtering pinned tasks on focus_tier, so only the target
+ * task's own tier reorders — other tiers keep their relative order untouched.
+ * Returns true if the order actually changed.
+ */
+function bumpPinnedTaskWithinTier(store: TaskStore, task: Task): boolean {
+  const tierOf = (t: Task) => t.focus_tier ?? 'satellite';
+  const targetTier = tierOf(task);
+  const ordered = store.tasks
+    .filter((t) => t.pinned && t.phase !== 'COMPLETE' && t.status !== 'done')
+    .sort((a, b) => (a.pin_order ?? 0) - (b.pin_order ?? 0));
+  const firstIdx = ordered.findIndex((t) => tierOf(t) === targetTier);
+  if (firstIdx < 0 || ordered[firstIdx].id === task.id) return false; // already at tier front
+  const curIdx = ordered.findIndex((t) => t.id === task.id);
+  if (curIdx < 0) return false;
+  const [moved] = ordered.splice(curIdx, 1);
+  ordered.splice(firstIdx, 0, moved);
+  ordered.forEach((t, i) => { t.pin_order = i; });
+  return true;
+}
+
+/**
  * Lightweight touch: update last_session_update without full updateTask() validation.
  * Used on session resume (handleSend) to keep "Recent" sort accurate.
+ * If the task is pinned, also bump it to the front of its tier so chatting with
+ * a task surfaces it in the Focus bar.
  */
 export async function touchLastSessionUpdate(taskIdPrefix: string): Promise<void> {
   return withWriteLock(async () => {
@@ -2302,8 +2333,16 @@ export async function touchLastSessionUpdate(taskIdPrefix: string): Promise<void
     const task = store.tasks.find((t) => t.id.startsWith(taskIdPrefix));
     if (!task) return;
     task.last_session_update = new Date().toISOString();
+    // Opt-out config: when bump_pinned_on_chat is explicitly false, keep the
+    // manual drag order fixed and only update the timestamp.
+    const config = await getConfig();
+    const bumpEnabled = config.ui?.bump_pinned_on_chat !== false;
+    const focusBarChanged = bumpEnabled && task.pinned ? bumpPinnedTaskWithinTier(store, task) : false;
     await writeStore(store);
     bus.emit(EventNames.TASK_UPDATED, { task }, ['web-ui'], { source: 'session-touch' });
+    if (focusBarChanged) {
+      bus.emit(EventNames.CONFIG_CHANGED, { key: 'focus_bar' }, ['web-ui']);
+    }
   });
 }
 
@@ -2552,7 +2591,7 @@ export async function toggleStar(idPrefix: string): Promise<{ task: Task; starre
 
 /**
  * Toggle pin on a task (by exact ID). Returns ordered list of pinned task IDs.
- * When pinning: sets pinned=true, pin_order = max existing + 1.
+ * When pinning: sets pinned=true, pin_order = min existing - 1 (surfaces at top of its tier).
  * When unpinning: clears pinned & pin_order, compacts remaining orders.
  */
 export async function togglePin(taskId: string): Promise<{ pinned: boolean; pinned_tasks: string[] }> {
@@ -2577,10 +2616,14 @@ export async function togglePin(taskId: string): Promise<{ pinned: boolean; pinn
       const pinned = store.tasks.filter((t) => t.pinned).sort((a, b) => (a.pin_order ?? 0) - (b.pin_order ?? 0));
       pinned.forEach((t, i) => { t.pin_order = i; });
     } else {
-      // Pin — assign next order
-      const maxOrder = store.tasks.filter((t) => t.pinned).reduce((max, t) => Math.max(max, t.pin_order ?? 0), -1);
+      // Pin — new pins surface at the TOP of their tier (lowest pin_order sorts first).
+      // pin_order is only a relative sort key, so going below 0 (and drifting more
+      // negative each pin) is intentional and harmless — the unpin branch above and
+      // reorderPins() re-compact to 0..n whenever the set changes.
+      const orders = store.tasks.filter((t) => t.pinned).map((t) => t.pin_order ?? 0);
+      const minOrder = orders.length ? Math.min(...orders) : 0;
       task.pinned = true;
-      task.pin_order = maxOrder + 1;
+      task.pin_order = minOrder - 1;
       task.updated_at = now;
     }
 
@@ -2937,34 +2980,60 @@ function prepareRawUpdate(task: Task, updates: Partial<Task>): Partial<Task> | n
 }
 
 /**
- * Update a task by exact ID with raw partial fields (used by sync pull).
- * Does NOT trigger auto-push to avoid sync loops.
- * Returns { changed: true } if any field was actually modified, { changed: false } otherwise.
+ * Update a task by exact ID with raw partial fields. O(1) single-row UPDATE —
+ * no full-store rewrite (unlike updateTask).
+ *
+ * By default it is silent (no TASK_UPDATED event, no plugin push) so sync-pull
+ * callers don't trigger sync loops. Pass `opts.emitEvent`/`opts.push` to opt in:
+ * used by applySessionPhase so hot-path phase transitions stay O(1) yet still
+ * notify the UI and sync to external trackers.
+ *
+ * Returns { changed, task } — `task` is the post-update row when changed.
  */
-export async function updateTaskRaw(id: string, updates: Partial<Task>): Promise<{ changed: boolean }> {
+export async function updateTaskRaw(
+  id: string,
+  updates: Partial<Task>,
+  opts?: { emitEvent?: boolean; push?: boolean; source?: string },
+): Promise<{ changed: boolean; task?: Task }> {
   await ensureInit();
-  return withWriteLock(async () => {
+  const updated = await withWriteLock(async () => {
     const db = getDb()!;
     const row = db.prepare('SELECT * FROM tasks WHERE id = ?').get(id) as Record<string, any> | undefined;
-    if (!row) return { changed: false };
+    if (!row) return undefined;
     const task = rowToTask(row);
 
     const prepared = prepareRawUpdate(task, updates);
-    if (!prepared) return { changed: false };
+    if (!prepared) return undefined;
 
     // Build the UPDATE dynamically from the fields that actually changed.
     // taskToRow() already handles column mapping + JSON encoding + payload spill.
     const patchRow = taskToRow(prepared);
     const cols = Object.keys(patchRow);
-    if (cols.length === 0) return { changed: false };
+    if (cols.length === 0) return undefined;
 
     const setClause = cols.map((c) => `${c} = @${c}`).join(', ');
     const bound: Record<string, unknown> = { ...patchRow, id };
     dbTransaction((handle) => {
       handle.prepare(`UPDATE tasks SET ${setClause} WHERE id = @id`).run(bound);
     });
-    return { changed: true };
+    // Return the merged post-update task so callers can emit / push without re-reading.
+    Object.assign(task, prepared);
+    return task;
   });
+
+  if (!updated) return { changed: false };
+
+  // Optional side-effects (outside the lock — push re-acquires it). Defaults off
+  // to preserve the silent contract for sync-pull callers.
+  if (opts?.push && updated.source !== 'local') {
+    autoPushIfConfigured(updated).catch(() => { /* sync_error already stamped inside */ });
+  }
+  if (opts?.emitEvent) {
+    const eventName = updated.phase === 'COMPLETE' ? EventNames.TASK_COMPLETED : EventNames.TASK_UPDATED;
+    bus.emit(eventName, { task: updated }, ['web-ui', 'main-agent'], { source: opts.source ?? 'internal' });
+  }
+
+  return { changed: true, task: updated };
 }
 
 // ── Bulk APIs ───────────────────────────────────────────────────────────────

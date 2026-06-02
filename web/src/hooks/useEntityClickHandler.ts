@@ -13,11 +13,14 @@
  */
 import { useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { resolvePath } from '@/api/files';
 
 export function useEntityClickHandler(
   onTaskClick?: (taskId: string) => void,
   onSessionClick?: (sessionId: string) => void,
   onFileOpen?: (path: string, line?: number) => void,
+  /** Host for resolving relative paths (remote sessions). Local when omitted. */
+  fileHost?: string,
 ) {
   const navigate = useNavigate();
 
@@ -52,11 +55,23 @@ export function useEntityClickHandler(
     const fileAnchor = target.closest('a.file-link') as HTMLAnchorElement | null;
     if (fileAnchor) {
       e.preventDefault();
-      const filePath = fileAnchor.dataset.filePath;
+      if (!onFileOpen) return;
       const fileLine = fileAnchor.dataset.fileLine;
-      if (filePath && onFileOpen) {
-        onFileOpen(filePath, fileLine ? parseInt(fileLine, 10) : undefined);
+      const line = fileLine ? parseInt(fileLine, 10) : undefined;
+      const filePath = fileAnchor.dataset.filePath;
+      if (filePath) {
+        // Absolute path — open directly.
+        onFileOpen(filePath, line);
+        return;
+      }
+      // Relative path — resolve against cwd (walks up to repo root / sibling pkgs).
+      const rel = fileAnchor.dataset.relPath;
+      const cwd = fileAnchor.dataset.cwd;
+      if (rel && cwd) {
+        resolvePath(rel, cwd, fileHost)
+          .then((r) => onFileOpen(r.path, line))
+          .catch(() => onFileOpen(`${cwd.replace(/\/$/, '')}/${rel.replace(/^\.\//, '')}`, line));
       }
     }
-  }, [onTaskClick, onSessionClick, onFileOpen, navigate]);
+  }, [onTaskClick, onSessionClick, onFileOpen, fileHost, navigate]);
 }

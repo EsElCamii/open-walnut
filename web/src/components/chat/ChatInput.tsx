@@ -5,12 +5,44 @@ import type { ImageAttachment } from '@/api/chat';
 import type { SlashCommandItem } from '@/api/slash-commands';
 import { MAX_QUEUE_SIZE } from '@/hooks/useChat';
 import { CommandPalette, type PaletteItem } from './CommandPalette';
+import { FileMentionPopup, type FileMentionHandle } from './FileMentionPopup';
 import type { Task } from '@open-walnut/core';
 import { StatusBadge } from '../common/StatusBadge';
 import { MicButton } from '../common/MicButton';
 
 const ALLOWED_TYPES = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp']);
 const MAX_IMAGES = 5;
+
+/**
+ * Detect an active "@" file mention at the caret.
+ * Triggers only when the "@" sits at the start of input or right after
+ * whitespace (so emails `a@b` and decorators don't false-fire), and there's
+ * no whitespace between the "@" and the caret. Returns the "@" index and the
+ * query typed after it, or null if no mention is active.
+ */
+export function detectMention(
+  text: string,
+  caret: number,
+): { atIndex: number; query: string } | null {
+  const at = text.lastIndexOf('@', caret - 1);
+  if (at === -1) return null;
+  const before = at === 0 ? '' : text[at - 1];
+  if (before && !/\s/.test(before)) return null;
+  const query = text.slice(at + 1, caret);
+  if (/\s/.test(query)) return null;
+  return { atIndex: at, query };
+}
+
+/**
+ * Format a selected path as an "@" reference token for insertion into the message.
+ * Paths with spaces are quoted so the ref stays a single token. The consumer is
+ * the Claude Code CLI on the other end (the message is sent as plain text) — Claude
+ * Code natively understands @path / @"quoted path" mentions, so no Walnut-side parser
+ * decodes this; it travels verbatim in the message body.
+ */
+function formatMentionPath(relPath: string): string {
+  return /\s/.test(relPath) ? `@"${relPath}"` : `@${relPath}`;
+}
 
 /**
  * Read the computed max-height of a textarea element in pixels.
@@ -48,9 +80,13 @@ interface ChatInputProps {
   draftKey?: string;
   /** Toggle Execution / Plan mode (triggered by Shift+Tab) */
   onToggleMode?: () => void;
+  /** Root dir for "@" file mentions. When set, typing "@" opens a file picker. */
+  mentionCwd?: string;
+  /** SSH host for "@" mentions (undefined = local). */
+  mentionHost?: string;
 }
 
-export function ChatInput({ onSend, onCommand, onStop, onInterruptSend, onClearQueue, disabled, isStreaming, focusedTaskTitle, focusedTask, onClearFocus, queueCount, placeholder, showCommands = true, sessionCommands, searchSessionCommands, onControlCommand, draftKey, onToggleMode }: ChatInputProps) {
+export function ChatInput({ onSend, onCommand, onStop, onInterruptSend, onClearQueue, disabled, isStreaming, focusedTaskTitle, focusedTask, onClearFocus, queueCount, placeholder, showCommands = true, sessionCommands, searchSessionCommands, onControlCommand, draftKey, onToggleMode, mentionCwd, mentionHost }: ChatInputProps) {
   const [value, setValue] = useState(() => {
     if (!draftKey) return '';
     try { return localStorage.getItem(draftKey) ?? ''; } catch { return ''; }
@@ -133,6 +169,29 @@ export function ChatInput({ onSend, onCommand, onStop, onInterruptSend, onClearQ
     paletteRef.current = { open: paletteOpen, results: paletteResults, selectedIndex };
   }, [paletteOpen, paletteResults, selectedIndex]);
 
+  // "@" file mention state. mentionAtIndexRef/mentionEndRef bracket the "@query"
+  // span in `value` so selection can splice in the path without relying on the
+  // live caret (which is unreliable for mouse-driven picks — the textarea may have
+  // lost focus). Both are recomputed on every detect. Imperative handle drives
+  // popup keyboard nav from handleKeyDown.
+  const mentionEnabled = !!mentionCwd;
+  const [mentionOpen, setMentionOpen] = useState(false);
+  const [mentionQuery, setMentionQuery] = useState('');
+  const mentionAtIndexRef = useRef<number>(-1);
+  const mentionEndRef = useRef<number>(-1);
+  const mentionPopupRef = useRef<FileMentionHandle>(null);
+  // Ref mirror so handleKeyDown reads latest open-state without stale closure.
+  const mentionOpenRef = useRef(false);
+  mentionOpenRef.current = mentionOpen;
+
+  const closeMention = useCallback(() => {
+    setMentionOpen(false);
+    setMentionQuery('');
+    mentionAtIndexRef.current = -1;
+    mentionEndRef.current = -1;
+    mentionOpenRef.current = false;
+  }, []);
+
   const processFiles = useCallback((files: FileList | File[]) => {
     const fileArray = Array.from(files);
     for (const file of fileArray) {
@@ -185,10 +244,14 @@ export function ChatInput({ onSend, onCommand, onStop, onInterruptSend, onClearQ
     try { localStorage.removeItem(key); } catch { /* ignore */ }
   }, []);
 
+  // Clear the input UI. By default the persisted draft is cleared too, but callers
+  // that send asynchronously pass keepDraft=true so the draft survives until the
+  // send is confirmed successful (otherwise a failed send loses the user's text).
   const resetInput = (keepDraft = false) => {
     setValue('');
     setImages([]);
     closePalette();
+    closeMention();
     if (!keepDraft) clearDraft();
     if (textareaRef.current) {
       textareaRef.current.style.height = 'auto';
@@ -296,12 +359,55 @@ export function ChatInput({ onSend, onCommand, onStop, onInterruptSend, onClearQ
     });
   }, [onControlCommand, closePalette]);
 
+  // Replace the active "@query" span with the selected path, then close the popup.
+  // The popup hands back an absolute path (avoids ambiguity about what a relative
+  // ref resolves against). Splice between the stored "@" index and query-end index
+  // rather than the live caret — mouse picks don't reliably keep the caret in place.
+  const handleMentionSelect = useCallback((absPath: string) => {
+    const at = mentionAtIndexRef.current;
+    const end = mentionEndRef.current;
+    if (at < 0 || end < at) { closeMention(); return; }
+    const ref = formatMentionPath(absPath) + ' ';
+    const newValue = value.slice(0, at) + ref + value.slice(end);
+    setValue(newValue);
+    saveDraft(newValue);
+    closeMention();
+    const newCaret = at + ref.length;
+    requestAnimationFrame(() => {
+      const ta = textareaRef.current;
+      if (ta) {
+        ta.style.height = 'auto';
+        ta.style.height = Math.min(ta.scrollHeight, getMaxHeight(ta)) + 'px';
+        ta.focus();
+        ta.setSelectionRange(newCaret, newCaret);
+      }
+    });
+  }, [value, saveDraft, closeMention]);
+
   const handleKeyDown = (e: KeyboardEvent) => {
     // Shift+Tab: toggle Execution / Plan mode
     if (e.key === 'Tab' && e.shiftKey) {
       e.preventDefault();
       onToggleMode?.();
       return;
+    }
+
+    // "@" file mention popup keyboard nav (takes priority over command palette;
+    // they're mutually exclusive since one starts with "/" and the other "@").
+    if (mentionOpenRef.current) {
+      if (e.nativeEvent.isComposing || e.keyCode === 229) return;
+      if (e.key === 'ArrowDown') { e.preventDefault(); mentionPopupRef.current?.move(1); return; }
+      if (e.key === 'ArrowUp') { e.preventDefault(); mentionPopupRef.current?.move(-1); return; }
+      if (e.key === 'Escape') { e.preventDefault(); closeMention(); return; }
+      if (e.key === 'Enter' || e.key === 'Tab') {
+        e.preventDefault();
+        // Cmd/Ctrl+Enter → select current (file or dir) regardless of type. Plain
+        // Enter/Tab → open dir / pick file. This deliberately swallows Cmd/Ctrl+Enter
+        // (the global "send" shortcut) while the popup is open so the user can pick.
+        if (e.metaKey || e.ctrlKey) mentionPopupRef.current?.selectCurrent();
+        else mentionPopupRef.current?.enter();
+        return;
+      }
     }
 
     // Read palette state from ref to avoid stale closure issues —
@@ -354,6 +460,22 @@ export function ChatInput({ onSend, onCommand, onStop, onInterruptSend, onClearQ
     setValue(newValue);
     handleInput();
     saveDraft(newValue);
+
+    // "@" file mention detection: caret follows an "@" (at start or after whitespace)
+    // with no whitespace in between. The text after "@" becomes the dir filter.
+    if (mentionEnabled) {
+      const caret = textareaRef.current?.selectionStart ?? newValue.length;
+      const m = detectMention(newValue, caret);
+      if (m) {
+        mentionAtIndexRef.current = m.atIndex;
+        mentionEndRef.current = caret; // end of the "@query" span = current caret
+        setMentionQuery(m.query);
+        setMentionOpen(true);
+        mentionOpenRef.current = true;
+        return; // "@" and "/" are mutually exclusive triggers
+      }
+      if (mentionOpenRef.current) closeMention();
+    }
 
     // Slash command detection: text starts with "/" and no space yet (still typing command name)
     const enablePalette = showCommands || isSessionMode;
@@ -453,6 +575,16 @@ export function ChatInput({ onSend, onCommand, onStop, onInterruptSend, onClearQ
           selectedIndex={selectedIndex}
           onSelect={handleSelectCommand}
           showSource={isSessionMode}
+        />
+      )}
+      {mentionOpen && mentionCwd && (
+        <FileMentionPopup
+          ref={mentionPopupRef}
+          cwd={mentionCwd}
+          host={mentionHost}
+          query={mentionQuery}
+          onSelect={handleMentionSelect}
+          onClose={closeMention}
         />
       )}
       {/* Queue indicator bar — dismissable, reappears when new messages queued */}

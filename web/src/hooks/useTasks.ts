@@ -181,8 +181,13 @@ function applyFieldUpdate(tasks: Task[], id: string, updates: Record<string, unk
   for (const key of Object.keys(updates)) {
     if (OPTIMISTIC_FIELDS.has(key)) filtered[key] = updates[key];
   }
+  // `needs_attention` is a read/seen marker, not content. Clearing it on focus
+  // must NOT bump updated_at, or the task jumps to the top of an updated_at-sorted
+  // list seconds after the user merely selects it. Mirror task-manager.updateTask.
+  const changedKeys = Object.keys(updates).filter((k) => updates[k] !== undefined);
+  const onlyAttentionMarker = changedKeys.length > 0 && changedKeys.every((k) => k === 'needs_attention');
   return tasks.map(t => t.id === id
-    ? { ...t, ...filtered, updated_at: now }
+    ? (onlyAttentionMarker ? { ...t, ...filtered } : { ...t, ...filtered, updated_at: now })
     : t);
 }
 
@@ -350,6 +355,8 @@ export function useTasks(filter?: tasksApi.TaskFilter): UseTasksReturn {
     const { task } = data as { task: Task };
     // Skip tasks with missing or empty titles (e.g. from sync race conditions)
     if (!task.title || task.title.trim() === '') return;
+    // Suppress the echo of our own optimistic create (already reconciled locally).
+    if (consumeEcho(`create:${task.id}`)) return;
     wsEventCounts.current.created++;
     // Log every 10th event or first event (to spot event storms)
     const c = wsEventCounts.current;
@@ -463,9 +470,37 @@ export function useTasks(filter?: tasksApi.TaskFilter): UseTasksReturn {
   }, [showOperationError, refetch]);
 
   const create = useCallback(async (input: tasksApi.CreateTaskInput) => {
-    const task = await tasksApi.createTask(input);
-    return task;
-  }, []);
+    // Optimistic local-first insert: show the task immediately under a temp id,
+    // then reconcile with the server's real task (or roll back on failure).
+    const tmpId = `tmp-${crypto.randomUUID()}`;
+    const now = new Date().toISOString();
+    const optimistic = {
+      id: tmpId,
+      title: input.title,
+      status: 'todo',
+      priority: (input.priority ?? 'none'),
+      phase: 'TODO',
+      category: input.category,
+      project: input.project,
+      created_at: now,
+      updated_at: now,
+    } as unknown as Task;
+    setTasks((prev) => [optimistic, ...prev]);
+    try {
+      const task = await tasksApi.createTask(input);
+      // Suppress the incoming task:created WS echo so we don't double-insert.
+      guardEcho(`create:${task.id}`);
+      setTasks((prev) => {
+        const withoutTmp = prev.filter((t) => t.id !== tmpId);
+        return withoutTmp.some((t) => t.id === task.id) ? withoutTmp : [task, ...withoutTmp];
+      });
+      return task;
+    } catch (err) {
+      setTasks((prev) => prev.filter((t) => t.id !== tmpId));
+      onOpError(err as Error);
+      throw err;
+    }
+  }, [guardEcho, onOpError]);
 
   const update = useCallback((id: string, updates: tasksApi.UpdateTaskInput) => {
     // Only guard echo + apply optimistic update when the update contains optimistic-safe fields.

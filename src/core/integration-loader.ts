@@ -75,7 +75,13 @@ async function bundleExternalPlugin(
       format: 'esm',
       platform: 'node',
       target: 'node22',
-      external: ['better-sqlite3'],
+      // Mark ALL npm packages external — we only bundle to rebase the plugin's
+      // own relative imports onto walnut's src/ tree; npm packages (native ones
+      // like better-sqlite3 / node-pty included) resolve at runtime from
+      // walnut's node_modules. Listing packages individually was whack-a-mole:
+      // any new transitively-reached native dep broke the bundle (better-sqlite3,
+      // then node-pty). `packages: 'external'` kills that whole class.
+      packages: 'external',
       nodePaths: [path.join(projectRoot, 'node_modules')],
       banner: { js: 'import { createRequire as __cr } from "node:module"; const require = __cr(import.meta.url);' },
       logLevel: 'warning',

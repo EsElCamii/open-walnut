@@ -5,7 +5,7 @@ import { SessionNotes } from './SessionNotes';
 import { SessionFileExplorer } from './SessionFileExplorer';
 import { SessionTerminal } from './SessionTerminal';
 import { FileViewer } from '../common/FileViewer';
-import { ICON_ROBOT, ICON_EXPAND, ICON_COLLAPSE, ICON_CLOSE, ICON_LOCK, ICON_UNLOCK } from '../common/Icons';
+import { ICON_ROBOT, ICON_EXPAND, ICON_COLLAPSE, ICON_CLOSE, ICON_LOCK, ICON_UNLOCK, ICON_LOCATE } from '../common/Icons';
 import { UserMessagesSummary } from './UserMessagesSummary';
 // PlanPreviewSection replaced by inline plan popover in meta bar
 import { ChatInput } from '@/components/chat/ChatInput';
@@ -18,6 +18,7 @@ import { useEvent } from '@/hooks/useWebSocket';
 import { fetchSession, executePlanContinue, executePlanSession, updateSession, restartSession } from '@/api/sessions';
 import { log } from '@/utils/log';
 import { fetchTask } from '@/api/tasks';
+import { EditableSessionTitle } from './EditableSessionTitle';
 import { fetchPinnedTasks, pinTask, unpinTask, setTaskTier } from '@/api/focus';
 import type { FocusTier } from '@/api/focus';
 import { timeAgo } from '@/utils/time';
@@ -134,8 +135,9 @@ export const SessionPanel = memo(function SessionPanel({ sessionId, onClose, loc
   const sessionIdRef = useRef(sessionId);
   sessionIdRef.current = sessionId;
 
-  // Slash command autocomplete for session input
-  const { items: slashCommands, search: searchSlashCommands } = useSlashCommands(session?.cwd);
+  // Slash command autocomplete for session input — pass host so REMOTE sessions
+  // get the remote host's skills, not the Mac's local ones.
+  const { items: slashCommands, search: searchSlashCommands } = useSlashCommands(session?.cwd, session?.host);
 
   // Model picker state
   const [modelPickerOpen, setModelPickerOpen] = useState(false);
@@ -519,8 +521,9 @@ export const SessionPanel = memo(function SessionPanel({ sessionId, onClose, loc
   // not for UI display in this panel.
   const taskPhase = (sessionTask?.phase ?? 'TODO') as TaskPhase;
 
-  // Header content
-  const title = session?.title || session?.description || session?.slug || null;
+  // Header content — prefer the linked task title; fall back to session metadata.
+  const sessionFallbackTitle = session?.title || session?.description || session?.slug || null;
+  const headerTitle = (session?.taskId ? taskTitle : null) || sessionFallbackTitle;
   const sessionsPageUrl = `/sessions?id=${sessionId}`;
 
   const planContentValue = plan?.content ?? null;
@@ -533,10 +536,25 @@ export const SessionPanel = memo(function SessionPanel({ sessionId, onClose, loc
         <div className="session-panel-header">
           <div className="session-panel-header-top">
             <div className="session-panel-title-area">
-              {title
-                ? <span className="session-panel-title" title={title}>{title}</span>
+              {headerTitle
+                ? <EditableSessionTitle
+                    sessionId={sessionId}
+                    taskId={session?.taskId}
+                    title={headerTitle}
+                    className="session-panel-title"
+                  />
                 : <span className="session-panel-title text-muted">Untitled session</span>
               }
+              {!loading && session?.taskId && (
+                <button
+                  className="task-action-btn session-panel-locate"
+                  onClick={() => onTaskClick?.(session.taskId!)}
+                  title={taskTitle ? `Go to task: ${taskTitle}` : `Go to task ${session.taskId}`}
+                  aria-label="Locate task"
+                >
+                  {ICON_LOCATE}
+                </button>
+              )}
               {!loading && session?.provider === 'embedded' && (
                 <span
                   className="session-panel-badge"
@@ -592,18 +610,6 @@ export const SessionPanel = memo(function SessionPanel({ sessionId, onClose, loc
                 slot="phase"
                 compact
               />
-              <div
-                className="session-panel-task-link"
-                role="button"
-                tabIndex={0}
-                onClick={() => onTaskClick?.(session.taskId!)}
-                onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') onTaskClick?.(session.taskId!); }}
-                title={taskTitle ? `Go to task: ${taskTitle}` : `Go to task ${session.taskId}`}
-              >
-                <span className="session-panel-task-icon">&#x1F4CB;</span>
-                <span className="session-panel-task-title">{taskTitle || session.taskId}</span>
-                <span className="session-panel-task-arrow">&#x2197;</span>
-              </div>
               <TaskQuickActions
                 taskId={session.taskId}
                 task={sessionTask}
@@ -942,6 +948,8 @@ export const SessionPanel = memo(function SessionPanel({ sessionId, onClose, loc
             sessionCommands={slashCommands}
             searchSessionCommands={searchSlashCommands}
             onControlCommand={handleControlCommand}
+            mentionCwd={session?.cwd}
+            mentionHost={session?.host}
             draftKey={`draft:session:${sessionId}`}
             onToggleMode={session ? () => {
               const cur = session.mode || 'default';

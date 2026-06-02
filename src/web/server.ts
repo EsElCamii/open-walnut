@@ -44,7 +44,7 @@ import { createSkillsRouter } from './routes/skills.js'
 import { createSlashCommandsRouter } from './routes/slash-commands.js'
 import { timelineRouter } from './routes/timeline.js'
 import { CronService } from '../core/cron/index.js'
-import { CRON_FILE } from '../constants.js'
+import { CRON_FILE, IS_EPHEMERAL } from '../constants.js'
 import { sessionRunner } from '../providers/claude-code-session.js'
 import { SessionHealthMonitor } from '../core/session-health-monitor.js'
 import { SessionReaper } from '../core/session-reaper.js'
@@ -270,7 +270,7 @@ export async function startServer(options: ServerOptions = {}): Promise<HttpServ
 
   const port = options.port ?? DEFAULT_PORT
   const dev = options.dev ?? false
-  const isEphemeral = !!process.env.OPEN_WALNUT_EPHEMERAL
+  const isEphemeral = IS_EPHEMERAL
 
   const app = express()
 

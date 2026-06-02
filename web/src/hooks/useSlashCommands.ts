@@ -11,12 +11,13 @@ const inflightRequests = new Map<string, Promise<SlashCommandItem[]>>();
  * Fetches all available slash commands for a session (skills + commands + Claude commands).
  * Uses a module-level global cache with inflight dedup to avoid redundant fetches.
  */
-export function useSlashCommands(cwd?: string) {
+export function useSlashCommands(cwd?: string, host?: string) {
   const [items, setItems] = useState<SlashCommandItem[]>([]);
   const [loading, setLoading] = useState(false);
 
   useEffect(() => {
-    const key = cwd ?? '__no_cwd__';
+    // Key on BOTH cwd and host so remote/local lists never share a cache entry.
+    const key = `${cwd ?? '__no_cwd__'}::${host ?? '__local__'}`;
     const cached = globalCache.get(key);
     if (cached) {
       setItems(cached);
@@ -30,7 +31,7 @@ export function useSlashCommands(cwd?: string) {
     let promise = inflightRequests.get(key);
     if (!promise) {
       const endPerf = perf.start('slash-commands:fetch');
-      promise = fetchSlashCommands(cwd);
+      promise = fetchSlashCommands(cwd, host);
       inflightRequests.set(key, promise);
       promise.then((r) => endPerf(`${r.length} cmds`)).catch(() => endPerf('error'));
       promise.finally(() => inflightRequests.delete(key));
@@ -47,7 +48,7 @@ export function useSlashCommands(cwd?: string) {
     });
 
     return () => { cancelled = true; };
-  }, [cwd]);
+  }, [cwd, host]);
 
   const search = useCallback((query: string): SlashCommandItem[] => {
     if (!query) return items;

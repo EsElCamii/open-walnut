@@ -6646,6 +6646,48 @@ img[data-lightbox-src],
   min-width: 0;
 }
 
+.session-panel-title-editable {
+  cursor: pointer;
+  border-radius: 4px;
+  padding: 2px 4px;
+  margin: -2px -4px;
+  transition: background 0.15s;
+}
+
+.session-panel-title-editable:hover {
+  background: var(--bg-hover, rgba(0, 0, 0, 0.04));
+}
+
+[data-theme="dark"] .session-panel-title-editable:hover {
+  background: rgba(255, 255, 255, 0.06);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme]) .session-panel-title-editable:hover {
+    background: rgba(255, 255, 255, 0.06);
+  }
+}
+
+.session-panel-title-input {
+  font-size: 14px;
+  font-weight: 600;
+  letter-spacing: -0.2px;
+  flex: 1;
+  min-width: 0;
+  border: 1px solid var(--accent, #007AFF);
+  border-radius: 4px;
+  padding: 2px 4px;
+  margin: -2px -4px;
+  background: var(--card-bg, #fff);
+  color: var(--fg);
+  outline: none;
+  font-family: inherit;
+}
+
+.session-panel-locate {
+  flex-shrink: 0;
+}
+
 .session-panel-badge {
   display: inline-flex;
   align-items: center;
@@ -7646,6 +7688,19 @@ img[data-lightbox-src],
   background: color-mix(in srgb, var(--accent) 15%, transparent);
 }
 
+/* Transient pulse after a "locate" jump (session panel → task) so the target
+   card is unmistakable among similar-looking pinned cards. */
+@keyframes todo-locate-flash {
+  0%   { box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent) 70%, transparent); background: color-mix(in srgb, var(--accent) 28%, transparent); }
+  60%  { box-shadow: 0 0 0 4px color-mix(in srgb, var(--accent) 0%, transparent); background: color-mix(in srgb, var(--accent) 16%, transparent); }
+  100% { box-shadow: 0 0 0 0 transparent; background: transparent; }
+}
+
+.todo-card-locate-flash {
+  animation: todo-locate-flash 1.5s ease-out;
+  border-radius: 8px;
+}
+
 .todo-pinned-title {
   flex: 1;
   font-size: 12px;
@@ -7897,6 +7952,45 @@ img[data-lightbox-src],
   user-select: none;
 }
 
+/* Focus tier inline add ("+ Add to Focus" row) */
+.focus-inline-add-trigger {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 3px 8px;
+  margin-top: 2px;
+  border: 1px dashed color-mix(in srgb, var(--border) 70%, transparent);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--fg-muted);
+  font-size: 12px;
+  cursor: pointer;
+  transition: background 0.12s, color 0.12s, border-color 0.12s;
+}
+.focus-inline-add-trigger:hover {
+  background: var(--accent-subtle);
+  color: var(--accent);
+  border-color: var(--accent);
+}
+.focus-inline-add-plus {
+  font-size: 14px;
+  font-weight: 700;
+  line-height: 1;
+}
+.focus-inline-add {
+  margin-top: 2px;
+}
+.focus-inline-add input {
+  width: 100%;
+  padding: 4px 8px;
+  border: 1px solid var(--accent);
+  border-radius: 6px;
+  background: var(--bg);
+  color: inherit;
+  font-size: 12px;
+}
+
 /* Promote / Demote tier button */
 
 .todo-tier-btn {
@@ -8075,6 +8169,7 @@ img[data-lightbox-src],
 }
 
 .todo-item-title-row {
+  position: relative;
   display: flex;
   align-items: center;
   gap: 4px;
@@ -8086,8 +8181,6 @@ img[data-lightbox-src],
   flex-shrink: 0;
 }
 
-/* Attention dot — absolutely positioned in todo-panel-item's left padding area.
-   Always before chevron and phase icon; doesn't add width to the flow. */
 .task-attention-dot {
   display: inline-block;
   flex-shrink: 0;
@@ -8095,6 +8188,27 @@ img[data-lightbox-src],
   height: 7px;
   border-radius: 50%;
   background: var(--error);
+}
+
+/* Attention dot — pinned into .todo-panel-item's left padding gutter so it never
+   shifts the phase icon. Two magic numbers, both load-bearing:
+   - left:-13px is empirical: phase-icon left edge measured at x=90, dot at x=77 →
+     13px gutter. It is RELATIVE to .todo-panel-item's padding-left (22px); changing
+     that padding requires re-deriving this offset.
+   - top:50%+translateY (NOT a fixed top:11px, which was tried and broke alignment
+     when titles wrap to multiple lines) keeps it centered against the phase icon. */
+.todo-item-title-row .task-attention-dot {
+  position: absolute;
+  left: -13px;
+  top: 50%;
+  transform: translateY(-50%);
+}
+/* Parent tasks render an absolutely-positioned collapse chevron in that same gutter
+   (left:2px, 18px wide → occupies x≈[2,20] of .todo-panel-item). The default dot
+   sits at x≈[9,16] and would overlap the chevron glyph. When a chevron is present,
+   tuck the dot just right of the chevron box (item x≈15) so both stay legible. */
+.todo-panel-item:has(> .collapse-chevron) .todo-item-title-row .task-attention-dot {
+  left: -7px;
 }
 
 .todo-item-title {
@@ -8152,7 +8266,8 @@ img[data-lightbox-src],
 
 /* ── Vertical splitter between list and detail ── */
 
-.todo-detail-splitter {
+.todo-detail-splitter,
+.todo-pinned-splitter {
   height: 6px;
   flex-shrink: 0;
   cursor: row-resize;
@@ -8161,10 +8276,12 @@ img[data-lightbox-src],
   transition: background 0.15s;
   border-top: 1px solid var(--border-strong);
 }
-.todo-detail-splitter:hover {
+.todo-detail-splitter:hover,
+.todo-pinned-splitter:hover {
   background: color-mix(in srgb, var(--accent) 30%, transparent);
 }
-.todo-detail-splitter::after {
+.todo-detail-splitter::after,
+.todo-pinned-splitter::after {
   content: '';
   position: absolute;
   left: 50%;
@@ -8177,18 +8294,21 @@ img[data-lightbox-src],
   opacity: 0.3;
   transition: opacity 0.15s;
 }
-.todo-detail-splitter:hover::after {
+.todo-detail-splitter:hover::after,
+.todo-pinned-splitter:hover::after {
   opacity: 0.6;
 }
 
 /* Disable transitions while dragging splitter */
 .todo-panel.splitter-resizing .todo-panel-list,
+.todo-panel.splitter-resizing .todo-pinned-wrapper,
 .todo-panel.splitter-resizing .todo-detail-pane {
   transition: none;
 }
 
 @media (max-width: 768px) {
-  .todo-detail-splitter { display: none; }
+  .todo-detail-splitter,
+  .todo-pinned-splitter { display: none; }
 }
 
 /* ── Task Detail Pane (bottom of todo panel) ── */
@@ -8831,7 +8951,10 @@ img[data-lightbox-src],
   font-size: 16px;
   font-weight: 700;
   line-height: 1;
-  color: inherit;
+  /* Override .task-kebab-btn's opacity:0 (which only reveals on task-row hover) —
+     this button lives in the add bar, not a task row, so it must always be visible. */
+  opacity: 1;
+  color: var(--fg-muted);
   padding: 0;
 }
 
@@ -10440,6 +10563,16 @@ img[data-lightbox-src],
 
 .task-kebab-item-active {
   color: var(--accent);
+}
+
+.task-kebab-item-danger {
+  color: var(--error);
+}
+
+.task-kebab-item-danger:hover {
+  /* --error-subtle is not defined anywhere; derive the tint from the themed
+     --error so it tracks light/dark themes instead of a hardcoded literal. */
+  background: color-mix(in srgb, var(--error) 12%, transparent);
 }
 
 .task-kebab-info {
@@ -12336,6 +12469,157 @@ a.task-kebab-info:hover {
   background: rgba(34, 211, 238, 0.12);
 }
 
+/* ===== "@" File Mention Popup (mini VS Code above chat input) ===== */
+.file-mention-popup {
+  position: absolute;
+  bottom: 100%;
+  left: 0;
+  right: 0;
+  margin-bottom: 4px;
+  display: flex;
+  flex-direction: column;
+  background: var(--card-bg);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  box-shadow: var(--card-shadow-hover);
+  height: 340px;
+  max-height: 60vh;
+  overflow: hidden;
+  z-index: 50;
+  animation: commandPaletteIn 0.15s ease-out;
+}
+
+.file-mention-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.fmp-btn {
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--fg);
+  cursor: pointer;
+  font-size: 13px;
+  line-height: 1;
+  padding: 3px 7px;
+}
+.fmp-btn:hover:not(:disabled) { background: var(--bg-secondary); }
+.fmp-btn:disabled { opacity: 0.4; cursor: default; }
+.fmp-close { margin-left: auto; }
+
+.fmp-breadcrumb {
+  font-family: 'SF Mono', Menlo, monospace;
+  font-size: 12px;
+  color: var(--fg-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  flex: 1;
+  direction: rtl;
+  text-align: left;
+  cursor: text;
+}
+.fmp-breadcrumb:hover { color: var(--fg); }
+
+.fmp-breadcrumb-input {
+  flex: 1;
+  font-family: 'SF Mono', Menlo, monospace;
+  font-size: 12px;
+  color: var(--fg);
+  background: var(--bg);
+  border: 1px solid var(--accent);
+  border-radius: var(--radius-sm);
+  padding: 2px 6px;
+  outline: none;
+}
+
+.file-mention-body {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+}
+
+.file-mention-list {
+  width: 45%;
+  min-width: 180px;
+  overflow-y: auto;
+  border-right: 1px solid var(--border);
+  padding: 4px;
+}
+
+.file-mention-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 6px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 13px;
+}
+.file-mention-item.selected { background: var(--accent-subtle); }
+.file-mention-item:hover { background: var(--bg-secondary); }
+
+.fmp-icon { flex-shrink: 0; }
+.fmp-name {
+  flex: 1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.fmp-into { color: var(--fg-muted); font-size: 11px; }
+.fmp-size { color: var(--fg-muted); font-size: 11px; white-space: nowrap; }
+
+.fmp-pick {
+  flex-shrink: 0;
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--fg-muted);
+  cursor: pointer;
+  font-size: 11px;
+  line-height: 1;
+  padding: 2px 5px;
+  opacity: 0;
+}
+.file-mention-item.selected .fmp-pick,
+.file-mention-item:hover .fmp-pick { opacity: 1; }
+.fmp-pick:hover { background: var(--accent-subtle); color: var(--accent); }
+
+.file-mention-preview {
+  flex: 1;
+  min-width: 0;
+  overflow: auto;
+}
+
+.fmp-loading, .fmp-empty, .fmp-error, .fmp-preview-empty {
+  padding: 10px;
+  font-size: 12px;
+  color: var(--fg-muted);
+}
+.fmp-error { color: var(--danger, #dc2626); }
+.fmp-preview-empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  text-align: center;
+}
+
+.file-mention-hint {
+  display: flex;
+  gap: 12px;
+  padding: 5px 8px;
+  border-top: 1px solid var(--border);
+  font-size: 11px;
+  color: var(--fg-muted);
+  flex-shrink: 0;
+}
+
 /* ===== Session Path Selector (popover above chat input) ===== */
 
 .session-path-selector {
@@ -12457,7 +12741,7 @@ a.task-kebab-info:hover {
 
 .sps-path-main {
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   gap: 6px;
 }
 
@@ -12466,9 +12750,11 @@ a.task-kebab-info:hover {
   font-weight: 500;
   color: var(--fg);
   font-family: 'SF Mono', Menlo, monospace;
-  word-break: break-all;
   flex: 1;
   min-width: 0;
+  /* break-all wraps mid-segment so a long unbroken path can't overflow horizontally.
+     Accepted tradeoff: in a narrow popover a very long path wraps to several lines. */
+  word-break: break-all;
 }
 
 .sps-path-host-tag {
@@ -12483,6 +12769,7 @@ a.task-kebab-info:hover {
 
 .sps-path-meta {
   display: flex;
+  align-items: center;
   gap: 8px;
   font-size: 10px;
   color: var(--fg-muted);
@@ -13933,6 +14220,20 @@ a.task-kebab-info:hover {
   text-align: left;
   color: var(--fg-muted);
   font-family: var(--font-mono, monospace);
+  cursor: text;
+}
+.session-file-explorer-toolbar .sfe-root-path:hover { color: var(--fg); }
+
+.session-file-explorer-toolbar .sfe-root-path-input {
+  flex: 1;
+  color: var(--fg);
+  background: var(--bg);
+  border: 1px solid var(--accent);
+  border-radius: var(--radius-sm);
+  padding: 2px 6px;
+  font-family: var(--font-mono, monospace);
+  font-size: 12px;
+  outline: none;
 }
 
 .sfe-toolbar-actions {
@@ -14572,7 +14873,47 @@ a.task-kebab-info:hover {
   padding: 4px 12px 8px;
   flex: 1;
   min-height: 0;
-  overflow: hidden;
+  overflow-x: auto;
+  overflow-y: hidden;
+}
+
+/* ── Inline "+" quick-add to Focus ── */
+
+.dock-quick-add-btn {
+  align-self: center;
+  flex: 0 0 auto;
+  width: 32px;
+  height: 32px;
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--fg-muted);
+  font-size: 20px;
+  font-weight: 400;
+  line-height: 1;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s, border-color 0.15s;
+}
+
+.dock-quick-add-btn:hover {
+  background: var(--accent-subtle);
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+.dock-quick-add-form {
+  align-self: center;
+  flex: 0 0 auto;
+}
+
+.dock-quick-add-form input {
+  width: 180px;
+  padding: 6px 10px;
+  border: 1px solid var(--accent);
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+  color: var(--fg);
+  font-size: 13px;
 }
 
 /* ── Chat dock item ── */
@@ -17460,6 +17801,22 @@ a.file-link:hover {
   overflow: hidden;
 }
 
+/* Explorer variant — wider to fit tree + preview side by side */
+.file-viewer-panel-explorer {
+  max-width: 1200px;
+}
+
+/* Body hosts the SessionFileExplorer which manages its own scrolling panes */
+.file-viewer-body-explorer {
+  overflow: hidden;
+  display: flex;
+}
+
+.file-viewer-body-explorer .session-file-explorer {
+  flex: 1;
+  min-height: 0;
+}
+
 .file-viewer-header {
   display: flex;
   align-items: center;
@@ -17580,6 +17937,76 @@ a.file-link:hover {
   font-family: var(--font-mono, 'SF Mono', 'Fira Code', monospace);
   background: none;
   overflow-x: auto;
+}
+
+/* HTML file preview/source toggle */
+.fv-html-toolbar {
+  display: flex;
+  gap: 4px;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border, #e5e7eb);
+  position: sticky;
+  top: 0;
+  background: var(--bg-primary, #fff);
+  z-index: 1;
+}
+
+.fv-html-tab {
+  font-size: 11px;
+  font-weight: 600;
+  padding: 3px 10px;
+  border-radius: 5px;
+  border: 1px solid transparent;
+  background: none;
+  color: var(--fg-muted);
+  cursor: pointer;
+}
+
+.fv-html-tab:hover {
+  background: var(--bg-tertiary);
+}
+
+.fv-html-tab.active {
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+}
+
+.fv-html-preview {
+  display: block;
+  width: 100%;
+  height: 100%;
+  min-height: 60vh;
+  border: none;
+  background: #fff;
+}
+
+/* Markdown rendered preview inside the file viewer */
+.fv-md-preview {
+  padding: 16px 20px;
+  overflow: auto;
+  height: 100%;
+}
+
+/* Fullscreen button sits at the right end of the toolbar */
+.fv-fullscreen-btn {
+  margin-left: auto;
+}
+
+/* Fullscreen preview overlay — covers the viewport, escapes the panel chrome */
+.file-content-view.fv-fullscreen {
+  position: fixed;
+  inset: 0;
+  z-index: 10000;
+  background: var(--bg-primary, #fff);
+  display: flex;
+  flex-direction: column;
+}
+
+.file-content-view.fv-fullscreen .fv-html-preview,
+.file-content-view.fv-fullscreen .fv-md-preview {
+  flex: 1;
+  height: auto;
+  min-height: 0;
 }
 
 .fv-line {

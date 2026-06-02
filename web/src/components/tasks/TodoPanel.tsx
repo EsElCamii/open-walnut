@@ -50,8 +50,6 @@ import { DatePicker, formatDateDisplay, isOverdue, parseDateLocal } from '../com
 import { PersonIcon } from '../common/PersonIcon';
 import { useVerticalSplitter } from '@/hooks/useVerticalSplitter';
 import { useIntegrations, getIntegrationMeta } from '@/hooks/useIntegrations';
-import { TaskStatusDot } from './TaskStatusDot';
-import { PriorityPicker } from '../common/PriorityPicker';
 import { ProjectDetailPane } from './ProjectDetailPane';
 import { CategoryDetailPane } from './CategoryDetailPane';
 import { GlobalNotesSection } from '../notes/GlobalNotesSection';
@@ -169,6 +167,7 @@ function effectivePriority(p: string): string {
 // ── LocalStorage persistence helpers ──
 
 const LS_TAB_KEY = 'walnut-todo-active-tab';
+const LS_COLLAPSED_SECTIONS_KEY = 'walnut-todo-collapsed-sections';
 const LS_COLLAPSED_CATS_KEY = 'walnut-todo-collapsed-cats';
 const LS_COLLAPSED_PROJS_KEY = 'walnut-todo-collapsed-projs';
 const LS_EXPANDED_PARENTS_KEY = 'walnut-todo-expanded-parents';
@@ -228,7 +227,6 @@ interface SortableTaskItemProps {
   onSetPriority?: (id: string, priority: string) => void;
   onUpdateTitle?: (id: string, title: string) => void;
   onOpenSession?: (sessionId: string) => void;
-  openSessionIds?: Set<string>;
   onExpandDetail?: (task: Task) => void;
   onClearFocus?: () => void;
   onPinTask?: (taskId: string) => void;
@@ -248,8 +246,7 @@ interface SortableTaskItemProps {
   isFadingOverride?: boolean;     // Task is fading out after focus moved away
 }
 
-function SortableTaskItem({ task, isFocused, isDetailOpen, isRecentlyDone, isNestTarget, depth = 0, childCount, isExpanded, onToggleExpand, onClick, onSetPhase, onStar, onDelete, onSetPriority, onUpdateTitle, onOpenSession, openSessionIds, onExpandDetail, onClearFocus, onPinTask, onUnpinTask, onSetTier, onSetDate, onUnparent, onMoveUp, isPinned, pinnedTier, searchContext, searchMatchField, searchScore, searchKeywordScore, searchSemanticScore, filterOverrideReason, isFadingOverride }: SortableTaskItemProps) {
-  const integrations = useIntegrations();
+function SortableTaskItem({ task, isFocused, isDetailOpen, isRecentlyDone, isNestTarget, depth = 0, childCount, isExpanded, onToggleExpand, onClick, onSetPhase, onStar, onDelete, onSetPriority, onUpdateTitle, onOpenSession, onExpandDetail, onClearFocus, onPinTask, onUnpinTask, onSetTier, onSetDate, onUnparent, onMoveUp, isPinned, pinnedTier, searchContext, searchMatchField, searchScore, searchKeywordScore, searchSemanticScore, filterOverrideReason, isFadingOverride }: SortableTaskItemProps) {
   const hookPhases = usePhaseHooks();
   const {
     attributes,
@@ -433,9 +430,13 @@ function SortableTaskItem({ task, isFocused, isDetailOpen, isRecentlyDone, isNes
         </button>
       )}
 
-      {/* — content area: single-line [phase] [title] [badges] [⋮] — */}
+      {/* — content area: single-line [attention] [phase] [title] [badges] [⋮] — */}
       <div className="todo-item-content">
         <div className="todo-item-title-row">
+          {/* Attention dot — leftmost, keeps everything on one line */}
+          {task.needs_attention && !isDone && (
+            <span className="task-attention-dot" role="img" aria-label="Needs your attention" title="Needs your attention" />
+          )}
           {/* Phase icon */}
           <div className="phase-picker-wrapper phase-picker-inline" ref={phaseWrapperRef}>
             <button
@@ -490,119 +491,7 @@ function SortableTaskItem({ task, isFocused, isDetailOpen, isRecentlyDone, isNes
           >
             {task.title}
           </span>
-        </div>
-        {/* — badge row: [attention dot below 🏃] status · source · link · actions — */}
-        <div className="todo-item-meta-row">
-          {task.needs_attention && !isDone && (
-            <span className="task-attention-dot" role="img" aria-label="Needs your attention" title="Needs your attention" />
-          )}
-          <TaskStatusDot task={task} onClick={onOpenSession ? () => {
-            const sid = resolveTaskSessionId(task);
-            if (sid) onOpenSession(sid);
-          } : undefined} />
-          {task.source && (() => {
-            const meta = getIntegrationMeta(integrations, task.source);
-            const badge = task.source === 'local' ? 'L' : (meta?.badge ?? task.source.charAt(0).toUpperCase());
-            const integrationName = task.source === 'local' ? 'Local' : (meta?.name ?? task.source);
-            const badgeColor = meta?.badgeColor;
-            const synced = task.source !== 'local' && (!!task.ext?.[task.source] || !!((task as unknown as Record<string, unknown>)[({ 'ms-todo': 'ms_todo_id' } as Record<string, string>)[task.source] ?? '']));
-            const errorClass = task.sync_error ? ' task-source-badge-error' : '';
-            const unsyncedClass = !task.sync_error && task.source !== 'local' && !synced ? ' task-source-badge-unsynced' : '';
-            return (
-              <span
-                className={`task-source-badge${errorClass}${unsyncedClass}`}
-                style={!task.sync_error && !unsyncedClass && badgeColor ? { background: badgeColor, color: 'white' } : task.source === 'local' ? { background: '#8E8E93', color: 'white' } : undefined}
-                title={
-                  task.sync_error
-                    ? `Sync error: ${task.sync_error}`
-                    : task.source === 'local'
-                      ? 'Local only — not synced'
-                      : synced ? `Synced to ${integrationName}` : `Not synced to ${integrationName} — will retry`
-                }
-              >
-                {task.sync_error ? '!' : badge}
-              </span>
-            );
-          })()}
-          {task.external_url && (() => {
-            const meta = getIntegrationMeta(integrations, task.source);
-            const label = meta?.externalLinkLabel ?? meta?.name ?? 'external';
-            return (
-              <a
-                className="task-external-link"
-                href={task.external_url}
-                target="_blank"
-                rel="noopener noreferrer"
-                title={`Open in ${label}`}
-                onClick={(e) => e.stopPropagation()}
-              >
-                &#x2197;
-              </a>
-            );
-          })()}
-          <button
-            className={`task-action-btn task-expand-btn${isFocused ? ' active' : ''}`}
-            onClick={(e) => {
-              e.stopPropagation();
-              if (isFocused) {
-                onClearFocus?.();
-              } else {
-                onExpandDetail?.(task);
-              }
-            }}
-            title={isFocused ? 'Close detail' : 'Open detail'}
-          >
-            {ICONS.ICON_INFO}
-          </button>
-          {onSetPriority ? (
-            <PriorityPicker
-              priority={task.priority}
-              onChange={(p) => onSetPriority(task.id, p)}
-            />
-          ) : (
-            <span className={`badge badge-${task.priority}`}>{task.priority === 'immediate' ? '!!' : task.priority === 'important' ? '!' : task.priority === 'backlog' ? '~' : '--'}</span>
-          )}
-          {onStar && (
-            <button
-              className={`task-action-btn task-star-btn${task.starred ? ' starred' : ''}`}
-              onClick={(e) => { e.stopPropagation(); onStar(task.id); }}
-              title={task.starred ? 'Unstar' : 'Star'}
-            >
-              {task.starred ? ICONS.ICON_STAR_FILLED : ICONS.ICON_STAR_EMPTY}
-            </button>
-          )}
-          {onPinTask && !isPinned && task.status !== 'done' && task.phase !== 'COMPLETE' && (
-            <button
-              className="task-action-btn task-pin-btn"
-              onClick={(e) => { e.stopPropagation(); onPinTask(task.id); }}
-              title="Pin to Focus Dock"
-            >
-              {ICONS.ICON_PIN}
-            </button>
-          )}
-          {isPinned && onUnpinTask && (
-            <button
-              className="task-action-btn task-pin-btn pinned"
-              onClick={(e) => { e.stopPropagation(); onUnpinTask(task.id); }}
-              title="Unpin from Focus Dock"
-            >
-              {ICONS.ICON_PIN_FILLED}
-            </button>
-          )}
-          {onDelete && (
-            <button
-              className="task-action-btn task-delete-btn"
-              onClick={(e) => {
-                e.stopPropagation();
-                if (window.confirm(`Delete task "${task.title}"? This cannot be undone.`)) {
-                  onDelete(task.id);
-                }
-              }}
-              title="Delete task"
-            >
-              {ICONS.ICON_TRASH}
-            </button>
-          )}
+          {/* Info pills + kebab — same line as title, no second row */}
           {dueDateLabel && (
             <span className={`todo-item-due-pill${dueDateOverdue ? ' todo-item-due-overdue' : ''}`}>
               {dueDateLabel}
@@ -615,9 +504,6 @@ function SortableTaskItem({ task, isFocused, isDetailOpen, isRecentlyDone, isNes
           )}
           {!!childCount && (
             <span className="task-children-badge">{childCount} sub</span>
-          )}
-          {task.needs_attention && !isDone && (
-            <span className="task-attention-dot" title="Needs your attention" />
           )}
           {isDone && task.completed_at && (
             <span className="task-completed-time">{timeAgo(task.completed_at)}</span>
@@ -641,6 +527,7 @@ function SortableTaskItem({ task, isFocused, isDetailOpen, isRecentlyDone, isNes
             onSetDate={onSetDate}
             onUnparent={onUnparent}
             onMoveUp={onMoveUp}
+            onDelete={onDelete}
           />
         </div>
         {/* Filter override reason — shown below title when task is outside current filters */}
@@ -1380,6 +1267,51 @@ function TaskDetailPane({ task, allTasks, onClose, onOpenSession, onOpenTriageFo
 const RECENT_VISIBLE_MAX = 3;
 const CARD_HEIGHT_PX = 30; // ~28px min-height + 2px gap
 
+// ── FocusInlineAdd — "+" row at the bottom of the Focus tier to add a task
+// directly into Focus. Reuses the parent onCreate (optimistic + tier-correct path). ──
+function FocusInlineAdd({ onAdd }: { onAdd: (title: string) => void }) {
+  const [open, setOpen] = useState(false);
+  const [value, setValue] = useState('');
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => { if (open) inputRef.current?.focus(); }, [open]);
+
+  const submit = () => {
+    const title = value.trim();
+    if (!title) { setOpen(false); return; }
+    onAdd(title);
+    setValue('');
+    // Keep open for rapid multi-add; input stays focused.
+  };
+
+  if (!open) {
+    return (
+      <button type="button" className="focus-inline-add-trigger" onClick={() => setOpen(true)} title="Add a task directly to Focus">
+        <span className="focus-inline-add-plus">+</span>
+        <span>Add to Focus…</span>
+      </button>
+    );
+  }
+
+  return (
+    <div className="focus-inline-add">
+      <input
+        ref={inputRef}
+        type="text"
+        value={value}
+        placeholder="Task title — Enter to add, Esc to close"
+        onChange={(e) => setValue(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.nativeEvent.isComposing || e.keyCode === 229) return;
+          if (e.key === 'Enter') { e.preventDefault(); submit(); }
+          if (e.key === 'Escape') { e.preventDefault(); setValue(''); setOpen(false); }
+        }}
+        onBlur={() => { if (!value.trim()) setOpen(false); }}
+      />
+    </div>
+  );
+}
+
 interface RecentCardProps {
   task: Task;
   isFocused: boolean;
@@ -1398,11 +1330,12 @@ interface RecentCardProps {
   onOpenSession?: (sessionId: string) => void;
   onSetPhase?: (id: string, phase: string) => void;
   onUpdateTitle?: (id: string, title: string) => void;
+  onDelete?: (id: string) => void;
 }
 
 // ── SortableRecentCard — draggable recent-activity card with kebab menu ──
 
-function SortableRecentCard({ task, isFocused, isDetailOpen, onClick, onPinTask, onUnpinTask, isPinned, pinnedTier, onSetPriority, onSetDate, onStar, onSetTier, onExpandDetail, onClearFocus, onOpenSession, onSetPhase, onUpdateTitle }: RecentCardProps) {
+function SortableRecentCard({ task, isFocused, isDetailOpen, onClick, onPinTask, onUnpinTask, isPinned, pinnedTier, onSetPriority, onSetDate, onStar, onSetTier, onExpandDetail, onClearFocus, onOpenSession, onSetPhase, onUpdateTitle, onDelete }: RecentCardProps) {
   const {
     attributes,
     listeners,
@@ -1596,6 +1529,7 @@ function SortableRecentCard({ task, isFocused, isDetailOpen, onClick, onPinTask,
         onUnpinTask={onUnpinTask}
         onSetTier={onSetTier}
         onOpenSession={onOpenSession}
+        onDelete={onDelete}
       />
     </div>
   );
@@ -1706,12 +1640,15 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
     document.addEventListener('mousedown', handleClick);
     return () => document.removeEventListener('mousedown', handleClick);
   }, [quickMoreOpen]);
-  const [pinnedCollapsed, setPinnedCollapsed] = useState(false);
-  const [focusCollapsed, setFocusCollapsed] = useState(false);
-  const [nextCollapsed, setNextCollapsed] = useState(false);
-  const [satelliteCollapsed, setSatelliteCollapsed] = useState(false);
-  const [waitCollapsed, setWaitCollapsed] = useState(false);
-  const [recentCollapsed, setRecentCollapsed] = useState(false);
+  const [collapsedSections, setCollapsedSections] = useState<Set<string>>(() => readSetFromStorage(LS_COLLAPSED_SECTIONS_KEY));
+  const toggleSection = useCallback((id: string) => {
+    setCollapsedSections((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      persistSet(LS_COLLAPSED_SECTIONS_KEY, next);
+      return next;
+    });
+  }, []);
   const [collapsedCategories, setCollapsedCategories] = useState<Set<string>>(() => readSetFromStorage(LS_COLLAPSED_CATS_KEY));
   const [collapsedProjects, setCollapsedProjects] = useState<Set<string>>(() => readSetFromStorage(LS_COLLAPSED_PROJS_KEY));
   // Tracks which parent tasks the user has EXPANDED (default = all collapsed)
@@ -1768,6 +1705,10 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
 
   // Vertical splitter for list/detail ratio
   const { ratio: detailRatio, containerRef: splitterContainerRef, handleMouseDown: splitterMouseDown, isResizing: splitterResizing } = useVerticalSplitter();
+  // Splitter between the PINNED+RECENT region and the main task list.
+  // ratio = bottom (main list) share, matching the hook's drag direction
+  // (drag divider down → list shrinks → ratio decreases). Default 0.4 = list ~40%.
+  const { ratio: listRatio, handleMouseDown: pinnedSplitterMouseDown } = useVerticalSplitter({ storageKey: 'open-walnut-todo-pinned-ratio', defaultRatio: 0.4, minRatio: 0.3, maxRatio: 0.8, containerRef: splitterContainerRef });
 
   // Determine if search mode is active (query entered)
   const isSearchMode = searchQuery.trim().length > 0;
@@ -1786,6 +1727,16 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
   // triggers a refetch (otherwise the list jumps to top).
   const scrollAfterReparentRef = useRef<string | null>(null);
 
+  // Pulse a card so a "locate" jump (e.g. session panel → task) is visible:
+  // scrolling alone leaves the user unsure which card was the target, especially
+  // when several pinned cards look alike. Re-triggers cleanly on repeat locates.
+  const flashCard = useCallback((el: Element) => {
+    el.classList.remove('todo-card-locate-flash');
+    void (el as HTMLElement).offsetWidth; // reflow so the animation restarts
+    el.classList.add('todo-card-locate-flash');
+    setTimeout(() => el.classList.remove('todo-card-locate-flash'), 1500);
+  }, []);
+
   // Scroll to a task by ID inside .todo-panel-list.
   // Uses double-RAF + retry to wait for React commit + browser paint + layout settle
   // after state changes (expand/filter-clear, detail panel open).
@@ -1795,7 +1746,7 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
     clearTimeout(scrollTimerRef.current);
     scrollLog('focus-scroll-start', { taskId: taskId.substring(0, 12) });
 
-    const doScroll = () => {
+    const doScroll = (flash = false) => {
       const listContainer = document.querySelector('.todo-panel-list');
       if (!listContainer) {
         scrollLog('focus-scroll-MISS', { reason: 'no-list-container' });
@@ -1816,12 +1767,13 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
       } else {
         scrollLog('focus-scroll-skip', { reason: 'already-visible', taskId: taskId.substring(0, 12) });
       }
+      if (flash) flashCard(el);
     };
 
     // Phase 1: double-RAF (React commit + paint) — handles expand/filter DOM changes
     scrollRafRef.current = requestAnimationFrame(() => {
       scrollRafRef.current = requestAnimationFrame(() => {
-        doScroll();
+        doScroll(true);
         // Phase 2: re-scroll after 150ms to handle layout shifts from the detail
         // panel opening (flex ratio change on .todo-panel-list). No CSS transition
         // is involved — the flex change is instant — but React may batch the
@@ -1834,11 +1786,26 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
         }, 150);
       });
     });
-  }, []);
+  }, [flashCard]);
+
+  // Scroll a pinned task into view inside the top Pinned region (Focus/Next/Satellite/Wait).
+  // Separate from scrollToTask (which targets the lower .todo-panel-list) so the PIN region
+  // jumps + highlights too — not just the list below. Double-RAF waits for tier re-render.
+  const pinnedScrollRafRef = useRef<number>(0);
+  const scrollToPinnedTask = useCallback((taskId: string) => {
+    cancelAnimationFrame(pinnedScrollRafRef.current);
+    pinnedScrollRafRef.current = requestAnimationFrame(() => {
+      pinnedScrollRafRef.current = requestAnimationFrame(() => {
+        const wrapper = document.querySelector('.todo-pinned-wrapper');
+        const el = wrapper?.querySelector(`[data-task-id="${window.CSS.escape(taskId)}"]`);
+        if (el) { el.scrollIntoView({ block: 'nearest', behavior: 'smooth' }); flashCard(el); }
+      });
+    });
+  }, [flashCard]);
 
   // Cleanup RAF + timer on unmount
   useEffect(() => {
-    return () => { cancelAnimationFrame(scrollRafRef.current); clearTimeout(scrollTimerRef.current); };
+    return () => { cancelAnimationFrame(scrollRafRef.current); clearTimeout(scrollTimerRef.current); cancelAnimationFrame(pinnedScrollRafRef.current); };
   }, []);
 
   // Scroll the just-moved task back into view after reparent / move-up causes
@@ -1959,6 +1926,9 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
     // Scroll to the focused task after state changes (expand/filter) have flushed to DOM.
     // scrollToTask uses double-RAF + retry to wait for React commit + browser paint.
     scrollToTask(focusedTaskId);
+    // Also jump the top Pinned region (no-op if the task isn't pinned — the DOM
+    // query simply finds nothing). Keeps the PIN row in sync with the list below.
+    scrollToPinnedTask(focusedTaskId);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [focusedTaskId, focusNonce, tasks, activeCategory, collapsedCategories, collapsedProjects, favorites]);
 
@@ -3536,33 +3506,38 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
       {/* Unified DndContext wrapping both Pinned + Recent — enables drag from Recent to Pin */}
       {(pinnedTasks.length > 0 || recentTasks.length > 0) && (
         <DndContext sensors={pinnedSensors} collisionDetection={closestCenter} onDragStart={handlePinnedDragStart} onDragOver={handlePinnedDragOver} onDragEnd={handlePinnedDragEnd} onDragCancel={handlePinnedDragCancel}>
-          <div className="todo-pinned-wrapper">
+          <div className="todo-pinned-wrapper" style={{ flex: `${1 - listRatio} 1 0%` }}>
           {/* PINNED section — Focus + Next + Satellite sub-groups */}
           {pinnedTasks.length > 0 && (
             <div className="todo-pinned-section">
-              <div className="todo-pinned-header" onClick={() => setPinnedCollapsed(c => !c)} role="button" tabIndex={0} onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') setPinnedCollapsed(c => !c); }} style={{ cursor: 'pointer' }}>
-                <span className={`todo-pinned-chevron${pinnedCollapsed ? '' : ' todo-pinned-chevron-open'}`}>{'\u25B8'}</span>
+              <div className="todo-pinned-header" onClick={() => toggleSection('pinned')} role="button" tabIndex={0} onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') toggleSection('pinned'); }} style={{ cursor: 'pointer' }}>
+                <span className={`todo-pinned-chevron${collapsedSections.has('pinned') ? '' : ' todo-pinned-chevron-open'}`}>{'\u25B8'}</span>
                 <span className="todo-pinned-label">Pinned</span>
                 <span className="todo-pinned-count">{pinnedTasks.length}</span>
               </div>
-              {!pinnedCollapsed && (
+              {!collapsedSections.has('pinned') && (
                 <>
                   {/* Focus sub-group */}
                   <div className="todo-pinned-subgroup">
-                    <div className="todo-pinned-sublabel" onClick={() => setFocusCollapsed(c => !c)} role="button" tabIndex={0} onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') setFocusCollapsed(c => !c); }} style={{ cursor: 'pointer' }} title="Current sprint — finish these first">
-                      <span className={`todo-pinned-chevron todo-pinned-sub-chevron${focusCollapsed ? '' : ' todo-pinned-chevron-open'}`}>{'\u25B8'}</span>
+                    <div className="todo-pinned-sublabel" onClick={() => toggleSection('focus')} role="button" tabIndex={0} onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') toggleSection('focus'); }} style={{ cursor: 'pointer' }} title="Current sprint — finish these first">
+                      <span className={`todo-pinned-chevron todo-pinned-sub-chevron${collapsedSections.has('focus') ? '' : ' todo-pinned-chevron-open'}`}>{'\u25B8'}</span>
                       <span className="todo-pinned-sublabel-icon todo-icon-focus" />
                       <span className="todo-pinned-sublabel-text">Focus</span>
                       <span className="todo-pinned-sublabel-count">{focusTasksDisplay.length}</span>
                     </div>
-                    {!focusCollapsed && (
+                    {!collapsedSections.has('focus') && (
                       <SortableContext items={focusIds_arr} strategy={verticalListSortingStrategy}>
                         <div className="todo-pinned-list-scroll" style={focusTasksDisplay.length > tierLimits.focus ? { maxHeight: tierLimits.focus * CARD_HEIGHT_PX } : undefined}>
                           <TierDropZone id="focus-drop-zone" isEmpty={focusTasksDisplay.length === 0}>
                             {focusTasksDisplay.map((task) => (
-                              <SortableTierCard key={task.id} task={task} tier="focus" isFocused={focusedTaskId === task.id} isDetailOpen={focusedTaskId === task.id && !suppressDetail} onClick={handlePinnedCardClick} onSetTier={onSetTier} onUnpinTask={onUnpinTask} onPinTask={onPinTask} onSetPriority={onSetPriority} onSetDate={onSetDate} onStar={onStar} onExpandDetail={handleExpandDetail} onClearFocus={onClearFocus} onOpenSession={onOpenSession} onSetPhase={setPhaseOrComplete} onUpdateTitle={onUpdate ? handleUpdateTitle : undefined} />
+                              <SortableTierCard key={task.id} task={task} tier="focus" isFocused={focusedTaskId === task.id} isDetailOpen={focusedTaskId === task.id && !suppressDetail} onClick={handlePinnedCardClick} onSetTier={onSetTier} onUnpinTask={onUnpinTask} onPinTask={onPinTask} onSetPriority={onSetPriority} onSetDate={onSetDate} onStar={onStar} onExpandDetail={handleExpandDetail} onClearFocus={onClearFocus} onOpenSession={onOpenSession} onSetPhase={setPhaseOrComplete} onUpdateTitle={onUpdate ? handleUpdateTitle : undefined} onDelete={onDelete} />
                             ))}
                           </TierDropZone>
+                          <FocusInlineAdd onAdd={async (title) => {
+                            const result = await onCreate({ title, priority: 'none', category: effectiveDefaultCategory, pinnedTier: 'focus' });
+                            const newTask = result as Task | undefined;
+                            if (newTask?.id) onFocusTask?.(newTask);
+                          }} />
                         </div>
                       </SortableContext>
                     )}
@@ -3570,18 +3545,18 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
 
                   {/* Next sub-group */}
                   <div className="todo-pinned-subgroup">
-                    <div className="todo-pinned-sublabel" onClick={() => setNextCollapsed(c => !c)} role="button" tabIndex={0} onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') setNextCollapsed(c => !c); }} style={{ cursor: 'pointer' }} title="Next sprint — queued after Focus is done">
-                      <span className={`todo-pinned-chevron todo-pinned-sub-chevron${nextCollapsed ? '' : ' todo-pinned-chevron-open'}`}>{'\u25B8'}</span>
+                    <div className="todo-pinned-sublabel" onClick={() => toggleSection('next')} role="button" tabIndex={0} onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') toggleSection('next'); }} style={{ cursor: 'pointer' }} title="Next sprint — queued after Focus is done">
+                      <span className={`todo-pinned-chevron todo-pinned-sub-chevron${collapsedSections.has('next') ? '' : ' todo-pinned-chevron-open'}`}>{'\u25B8'}</span>
                       <span className="todo-pinned-sublabel-icon todo-icon-next" />
                       <span className="todo-pinned-sublabel-text">Next</span>
                       <span className="todo-pinned-sublabel-count">{nextTasksDisplay.length}</span>
                     </div>
-                    {!nextCollapsed && (
+                    {!collapsedSections.has('next') && (
                       <SortableContext items={nextIds_arr} strategy={verticalListSortingStrategy}>
                         <div className="todo-pinned-list-scroll" style={nextTasksDisplay.length > tierLimits.next ? { maxHeight: tierLimits.next * CARD_HEIGHT_PX } : undefined}>
                           <TierDropZone id="next-drop-zone" isEmpty={nextTasksDisplay.length === 0}>
                             {nextTasksDisplay.map((task) => (
-                              <SortableTierCard key={task.id} task={task} tier="next" isFocused={focusedTaskId === task.id} isDetailOpen={focusedTaskId === task.id && !suppressDetail} onClick={handlePinnedCardClick} onSetTier={onSetTier} onUnpinTask={onUnpinTask} onPinTask={onPinTask} onSetPriority={onSetPriority} onSetDate={onSetDate} onStar={onStar} onExpandDetail={handleExpandDetail} onClearFocus={onClearFocus} onOpenSession={onOpenSession} onSetPhase={setPhaseOrComplete} onUpdateTitle={onUpdate ? handleUpdateTitle : undefined} />
+                              <SortableTierCard key={task.id} task={task} tier="next" isFocused={focusedTaskId === task.id} isDetailOpen={focusedTaskId === task.id && !suppressDetail} onClick={handlePinnedCardClick} onSetTier={onSetTier} onUnpinTask={onUnpinTask} onPinTask={onPinTask} onSetPriority={onSetPriority} onSetDate={onSetDate} onStar={onStar} onExpandDetail={handleExpandDetail} onClearFocus={onClearFocus} onOpenSession={onOpenSession} onSetPhase={setPhaseOrComplete} onUpdateTitle={onUpdate ? handleUpdateTitle : undefined} onDelete={onDelete} />
                             ))}
                           </TierDropZone>
                         </div>
@@ -3592,17 +3567,17 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
                   {/* Satellite sub-group */}
                   {satelliteTasksDisplay.length > 0 && (
                     <div className="todo-pinned-subgroup">
-                      <div className="todo-pinned-sublabel" onClick={() => setSatelliteCollapsed(c => !c)} role="button" tabIndex={0} onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') setSatelliteCollapsed(c => !c); }} style={{ cursor: 'pointer' }} title="Backlog — other pinned tasks">
-                        <span className={`todo-pinned-chevron todo-pinned-sub-chevron${satelliteCollapsed ? '' : ' todo-pinned-chevron-open'}`}>{'\u25B8'}</span>
+                      <div className="todo-pinned-sublabel" onClick={() => toggleSection('satellite')} role="button" tabIndex={0} onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') toggleSection('satellite'); }} style={{ cursor: 'pointer' }} title="Backlog — other pinned tasks">
+                        <span className={`todo-pinned-chevron todo-pinned-sub-chevron${collapsedSections.has('satellite') ? '' : ' todo-pinned-chevron-open'}`}>{'\u25B8'}</span>
                         <span className="todo-pinned-sublabel-icon todo-icon-satellite" />
                         <span className="todo-pinned-sublabel-text">Satellite</span>
                         <span className="todo-pinned-sublabel-count">{satelliteTasksDisplay.length}</span>
                       </div>
-                      {!satelliteCollapsed && (
+                      {!collapsedSections.has('satellite') && (
                         <SortableContext items={satelliteIds_arr} strategy={verticalListSortingStrategy}>
                           <div className="todo-pinned-list todo-pinned-list-scroll" style={satelliteTasksDisplay.length > tierLimits.satellite ? { maxHeight: tierLimits.satellite * CARD_HEIGHT_PX } : undefined}>
                             {satelliteTasksDisplay.map((task) => (
-                              <SortableTierCard key={task.id} task={task} tier="satellite" isFocused={focusedTaskId === task.id} isDetailOpen={focusedTaskId === task.id && !suppressDetail} onClick={handlePinnedCardClick} onSetTier={onSetTier} onUnpinTask={onUnpinTask} onPinTask={onPinTask} onSetPriority={onSetPriority} onSetDate={onSetDate} onStar={onStar} onExpandDetail={handleExpandDetail} onClearFocus={onClearFocus} onOpenSession={onOpenSession} onSetPhase={setPhaseOrComplete} onUpdateTitle={onUpdate ? handleUpdateTitle : undefined} />
+                              <SortableTierCard key={task.id} task={task} tier="satellite" isFocused={focusedTaskId === task.id} isDetailOpen={focusedTaskId === task.id && !suppressDetail} onClick={handlePinnedCardClick} onSetTier={onSetTier} onUnpinTask={onUnpinTask} onPinTask={onPinTask} onSetPriority={onSetPriority} onSetDate={onSetDate} onStar={onStar} onExpandDetail={handleExpandDetail} onClearFocus={onClearFocus} onOpenSession={onOpenSession} onSetPhase={setPhaseOrComplete} onUpdateTitle={onUpdate ? handleUpdateTitle : undefined} onDelete={onDelete} />
                             ))}
                           </div>
                         </SortableContext>
@@ -3612,18 +3587,18 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
 
                   {/* Wait sub-group — parked tasks pinned but deprioritized */}
                   <div className="todo-pinned-subgroup">
-                    <div className="todo-pinned-sublabel" onClick={() => setWaitCollapsed(c => !c)} role="button" tabIndex={0} onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') setWaitCollapsed(c => !c); }} style={{ cursor: 'pointer' }} title="Wait — parked tasks, pinned but not actively worked on">
-                      <span className={`todo-pinned-chevron todo-pinned-sub-chevron${waitCollapsed ? '' : ' todo-pinned-chevron-open'}`}>{'\u25B8'}</span>
+                    <div className="todo-pinned-sublabel" onClick={() => toggleSection('wait')} role="button" tabIndex={0} onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') toggleSection('wait'); }} style={{ cursor: 'pointer' }} title="Wait — parked tasks, pinned but not actively worked on">
+                      <span className={`todo-pinned-chevron todo-pinned-sub-chevron${collapsedSections.has('wait') ? '' : ' todo-pinned-chevron-open'}`}>{'\u25B8'}</span>
                       <span className="todo-pinned-sublabel-icon todo-icon-wait" />
                       <span className="todo-pinned-sublabel-text">Wait</span>
                       <span className="todo-pinned-sublabel-count">{waitTasksDisplay.length}</span>
                     </div>
-                    {!waitCollapsed && (
+                    {!collapsedSections.has('wait') && (
                       <SortableContext items={waitIds_arr} strategy={verticalListSortingStrategy}>
                         <div className="todo-pinned-list-scroll" style={waitTasksDisplay.length > tierLimits.wait ? { maxHeight: tierLimits.wait * CARD_HEIGHT_PX } : undefined}>
                           <TierDropZone id="wait-drop-zone" isEmpty={waitTasksDisplay.length === 0}>
                             {waitTasksDisplay.map((task) => (
-                              <SortableTierCard key={task.id} task={task} tier="wait" isFocused={focusedTaskId === task.id} isDetailOpen={focusedTaskId === task.id && !suppressDetail} onClick={handlePinnedCardClick} onSetTier={onSetTier} onUnpinTask={onUnpinTask} onPinTask={onPinTask} onSetPriority={onSetPriority} onSetDate={onSetDate} onStar={onStar} onExpandDetail={handleExpandDetail} onClearFocus={onClearFocus} onOpenSession={onOpenSession} onSetPhase={setPhaseOrComplete} onUpdateTitle={onUpdate ? handleUpdateTitle : undefined} />
+                              <SortableTierCard key={task.id} task={task} tier="wait" isFocused={focusedTaskId === task.id} isDetailOpen={focusedTaskId === task.id && !suppressDetail} onClick={handlePinnedCardClick} onSetTier={onSetTier} onUnpinTask={onUnpinTask} onPinTask={onPinTask} onSetPriority={onSetPriority} onSetDate={onSetDate} onStar={onStar} onExpandDetail={handleExpandDetail} onClearFocus={onClearFocus} onOpenSession={onOpenSession} onSetPhase={setPhaseOrComplete} onUpdateTitle={onUpdate ? handleUpdateTitle : undefined} onDelete={onDelete} />
                             ))}
                           </TierDropZone>
                         </div>
@@ -3638,12 +3613,12 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
           {/* Recent tasks section — draggable cards, drop on Pinned tiers to pin */}
           {recentTasks.length > 0 && (
             <div className="todo-pinned-section">
-              <div className="todo-pinned-header" onClick={() => setRecentCollapsed(c => !c)} role="button" tabIndex={0} onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') setRecentCollapsed(c => !c); }} style={{ cursor: 'pointer' }}>
-                <span className={`todo-pinned-chevron${recentCollapsed ? '' : ' todo-pinned-chevron-open'}`}>{'\u25B8'}</span>
+              <div className="todo-pinned-header" onClick={() => toggleSection('recent')} role="button" tabIndex={0} onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') toggleSection('recent'); }} style={{ cursor: 'pointer' }}>
+                <span className={`todo-pinned-chevron${collapsedSections.has('recent') ? '' : ' todo-pinned-chevron-open'}`}>{'\u25B8'}</span>
                 <span className="todo-pinned-label">Recent</span>
                 <span className="todo-pinned-count">{recentTasks.length}</span>
               </div>
-              {!recentCollapsed && (
+              {!collapsedSections.has('recent') && (
                 <SortableContext items={recentIds} strategy={verticalListSortingStrategy}>
                   <div className="todo-pinned-list todo-pinned-list-scroll" style={{ maxHeight: RECENT_VISIBLE_MAX * 30 }}>
                     {recentTasks.map((task) => (
@@ -3666,6 +3641,7 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
                         onOpenSession={onOpenSession}
                         onSetPhase={setPhaseOrComplete}
                         onUpdateTitle={onUpdate ? handleUpdateTitle : undefined}
+                        onDelete={onDelete}
                       />
                     ))}
                   </div>
@@ -3686,7 +3662,12 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
         </DndContext>
       )}
 
-      <div className="todo-panel-list" style={((focusedTask && !suppressDetail) || detailTarget) ? { flex: `${1 - detailRatio} 1 0%` } : undefined}>
+      {/* Draggable divider between PINNED+RECENT and the main task list */}
+      {(pinnedTasks.length > 0 || recentTasks.length > 0) && !((focusedTask && !suppressDetail) || detailTarget) && (
+        <div className="todo-pinned-splitter" onMouseDown={pinnedSplitterMouseDown} />
+      )}
+
+      <div className="todo-panel-list" style={((focusedTask && !suppressDetail) || detailTarget) ? { flex: `${1 - detailRatio} 1 0%` } : (pinnedTasks.length > 0 || recentTasks.length > 0) ? { flex: `${listRatio} 1 0%` } : undefined}>
         {loading && (
           <div className="empty-state" style={{ padding: '24px 8px' }}>
             <div className="spinner" style={{ width: 20, height: 20, borderWidth: 2, margin: '0 auto' }} />
@@ -3779,7 +3760,6 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
                     onSetDate={onSetDate}
                     onUpdateTitle={onUpdate ? handleUpdateTitle : undefined}
                     onOpenSession={onOpenSession}
-                    openSessionIds={openSessionIds}
                     onExpandDetail={handleExpandDetail}
                     onClearFocus={onClearFocus}
                     onPinTask={onPinTask}
@@ -3828,7 +3808,6 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
                   onSetDate={onSetDate}
                   onUpdateTitle={onUpdate ? handleUpdateTitle : undefined}
                   onOpenSession={onOpenSession}
-                  openSessionIds={openSessionIds}
                   onExpandDetail={handleExpandDetail}
                   onClearFocus={onClearFocus}
                   onPinTask={onPinTask}
@@ -3910,7 +3889,6 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
                                   onSetDate={onSetDate}
                                   onUpdateTitle={onUpdate ? handleUpdateTitle : undefined}
                                   onOpenSession={onOpenSession}
-                                  openSessionIds={openSessionIds}
                                   onExpandDetail={handleExpandDetail}
                                   onClearFocus={onClearFocus}
                                   onPinTask={onPinTask}
@@ -3981,7 +3959,6 @@ export const TodoPanel = memo(function TodoPanel({ tasks: rawTasks, loading, onC
                                                 onSetDate={onSetDate}
                                                 onUpdateTitle={onUpdate ? handleUpdateTitle : undefined}
                                                 onOpenSession={onOpenSession}
-                                                openSessionIds={openSessionIds}
                                                 onExpandDetail={handleExpandDetail}
                                                 onClearFocus={onClearFocus}
                                                 onPinTask={onPinTask}

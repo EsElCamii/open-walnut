@@ -167,7 +167,7 @@ export async function applySessionPhase(
   opts?: ApplySessionPhaseOpts,
 ): Promise<{ changed: boolean; oldPhase?: TaskPhase; newPhase?: TaskPhase }> {
   // Dynamic imports to avoid circular dependencies (phase.ts ← task-manager.ts)
-  const { getTask, updateTask } = await import('./task-manager.js')
+  const { getTask, updateTaskRaw } = await import('./task-manager.js')
   let task: Task
   try {
     task = await getTask(taskId)
@@ -199,11 +199,15 @@ export async function applySessionPhase(
   const MAX_RETRIES = 2
   for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
     try {
-      await updateTask(taskId, {
+      // O(1) single-row write (updateTaskRaw) instead of updateTask's O(N)
+      // full-store rewrite — phase transitions are on the hot send path and
+      // must not hold the global task write-lock for O(taskCount) time.
+      // emitEvent/push keep UI + external-sync parity with updateTask.
+      await updateTaskRaw(taskId, {
         phase: newPhase,
         ...(newPhase === 'AWAIT_HUMAN_ACTION' ? { needs_attention: true } : {}),
         ...(newPhase === 'IN_PROGRESS' ? { needs_attention: false } : {}),
-      }, { source })
+      }, { emitEvent: true, push: true, source })
 
       log.session.info('phase transition', {
         taskId, oldPhase, newPhase, trigger, source,

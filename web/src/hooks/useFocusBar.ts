@@ -140,9 +140,12 @@ export function useFocusBar(tasks: Task[]): UseFocusBarReturn {
     const task = tasks.find((t) => t.id === taskId);
     if (task && (task.status === 'done' || task.phase === 'COMPLETE')) return;
     lastWriteRef.current = Date.now();
-    // New pin defaults to Satellite
-    setPinnedIds((prev) => prev.includes(taskId) ? prev : [...prev, taskId]);
-    setSatelliteIds((prev) => prev.includes(taskId) ? prev : [...prev, taskId]);
+    // New pin defaults to Satellite, surfacing at the top of its tier. Prepend
+    // must mirror the backend, where togglePin assigns pin_order = minOrder - 1
+    // (top). If either side flips, the optimistic order and the post-refresh
+    // order diverge and the row visibly jumps.
+    setPinnedIds((prev) => prev.includes(taskId) ? prev : [taskId, ...prev]);
+    setSatelliteIds((prev) => prev.includes(taskId) ? prev : [taskId, ...prev]);
     try {
       await focusApi.pinTask(taskId);
     } catch {

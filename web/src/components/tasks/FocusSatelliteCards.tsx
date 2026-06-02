@@ -59,9 +59,10 @@ interface SortableTierCardProps {
   onOpenSession?: (sessionId: string) => void;
   onSetPhase?: (id: string, phase: string) => void;
   onUpdateTitle?: (id: string, title: string) => void;
+  onDelete?: (id: string) => void;
 }
 
-export const SortableTierCard = memo(function SortableTierCard({ task, tier, isFocused, isDetailOpen, onClick, onSetTier, onUnpinTask, onPinTask, onSetPriority, onSetDate, onStar, onExpandDetail, onClearFocus, onOpenSession, onSetPhase, onUpdateTitle }: SortableTierCardProps) {
+export const SortableTierCard = memo(function SortableTierCard({ task, tier, isFocused, isDetailOpen, onClick, onSetTier, onUnpinTask, onPinTask, onSetPriority, onSetDate, onStar, onExpandDetail, onClearFocus, onOpenSession, onSetPhase, onUpdateTitle, onDelete }: SortableTierCardProps) {
   const {
     attributes,
     listeners,
@@ -170,6 +171,7 @@ export const SortableTierCard = memo(function SortableTierCard({ task, tier, isF
     <div
       ref={setNodeRef}
       style={style}
+      data-task-id={task.id}
       className={`${cardClass}${isFocused ? ' todo-pinned-card-active' : ''}${needsAttention ? ' todo-pinned-card-attention' : ''}`}
       onClick={(e) => {
         if (isEditing) return;
@@ -266,6 +268,7 @@ export const SortableTierCard = memo(function SortableTierCard({ task, tier, isF
         onUnpinTask={onUnpinTask}
         onSetTier={onSetTier}
         onOpenSession={onOpenSession}
+        onDelete={onDelete}
       />
     </div>
   );

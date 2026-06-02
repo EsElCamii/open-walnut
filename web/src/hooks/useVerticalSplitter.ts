@@ -5,19 +5,13 @@ const RATIO_MIN = 0.15;
 const RATIO_MAX = 0.85;
 const STORAGE_KEY = 'open-walnut-todo-detail-ratio-v2';
 
-function clampRatio(r: number): number {
-  return Math.max(RATIO_MIN, Math.min(RATIO_MAX, r));
-}
-
-function readStoredRatio(): number {
-  try {
-    const stored = localStorage.getItem(STORAGE_KEY);
-    if (stored) {
-      const parsed = parseFloat(stored);
-      if (!isNaN(parsed)) return clampRatio(parsed);
-    }
-  } catch { /* ignore */ }
-  return RATIO_DEFAULT;
+export interface VerticalSplitterOptions {
+  storageKey?: string;
+  defaultRatio?: number;
+  minRatio?: number;
+  maxRatio?: number;
+  /** Reuse an external flex-column container instead of the hook's own ref. */
+  containerRef?: React.RefObject<HTMLDivElement | null>;
 }
 
 export interface UseVerticalSplitterReturn {
@@ -33,12 +27,34 @@ export interface UseVerticalSplitterReturn {
 
 /**
  * Ratio-based vertical splitter for list/detail panes.
- * Mouse UP (negative deltaY) → ratio increases (detail grows).
+ * Mouse UP (negative deltaY) → ratio increases (top pane grows).
  */
-export function useVerticalSplitter(): UseVerticalSplitterReturn {
+export function useVerticalSplitter(opts: VerticalSplitterOptions = {}): UseVerticalSplitterReturn {
+  const storageKey = opts.storageKey ?? STORAGE_KEY;
+  const defaultRatio = opts.defaultRatio ?? RATIO_DEFAULT;
+  const minRatio = opts.minRatio ?? RATIO_MIN;
+  const maxRatio = opts.maxRatio ?? RATIO_MAX;
+
+  const clampRatio = useCallback(
+    (r: number) => Math.max(minRatio, Math.min(maxRatio, r)),
+    [minRatio, maxRatio],
+  );
+
+  const readStoredRatio = useCallback((): number => {
+    try {
+      const stored = localStorage.getItem(storageKey);
+      if (stored) {
+        const parsed = parseFloat(stored);
+        if (!isNaN(parsed)) return clampRatio(parsed);
+      }
+    } catch { /* ignore */ }
+    return defaultRatio;
+  }, [storageKey, defaultRatio, clampRatio]);
+
   const [ratio, setRatio] = useState(readStoredRatio);
   const [isResizing, setIsResizing] = useState(false);
-  const containerRef = useRef<HTMLDivElement>(null);
+  const ownContainerRef = useRef<HTMLDivElement>(null);
+  const containerRef = opts.containerRef ?? ownContainerRef;
   const startYRef = useRef(0);
   const startRatioRef = useRef(0);
 
@@ -76,7 +92,7 @@ export function useVerticalSplitter(): UseVerticalSplitterReturn {
         // Read latest ratio from state via the container's flex children
         // (simpler: just persist whatever setRatio last set)
         setRatio((current) => {
-          try { localStorage.setItem(STORAGE_KEY, String(current)); } catch { /* ignore */ }
+          try { localStorage.setItem(storageKey, String(current)); } catch { /* ignore */ }
           return current;
         });
       } catch { /* ignore */ }
@@ -84,7 +100,7 @@ export function useVerticalSplitter(): UseVerticalSplitterReturn {
 
     document.addEventListener('mousemove', onMouseMove);
     document.addEventListener('mouseup', onMouseUp);
-  }, [ratio]);
+  }, [ratio, clampRatio, storageKey]);
 
   return { ratio, containerRef, handleMouseDown, isResizing };
 }

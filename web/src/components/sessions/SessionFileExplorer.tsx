@@ -16,6 +16,8 @@ import { log } from '@/utils/log';
 interface SessionFileExplorerProps {
   cwd?: string;
   host?: string;
+  /** Line to highlight/scroll-to in the initially-selected file's preview. */
+  initialLine?: number;
 }
 
 interface TreeNode {
@@ -43,7 +45,7 @@ function parentPath(p: string): string {
   return trimmed.slice(0, idx);
 }
 
-export function SessionFileExplorer({ cwd, host }: SessionFileExplorerProps) {
+export function SessionFileExplorer({ cwd, host, initialLine }: SessionFileExplorerProps) {
   const [root, setRoot] = useState<string>(cwd || '~');
   const [showHidden, setShowHidden] = useState(false);
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
@@ -91,6 +93,9 @@ export function SessionFileExplorer({ cwd, host }: SessionFileExplorerProps) {
             setExpanded(raw ? new Set(JSON.parse(raw) as string[]) : new Set());
           } catch { setExpanded(new Set()); }
         }
+        // If the user typed a file path, the backend listed its parent and flagged
+        // the file — open it in the preview pane (VS Code style).
+        if (res.selectedFile) setSelectedFile(joinPath(canonical, res.selectedFile));
       }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -176,11 +181,43 @@ export function SessionFileExplorer({ cwd, host }: SessionFileExplorerProps) {
     for (const p of loaded) void loadDir(p, { isRoot: p === root });
   }, [root, loadDir]);
 
+  // Editable root path: click to type an absolute path and jump there.
+  const [editingPath, setEditingPath] = useState(false);
+
+  const commitPath = useCallback((raw: string) => {
+    const next = raw.trim();
+    setEditingPath(false);
+    if (!next || next === root) return;
+    setChildrenMap(new Map());
+    setSelectedFile(null);
+    void loadDir(next, { isRoot: true, restoreExpanded: true });
+  }, [root, loadDir]);
+
   return (
     <div className="session-file-explorer">
       <div className="session-file-explorer-toolbar">
         <button className="sfe-btn" onClick={goUp} title="Go to parent directory">↑</button>
-        <span className="sfe-root-path" title={root}>{root}</span>
+        {editingPath ? (
+          <input
+            className="sfe-root-path-input"
+            defaultValue={root}
+            autoFocus
+            spellCheck={false}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') { e.preventDefault(); commitPath((e.target as HTMLInputElement).value); }
+              else if (e.key === 'Escape') { e.preventDefault(); setEditingPath(false); }
+            }}
+            onBlur={(e) => commitPath(e.target.value)}
+          />
+        ) : (
+          <span
+            className="sfe-root-path"
+            title={`${root} — click to edit`}
+            onClick={() => setEditingPath(true)}
+          >
+            {root}
+          </span>
+        )}
         <div className="sfe-toolbar-actions">
           <button className="sfe-btn" onClick={handleRefresh} title="Refresh">⟳</button>
           <label className="sfe-hidden-toggle" title="Show hidden files">
@@ -236,7 +273,12 @@ export function SessionFileExplorer({ cwd, host }: SessionFileExplorerProps) {
 
         <div className="session-file-explorer-preview">
           {selectedFile ? (
-            <FileContentView key={selectedFile} path={selectedFile} host={host} />
+            <FileContentView
+              key={selectedFile}
+              path={selectedFile}
+              host={host}
+              line={selectedFile === cwd ? initialLine : undefined}
+            />
           ) : (
             <div className="sfe-preview-empty">Select a file to preview</div>
           )}

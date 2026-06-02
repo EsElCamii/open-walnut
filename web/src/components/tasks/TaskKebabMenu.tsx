@@ -34,6 +34,7 @@ interface TaskKebabMenuProps {
   onUnparent?: (id: string) => void;
   /** Move task up one slot among its siblings. Pass undefined when task is already first. */
   onMoveUp?: (id: string) => void;
+  onDelete?: (id: string) => void;
 }
 
 const TIER_OPTIONS: { value: FocusTier; label: string; icon: string }[] = [
@@ -57,7 +58,7 @@ const PRIORITY_OPTIONS: { value: TaskPriority; icon: string; label: string }[] =
   { value: 'none', icon: '--', label: 'None' },
 ];
 
-export function TaskKebabMenu({ task, isFocused, isDetailOpen, isPinned, pinnedTier, isDone, onExpandDetail, onClearFocus, onSetPriority, onStar, onPinTask, onUnpinTask, onSetTier, onOpenSession, onSetDate, onUnparent, onMoveUp }: TaskKebabMenuProps) {
+export function TaskKebabMenu({ task, isFocused, isDetailOpen, isPinned, pinnedTier, isDone, onExpandDetail, onClearFocus, onSetPriority, onStar, onPinTask, onUnpinTask, onSetTier, onOpenSession, onSetDate, onUnparent, onMoveUp, onDelete }: TaskKebabMenuProps) {
   const integrations = useIntegrations();
   const [open, setOpen] = useState(false);
   const [menuPos, setMenuPos] = useState<{ top: number; right: number } | null>(null);
@@ -350,6 +351,26 @@ export function TaskKebabMenu({ task, isFocused, isDetailOpen, isPinned, pinnedT
               </>
             );
           })()}
+
+          {/* Delete */}
+          {onDelete && (
+            <>
+              <div className="task-kebab-divider" />
+              <button
+                className="task-kebab-item task-kebab-item-danger"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  if (window.confirm(`Delete task "${task.title}"? This cannot be undone.`)) {
+                    onDelete(task.id);
+                  }
+                  closeMenu();
+                }}
+              >
+                <span className="task-kebab-icon">{ICONS.ICON_TRASH}</span>
+                <span>Delete</span>
+              </button>
+            </>
+          )}
         </div>
       )}
     </div>

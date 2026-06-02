@@ -30,7 +30,7 @@ import crypto from 'node:crypto'
 import { log } from '../logging/index.js'
 import { getDaemonSource } from './daemon-source.js'
 import { REQUIRED_DAEMON_CAPABILITIES } from './daemon-capabilities.js'
-import { DAEMON_BINARIES_DIR } from '../constants.js'
+import { DAEMON_BINARIES_DIR, IS_EPHEMERAL } from '../constants.js'
 import { buildRemotePreamble } from './session-io.js'
 import type { SshTarget } from './session-io.js'
 import { localDaemon } from './local-daemon.js'
@@ -143,6 +143,19 @@ export class DaemonConnection {
       )
     }
     return this.sshTarget
+  }
+
+  /**
+   * True when this connection must run read-only against a SHARED remote daemon:
+   * an ephemeral server connecting to a real (non-__local__) host. Ephemeral servers
+   * run over a snapshot of production data and may ATTACH to an already-running remote
+   * daemon to debug live sessions — but they must NEVER deploy, start, stop, or redeploy
+   * it. The remote daemon is a singleton (fixed /tmp/open-walnut/daemon.*); two servers
+   * deploying/restarting it is what caused the crash loop. Local daemons are exempt:
+   * same machine + same binary version means ensureRunning() reuses rather than fights.
+   */
+  private get isReadOnlyRemote(): boolean {
+    return IS_EPHEMERAL && this.hostKey !== '__local__'
   }
 
   // ── Binary deployment helpers ──
@@ -260,6 +273,15 @@ export class DaemonConnection {
       let daemonPort = await this.checkDaemonRunning()
 
       if (daemonPort === null) {
+        if (this.isReadOnlyRemote) {
+          // Ephemeral: attach-only. If no daemon is already running on the shared
+          // remote host, do NOT deploy/start one — that would let the throwaway
+          // sandbox fight the production server over the singleton daemon.
+          throw new Error(
+            `ephemeral server: no daemon running on '${this.hostKey}' and ephemeral ` +
+            `sandboxes do not deploy/start remote daemons (attach-only)`,
+          )
+        }
         // Step 2: Deploy daemon
         await this.deployDaemon()
 
@@ -288,6 +310,15 @@ export class DaemonConnection {
       // required list.
       const handshakeOk = await this.verifyCapabilities()
       if (!handshakeOk) {
+        if (this.isReadOnlyRemote) {
+          // Ephemeral attach-only: a capability mismatch must NOT trigger a redeploy
+          // (that would restart the production daemon). The running daemon belongs to
+          // production and is almost certainly fine; bail instead of fighting it.
+          throw new Error(
+            `ephemeral server: capability handshake failed on '${this.hostKey}' and ` +
+            `ephemeral sandboxes do not redeploy remote daemons (attach-only)`,
+          )
+        }
         log.session.warn('DaemonConnection: capability handshake failed — forcing redeploy', {
           host: this.hostKey,
         })
@@ -665,6 +696,10 @@ export class DaemonConnection {
    * If they differ, stop the remote daemon and return true (caller should redeploy).
    */
   private async shouldUpgradeDaemon(remotePath: string): Promise<boolean> {
+    // Ephemeral attach-only: never upgrade (which would --stop the production
+    // daemon). Version skew between the ephemeral's binary and production's is
+    // expected and must not trigger a restart of the shared singleton.
+    if (this.isReadOnlyRemote) return false
     try {
       const localBinary = await this.getLocalBinaryPath()
       if (!localBinary) return false
@@ -790,6 +825,15 @@ export class DaemonConnection {
    * logic can retry.
    */
   private async forceRedeployAndReconnect(): Promise<void> {
+    // Backstop: ephemeral attach-only must never redeploy/restart a shared remote
+    // daemon. Callers (connect, reconnect) already guard, but this is the single
+    // method that performs the destructive --stop + deploy + start, so refuse here
+    // too — defense in depth against any future caller.
+    if (this.isReadOnlyRemote) {
+      throw new Error(
+        `ephemeral server: refusing forceRedeployAndReconnect on '${this.hostKey}' (attach-only)`,
+      )
+    }
     log.session.info('DaemonConnection: forcing redeploy due to capability drift', {
       host: this.hostKey,
     })
@@ -1627,6 +1671,14 @@ export class DaemonConnection {
     }
 
     if (daemonPort === null) {
+      if (this.isReadOnlyRemote) {
+        // Ephemeral attach-only: the shared remote daemon is genuinely gone. Do NOT
+        // redeploy/restart it (that race is the crash loop). Surface so the reconnect
+        // loop backs off; if production restarts the daemon, a later attach succeeds.
+        throw new Error(
+          `ephemeral server: daemon absent on '${this.hostKey}' — attach-only, not redeploying`,
+        )
+      }
       // Daemon genuinely absent — redeploy and restart
       log.session.info('DaemonConnection: daemon not running, redeploying', { host: this.hostKey })
       await this.deployDaemon()
@@ -1648,6 +1700,12 @@ export class DaemonConnection {
     const priorInstanceId = this._daemonInstanceId
     const handshakeOk = await this.verifyCapabilities()
     if (!handshakeOk) {
+      if (this.isReadOnlyRemote) {
+        // Ephemeral attach-only: don't redeploy on reconnect handshake failure.
+        throw new Error(
+          `ephemeral server: reconnect handshake failed on '${this.hostKey}' — attach-only, not redeploying`,
+        )
+      }
       log.session.warn('DaemonConnection: reconnect hello failed — forcing redeploy', {
         host: this.hostKey,
       })

@@ -11,7 +11,7 @@
 
 import { execFile } from 'node:child_process'
 import type { SessionRecord } from '../../core/types.js'
-import { resolveSshTarget, tmuxSessionName } from './spawn.js'
+import { resolveSshTarget, tmuxSessionName, TMUX_SOCKET, sshControlMasterArgs } from './spawn.js'
 import { listSessions } from '../../core/session-tracker.js'
 import { log } from '../../logging/index.js'
 
@@ -29,17 +29,25 @@ function run(cmd: string, args: string[]): Promise<{ code: number; stdout: strin
   })
 }
 
-/** Run a tmux command locally, or wrapped in ssh for a remote host. */
+/**
+ * Run a tmux command locally, or wrapped in ssh for a remote host.
+ * Always targets the dedicated `-L walnut` socket so we manage the same tmux
+ * server the terminals run on (the default socket may be wedged on old tmux —
+ * see TMUX_SOCKET in spawn.ts).
+ */
 async function runTmux(host: string | undefined, tmuxArgs: string[]): Promise<{ code: number; stdout: string; stderr: string }> {
+  const socketArgs = ['-L', TMUX_SOCKET, ...tmuxArgs]
   if (!host) {
-    return run('tmux', tmuxArgs)
+    return run('tmux', socketArgs)
   }
   const target = await resolveSshTarget(host)
   const hostString = target.user ? `${target.user}@${target.hostname}` : target.hostname
-  const sshArgs = ['-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=no']
+  // Reuse the shared ControlMaster socket (warmed by the probe/spawn) so reaper
+  // + lifecycle calls don't each pay a fresh corp-proxy connection.
+  const sshArgs = ['-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=no', ...sshControlMasterArgs(host)]
   if (target.port) sshArgs.push('-p', String(target.port))
   // Quote each tmux arg minimally; our args are session names / format strings (no spaces except the format).
-  const remote = ['tmux', ...tmuxArgs.map((a) => (/\s/.test(a) ? `'${a.replace(/'/g, "'\\''")}'` : a))].join(' ')
+  const remote = ['tmux', ...socketArgs.map((a) => (/\s/.test(a) ? `'${a.replace(/'/g, "'\\''")}'` : a))].join(' ')
   sshArgs.push(hostString, remote)
   return run('ssh', sshArgs)
 }

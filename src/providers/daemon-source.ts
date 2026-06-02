@@ -855,6 +855,8 @@ function cmdStart(ws, id, cmd) {
     orphanPollTimer: null,
     mode: mode || 'default',
     pendingCtrl: null,
+    spawnTs: Date.now(),     // latency instrumentation: CLI spawn → first init line
+    sawInit: false,
   };
 
   proc.on('exit', (code) => {
@@ -980,6 +982,16 @@ function ensureWatcher(sid) {
       for (const line of lines) {
         if (!line.trim()) continue;
 
+        // ── Latency instrumentation: time from CLI spawn to first init line ──
+        // Pure CLI cold-start (incl. MCP connect) as seen by the daemon,
+        // directly comparable to running claude by hand. Logged once per session.
+        if (!s.sawInit && line.includes('"type":"system"') && line.includes('"init"')) {
+          s.sawInit = true;
+          logMsg('info', 'first init line from CLI', {
+            sid, spawnToInitMs: s.spawnTs ? Date.now() - s.spawnTs : null,
+          });
+        }
+
         // ── Permission policy intercept ──
         if (line.includes('"control_request"') || line.includes('"control_response"')) {
           try {
@@ -1059,9 +1071,15 @@ function addSubscriber(ws, sid, fromOffset) {
       fs.closeSync(fd);
       const text = buf.toString('utf-8');
       for (const line of text.split('\\n')) {
-        if (line.trim() && ws.readyState === 1) {
-          try { sendEvent(ws, 'jsonl', { sid, line }); } catch {}
-        }
+        if (!line.trim() || ws.readyState !== 1) continue;
+        // Skip transient permission-protocol lines on replay. control_request/
+        // control_response are RPC handshake lines, not session history; replaying
+        // them resurrects stale permission prompts in the UI. A genuinely-pending
+        // request is recovered out-of-band via pendingCtrl (returned on attach),
+        // NOT via replay — so dropping all control lines here loses nothing.
+        // Keep in sync with daemon-standalone.ts addSubscriber (CLAUDE.md).
+        if (line.includes('"control_request"') || line.includes('"control_response"')) continue;
+        try { sendEvent(ws, 'jsonl', { sid, line }); } catch {}
       }
     } catch {}
   } else {

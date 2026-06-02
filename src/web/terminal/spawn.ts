@@ -13,12 +13,33 @@
  */
 
 import os from 'node:os'
+import path from 'node:path'
 import type { IPty } from '@homebridge/node-pty-prebuilt-multiarch'
 import type { SessionRecord } from '../../core/types.js'
 import type { SshTarget } from '../../providers/session-io.js'
 import { shellQuote } from '../../providers/session-io.js'
 import { getConfig } from '../../core/config-manager.js'
 import { log } from '../../logging/index.js'
+
+/**
+ * SSH ControlMaster args shared by the tmux probe AND the terminal spawn for a
+ * host. WHY: a fresh SSH connection to a corp dev host through the WSSH proxy
+ * costs 2-21s (highly variable). Without muxing, the probe pays that once and
+ * the spawn pays it AGAIN moments later — and the probe's 20s timeout would
+ * intermittently fire. With a shared ControlPath, the probe establishes the
+ * master connection and the spawn reuses it instantly (ControlPersist keeps it
+ * warm). Same pattern the session daemon uses (daemon-connection.ts).
+ *
+ * `host` is the alias — one socket per alias, stable across probe+spawn+reaper.
+ */
+export function sshControlMasterArgs(host: string): string[] {
+  const socket = path.join(os.tmpdir(), `walnut-term-ssh-${host}`)
+  return [
+    '-o', 'ControlMaster=auto',
+    '-o', `ControlPath=${socket}`,
+    '-o', 'ControlPersist=120',
+  ]
+}
 
 export interface SpawnResult {
   pty: IPty
@@ -27,6 +48,21 @@ export interface SpawnResult {
   /** Host alias when remote, undefined for local. */
   host?: string
 }
+
+/**
+ * Dedicated tmux socket name (`tmux -L walnut ...`). TWO reasons this is
+ * mandatory, not cosmetic:
+ *   1. Isolation — Walnut's terminals never collide with the user's own tmux
+ *      sessions on the default socket.
+ *   2. Correctness on old tmux — a stale/corrupt `default` socket left in
+ *      /tmp/tmux-<uid>/ makes tmux 1.8 (older Linux distros) silently fail
+ *      `new-session` with rc=1 and immediately close the ssh connection. A
+ *      private `-L` socket sidesteps that entirely (verified on a real legacy
+ *      dev host where the default socket was wedged).
+ * Used by spawn.ts, tmux-check.ts (probe) and tmux-lifecycle.ts — they MUST
+ * all pass the same `-L walnut` or they'd talk to different tmux servers.
+ */
+export const TMUX_SOCKET = 'walnut'
 
 /**
  * Stable tmux session name derived from the Claude session ID.
@@ -75,35 +111,41 @@ function sshKeepaliveArgs(t: SshTarget): string[] {
 
 /**
  * The remote command run over ssh: enter (or create) the tmux session.
- * cwd injected via tmux `-c` (start directory); omitted when no cwd.
+ *
+ * Start directory is set by `cd <cwd> &&` BEFORE launching tmux, NOT by tmux's
+ * `-c` flag. Reason: `new-session -c` was only added in tmux 1.9, and some
+ * legacy dev hosts ship tmux 1.8 — passing `-c` there fails with "unknown
+ * option -- c" and the terminal never opens. A `cd` first works on every tmux
+ * version: a NEW session inherits the launching client's cwd. `exec` replaces
+ * the shell so the ssh process becomes tmux directly (clean signal handling).
  *
  * `-A` makes this idempotent: attach if `walnut-<sid>` exists, else create it.
- * IMPORTANT: when attaching to an EXISTING session, tmux IGNORES `-c` — the
- * pane keeps whatever cwd it currently has. That's intentional: a reconnect
- * lands you back where you left off (your `cd`s preserved), not reset to the
- * session's original cwd. `-c` only takes effect on first creation.
+ * On attach to an EXISTING session the leading `cd` is irrelevant — tmux keeps
+ * the pane's current cwd, so a reconnect lands you back where you left off.
  */
 export function buildRemoteTmuxCommand(sessionId: string, cwd?: string): string {
   const name = tmuxSessionName(sessionId)
-  const parts = ['tmux', 'new-session', '-A', '-s', name]
-  if (cwd) {
-    parts.push('-c', shellQuote(cwd))
-  }
-  return parts.join(' ')
+  const tmux = `exec tmux -L ${TMUX_SOCKET} new-session -A -s ${name}`
+  return cwd ? `cd ${shellQuote(cwd)} && ${tmux}` : tmux
 }
 
-/** Local tmux args (node-pty spawns `tmux` directly, no shell quoting needed). */
-export function buildLocalTmuxArgs(sessionId: string, cwd?: string): string[] {
+/**
+ * Local tmux args (node-pty spawns `tmux` directly).
+ * Start directory comes from node-pty's `cwd` spawn option (see
+ * resolveSpawnForSession), NOT tmux `-c` — same tmux-1.8 compatibility reason
+ * as the remote path: a new session inherits the launching client's cwd.
+ */
+export function buildLocalTmuxArgs(sessionId: string): string[] {
   const name = tmuxSessionName(sessionId)
-  const args = ['new-session', '-A', '-s', name]
-  if (cwd) args.push('-c', cwd)
-  return args
+  return ['-L', TMUX_SOCKET, 'new-session', '-A', '-s', name]
 }
 
-/** Full ssh argv for a remote terminal (for diagnostics/tests). */
-export function buildRemoteSshArgs(sessionId: string, target: SshTarget, cwd?: string): string[] {
+/** Full ssh argv for a remote terminal. `host` (alias) keys the shared
+ * ControlMaster socket so the probe's warm connection is reused here. */
+export function buildRemoteSshArgs(sessionId: string, target: SshTarget, cwd?: string, host?: string): string[] {
   return [
     ...sshKeepaliveArgs(target),
+    ...(host ? sshControlMasterArgs(host) : []),
     sshHostString(target),
     buildRemoteTmuxCommand(sessionId, cwd),
   ]
@@ -124,15 +166,17 @@ export async function resolveSpawnForSession(
 
   if (record.host) {
     const target = await resolveSshTarget(record.host)
-    const args = buildRemoteSshArgs(record.claudeSessionId, target, record.cwd)
+    const args = buildRemoteSshArgs(record.claudeSessionId, target, record.cwd, record.host)
     log.web.info('terminal spawn (remote)', { sessionId: record.claudeSessionId, host: record.host, cwd: record.cwd })
     const p = pty.spawn('ssh', args, { name: 'xterm-256color', cols, rows, cwd: os.homedir(), env })
     return { pty: p, cwd: record.cwd, host: record.host }
   }
 
   const cwd = record.cwd ?? os.homedir()
-  const args = buildLocalTmuxArgs(record.claudeSessionId, cwd)
+  const args = buildLocalTmuxArgs(record.claudeSessionId)
   log.web.info('terminal spawn (local)', { sessionId: record.claudeSessionId, cwd })
+  // Start dir comes from node-pty's cwd option (tmux new-session inherits the
+  // launching client's cwd) — avoids tmux `-c` which old tmux lacks.
   const p = pty.spawn('tmux', args, { name: 'xterm-256color', cols, rows, cwd, env })
   return { pty: p, cwd }
 }

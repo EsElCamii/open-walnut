@@ -451,6 +451,32 @@ describe('updateTask — starred', () => {
   });
 });
 
+describe('updateTask — needs_attention (read marker)', () => {
+  it('does NOT bump updated_at when only clearing needs_attention', async () => {
+    const { task } = await addTask({ title: 'Attention task' });
+    await updateTask(task.id, { needs_attention: true });
+    const { task: marked } = await updateTask(task.id, { title: 'Marked' });
+    const before = marked.updated_at;
+
+    // Wait a tick so a (wrong) timestamp bump would be observable.
+    await new Promise((r) => setTimeout(r, 5));
+    const { task: cleared } = await updateTask(task.id, { needs_attention: false });
+
+    expect(cleared.needs_attention).toBe(false);
+    expect(cleared.updated_at).toBe(before);
+  });
+
+  it('still bumps updated_at when needs_attention changes alongside content', async () => {
+    const { task } = await addTask({ title: 'Combo task' });
+    const before = task.updated_at;
+    await new Promise((r) => setTimeout(r, 5));
+
+    const { task: updated } = await updateTask(task.id, { needs_attention: false, title: 'Renamed' });
+    expect(updated.title).toBe('Renamed');
+    expect(updated.updated_at).not.toBe(before);
+  });
+});
+
 describe('getProjectMetadata', () => {
   it('returns null when no .metadata task exists', async () => {
     await addTask({ title: 'Regular task', category: 'Work', project: 'HomeLab' });

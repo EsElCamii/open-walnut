@@ -45,7 +45,7 @@ export function entityRefsToMarkdownLinks(text: string): string {
 }
 
 /** DOMPurify attributes preserved for entity ref, image, and file link rendering */
-const SANITIZE_ATTRS = ['data-task-id', 'data-session-id', 'data-lightbox-src', 'data-file-path', 'data-file-line', 'loading'];
+const SANITIZE_ATTRS = ['data-task-id', 'data-session-id', 'data-lightbox-src', 'data-file-path', 'data-file-line', 'data-rel-path', 'data-cwd', 'loading', 'target', 'rel'];
 
 // ── JSON ID pill injection for tool call INPUT/RESULT areas ──
 
@@ -107,8 +107,10 @@ export function renderToolResultWithRefs(text: string): string {
     // Step 3: Inject JSON ID pills into HTML-escaped JSON values
     // The marked parser will have HTML-escaped the JSON quotes as &quot;
     const withPills = injectJsonIdLinks(html);
-    // Step 4: Sanitize
-    return DOMPurify.sanitize(withPills, { ADD_ATTR: SANITIZE_ATTRS });
+    // Step 4: Linkify file paths inside code blocks (tool results are mostly code)
+    const withCodePaths = linkifyPathsInCode(withPills);
+    // Step 5: Sanitize
+    return DOMPurify.sanitize(withCodePaths, { ADD_ATTR: SANITIZE_ATTRS });
   } catch {
     return DOMPurify.sanitize(text);
   }
@@ -153,11 +155,22 @@ export function filePathsToHtml(text: string, sessionCwd?: string): string {
     return fenceRanges.some(([start, end]) => idx >= start && idx < end);
   }
 
-  // Also skip if preceded by :// (URL), or if inside <a> tag
+  // Track full URL ranges so a path SEGMENT inside a URL is never linkified —
+  // e.g. https://host/packages/--/x/task.md must stay one URL, not become a
+  // clickable "/x/task.md". The old `:// in preceding 3 chars` check only caught
+  // the segment right after `://`, missing deeper segments.
+  const urlRanges: [number, number][] = [];
+  const urlRe = /https?:\/\/[^\s"'`<>)]+/g;
+  let um: RegExpExecArray | null;
+  while ((um = urlRe.exec(text)) !== null) urlRanges.push([um.index, um.index + um[0].length]);
+  function isInUrl(idx: number): boolean {
+    return urlRanges.some(([start, end]) => idx >= start && idx < end);
+  }
+
+  // Also skip if inside a URL, a code fence, or a markdown image
   function shouldSkip(matchIdx: number, matchStr: string): boolean {
     if (isInFence(matchIdx)) return true;
-    // Check for URL context (://path)
-    if (matchIdx >= 3 && text.slice(matchIdx - 3, matchIdx).includes('://')) return true;
+    if (isInUrl(matchIdx)) return true;
     // Check for markdown image ![...](path)
     if (matchIdx >= 2 && text[matchIdx - 1] === '(' && text.slice(0, matchIdx).lastIndexOf('![') > text.slice(0, matchIdx).lastIndexOf(']')) return true;
     return false;
@@ -187,6 +200,23 @@ export function filePathsToHtml(text: string, sessionCwd?: string): string {
     replacements.push({ start: m.index, end: m.index + fullMatch.length, replacement });
   }
 
+  // Pass 1b: Absolute DIRECTORY paths (no file extension) — /dir/sub/leaf.
+  // Requires ≥3 segments to avoid matching short prose-y roots like "/usr/bin".
+  // Skips anything already linkified by Pass 1 (overlap check) and URLs/fences.
+  const absDirRe = /(?<![\/\w])(\/(?:[\w@.+-]+\/){2,}[\w@.+-]+)\/?(?=[\s,;)"'`\]]|$)/g;
+  while ((m = absDirRe.exec(text)) !== null) {
+    const dirPath = m[1];
+    if (shouldSkip(m.index, dirPath)) continue;
+    // Skip if it has a file extension (Pass 1 owns those) or overlaps a prior match
+    const leaf = dirPath.split('/').pop() ?? '';
+    if (leaf.includes('.')) continue;
+    const start = m.index;
+    const end = m.index + dirPath.length;
+    if (replacements.some(r => start < r.end && end > r.start)) continue;
+    const replacement = `<a class="file-link" data-file-path="${dirPath}" href="#">${dirPath}</a>`;
+    replacements.push({ start, end, replacement });
+  }
+
   // Pass 2: Relative paths with extension — dir/file.ext or ./file.ext:42
   // Only linkify if sessionCwd is available (needed to resolve absolute path)
   if (sessionCwd) {
@@ -210,10 +240,33 @@ export function filePathsToHtml(text: string, sessionCwd?: string): string {
       const overlaps = replacements.some(r => pathStart < r.end && fullEnd > r.start);
       if (overlaps) continue;
 
-      const absPath = sessionCwd.replace(/\/$/, '') + '/' + pathPart.replace(/^\.\//, '');
+      // Carry rel+cwd instead of pre-joining: the path may live in a sibling
+      // package, so resolution (cwd → walk up → repo root) happens on click.
+      const relClean = pathPart.replace(/^\.\//, '');
       const lineAttr = lineNum ? ` data-file-line="${lineNum}"` : '';
       const display = lineNum ? `${pathPart}:${lineNum}` : pathPart;
-      const replacement = `<a class="file-link" data-file-path="${absPath}"${lineAttr} href="#">${display}</a>`;
+      const replacement = `<a class="file-link" data-rel-path="${relClean}" data-cwd="${sessionCwd}"${lineAttr} href="#">${display}</a>`;
+      replacements.push({ start: pathStart, end: fullEnd, replacement });
+    }
+
+    // Pass 2b: Relative DIRECTORY / extensionless paths below cwd — e.g.
+    // packages/services/some-team/SomeService.
+    // Claude frequently emits package-relative paths with no leading ./ and no
+    // extension. Require ≥3 segments to avoid prose like "and/or/maybe". Resolved
+    // against cwd; if it doesn't exist the explorer just shows "not found".
+    const relDirRe = /(?:^|[\s"'`(])((?:[\w@][\w@.+-]*\/){2,}[\w@][\w@.+-]*)\/?(?=[\s,;)"'`\].]|$)/gm;
+    while ((m = relDirRe.exec(text)) !== null) {
+      // Trim a trailing sentence period the greedy class may have swallowed
+      // (e.g. "…/SomeService." → drop the final ".").
+      const pathPart = m[1].replace(/\.+$/, '');
+      const leaf = pathPart.split('/').pop() ?? '';
+      if (leaf.includes('.')) continue; // files-with-ext belong to Pass 2
+      if (pathPart.split('/').length < 3) continue; // trim may have dropped a segment
+      const pathStart = m.index + m[0].indexOf(pathPart);
+      const fullEnd = pathStart + pathPart.length;
+      if (shouldSkip(pathStart, pathPart)) continue;
+      if (replacements.some(r => pathStart < r.end && fullEnd > r.start)) continue;
+      const replacement = `<a class="file-link" data-rel-path="${pathPart}" data-cwd="${sessionCwd}" href="#">${pathPart}</a>`;
       replacements.push({ start: pathStart, end: fullEnd, replacement });
     }
   }
@@ -228,9 +281,135 @@ export function filePathsToHtml(text: string, sessionCwd?: string): string {
 }
 
 /**
+ * Linkify file paths that ended up *inside* <code> blocks after marked ran.
+ * filePathsToHtml() deliberately skips code fences (injecting <a> before marked
+ * would get HTML-escaped), so this post-pass handles inline `code` and fenced
+ * blocks. Operates on the already-escaped inner text of each <code> element.
+ */
+function linkifyPathsInCode(html: string, sessionCwd?: string): string {
+  return html.replace(/(<code[^>]*>)([\s\S]*?)(<\/code>)/g, (full, open: string, inner: string, close: string) => {
+    if (inner.includes('<a ')) return full; // already linkified
+    let changed = false;
+
+    // Track URL ranges (http(s)://…) so we never linkify a path SEGMENT inside a
+    // URL — e.g. https://host/packages/--/x/task.md must stay a single URL, not a
+    // clickable "/x/task.md" file link. Matches against the escaped inner text.
+    const urlRanges: [number, number][] = [];
+    const urlRe = /https?:\/\/[^\s"'`<>]+/g;
+    let um: RegExpExecArray | null;
+    while ((um = urlRe.exec(inner)) !== null) urlRanges.push([um.index, um.index + um[0].length]);
+    const inUrl = (idx: number) => urlRanges.some(([s, e]) => idx >= s && idx < e);
+
+    // Absolute paths: /dir/file.ext(:line)
+    const absRe = /(?<![\/\w])(\/(?:[\w@.+-]+\/)+[\w@.+-]+\.[\w]+)(?::(\d+))?/g;
+    let out = inner.replace(absRe, (m, filePath: string, lineNum: string | undefined, offset: number) => {
+      if (inUrl(offset)) return m;
+      const ext = filePath.split('.').pop()?.toLowerCase() ?? '';
+      if (IMAGE_EXTENSIONS.has(ext)) return m;
+      changed = true;
+      const lineAttr = lineNum ? ` data-file-line="${lineNum}"` : '';
+      const display = lineNum ? `${filePath}:${lineNum}` : filePath;
+      return `<a class="file-link" data-file-path="${filePath}"${lineAttr} href="#">${display}</a>`;
+    });
+
+    // Absolute DIRECTORY paths (no extension, ≥3 segments) — open the folder.
+    {
+      const urlR: [number, number][] = [];
+      urlRe.lastIndex = 0;
+      while ((um = urlRe.exec(out)) !== null) urlR.push([um.index, um.index + um[0].length]);
+      const inU = (idx: number) => urlR.some(([s, e]) => idx >= s && idx < e);
+      const absDirRe = /(?<![\/\w])(\/(?:[\w@.+-]+\/){2,}[\w@.+-]+)\/?(?=[\s,;)"'`\]<]|$)/g;
+      out = out.replace(absDirRe, (m, dirPath: string, offset: number) => {
+        if (inU(offset)) return m;
+        if (m.includes('file-link')) return m;
+        const leaf = dirPath.split('/').pop() ?? '';
+        if (leaf.includes('.')) return m;
+        changed = true;
+        return `<a class="file-link" data-file-path="${dirPath}" href="#">${dirPath}</a>`;
+      });
+    }
+
+    // Relative paths (needs cwd to resolve): dir/file.ext or ./file.ext(:line)
+    if (sessionCwd) {
+      // URL offsets shift after the abs pass rewrites text; recompute against `out`.
+      const urlRanges2: [number, number][] = [];
+      urlRe.lastIndex = 0;
+      while ((um = urlRe.exec(out)) !== null) urlRanges2.push([um.index, um.index + um[0].length]);
+      const inUrl2 = (idx: number) => urlRanges2.some(([s, e]) => idx >= s && idx < e);
+
+      const relRe = /(^|[\s"'`(>])((?:\.\/|[\w@][\w@.+-]*\/)+[\w@.+-]+\.(\w+))(?::(\d+))?/g;
+      out = out.replace(relRe, (m, lead: string, pathPart: string, ext: string, lineNum: string | undefined, offset: number) => {
+        if (inUrl2(offset)) return m;
+        const e = ext?.toLowerCase();
+        if (!e || IMAGE_EXTENSIONS.has(e) || !CODE_EXTENSIONS.has(e)) return m;
+        // Don't re-wrap something already turned into an anchor by the abs pass
+        if (m.includes('file-link')) return m;
+        changed = true;
+        // Carry rel+cwd; resolution (sibling pkg / repo root) happens on click.
+        const relClean = pathPart.replace(/^\.\//, '');
+        const lineAttr = lineNum ? ` data-file-line="${lineNum}"` : '';
+        const display = lineNum ? `${pathPart}:${lineNum}` : pathPart;
+        return `${lead}<a class="file-link" data-rel-path="${relClean}" data-cwd="${sessionCwd}"${lineAttr} href="#">${display}</a>`;
+      });
+    }
+
+    // Linkify full URLs as external links ("render all", not a partial file link).
+    // Runs last; file passes left URL text intact, and our file-link anchors carry
+    // no http (data-file-path is a fs path), so this won't touch them.
+    out = out.replace(/https?:\/\/[^\s"'`<>]+/g, (url) => {
+      changed = true;
+      return `<a href="${url}" target="_blank" rel="noopener noreferrer">${url}</a>`;
+    });
+
+    return changed ? open + out + close : full;
+  });
+}
+
+/**
+ * Strip tool-call syntax the model occasionally leaks into plain assistant TEXT.
+ *
+ * The model sometimes emits a literal `<invoke name="X">…<parameter …>…</parameter></invoke>`
+ * block as prose right before the real `tool_use` block. Left in, marked passes the
+ * unknown tags through and DOMPurify strips `<invoke>`/`<parameter>`, dumping the raw
+ * multiline command as flat text and breaking layout. The real tool call still renders
+ * from its own block, so the leaked copy is pure noise — remove it.
+ *
+ * Code fences are protected so a legit sample that *shows* this syntax survives.
+ */
+export function stripLeakedToolCalls(text: string): string {
+  if (!text.includes('invoke')) return text;
+
+  const fenceRanges: [number, number][] = [];
+  const fenceRe = /```[\s\S]*?```|`[^`\n]+`/g;
+  let fm: RegExpExecArray | null;
+  while ((fm = fenceRe.exec(text)) !== null) fenceRanges.push([fm.index, fm.index + fm[0].length]);
+  const inFence = (i: number) => fenceRanges.some(([s, e]) => i >= s && i < e);
+
+  const removals: [number, number][] = [];
+  const blockRe = /<(?:antml:)?invoke\b[^>]*>[\s\S]*?<\/(?:antml:)?invoke>/g;
+  let m: RegExpExecArray | null;
+  while ((m = blockRe.exec(text)) !== null) {
+    if (!inFence(m.index)) removals.push([m.index, m.index + m[0].length]);
+  }
+  // Streaming mid-leak: an open <invoke …> with no closer yet → drop to end of text.
+  if (removals.length === 0) {
+    const openRe = /<(?:antml:)?invoke\b[^>]*>[\s\S]*$/;
+    const om = openRe.exec(text);
+    if (om && !inFence(om.index)) removals.push([om.index, text.length]);
+  }
+  if (removals.length === 0) return text;
+
+  removals.sort((a, b) => b[0] - a[0]);
+  let result = text;
+  for (const [s, e] of removals) result = result.slice(0, s) + result.slice(e);
+  // Collapse blank-line/whitespace debris left behind by the removed block.
+  return result.replace(/\s+$/, '').replace(/\n{3,}/g, '\n\n');
+}
+
+/**
  * Render markdown text with entity ref support and file path linkification.
  * Preprocesses <task-ref> and <session-ref> XML tags into clickable HTML anchors,
- * converts file paths to clickable links,
+ * converts file paths to clickable links (including inside code blocks),
  * then runs marked.parse() + DOMPurify.sanitize().
  */
 const mdCache = new Map<string, string>();
@@ -248,10 +427,13 @@ export function renderMarkdownWithRefs(text: string, sessionCwd?: string): strin
 
   let html: string;
   try {
-    let preprocessed = entityRefsToHtml(text);
+    let preprocessed = stripLeakedToolCalls(text);
+    preprocessed = entityRefsToHtml(preprocessed);
     preprocessed = filePathsToHtml(preprocessed, sessionCwd);
     const raw = marked.parse(preprocessed);
-    html = typeof raw === 'string' ? DOMPurify.sanitize(raw, { ADD_ATTR: SANITIZE_ATTRS }) : '';
+    let parsed = typeof raw === 'string' ? raw : '';
+    parsed = linkifyPathsInCode(parsed, sessionCwd);
+    html = DOMPurify.sanitize(parsed, { ADD_ATTR: SANITIZE_ATTRS });
   } catch {
     html = DOMPurify.sanitize(text);
   }

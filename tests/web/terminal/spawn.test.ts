@@ -27,31 +27,27 @@ describe('tmuxSessionName', () => {
 });
 
 describe('buildLocalTmuxArgs', () => {
-  it('uses new-session -A (idempotent attach-or-create) with -s and -c', () => {
-    expect(buildLocalTmuxArgs('sid1', '/home/u/proj')).toEqual([
-      'new-session', '-A', '-s', 'walnut-sid1', '-c', '/home/u/proj',
-    ]);
-  });
-
-  it('omits -c when no cwd (tmux falls back to home)', () => {
-    expect(buildLocalTmuxArgs('sid1')).toEqual(['new-session', '-A', '-s', 'walnut-sid1']);
+  it('uses dedicated -L socket + new-session -A, NO -c (tmux 1.8 compat)', () => {
+    // Start dir comes from node-pty's cwd option, not tmux -c (which old tmux lacks).
+    // -L walnut isolates from the user's own tmux + dodges a wedged default socket.
+    expect(buildLocalTmuxArgs('sid1')).toEqual(['-L', 'walnut', 'new-session', '-A', '-s', 'walnut-sid1']);
   });
 });
 
 describe('buildRemoteTmuxCommand', () => {
-  it('builds a shell-quoted remote tmux command with cwd', () => {
+  it('sets start dir via leading cd + exec tmux -L (no -c flag — tmux 1.8 compat)', () => {
     expect(buildRemoteTmuxCommand('sid2', '/var/data')).toBe(
-      "tmux new-session -A -s walnut-sid2 -c '/var/data'",
+      "cd '/var/data' && exec tmux -L walnut new-session -A -s walnut-sid2",
     );
   });
 
   it('shell-quotes cwd containing single quotes safely', () => {
     const cmd = buildRemoteTmuxCommand('sid2', "/weird/it's here");
-    expect(cmd).toBe("tmux new-session -A -s walnut-sid2 -c '/weird/it'\\''s here'");
+    expect(cmd).toBe("cd '/weird/it'\\''s here' && exec tmux -L walnut new-session -A -s walnut-sid2");
   });
 
-  it('omits -c when no cwd', () => {
-    expect(buildRemoteTmuxCommand('sid2')).toBe('tmux new-session -A -s walnut-sid2');
+  it('omits the cd prefix when no cwd', () => {
+    expect(buildRemoteTmuxCommand('sid2')).toBe('exec tmux -L walnut new-session -A -s walnut-sid2');
   });
 });
 
@@ -66,11 +62,11 @@ describe('buildRemoteSshArgs', () => {
     expect(args).toContain('BatchMode=yes');
   });
 
-  it('targets user@hostname and ends with the tmux command', () => {
+  it('targets user@hostname and ends with the cd + tmux command', () => {
     const args = buildRemoteSshArgs('sid3', target, '/home/alice/x');
     expect(args).toContain('alice@dev.example.com');
     expect(args[args.length - 1]).toBe(
-      "tmux new-session -A -s walnut-sid3 -c '/home/alice/x'",
+      "cd '/home/alice/x' && exec tmux -L walnut new-session -A -s walnut-sid3",
     );
   });
 

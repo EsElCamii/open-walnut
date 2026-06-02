@@ -464,7 +464,9 @@ export function SessionPathSelector({ open, onClose, onSelect }: Props) {
                 : 'No paths match your search.'}
           </div>
         )}
-        {filtered.map((d, idx) => (
+        {filtered.map((d, idx) => {
+          const fullCwd = `${d.cwd}${d.live ? '/' : ''}`;
+          return (
           <div
             key={`${d.cwd}::${d.host ?? ''}::${d.live ? 'live' : 'hist'}`}
             className={`sps-path-item${idx === selectedIdx ? ' active' : ''}${d.live ? ' sps-live' : ''}`}
@@ -490,21 +492,26 @@ export function SessionPathSelector({ open, onClose, onSelect }: Props) {
             onMouseEnter={() => setSelectedIdx(idx)}
           >
             <div className="sps-path-main">
-              <span className="sps-path-cwd">{d.cwd}{d.live ? '/' : ''}</span>
-              {d.live
-                ? <span className="sps-path-host-tag sps-tag-live">{d.host ? (d.hostLabel ?? d.host) : 'local'}</span>
-                : <span className="sps-path-host-tag">{d.host ? (d.hostLabel ?? d.host) : 'local'}</span>
-              }
+              {/* title is the only way to read the full path once it wraps in a narrow popover */}
+              <span className="sps-path-cwd" title={fullCwd}>{fullCwd}</span>
             </div>
-            {!d.live && (
-              <div className="sps-path-meta">
-                <span className="sps-path-category">{d.category}</span>
-                <span>{d.count} session{d.count !== 1 ? 's' : ''}</span>
-                <span>{timeAgo(d.lastUsed)}</span>
-              </div>
-            )}
+            {/* Host badge lives in the meta row (not beside the path) so the path span gets the
+                full popover width. Sharing the row forced long paths to wrap to 7+ lines. */}
+            <div className="sps-path-meta">
+              <span className={`sps-path-host-tag${d.live ? ' sps-tag-live' : ''}`}>
+                {d.host ? (d.hostLabel ?? d.host) : 'local'}
+              </span>
+              {!d.live && (
+                <>
+                  <span className="sps-path-category">{d.category}</span>
+                  <span>{d.count} session{d.count !== 1 ? 's' : ''}</span>
+                  <span>{timeAgo(d.lastUsed)}</span>
+                </>
+              )}
+            </div>
           </div>
-        ))}
+          );
+        })}
       </div>
 
       {/* Task metadata footer — applied to the new task on quick-start */}

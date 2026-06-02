@@ -32,6 +32,7 @@ import { isProcessAliveAsync } from '../utils/process.js'
 import { SESSION_STREAMS_DIR, CLAUDE_HOME } from '../constants.js'
 import { log } from '../logging/index.js'
 import { markProcessing, removeProcessed, revertToPending, loadQueue, getAllSessionsWithPending } from '../core/session-message-queue.js'
+import type { QueuedMessage } from '../core/session-message-queue.js'
 // Image transfer for remote sessions: RemoteSessionManager.prepareOutbound() uploads
 // local images via daemon and rewrites paths inside start() and writeMessage().
 import type { SshTarget } from './session-io.js'
@@ -424,8 +425,21 @@ export class ClaudeCodeSession {
   }>()
   /** Periodic re-emit timers for pending permission requests (no auto-resolve). */
   private _permissionReEmitTimers = new Map<string, ReturnType<typeof setTimeout>>()
+  /** request_ids we've already responded to. Guards against the daemon replaying
+   *  historical control_request lines on reconnect — those are stale (already
+   *  auto-allowed remotely) and must not resurrect a UI permission prompt.
+   *  INTENTIONALLY NEVER CLEARED: surviving across reconnect/replay is the whole
+   *  point. Do NOT add a .clear() on turn boundary or process death — that would
+   *  reintroduce the zombie-prompt bug (replayed control_request lines outlive the
+   *  turn that produced them). It looks like a leaking Set but bounded growth is
+   *  accepted; see git history for the zombie permission-card incident. */
+  private _resolvedPermissionRequestIds = new Set<string>()
   /** Timestamp when spawn() was called — used to measure time-to-init for diagnostics. */
   private _spawnTs = 0
+  /** Wall-clock ts of the HTTP request that triggered this start (latency instrumentation only). */
+  private _requestTs = 0
+  /** Ts when transport.start() resolved (daemon spawned the CLI). For init-latency breakdown. */
+  private _transportReadyTs = 0
   /** Timestamp of the last message delivery (FIFO write or --resume spawn). */
   private _lastMessageDeliveryTs = 0
   /** Timestamp of the last JSONL event received from the output file. */
@@ -746,6 +760,10 @@ export class ClaudeCodeSession {
       if (this.claudeSessionId) {
         registerSessionManager(this.claudeSessionId, transport)
       }
+
+      // Mark when the daemon confirmed the CLI was spawned — lets the init handler
+      // isolate "CLI cold-start until first init line" from Walnut-side overhead.
+      this._transportReadyTs = Date.now()
 
       log.session.info('session spawned via transport', {
         // DUP-DEBUG: ccsId tags every CCS instance creation. Pair with the
@@ -1107,6 +1125,8 @@ export class ClaudeCodeSession {
         })
         // Recover pending permission from daemon attach response.
         // The daemon tracks control_request state and returns it on attach.
+        // Single slot: the `claude -p` protocol has at most one outstanding
+        // can_use_tool at a time, so pendingCtrl carries at most one request.
         if (attachResult?.pendingCtrl && session._pendingPermissionRequests.size === 0) {
           const pc = attachResult.pendingCtrl
           session._pendingPermissionRequests.set(pc.reqId, {
@@ -1793,11 +1813,29 @@ export class ClaudeCodeSession {
           const oldSessionId = this.claudeSessionId
           this.claudeSessionId = newId
           this._expectedSessionId = null
-          const initElapsedMs = this._spawnTs ? Date.now() - this._spawnTs : undefined
+          // ── time-to-init latency breakdown (instrumentation) ──
+          // Splits the previously-opaque timeToInitMs into hops so we can see whether
+          // Walnut's overhead vs bare CLI lives in route, spawn, or the CLI cold-start.
+          const now = Date.now()
+          const initElapsedMs = this._spawnTs ? now - this._spawnTs : undefined
+          // route→handleStart (HTTP recv → send() called): captured via _requestTs.
+          // _spawnTs is set at the top of send(), so requestTs→spawn covers route + send setup.
+          const requestToSpawnMs = this._requestTs ? this._spawnTs - this._requestTs : undefined
+          // _spawnTs → transport.start() resolved: daemon accepted start, spawned CLI.
+          const spawnToTransportMs = this._transportReadyTs && this._spawnTs
+            ? this._transportReadyTs - this._spawnTs : undefined
+          // transport ready → first init line back in Walnut: CLI cold-start + MCP wait
+          // + 100ms daemon poll + WS hop. This is the segment that should ≈ bare-CLI time.
+          const transportToInitMs = this._transportReadyTs ? now - this._transportReadyTs : undefined
+          const requestToInitMs = this._requestTs ? now - this._requestTs : undefined
           log.session.info('session ID from init', {
             sessionId: newId,
             taskId: this.taskId,
             timeToInitMs: initElapsedMs,
+            requestToInitMs,
+            requestToSpawnMs,
+            spawnToTransportMs,
+            transportToInitMs,
             isRemote: !!this._host,
             host: this._host,
           })
@@ -2629,6 +2667,22 @@ export class ClaudeCodeSession {
           mode: this._mode,
         })
 
+        // Dedup: ignore a request_id we've already responded to. The daemon
+        // replays historical JSONL on reconnect; a replayed control_request is
+        // stale (already auto-allowed remotely) and must not resurrect a prompt.
+        // DEFENSE-IN-DEPTH: the daemon's addSubscriber() already skips control
+        // lines during replay, so in the common case this guard never fires. It
+        // is retained as a backstop for (1) version skew — a remote daemon running
+        // an OLDER binary that predates the skip — and (2) any race where a control
+        // line slips through. Both layers are intentional; do NOT delete this as
+        // "redundant" with the daemon-side skip.
+        if (this._resolvedPermissionRequestIds.has(request_id)) {
+          log.session.info('control_request ignored — already resolved (stale replay)', {
+            sessionId: this.claudeSessionId, taskId: this.taskId, requestId: request_id, toolName: request.tool_name,
+          })
+          break
+        }
+
         if (request.subtype === 'can_use_tool') {
           // NOTE: For daemon sessions (all sessions now), bypass/plan auto-approval is
           // handled by the daemon itself — it `continue`s past auto-decided requests so
@@ -2884,11 +2938,20 @@ export class ClaudeCodeSession {
       mode: this._mode,
     })
     if (!this._transport) {
+      // Transport gone: the response was NOT delivered. resolvePermissionRequest()
+      // sees written===false and re-queues this request for recovery on reconnect.
+      // CRITICAL: do NOT add requestId to _resolvedPermissionRequestIds here —
+      // the request is still genuinely pending. Poisoning it would make the dedup
+      // guard in handleStreamLine() silently drop the replayed control_request,
+      // permanently stranding the session (CLI blocked forever).
       log.session.warn('control_response dropped — no transport (session detached). Permission stays pending for recovery.', {
         sessionId: this.claudeSessionId, taskId: this.taskId, requestId,
       })
       return false
     }
+    // Response is being delivered (sync handoff to writeRaw succeeded). Mark resolved
+    // so a daemon replay of this same request_id on reconnect is ignored.
+    this._resolvedPermissionRequestIds.add(requestId)
     Promise.resolve(this._transport.writeRaw(response)).then((ok) => {
       if (!ok) {
         log.session.warn('control_response write failed (broken pipe) — session may hang until idle timeout kills it', {
@@ -3552,11 +3615,18 @@ export class SessionRunner {
     fromPlanSessionId?: string
     forkedFromSessionId?: string
     largePromptFile?: { localPath: string; originalLength: number }
+    requestTs?: number
   }): Promise<{ sessionReady: Promise<string>; title: string }> {
     const { taskId, project, mode, model } = data
     let cwd = data.cwd
     let { message } = data
-    log.session.info('starting session', { taskId: taskId || '(taskless)', project, host: data.host })
+    // Latency instrumentation: time from HTTP request received → handleStart entry
+    // (covers task create/update, event bus dispatch). See § time-to-init breakdown.
+    const routeToHandleStartMs = data.requestTs ? Date.now() - data.requestTs : undefined
+    log.session.info('starting session', {
+      taskId: taskId || '(taskless)', project, host: data.host,
+      routeToHandleStartMs,
+    })
     if (data.largePromptFile) {
       log.session.info('session start with spilled prompt', {
         taskId, host: data.host,
@@ -3735,6 +3805,9 @@ export class SessionRunner {
     // Claude Code's --resume + --fork-session creates a new session with full context.
     const resumeId = isFork ? data.forkedFromSessionId : undefined
     const spillFile = data.largePromptFile ? { localPath: data.largePromptFile.localPath } : undefined
+    // Carry the HTTP request ts onto the session instance so the init handler can
+    // compute the full route→init latency breakdown (instrumentation only).
+    session._requestTs = data.requestTs ?? 0
     session.send(message, cwd, resumeId, mode, resolvedModel, appendSystemPrompt, data.host, sshTarget, isFork, config.session?.permission_prompt, spillFile, config.session?.stream_partial_messages)
 
     // Record directory usage for the frequent-dirs persistent store (fire-and-forget)
@@ -4109,47 +4182,6 @@ export class SessionRunner {
       }
     }
 
-    // Unconditional phase transition + session cleanup (best-effort, don't block send).
-    try {
-      const { getSessionByClaudeId, updateSessionRecord } = await import('../core/session-tracker.js')
-      const record = await getSessionByClaudeId(sessionId)
-      if (record) {
-        // Phase sync: session input → IN_PROGRESS
-        if (record.taskId) {
-          // Cancel stale triage runs for this task — user has resumed, triage analysis is outdated
-          try {
-            const { subagentRunner } = await import('./subagent-runner.js')
-            const cancelled = subagentRunner.cancelRunsForTask(record.taskId, 'turn-complete-triage')
-            if (cancelled > 0) log.session.info('handleSend: cancelled stale triage', { taskId: record.taskId, cancelled })
-          } catch { /* non-fatal */ }
-
-          const { applySessionPhase } = await import('../core/phase.js')
-          await applySessionPhase(record.taskId, 'session:input', 'session.ts:handleSend', { sessionId })
-          // Touch last_session_update on resume for "Recent" sidebar sort
-          const { touchLastSessionUpdate } = await import('../core/task-manager.js')
-          touchLastSessionUpdate(record.taskId).catch(err =>
-            log.session.warn('touchLastSessionUpdate failed', { taskId: record.taskId, error: String(err) }))
-        }
-        // Clear stale error message and update activity on resume
-        if (record.process_status === 'error' || record.errorMessage) {
-          await updateSessionRecord(sessionId, {
-            activity: 'Processing follow-up...',
-            errorMessage: undefined,  // Clear stale error on resume
-          })
-          // Emit status change so frontend clears the error banner immediately
-          bus.emit(EventNames.SESSION_STATUS_CHANGED, {
-            sessionId,
-            taskId: record.taskId,
-            process_status: record.process_status,
-            phase: 'IN_PROGRESS',
-            activity: 'Processing follow-up...',
-          }, ['*'], { source: 'session-runner' })
-        }
-      }
-    } catch (err) {
-      log.session.warn('handleSend: phase/status reset failed', { sessionId, error: err instanceof Error ? err.message : String(err) })
-    }
-
     // pendingModel/pendingMode is saved at the RPC layer (session-chat.ts) BEFORE
     // enqueueMessage, preventing a race with concurrent processNext() calls.
 
@@ -4174,8 +4206,11 @@ export class SessionRunner {
       }
     }
 
+    // Message delivery is top priority — trigger it NOW, before any task/phase
+    // bookkeeping. Those writes go through the global task write-lock, which
+    // serializes behind every other session's task updates; awaiting them here
+    // would delay delivery by seconds when other sessions are busy.
     // Message is already enqueued by session:send RPC (or session_send agent tool).
-    // Trigger processing if not already active.
     if (!this.activeProcessing.has(sessionId)) {
       log.session.info('handleSend: triggering processNext', { sessionId, interrupt: !!interrupt })
       this.processNext(sessionId, mode).catch((err) => {
@@ -4188,6 +4223,55 @@ export class SessionRunner {
       this.injectMidTurn(sessionId).catch((err) => {
         log.session.error('injectMidTurn failed', { sessionId, error: err instanceof Error ? err.message : String(err) })
       })
+    }
+
+    // Unconditional phase transition + session cleanup. Best-effort and fire-and-forget
+    // so the global task write-lock never blocks message delivery above.
+    // applySessionPhase is an idempotent state machine (reads current phase, no-ops if
+    // no transition needed), so running it after delivery is safe.
+    void this.syncPhaseAfterSend(sessionId)
+  }
+
+  /** Fire-and-forget phase/status bookkeeping after a send. Never blocks delivery. */
+  private async syncPhaseAfterSend(sessionId: string): Promise<void> {
+    try {
+      const { getSessionByClaudeId, updateSessionRecord } = await import('../core/session-tracker.js')
+      const record = await getSessionByClaudeId(sessionId)
+      if (!record) return
+
+      // Phase sync: session input → IN_PROGRESS
+      if (record.taskId) {
+        // Cancel stale triage runs for this task — user has resumed, triage analysis is outdated
+        try {
+          const { subagentRunner } = await import('./subagent-runner.js')
+          const cancelled = subagentRunner.cancelRunsForTask(record.taskId, 'turn-complete-triage')
+          if (cancelled > 0) log.session.info('handleSend: cancelled stale triage', { taskId: record.taskId, cancelled })
+        } catch { /* non-fatal */ }
+
+        const { applySessionPhase } = await import('../core/phase.js')
+        await applySessionPhase(record.taskId, 'session:input', 'session.ts:handleSend', { sessionId })
+        // Touch last_session_update on resume for "Recent" sidebar sort
+        const { touchLastSessionUpdate } = await import('../core/task-manager.js')
+        touchLastSessionUpdate(record.taskId).catch(err =>
+          log.session.warn('touchLastSessionUpdate failed', { taskId: record.taskId, error: String(err) }))
+      }
+      // Clear stale error message and update activity on resume
+      if (record.process_status === 'error' || record.errorMessage) {
+        await updateSessionRecord(sessionId, {
+          activity: 'Processing follow-up...',
+          errorMessage: undefined,  // Clear stale error on resume
+        })
+        // Emit status change so frontend clears the error banner immediately
+        bus.emit(EventNames.SESSION_STATUS_CHANGED, {
+          sessionId,
+          taskId: record.taskId,
+          process_status: record.process_status,
+          phase: 'IN_PROGRESS',
+          activity: 'Processing follow-up...',
+        }, ['*'], { source: 'session-runner' })
+      }
+    } catch (err) {
+      log.session.warn('handleSend: phase/status reset failed', { sessionId, error: err instanceof Error ? err.message : String(err) })
     }
   }
 
@@ -4236,6 +4320,7 @@ export class SessionRunner {
       // includes these messages when the turn eventually completes
       this.batchCounts.set(sessionId, (this.batchCounts.get(sessionId) ?? 0) + newMsgs.length)
       log.session.info('handleSend: message injected mid-turn via stdin', { sessionId, count: newMsgs.length })
+      this.logDeliveryLatency(sessionId, 'mid-turn', newMsgs)
 
       // Write synthetic user events so history has user messages for dedup.
       // Without this, mid-turn injected messages are missing from JSONL history,
@@ -4260,6 +4345,32 @@ export class SessionRunner {
       await revertToPending(newMsgs)
       log.session.warn('handleSend: mid-turn stdin injection failed, reverted to pending', { sessionId })
     }
+  }
+
+  /**
+   * Log enqueue→delivered latency for a delivered batch. The messageId
+   * (`qm-<ts>-<rand>`) is the cross-layer request id — grep it to trace a
+   * single message from RPC through delivery. deliveryMs = now - enqueuedAt
+   * of the oldest message in the batch (worst-case wait the user felt).
+   */
+  private logDeliveryLatency(sessionId: string, path: 'stdin' | 'mid-turn' | 'resume', msgs: QueuedMessage[]): void {
+    const now = Date.now()
+    let maxMs = 0
+    let oldestId: string | undefined
+    for (const m of msgs) {
+      const enq = Date.parse(m.enqueuedAt)
+      if (!Number.isNaN(enq)) {
+        const ms = now - enq
+        if (ms >= maxMs) { maxMs = ms; oldestId = m.id }
+      }
+    }
+    log.session.info('message delivered', {
+      sessionId,
+      path,
+      count: msgs.length,
+      deliveryMs: maxMs,
+      messageId: oldestId,
+    })
   }
 
   /**
@@ -4417,6 +4528,7 @@ export class SessionRunner {
         // No local PID pre-flight check needed.
         if (await targetSession.writeMessage(combined)) {
           log.session.info('processNext: message sent via stdin (no new process)', { sessionId })
+          this.logDeliveryLatency(sessionId, 'stdin', msgs)
 
           // Write synthetic user events to streams file so Phase 1 has user messages.
           // One event per queued message so each optimistic copy can dedup by ID.
@@ -4517,6 +4629,7 @@ export class SessionRunner {
             sessionId,
             count: msgs.length,
           }, ['main-ai'], { source: 'session-runner' })
+          this.logDeliveryLatency(sessionId, 'resume', msgs)
 
           bus.emit(EventNames.SESSION_STARTED, {
             taskId: record.taskId,
@@ -4573,21 +4686,26 @@ export class SessionRunner {
         sessionId,
         count: msgs.length,
       }, ['main-ai'], { source: 'session-runner' })
+      this.logDeliveryLatency(sessionId, 'resume', msgs)
     } catch (err) {
       // Clean up activeProcessing + batchCounts on any error (send() EMFILE, lookup failure, etc.)
       this.clearActiveProcessing(sessionId)
 
-      // Remove messages that can't be processed
-      removeProcessed(sessionId).catch(() => {})
-
-      // Tell frontend to clear optimistic messages
-      bus.emit(EventNames.SESSION_BATCH_COMPLETED, {
-        sessionId,
-        count: msgs.length,
-      }, ['main-ai'], { source: 'session-runner' })
-
       const errorMsg = err instanceof Error ? err.message : String(err)
       log.session.warn('processNext failed', { sessionId, error: errorMsg })
+
+      // Delivery failed (SSH/daemon down, spawn EMFILE, etc.). Revert the batch to
+      // 'pending' instead of removing it — the messages were never delivered to the
+      // CLI, so they must survive (server restart re-picks pending; user can Retry).
+      // Then tell the UI to mark these specific messages 'failed' (keep text + Retry)
+      // via batch-failed — NOT batch-completed, which would delete the optimistic rows.
+      await revertToPending(msgs).catch(() => {})
+
+      bus.emit(EventNames.SESSION_BATCH_FAILED, {
+        sessionId,
+        messageIds: msgs.map((m) => m.id),
+        error: errorMsg,
+      }, ['main-ai'], { source: 'session-runner' })
 
       bus.emit(EventNames.SESSION_ERROR, {
         sessionId,

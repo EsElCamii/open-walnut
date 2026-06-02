@@ -62,6 +62,13 @@ const DockTaskCard = memo(function DockTaskCard({ task, isActive, onActivate, on
   const sessionId = resolveTaskSessionId(task);
   const isStreaming = task.session_status?.process_status === 'running';
 
+  // Scroll the card into view when it becomes active (e.g. just added to Focus),
+  // so the user sees where the task landed even if the dock scrolls horizontally.
+  const cardRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (isActive) cardRef.current?.scrollIntoView({ behavior: 'smooth', inline: 'nearest', block: 'nearest' });
+  }, [isActive]);
+
   // Red highlight for phases that need human attention
   const needsAttention = task.phase === 'AGENT_COMPLETE' || task.phase === 'AWAIT_HUMAN_ACTION';
 
@@ -95,6 +102,7 @@ const DockTaskCard = memo(function DockTaskCard({ task, isActive, onActivate, on
   return (<>
     {FullscreenBackdrop}
     <div
+      ref={cardRef}
       className={`dock-task-card${isActive ? ' dock-task-active' : ''}${needsAttention ? ' dock-task-attention' : ''}${fullscreenClass}`}
       onClick={(e) => { if (!isFullscreen && (e.target === e.currentTarget || (e.target as HTMLElement).closest('.dock-task-header'))) handleClick(); }}
       role="button"
@@ -193,15 +201,75 @@ const ChatDockItem = memo(function ChatDockItem({ isActive }: ChatDockItemProps)
   );
 });
 
+// ── DockQuickAdd — inline "+" to add a task straight into the Focus tier ──
+
+interface DockQuickAddProps {
+  onAdd: (title: string) => Promise<void>;
+}
+
+const DockQuickAdd = memo(function DockQuickAdd({ onAdd }: DockQuickAddProps) {
+  const [open, setOpen] = useState(false);
+  const [title, setTitle] = useState('');
+  const [busy, setBusy] = useState(false);
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => { if (open) inputRef.current?.focus(); }, [open]);
+
+  const submit = useCallback(async () => {
+    const t = title.trim();
+    if (!t || busy) return;
+    setBusy(true);
+    try {
+      await onAdd(t);
+      setTitle('');
+      setOpen(false);
+    } finally {
+      setBusy(false);
+    }
+  }, [title, busy, onAdd]);
+
+  if (!open) {
+    return (
+      <button
+        className="dock-quick-add-btn"
+        onClick={() => setOpen(true)}
+        title="Add a task to Focus"
+        aria-label="Add a task to Focus"
+      >
+        +
+      </button>
+    );
+  }
+
+  return (
+    <div className="dock-quick-add-form">
+      <input
+        ref={inputRef}
+        type="text"
+        value={title}
+        onChange={(e) => setTitle(e.target.value)}
+        placeholder="Add to Focus…"
+        aria-label="New focus task title"
+        onKeyDown={(e) => {
+          if (e.key === 'Enter') { e.preventDefault(); submit(); }
+          if (e.key === 'Escape') { setTitle(''); setOpen(false); }
+        }}
+        onBlur={() => { if (!title.trim()) setOpen(false); }}
+      />
+    </div>
+  );
+});
+
 // ── FocusDock (container) ──
 
 interface FocusDockProps {
   focusBar: UseFocusBarReturn;
+  onQuickAddToFocus?: (title: string) => Promise<void>;
 }
 
 const FOCUS_DOCK_MAX_VISIBLE = 3;
 
-export function FocusDock({ focusBar }: FocusDockProps) {
+export function FocusDock({ focusBar, onQuickAddToFocus }: FocusDockProps) {
   const { unpin, focusIds, pinnedIds } = focusBar;
   // Resolve tasks from TasksContext directly (FocusBarContext no longer triggers
   // on task data changes — only on ID changes — to prevent double-trigger cascade).
@@ -301,6 +369,7 @@ export function FocusDock({ focusBar }: FocusDockProps) {
             onUnpin={unpin}
           />
         ))}
+        {onQuickAddToFocus && <DockQuickAdd onAdd={onQuickAddToFocus} />}
       </div>
     </div>
   );

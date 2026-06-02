@@ -333,6 +333,9 @@ export interface Config {
   ui?: {
     /** How many session panels to show side-by-side: '1', '2', or 'auto' (breakpoint-driven). */
     session_panels?: '1' | '2' | 'auto';
+    /** When chatting with a pinned task, bump it to the front of its Focus tier.
+     *  Default: true. Set to false to keep the manual drag order fixed. */
+    bump_pinned_on_chat?: boolean;
   };
   /** Audio capture configuration (system audio recording) */
   audio?: {
@@ -563,6 +566,10 @@ export interface SessionRecord {
   archive_reason?: string;
   /** Plan text stored on execution session (from the archived plan session). */
   planContent?: string;
+  /** LLM-generated gist (topics/decisions/questions) for search indexing. Set by onSessionEnd summary agent. */
+  summary?: string;
+  /** ISO timestamp of last summary generation — used to skip re-summarizing recently-summarized sessions. */
+  summaryGeneratedAt?: string;
   /** Error message when process_status is 'error' — persisted for post-mortem display. */
   errorMessage?: string;
   /** Why the last process_status change happened (K8s condition style). */

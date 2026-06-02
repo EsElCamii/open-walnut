@@ -332,6 +332,7 @@ sessionsRouter.get('/list-dirs', async (req: Request, res: Response, next: NextF
 
 // POST /api/sessions/quick-start — create task + start session in one step
 sessionsRouter.post('/quick-start', async (req: Request, res: Response, next: NextFunction) => {
+  const requestTs = Date.now()
   try {
     const { cwd, host, message, model, mode, images, taskId: existingTaskId, taskMeta } = req.body as {
       cwd: string
@@ -522,6 +523,7 @@ sessionsRouter.post('/quick-start', async (req: Request, res: Response, next: Ne
       host,
       appendSystemPrompt,
       largePromptFile,
+      requestTs,
     }, ['session-runner'], { source: 'quick-start' })
 
     log.web.info('quick-start: created task + started session', { taskId: updatedTask.id, cwd, host, category: taskCategory, retry: !!existingTaskId })
@@ -1641,13 +1643,16 @@ sessionsRouter.post('/:sessionId/fork', async (req: Request, res: Response, next
         return
       }
       const newTitle = child_title ?? `Fork of ${parentTask.title}`
+      // No _skipPluginOps: a forked child inherits the parent's source (e.g.
+      // an external sync plugin) and must pass the same content validation + push
+      // as any other task. Skipping it previously let CJK titles inherited from a
+      // parent slip into the external backend. addTask throws on CJK → surfaced via next(err).
       const { task: newChild } = await addTask({
         title: newTitle,
         category: parentTask.category,
         project: parentTask.project,
         parent_task_id: parentTask.id,
         source: parentTask.source,
-        _skipPluginOps: true, // fork is internal — skip plugin validateContent (rejects CJK) and auto-push
       })
       bus.emit(EventNames.TASK_CREATED, { task: newChild }, ['web-ui', 'main-agent'], { source: 'fork' })
       task = newChild

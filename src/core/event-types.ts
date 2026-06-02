@@ -42,6 +42,13 @@ export interface SessionStartEvent {
    * same path on the remote host before the session starts.
    */
   largePromptFile?: { localPath: string; originalLength: number };
+  /**
+   * Wall-clock timestamp (Date.now()) when the HTTP request that triggered this
+   * session start was received. Used purely for latency instrumentation — lets the
+   * init handler break down end-to-end time-to-init across each hop (route → send →
+   * spawn → CLI init). Optional; absent for non-HTTP-triggered starts.
+   */
+  requestTs?: number;
 }
 
 export interface SessionSendEvent {

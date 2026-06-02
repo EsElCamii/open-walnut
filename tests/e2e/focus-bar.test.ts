@@ -79,6 +79,14 @@ describe('Focus Bar API', () => {
     expect(r.data.pinned_tasks).toHaveLength(4);
   });
 
+  it('newly pinned task surfaces at the top of the list', async () => {
+    // Pins so far (in order): taskIds[0], [1], [2], [3]. Each new pin goes to the
+    // front, so the most recently pinned (taskIds[3]) must be first.
+    const r = await api('GET', '/api/focus/tasks');
+    expect(r.data.pinned_tasks[0]).toBe(taskIds[3]);
+    expect(r.data.pinned_tasks[r.data.pinned_tasks.length - 1]).toBe(taskIds[0]);
+  });
+
   it('DELETE /api/focus/tasks/:id unpins a task', async () => {
     const r = await api('DELETE', `/api/focus/tasks/${taskIds[0]}`);
     expect(r.status).toBe(200);

@@ -7,7 +7,8 @@ import type { MessageBlock, ThinkingBlock, ToolCallBlock, ImageBlock, TaskContex
 import { useLightbox } from '@/hooks/useLightbox';
 import { useEntityClickHandler } from '@/hooks/useEntityClickHandler';
 import { Lightbox } from '@/components/common/Lightbox';
-import { entityRefsToHtml, renderToolResultWithRefs, extractMarkdownFields } from '@/utils/markdown';
+import { FileViewer } from '@/components/common/FileViewer';
+import { entityRefsToHtml, renderToolResultWithRefs, extractMarkdownFields, renderMarkdownWithRefs } from '@/utils/markdown';
 import { parseAskQuestionInput } from './QuestionPopover';
 import { SubagentBlock } from './SubagentBlock';
 import { getErrorSuggestion } from '@/utils/error-suggestions';
@@ -526,9 +527,10 @@ const SESSION_ID_JSON_RE = /("(?:session_id|sessionId|from_plan|plan_session|exe
  */
 function renderJsonWithTaskLinks(
   input: Record<string, unknown>,
-  taskLookup: Map<string, Task>,
-  onTaskClick: (taskId: string) => void,
-  onSessionClick: (sessionId: string) => void,
+  taskLookup?: Map<string, Task>,
+  onTaskClick?: (taskId: string) => void,
+  onSessionClick?: (sessionId: string) => void,
+  onFileOpen?: (path: string, line?: number) => void,
 ): ReactNode {
   const jsonStr = JSON.stringify(input, null, 2);
 
@@ -536,75 +538,114 @@ function renderJsonWithTaskLinks(
   type Replacement = { index: number; length: number; prefix: string; suffix: string; node: ReactNode };
   const replacements: Replacement[] = [];
 
-  // Task ID matches
-  TASK_ID_JSON_RE.lastIndex = 0;
   let match: RegExpExecArray | null;
-  while ((match = TASK_ID_JSON_RE.exec(jsonStr)) !== null) {
-    const rawId = match[2];
-    const task = resolveTaskId(rawId, taskLookup);
-    if (!task) continue;
-    replacements.push({
-      index: match.index,
-      length: match[0].length,
-      prefix: match[1],
-      suffix: match[3],
-      node: (
-        <span
-          key={`task-pill-${match.index}`}
-          className="task-id-pill"
-          title={`${rawId} → ${task.title}`}
-          onClick={(e) => { e.stopPropagation(); onTaskClick(task.id); }}
-        >
-          {task.title}
-        </span>
-      ),
-    });
-  }
 
-  // Bare "id" matches (task ID format only)
-  BARE_ID_JSON_RE.lastIndex = 0;
-  while ((match = BARE_ID_JSON_RE.exec(jsonStr)) !== null) {
-    const rawId = match[2];
-    const task = resolveTaskId(rawId, taskLookup);
-    if (!task) continue;
-    replacements.push({
-      index: match.index,
-      length: match[0].length,
-      prefix: match[1],
-      suffix: match[3],
-      node: (
-        <span
-          key={`task-pill-bare-${match.index}`}
-          className="task-id-pill"
-          title={`${rawId} → ${task.title}`}
-          onClick={(e) => { e.stopPropagation(); onTaskClick(task.id); }}
-        >
-          {task.title}
-        </span>
-      ),
-    });
+  // Task ID matches
+  if (taskLookup && onTaskClick) {
+    TASK_ID_JSON_RE.lastIndex = 0;
+    while ((match = TASK_ID_JSON_RE.exec(jsonStr)) !== null) {
+      const rawId = match[2];
+      const task = resolveTaskId(rawId, taskLookup);
+      if (!task) continue;
+      const m = match;
+      replacements.push({
+        index: m.index,
+        length: m[0].length,
+        prefix: m[1],
+        suffix: m[3],
+        node: (
+          <span
+            key={`task-pill-${m.index}`}
+            className="task-id-pill"
+            title={`${rawId} → ${task.title}`}
+            onClick={(e) => { e.stopPropagation(); onTaskClick(task.id); }}
+          >
+            {task.title}
+          </span>
+        ),
+      });
+    }
+
+    // Bare "id" matches (task ID format only)
+    BARE_ID_JSON_RE.lastIndex = 0;
+    while ((match = BARE_ID_JSON_RE.exec(jsonStr)) !== null) {
+      const rawId = match[2];
+      const task = resolveTaskId(rawId, taskLookup);
+      if (!task) continue;
+      const m = match;
+      replacements.push({
+        index: m.index,
+        length: m[0].length,
+        prefix: m[1],
+        suffix: m[3],
+        node: (
+          <span
+            key={`task-pill-bare-${m.index}`}
+            className="task-id-pill"
+            title={`${rawId} → ${task.title}`}
+            onClick={(e) => { e.stopPropagation(); onTaskClick(task.id); }}
+          >
+            {task.title}
+          </span>
+        ),
+      });
+    }
   }
 
   // Session ID matches
-  SESSION_ID_JSON_RE.lastIndex = 0;
-  while ((match = SESSION_ID_JSON_RE.exec(jsonStr)) !== null) {
-    const rawId = match[2];
-    replacements.push({
-      index: match.index,
-      length: match[0].length,
-      prefix: match[1],
-      suffix: match[3],
-      node: (
-        <span
-          key={`session-pill-${match.index}`}
-          className="session-id-pill"
-          title={rawId}
-          onClick={(e) => { e.stopPropagation(); onSessionClick(rawId); }}
-        >
-          {rawId.slice(0, 12)}&hellip;
-        </span>
-      ),
-    });
+  if (onSessionClick) {
+    SESSION_ID_JSON_RE.lastIndex = 0;
+    while ((match = SESSION_ID_JSON_RE.exec(jsonStr)) !== null) {
+      const rawId = match[2];
+      const m = match;
+      replacements.push({
+        index: m.index,
+        length: m[0].length,
+        prefix: m[1],
+        suffix: m[3],
+        node: (
+          <span
+            key={`session-pill-${m.index}`}
+            className="session-id-pill"
+            title={rawId}
+            onClick={(e) => { e.stopPropagation(); onSessionClick(rawId); }}
+          >
+            {rawId.slice(0, 12)}&hellip;
+          </span>
+        ),
+      });
+    }
+  }
+
+  // File path matches — any quoted absolute path with a file extension, regardless
+  // of the key name (walnut tools use varied keys: file_path, source, path, …).
+  // Make them clickable to open the shared FileViewer overlay. Skip images.
+  if (onFileOpen) {
+    const FILE_PATH_JSON_RE = /(")(\/(?:[\w@.+ -]+\/)+[\w@.+ -]+\.[\w]+)(")/g;
+    const SKIP_EXT = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'ico', 'bmp']);
+    while ((match = FILE_PATH_JSON_RE.exec(jsonStr)) !== null) {
+      const filePath = match[2];
+      const ext = filePath.split('.').pop()?.toLowerCase() ?? '';
+      if (SKIP_EXT.has(ext)) continue;
+      const m = match;
+      replacements.push({
+        index: m.index,
+        length: m[0].length,
+        prefix: m[1],
+        suffix: m[3],
+        node: (
+          <a
+            key={`file-link-${m.index}`}
+            className="file-link"
+            href="#"
+            title={filePath}
+            onClick={(e) => { e.preventDefault(); e.stopPropagation(); onFileOpen(filePath); }}
+          >
+            {filePath}
+          </a>
+        ),
+      });
+    }
   }
 
   if (replacements.length === 0) return jsonStr;
@@ -699,9 +740,10 @@ interface ToolCallSectionProps {
   taskLookup?: Map<string, Task>;
   onTaskClick?: (taskId: string) => void;
   onSessionClick?: (sessionId: string) => void;
+  onFileOpen?: (path: string, line?: number) => void;
 }
 
-export function ToolCallSection({ block, taskLookup, onTaskClick, onSessionClick }: ToolCallSectionProps) {
+export function ToolCallSection({ block, taskLookup, onTaskClick, onSessionClick, onFileOpen }: ToolCallSectionProps) {
   const navigate = useNavigate();
   // Auto-expand get_session_history with plan_only: true so plan content is immediately visible
   const defaultOpen = block.name === 'session_history' && block.input?.plan_only === true;
@@ -715,19 +757,18 @@ export function ToolCallSection({ block, taskLookup, onTaskClick, onSessionClick
     }
   }, [navigate, onSessionClick]);
 
-  // Unified click handler for entity ref links (.task-link, .session-link) in tool results
-  const handleResultClick = useEntityClickHandler(onTaskClick, onSessionClick);
+  // Unified click handler for entity ref links (.task-link, .session-link, .file-link) in tool results
+  const handleResultClick = useEntityClickHandler(onTaskClick, onSessionClick, onFileOpen);
 
   // Collapsed summary: resolve task IDs and session IDs as pills
   const inputSummaryNode = block.input
     ? buildInputSummary(block.input, taskLookup, onTaskClick, handleSessionClick)
     : null;
 
-  // Expanded JSON: resolve task IDs and session IDs inline as clickable pills
+  // Expanded JSON: resolve task IDs / session IDs / file paths inline as clickable nodes.
+  // Always use the renderer so file paths become clickable even without taskLookup.
   const expandedJson = block.input
-    ? (taskLookup && onTaskClick
-      ? renderJsonWithTaskLinks(block.input, taskLookup, onTaskClick, handleSessionClick)
-      : JSON.stringify(block.input, null, 2))
+    ? renderJsonWithTaskLinks(block.input, taskLookup, onTaskClick, handleSessionClick, onFileOpen)
     : null;
 
   // Render tool result as markdown with entity refs as clickable pills
@@ -766,7 +807,7 @@ export function ToolCallSection({ block, taskLookup, onTaskClick, onSessionClick
               {markdownFields.map(f => (
                 <div key={f.key} className="chat-tool-block-field-markdown">
                   <div className="chat-tool-block-field-label">{f.key}</div>
-                  <div className="chat-tool-block-result markdown-body"
+                  <div className="chat-tool-block-result markdown-body" onClick={handleResultClick}
                        dangerouslySetInnerHTML={{ __html: f.html }} />
                 </div>
               ))}
@@ -805,12 +846,13 @@ function extractMessageToUser(blocks: MessageBlock[]): string | null {
  * ALL content (tool calls, thinking, text, images) collapses by default.
  * Only <MESSAGE-TO-USER> content is shown above the collapsed group.
  */
-function SystemMessageGroup({ blocks, sourceLabel, taskLookup, onTaskClick, onSessionClick, onContentClick }: {
+function SystemMessageGroup({ blocks, sourceLabel, taskLookup, onTaskClick, onSessionClick, onFileOpen, onContentClick }: {
   blocks: MessageBlock[];
   sourceLabel: string;
   taskLookup?: Map<string, Task>;
   onTaskClick?: (taskId: string) => void;
   onSessionClick?: (sessionId: string) => void;
+  onFileOpen?: (path: string, line?: number) => void;
   onContentClick: (e: React.MouseEvent<HTMLDivElement>) => void;
 }) {
   const [manualOpen, setManualOpen] = useState<boolean | null>(null);
@@ -862,7 +904,7 @@ function SystemMessageGroup({ blocks, sourceLabel, taskLookup, onTaskClick, onSe
                   return <ThinkingSection key={i} block={block} />;
                 case 'tool_call':
                   if (block.name === 'subagent_create') return <SubagentBlock key={i} block={block} />;
-                  return <ToolCallSection key={i} block={block} taskLookup={taskLookup} onTaskClick={onTaskClick} onSessionClick={onSessionClick} />;
+                  return <ToolCallSection key={i} block={block} taskLookup={taskLookup} onTaskClick={onTaskClick} onSessionClick={onSessionClick} onFileOpen={onFileOpen} />;
                 case 'text':
                   return <MemoizedTextBlock key={i} content={block.content} onClick={onContentClick} />;
                 case 'image': {
@@ -887,9 +929,9 @@ function SystemMessageGroup({ blocks, sourceLabel, taskLookup, onTaskClick, onSe
   );
 }
 
-/** Memoized text block that caches renderMarkdown output */
+/** Memoized text block that caches renderMarkdownWithRefs output (incl. clickable file paths) */
 function MemoizedTextBlock({ content, onClick }: { content: string; onClick: (e: React.MouseEvent<HTMLDivElement>) => void }) {
-  const html = useMemo(() => renderMarkdown(content), [content]);
+  const html = useMemo(() => renderMarkdownWithRefs(content), [content]);
   return (
     <div
       className="markdown-body"
@@ -902,14 +944,22 @@ function MemoizedTextBlock({ content, onClick }: { content: string; onClick: (e:
 function ChatMessageInner({ role, content, blocks, images, taskContext, routeInfo, timestamp, source, cronJobName, notification, queued, onCancel, taskLookup, onTaskClick, onSessionClick }: ChatMessageProps) {
   const { lightboxSrc, openLightbox, closeLightbox } = useLightbox();
 
+  // File path click → open the shared FileViewer overlay. Self-contained so every
+  // page that renders ChatMessage (MainPage chat + session columns, ChatPage) gets
+  // clickable file paths without threading a callback through the props chain.
+  const [fileViewerState, setFileViewerState] = useState<{ path: string; line?: number } | null>(null);
+  const handleFileOpen = useCallback((path: string, line?: number) => {
+    setFileViewerState({ path, line });
+  }, []);
+
   const isCron = source === 'cron';
   const isHeartbeat = source === 'heartbeat';
   const isNotification = notification || source === 'session' || source === 'session-error' || source === 'agent-error';
   const isErrorNotification = source === 'session-error' || source === 'agent-error';
   const time = formatTimestamp(timestamp);
 
-  // Unified entity click handler for .task-link and .session-link anchors
-  const handleEntityClick = useEntityClickHandler(onTaskClick, onSessionClick);
+  // Unified entity click handler for .task-link, .session-link, and .file-link anchors
+  const handleEntityClick = useEntityClickHandler(onTaskClick, onSessionClick, handleFileOpen);
 
   // Intercept clicks on task-link, session-link anchors, and lightbox images
   // NOTE: ALL hooks must be declared before any early returns (Rules of Hooks).
@@ -942,7 +992,7 @@ function ChatMessageInner({ role, content, blocks, images, taskContext, routeInf
       // Single Source of Truth: render full content as-is. Console never strips content.
       // Triage messages now contain all sections (notification + analysis); collapsing
       // is handled by the collapsed summary above, not by filtering content here.
-      return (role === 'user' && source !== 'triage') ? renderUserMessage(content) : renderMarkdown(content);
+      return (role === 'user' && source !== 'triage') ? renderUserMessage(content) : renderMarkdownWithRefs(content);
     }
     return null;
   }, [content, blocks, source, notification, role]);
@@ -1164,6 +1214,7 @@ function ChatMessageInner({ role, content, blocks, images, taskContext, routeInf
                   taskLookup={taskLookup}
                   onTaskClick={onTaskClick}
                   onSessionClick={onSessionClick}
+                  onFileOpen={handleFileOpen}
                   onContentClick={handleContentClick}
                 />
               ) : (
@@ -1203,7 +1254,7 @@ function ChatMessageInner({ role, content, blocks, images, taskContext, routeInf
                           )
                         }
                       }
-                      return <ToolCallSection key={i} block={block} taskLookup={taskLookup} onTaskClick={onTaskClick} onSessionClick={onSessionClick} />;
+                      return <ToolCallSection key={i} block={block} taskLookup={taskLookup} onTaskClick={onTaskClick} onSessionClick={onSessionClick} onFileOpen={handleFileOpen} />;
                     }
                     case 'text':
                       return <MemoizedTextBlock key={i} content={block.content} onClick={handleContentClick} />;
@@ -1233,6 +1284,13 @@ function ChatMessageInner({ role, content, blocks, images, taskContext, routeInf
           )}
         </div>
         {lightboxSrc && <Lightbox src={lightboxSrc} onClose={closeLightbox} />}
+        {fileViewerState && (
+          <FileViewer
+            path={fileViewerState.path}
+            line={fileViewerState.line}
+            onClose={() => setFileViewerState(null)}
+          />
+        )}
       </>
     );
   }
@@ -1316,6 +1374,13 @@ function ChatMessageInner({ role, content, blocks, images, taskContext, routeInf
         )}
       </div>
       {lightboxSrc && <Lightbox src={lightboxSrc} onClose={closeLightbox} />}
+      {fileViewerState && (
+        <FileViewer
+          path={fileViewerState.path}
+          line={fileViewerState.line}
+          onClose={() => setFileViewerState(null)}
+        />
+      )}
     </>
   );
 }

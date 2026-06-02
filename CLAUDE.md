@@ -115,6 +115,21 @@ Plans: architecture diagrams first → UX scenarios → pseudocode. No detailed 
 
 Use the structured logger (`log.info('subsystem', 'message', { sessionId, taskId })`) — never raw `console.log`. IDs must be **full, never truncated** so `grep <sessionId>` traces across browser + server. The logger routes through `console.log`/`warn`/`error` which the browser-logger monkey-patch forwards to `/tmp/open-walnut/`. Never use `console.debug` (invisible to forwarder).
 
+## Log investigation toolkit: `scripts/walnut-logs.sh`
+
+One entry point for digging through Walnut logs (structured JSON at `/tmp/open-walnut/open-walnut-<date>.log`). Needs `jq`.
+
+```bash
+scripts/walnut-logs.sh session <sid>     # full timeline for a session
+scripts/walnut-logs.sh delivery [sid]    # message enqueue→delivered latency (deliveryMs)
+scripts/walnut-logs.sh slow [ms]         # deliveries slower than ms (default 3000) — find lag
+scripts/walnut-logs.sh daemon <sid>      # which daemon-d-*.log serves a sid
+scripts/walnut-logs.sh jsonl <sid>       # tail the session's CLI .jsonl stream
+scripts/walnut-logs.sh req <id> | task <id> | errors [n] | tail [n]
+```
+
+Message-send latency is logged as `message delivered {deliveryMs, path, messageId}` at every delivery point (`path` = stdin / mid-turn / resume). `messageId` (`qm-…`) is the cross-layer request id — grep it to trace one message end-to-end.
+
 ## Debugging the Claude Code CLI (stuck / silent sessions)
 
 When a session goes `idle` with no output, gets stuck mid-turn, or the CLI appears hung, check **Claude Code's own trace log**. Walnut passes `--debug` to every `claude -p` spawn by default, so this log is always available.

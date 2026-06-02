@@ -42,6 +42,43 @@ const testSshTarget: SshTarget = {
 }
 
 // ═══════════════════════════════════════════════════════════════════
+//  B0: non-ephemeral server is never read-only (mock IS_EPHEMERAL: false)
+// ═══════════════════════════════════════════════════════════════════
+
+describe('B0: ephemeral attach-only discriminator (non-ephemeral)', () => {
+  it('remote host under NON-ephemeral → NOT read-only (deploy/start allowed)', () => {
+    const conn = new DaemonConnection('myhost', testSshTarget)
+    expect((conn as unknown as { isReadOnlyRemote: boolean }).isReadOnlyRemote).toBe(false)
+  })
+
+  // CONTRAST to the ephemeral attach-only suite: proves the gate is
+  // load-bearing, not a universal no-op. With IS_EPHEMERAL=false, the same
+  // "no daemon running" path that THROWS for ephemeral instead DOES deploy +
+  // start the daemon. If this regressed, the gate would block production too.
+  it('Test 6 — CONTRAST: non-ephemeral connect() with no daemon DOES deploy/start', async () => {
+    const conn = new DaemonConnection('myhost', testSshTarget)
+    const priv = conn as unknown as Record<string, (...args: unknown[]) => unknown>
+
+    vi.spyOn(priv, 'ensureControlMaster').mockResolvedValue(undefined)
+    vi.spyOn(priv, 'checkDaemonRunning').mockResolvedValue(null)
+    const deploy = vi.spyOn(priv, 'deployDaemon').mockResolvedValue(undefined)
+    const start = vi.spyOn(priv, 'startDaemon').mockResolvedValue(42424)
+    vi.spyOn(priv, 'createTunnel').mockResolvedValue(5555)
+    vi.spyOn(priv, 'connectWebSocket').mockResolvedValue(undefined)
+    vi.spyOn(priv, 'verifyCapabilities').mockResolvedValue(true)
+    // Fire-and-forget post-connect recovery would otherwise attempt real SSH.
+    vi.spyOn(priv, 'recoverDisconnectedSessions').mockResolvedValue(undefined)
+
+    await expect(conn.connect()).resolves.toBeUndefined()
+    expect(deploy).toHaveBeenCalledTimes(1)
+    expect(start).toHaveBeenCalledTimes(1)
+
+    // connect() started a ping interval — clear it to avoid leaking a handle.
+    conn.disconnect()
+  })
+})
+
+// ═══════════════════════════════════════════════════════════════════
 //  B1: createSessionManager factory dispatch
 // ═══════════════════════════════════════════════════════════════════
 

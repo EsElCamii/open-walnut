@@ -20,12 +20,23 @@ import {
 } from '../../src/core/task-manager.js';
 import { closeDb } from '../../src/core/task-db.js';
 import { WALNUT_HOME, CONFIG_FILE } from '../../src/constants.js';
+import { registry } from '../../src/core/integration-registry.js';
+import { createMockPlugin } from './plugin-test-utils.js';
 import type { Task } from '../../src/core/types.js';
+
+// Fake plugin source names used across migration tests. They must be registered
+// so cross-source migration's awaited push succeeds (noop pushTask). Without a
+// registered plugin, autoPushIfConfigured returns "plugin not loaded" and
+// updateTask now throws on it (migration push is awaited, not fire-and-forget).
+const MIGRATION_PLUGIN_SOURCES = ['ms-todo', 'plugin-a', 'plugin-b', 'plugin-x', 'scratch'];
 
 beforeEach(async () => {
   closeDb();
   _resetForTesting();
   await fs.rm(WALNUT_HOME, { recursive: true, force: true, maxRetries: 3, retryDelay: 50 });
+  for (const id of MIGRATION_PLUGIN_SOURCES) {
+    if (!registry.has(id)) registry.register(id, createMockPlugin({ id }));
+  }
 });
 
 afterEach(async () => {

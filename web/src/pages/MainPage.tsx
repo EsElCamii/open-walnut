@@ -27,6 +27,7 @@ import { AgentSwitcher } from '@/components/chat/AgentSwitcher';
 import { useContextInspector } from '@/hooks/useContextInspector';
 import { useUrlSync } from '@/hooks/useUrlSync';
 import { useSessionPanelMode } from '@/hooks/useSessionPanelMode';
+import { useSlashCommands } from '@/hooks/useSlashCommands';
 import { shouldHideUiOnlyMessage } from '@/hooks/useDeveloperSettings';
 import { useUiOnlySettings } from '@/hooks/useDeveloperSettings';
 import { resolveTaskSessionId } from '@/utils/session-status';
@@ -269,6 +270,13 @@ export function MainPage({ visible = true, navigateRef }: MainPageProps) {
   //   (2) Avoid stale-closure bugs in the async `handleSendMessage` — a ref always
   //       reads the latest value without needing to be in the effect's dep array.
   const quickStartMetaRef = useRef<QuickStartTaskMeta | null>(null);
+
+  // Quick-start mode: the chat input behaves like a session (skills/commands for
+  // the chosen cwd, and "@" file mentions rooted at that cwd + host).
+  const { items: quickStartCommands, search: searchQuickStartCommands } = useSlashCommands(
+    quickStartPath?.cwd,
+    quickStartPath?.host ?? undefined,
+  );
 
   // Set of session IDs currently open in columns — for active pill indicators
   const openSessionIdSet = useMemo(() => new Set(sessionColumns.map(c => c.id)), [sessionColumns]);
@@ -749,16 +757,28 @@ export function MainPage({ visible = true, navigateRef }: MainPageProps) {
     try {
       if (input.starred && task?.id) star(task.id);
       if (input.pinnedTier && task?.id) {
+        // Pin first (defaults to satellite), then set the requested tier unconditionally.
+        // Previously 'focus' was skipped here, leaving the task stuck in satellite.
         await focusBar.pin(task.id);
-        if (input.pinnedTier !== 'focus') {
-          setTimeout(() => focusBar.setTier(task.id, input.pinnedTier!), 100);
-        }
+        await focusBar.setTier(task.id, input.pinnedTier);
+        // Locate the task wherever it landed (any tier, not just focus). Focusing it
+        // scrolls the Pinned region to the right tier card. Set focus directly from the
+        // returned task object — dispatching the dock event alone is unreliable here
+        // because the task may not be in the local map yet (arrives via WS).
+        setFocusedTask(task);
+        setFocusNonce((n) => n + 1);
+        window.dispatchEvent(new CustomEvent('dock:activate-task', { detail: { taskId: task.id } }));
       }
     } catch (err) {
       console.warn('Quick add post-create side-effect failed', err);
     }
     return task;
   }, [create, star, focusBar]);
+
+  // Inline "+" in the Focus Dock — create a task and pin it straight to the Focus tier.
+  const handleQuickAddToFocus = useCallback(async (title: string) => {
+    await handleCreate({ title, priority: 'none', pinnedTier: 'focus' });
+  }, [handleCreate]);
 
   // Ref to avoid re-creating handleFocusTask on every focus change (which defeats React.memo on TodoPanel)
   const focusedTaskRef = useRef(focusedTask);
@@ -1176,6 +1196,13 @@ export function MainPage({ visible = true, navigateRef }: MainPageProps) {
               queueCount={chat.queueCount}
               draftKey="draft:main-chat"
               onToggleMode={toggleMode}
+              sessionCommands={quickStartPath ? quickStartCommands : undefined}
+              searchSessionCommands={quickStartPath ? searchQuickStartCommands : undefined}
+              // Quick-start: "@" roots at the chosen cwd + host (like a session).
+              // Plain main chat has no cwd, so "@" roots at "~" — backend expands it.
+              // (?? undefined: QuickStartPath.host is string|null; coerce null→undefined.)
+              mentionCwd={quickStartPath?.cwd ?? '~'}
+              mentionHost={quickStartPath?.host ?? undefined}
             />
           </div>
         </div>
@@ -1259,7 +1286,7 @@ export function MainPage({ visible = true, navigateRef }: MainPageProps) {
       </div>{/* end .main-page-content-row */}
 
       {/* FocusDock — inside right column, below chat+sessions */}
-      {focusBar.visible && <FocusDock focusBar={focusBar} />}
+      {focusBar.visible && <FocusDock focusBar={focusBar} onQuickAddToFocus={handleQuickAddToFocus} />}
 
       </div>{/* end .main-page-right */}
 

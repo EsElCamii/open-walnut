@@ -6,6 +6,14 @@ import { fileURLToPath } from 'node:url';
 export const WALNUT_HOME = resolveOpenWalnutHome();
 
 /**
+ * True when running as an ephemeral child server (open-walnut web --_ephemeral-child).
+ * Ephemeral servers run over a snapshot of production data and must never touch
+ * production's shared remote singleton daemons. Read at import time — the env is
+ * fixed at spawn (web.ts sets OPEN_WALNUT_EPHEMERAL=1) and never changes in-process.
+ */
+export const IS_EPHEMERAL = process.env.OPEN_WALNUT_EPHEMERAL === '1';
+
+/**
  * Resolve OPEN_WALNUT_HOME with guards against:
  * 1. Test processes touching production data (~/.open-walnut/)
  * 2. Leaked ephemeral env vars from parent processes
@@ -156,6 +164,9 @@ export function agentDailyDir(agentId?: string): string {
 export const GLOBAL_SKILLS_DIR = path.join(WALNUT_HOME, 'skills');
 export const SKILL_SETTINGS_FILE = path.join(WALNUT_HOME, 'skill-settings.json');
 export const CLAUDE_SKILLS_DIR = path.join(CLAUDE_HOME, 'skills');
+/** Claude Code plugin registry — where enabled plugins + marketplaces are recorded. */
+export const CLAUDE_SETTINGS_FILE = path.join(CLAUDE_HOME, 'settings.json');
+export const CLAUDE_PLUGINS_DIR = path.join(CLAUDE_HOME, 'plugins');
 export const CRON_FILE = path.join(WALNUT_HOME, 'cron-jobs.json');
 export const USAGE_DB_FILE = path.join(WALNUT_HOME, 'usage.sqlite');
 export const LOG_DIR = '/tmp/open-walnut';

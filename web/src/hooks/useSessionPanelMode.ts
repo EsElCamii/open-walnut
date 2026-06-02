@@ -46,7 +46,11 @@ export function useSessionPanelMode(containerWidth = 0) {
   const setMode = useCallback((m: SessionPanelMode) => {
     setModeState(m);
     lastSelfChangeRef.current = Date.now();
-    updateConfig({ ui: { session_panels: m } }).catch(() => {});
+    // Merge into existing ui block so sibling keys (e.g. bump_pinned_on_chat) survive —
+    // updateConfig replaces the whole `ui` object, not individual sub-keys.
+    fetchConfig()
+      .then(c => updateConfig({ ui: { ...c.ui, session_panels: m } }))
+      .catch(() => {});
   }, []);
 
   const effectiveMaxPanels: number =

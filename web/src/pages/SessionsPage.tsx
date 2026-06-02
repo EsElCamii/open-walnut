@@ -265,8 +265,9 @@ export function SessionsPage() {
 
   const selectedSession = treeSession ?? directSession;
 
-  // Slash command autocomplete for session input
-  const { items: slashCommands, search: searchSlashCommands } = useSlashCommands(selectedSession?.cwd);
+  // Slash command autocomplete for session input — pass host so REMOTE sessions
+  // get the remote host's skills, not the Mac's local ones.
+  const { items: slashCommands, search: searchSlashCommands } = useSlashCommands(selectedSession?.cwd, selectedSession?.host);
 
   // When "Clear Context & Execute" replaces the session, switch to the new session
   const handleSessionReplaced = useCallback((newSessionId: string) => {
