@@ -3025,6 +3025,11 @@ export async function updateTaskRaw(
 
   // Optional side-effects (outside the lock — push re-acquires it). Defaults off
   // to preserve the silent contract for sync-pull callers.
+  // Fire-and-forget (unlike updateTask which awaits + throws): callers here are
+  // hot-path phase transitions that must not block on network. Push failures
+  // stay visible because autoPushIfConfigured stamps task.sync_error and emits
+  // its own TASK_UPDATED internally on every failure path — the UI still shows
+  // "didn't sync" even though we swallow the rejection here.
   if (opts?.push && updated.source !== 'local') {
     autoPushIfConfigured(updated).catch(() => { /* sync_error already stamped inside */ });
   }

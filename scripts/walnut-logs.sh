@@ -22,7 +22,10 @@
 #   scripts/walnut-logs.sh grep <pattern>       raw grep across today's JSON log
 #   scripts/walnut-logs.sh tail [n]             follow the live JSON log (n lines back, default 40)
 #
-set -euo pipefail
+# No `-e`: this is an interactive query tool, and a grep that matches nothing
+# (exit 1) is a normal "no results" outcome, not a fatal error — `-e` would
+# abort the whole script and print nothing for a valid-but-empty query.
+set -uo pipefail
 
 LOG_DIR="${WALNUT_LOG_DIR:-/tmp/open-walnut}"
 STREAMS_DIR="${WALNUT_STREAMS_DIR:-/tmp/open-walnut-streams}"
