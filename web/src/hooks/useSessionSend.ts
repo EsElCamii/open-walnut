@@ -7,12 +7,14 @@ import type { ImageAttachment } from '@/api/chat';
 interface UseSessionSendReturn {
   optimisticMsgs: OptimisticMessage[];
   sendError: string | null;
-  send: (sessionId: string, message: string, images?: ImageAttachment[]) => void;
-  interruptSend: (sessionId: string, message: string, images?: ImageAttachment[]) => void;
+  /** Resolves true once the message is persisted server-side (RPC ok), false if the RPC rejected. */
+  send: (sessionId: string, message: string, images?: ImageAttachment[]) => Promise<boolean>;
+  interruptSend: (sessionId: string, message: string, images?: ImageAttachment[]) => Promise<boolean>;
   retryFailed: (queueId: string, sessionId: string) => void;
   dismissFailed: (queueId: string) => void;
   handleMessagesDelivered: (count: number) => void;
   handleBatchCompleted: (count: number) => void;
+  handleBatchFailed: (messageIds: string[], error: string) => void;
   handleEditQueued: (sessionId: string, queueId: string, newText: string) => void;
   handleDeleteQueued: (sessionId: string, queueId: string) => void;
   addExternalQueued: (msg: { queueId: string; text: string }) => void;
@@ -86,7 +88,7 @@ export function useSessionSend(activeSessionId: string | null): UseSessionSendRe
     }
   }, [activeSessionId]);
 
-  const send = useCallback((sessionId: string, message: string, images?: ImageAttachment[]) => {
+  const send = useCallback(async (sessionId: string, message: string, images?: ImageAttachment[]): Promise<boolean> => {
     setSendError(null);
 
     const tempId = `temp-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
@@ -105,24 +107,26 @@ export function useSessionSend(activeSessionId: string | null): UseSessionSendRe
     if (images && images.length > 0) {
       rpcPayload.images = images.map(img => ({ data: img.data, mediaType: img.mediaType }));
     }
-    wsClient.sendRpc<{ messageId: string }>('session:send', rpcPayload)
-      .then((res) => {
-        if (res?.messageId) {
-          setOptimisticMsgs((prev) => prev.map((m) =>
-            m.queueId === tempId ? { ...m, queueId: res.messageId, status: 'received' as const } : m
-          ));
-        }
-      })
-      .catch((e: Error) => {
-        log.error('send', 'RPC failed', { sessionId, error: e.message });
-        setSendError(e.message);
+    try {
+      const res = await wsClient.sendRpc<{ messageId: string }>('session:send', rpcPayload);
+      if (res?.messageId) {
         setOptimisticMsgs((prev) => prev.map((m) =>
-          m.queueId === tempId ? { ...m, status: 'failed' as const, failedError: e.message } : m
+          m.queueId === tempId ? { ...m, queueId: res.messageId, status: 'received' as const } : m
         ));
-      });
+      }
+      return true;
+    } catch (e) {
+      const err = e as Error;
+      log.error('send', 'RPC failed', { sessionId, error: err.message });
+      setSendError(err.message);
+      setOptimisticMsgs((prev) => prev.map((m) =>
+        m.queueId === tempId ? { ...m, status: 'failed' as const, failedError: err.message } : m
+      ));
+      return false;
+    }
   }, []);
 
-  const interruptSend = useCallback((sessionId: string, message: string, images?: ImageAttachment[]) => {
+  const interruptSend = useCallback(async (sessionId: string, message: string, images?: ImageAttachment[]): Promise<boolean> => {
     setSendError(null);
 
     const tempId = `temp-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
@@ -141,21 +145,23 @@ export function useSessionSend(activeSessionId: string | null): UseSessionSendRe
     if (images && images.length > 0) {
       rpcPayload.images = images.map(img => ({ data: img.data, mediaType: img.mediaType }));
     }
-    wsClient.sendRpc<{ messageId: string }>('session:send', rpcPayload)
-      .then((res) => {
-        if (res?.messageId) {
-          setOptimisticMsgs((prev) => prev.map((m) =>
-            m.queueId === tempId ? { ...m, queueId: res.messageId, status: 'received' as const } : m
-          ));
-        }
-      })
-      .catch((e: Error) => {
-        log.error('send', 'RPC failed (interrupt)', { sessionId, error: e.message });
-        setSendError(e.message);
+    try {
+      const res = await wsClient.sendRpc<{ messageId: string }>('session:send', rpcPayload);
+      if (res?.messageId) {
         setOptimisticMsgs((prev) => prev.map((m) =>
-          m.queueId === tempId ? { ...m, status: 'failed' as const, failedError: e.message } : m
+          m.queueId === tempId ? { ...m, queueId: res.messageId, status: 'received' as const } : m
         ));
-      });
+      }
+      return true;
+    } catch (e) {
+      const err = e as Error;
+      log.error('send', 'RPC failed (interrupt)', { sessionId, error: err.message });
+      setSendError(err.message);
+      setOptimisticMsgs((prev) => prev.map((m) =>
+        m.queueId === tempId ? { ...m, status: 'failed' as const, failedError: err.message } : m
+      ));
+      return false;
+    }
   }, []);
 
   /** Retry a failed message — resets to pending and re-sends via RPC. */
@@ -229,6 +235,18 @@ export function useSessionSend(activeSessionId: string | null): UseSessionSendRe
     });
   }, []);
 
+  // Backend processNext failed to deliver the batch (e.g. SSH/daemon down). Mark the
+  // matching optimistic messages 'failed' (keep text + show Retry) instead of removing
+  // them. The messages stay in the server-side pending queue, so Retry can re-send.
+  const handleBatchFailed = useCallback((messageIds: string[], error: string) => {
+    log.warn('send', 'batch failed', { count: messageIds.length, error });
+    setSendError(error);
+    const idSet = new Set(messageIds);
+    setOptimisticMsgs((prev) => prev.map((m) =>
+      idSet.has(m.queueId) ? { ...m, status: 'failed' as const, failedError: error } : m
+    ));
+  }, []);
+
   const handleEditQueued = useCallback((sessionId: string, queueId: string, newText: string) => {
     setOptimisticMsgs((prev) => prev.map((m) =>
       m.queueId === queueId ? { ...m, text: newText } : m
@@ -282,6 +300,7 @@ export function useSessionSend(activeSessionId: string | null): UseSessionSendRe
     dismissFailed,
     handleMessagesDelivered,
     handleBatchCompleted,
+    handleBatchFailed,
     handleEditQueued,
     handleDeleteQueued,
     addExternalQueued,

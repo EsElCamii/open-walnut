@@ -164,6 +164,12 @@ export interface SessionBatchCompletedEvent {
   count: number;
 }
 
+export interface SessionBatchFailedEvent {
+  sessionId: string;
+  messageIds: string[];
+  error: string;
+}
+
 export interface SessionMessageQueuedEvent {
   sessionId: string;
   messageId: string;
@@ -411,6 +417,7 @@ export interface EventPayloadMap {
   'session:status-changed': SessionStatusChangedEvent;
   'session:messages-delivered': SessionMessagesDeliveredEvent;
   'session:batch-completed': SessionBatchCompletedEvent;
+  'session:batch-failed': SessionBatchFailedEvent;
   'session:message-queued': SessionMessageQueuedEvent;
   'session:system-event': SessionSystemEventPayload;
   'session:usage-update': SessionUsageUpdateEvent;

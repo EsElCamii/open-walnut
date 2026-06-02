@@ -504,6 +504,13 @@ sessionsRouter.post('/quick-start', async (req: Request, res: Response, next: Ne
       '</quick_start_task>',
     ].join('\n')
 
+    // A quick-start (incl. its retry) to a remote host is a deliberate human action —
+    // forget any cached connection failure so we reconnect fresh rather than fast-fail.
+    if (host) {
+      const { clearDaemonFailureCache } = await import('../../providers/daemon-connection.js')
+      clearDaemonFailureCache(host)
+    }
+
     // Emit SESSION_START event (sessionMessage includes image path annotations if images were attached)
     bus.emit(EventNames.SESSION_START, {
       taskId: updatedTask.id,

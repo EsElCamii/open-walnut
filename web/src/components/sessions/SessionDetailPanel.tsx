@@ -40,6 +40,7 @@ interface SessionDetailPanelProps {
   optimisticMessages?: import('./SessionChatHistory').OptimisticMessage[];
   onMessagesDelivered?: (count: number) => void;
   onBatchCompleted?: (count: number) => void;
+  onBatchFailed?: (messageIds: string[], error: string) => void;
   onEditQueued?: (queueId: string, newText: string) => void;
   onDeleteQueued?: (queueId: string) => void;
   onAgentQueued?: (msg: { queueId: string; text: string }) => void;
@@ -150,7 +151,7 @@ function EditableTitle({ sessionId, title, onSaved }: { sessionId: string; title
   );
 }
 
-export function SessionDetailPanel({ session, taskTitle, summary, onTitleChanged, onSessionReplaced, optimisticMessages, onMessagesDelivered, onBatchCompleted, onEditQueued, onDeleteQueued, onAgentQueued, onClearCommitted, onRetryFailed, onDismissFailed, onStreamingChange }: SessionDetailPanelProps) {
+export function SessionDetailPanel({ session, taskTitle, summary, onTitleChanged, onSessionReplaced, optimisticMessages, onMessagesDelivered, onBatchCompleted, onBatchFailed, onEditQueued, onDeleteQueued, onAgentQueued, onClearCommitted, onRetryFailed, onDismissFailed, onStreamingChange }: SessionDetailPanelProps) {
   const navigate = useNavigate();
   const enabledModes = useEnabledModes();
   const [executing, setExecuting] = useState(false);
@@ -850,6 +851,7 @@ export function SessionDetailPanel({ session, taskTitle, summary, onTitleChanged
           optimisticMessages={optimisticMessages}
           onMessagesDelivered={onMessagesDelivered}
           onBatchCompleted={onBatchCompleted}
+          onBatchFailed={onBatchFailed}
           onEditQueued={onEditQueued}
           onDeleteQueued={onDeleteQueued}
           onAgentQueued={onAgentQueued}

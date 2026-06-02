@@ -22,10 +22,11 @@ function getMaxHeight(el: HTMLTextAreaElement): number {
 }
 
 interface ChatInputProps {
-  onSend: (text: string, images?: ImageAttachment[]) => void;
+  /** May return a Promise<boolean> — false means the send failed and the draft must be preserved. */
+  onSend: (text: string, images?: ImageAttachment[]) => void | Promise<boolean>;
   onCommand?: (cmd: SlashCommand, args?: string) => void;
   onStop?: () => void;
-  onInterruptSend?: (text: string, images?: ImageAttachment[]) => void;
+  onInterruptSend?: (text: string, images?: ImageAttachment[]) => void | Promise<boolean>;
   onClearQueue?: () => void;
   disabled?: boolean;
   isStreaming?: boolean;
@@ -184,13 +185,53 @@ export function ChatInput({ onSend, onCommand, onStop, onInterruptSend, onClearQ
     try { localStorage.removeItem(key); } catch { /* ignore */ }
   }, []);
 
-  const resetInput = () => {
+  const resetInput = (keepDraft = false) => {
     setValue('');
     setImages([]);
     closePalette();
-    clearDraft();
+    if (!keepDraft) clearDraft();
     if (textareaRef.current) {
       textareaRef.current.style.height = 'auto';
+    }
+  };
+
+  // Restore the input box to the given text + images after a failed send, and make
+  // sure the draft is persisted so a page refresh still recovers it. This is the
+  // hard guarantee: the user's input must never silently disappear.
+  const restoreInput = (text: string, imgs: ImageAttachment[]) => {
+    setValue(text);
+    setImages(imgs);
+    saveDraft(text);
+    requestAnimationFrame(() => {
+      const el = textareaRef.current;
+      if (el) {
+        el.style.height = 'auto';
+        el.style.height = Math.min(el.scrollHeight, getMaxHeight(el)) + 'px';
+        el.focus();
+        el.setSelectionRange(text.length, text.length);
+      }
+    });
+  };
+
+  // Fire a send callback, then settle the draft based on the outcome. A callback
+  // that resolves to `false` (RPC rejected) restores the input; anything else
+  // (success, or a void return) clears the draft.
+  const dispatchSend = (
+    cb: (text: string, images?: ImageAttachment[]) => void | Promise<boolean>,
+    text: string,
+    imgs: ImageAttachment[],
+  ) => {
+    // Optimistically clear the box for snappy feel, but keep the draft until we know
+    // the send was accepted server-side.
+    resetInput(true);
+    const result = cb(text, imgs.length > 0 ? imgs : undefined);
+    if (result instanceof Promise) {
+      result.then((ok) => {
+        if (ok) clearDraft();
+        else restoreInput(text, imgs);
+      }).catch(() => restoreInput(text, imgs));
+    } else {
+      clearDraft();
     }
   };
 
@@ -223,8 +264,7 @@ export function ChatInput({ onSend, onCommand, onStop, onInterruptSend, onClearQ
     }
 
     // Send as regular message (includes session slash commands)
-    onSend(text, images.length > 0 ? images : undefined);
-    resetInput();
+    dispatchSend(onSend, text, images);
   };
 
   const closePalette = useCallback(() => {
@@ -386,9 +426,8 @@ export function ChatInput({ onSend, onCommand, onStop, onInterruptSend, onClearQ
 
   const handleInterruptSend = () => {
     const text = value.trim();
-    if ((!text && images.length === 0) || disabled) return;
-    onInterruptSend?.(text, images.length > 0 ? images : undefined);
-    resetInput();
+    if ((!text && images.length === 0) || disabled || !onInterruptSend) return;
+    dispatchSend(onInterruptSend, text, images);
   };
 
   const canSend = !disabled && !queueFull && (value.trim() || images.length > 0);

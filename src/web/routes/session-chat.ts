@@ -129,6 +129,14 @@ export function registerSessionChatRpc(): void {
       log.web.info('session:send RPC saved pending model/mode', { sessionId: data.sessionId, model, mode: data.mode })
     }
 
+    // User-initiated send to a remote session = a deliberate retry. Forget any
+    // cached connection failure (e.g. after the user ran mwinit) so processNext
+    // reconnects fresh instead of fast-failing against the 60s failure cache.
+    if (record?.host) {
+      const { clearDaemonFailureCache } = await import('../../providers/daemon-connection.js')
+      clearDaemonFailureCache(record.host)
+    }
+
     // Enqueue and notify in one call. augmentedMessage may include image refs;
     // original data.message is used for bus events (UI display).
     log.web.info('session message via RPC', { sessionId: data.sessionId, taskId: record?.taskId, messageLength: augmentedMessage.length })

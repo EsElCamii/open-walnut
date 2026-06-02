@@ -14,6 +14,7 @@ import {
   enqueueMessage,
   markProcessing,
   removeProcessed,
+  revertToPending,
   editMessage,
   deleteMessage,
   getQueue,
@@ -277,5 +278,56 @@ describe('combined workflow', () => {
     const batch2 = await markProcessing('sess-1');
     expect(batch2).toHaveLength(2);
     expect(batch2.map((m) => m.message)).toEqual(['batch2-a', 'batch2-b']);
+  });
+});
+
+// Regression: delivery failure (SSH/daemon down) must NOT drop the user's message.
+// This is the contract processNext() relies on — on a delivery error it calls
+// revertToPending(msgs) instead of removeProcessed(sessionId), so the message stays
+// recoverable (server restart re-picks pending; user can Retry). Previously the catch
+// block removed the batch, silently losing the message when the remote host was down.
+describe('delivery failure survival (Fix 2 regression)', () => {
+  it('revertToPending keeps a failed-delivery message in the queue as pending', async () => {
+    await enqueueMessage('sess-fail', 'do not lose me');
+
+    // Simulate processNext: lock the batch for delivery.
+    const batch = await markProcessing('sess-fail');
+    expect(batch).toHaveLength(1);
+    expect(batch[0].status).toBe('processing');
+
+    // Delivery throws (e.g. RemoteSessionManager start/writeMessage rejects on SSH fail).
+    // processNext's catch must revert, NOT remove.
+    await revertToPending(batch);
+
+    const after = await getQueue('sess-fail');
+    expect(after).toHaveLength(1);
+    expect(after[0].status).toBe('pending');
+    expect(after[0].message).toBe('do not lose me');
+  });
+
+  it('reverted message survives a simulated server restart (loadQueue)', async () => {
+    await enqueueMessage('sess-fail', 'survive restart');
+    const batch = await markProcessing('sess-fail');
+    await revertToPending(batch);
+
+    // Simulate restart: drop in-memory cache and reload from disk.
+    resetCache();
+    await loadQueue();
+
+    const after = await getQueue('sess-fail');
+    expect(after).toHaveLength(1);
+    expect(after[0].status).toBe('pending');
+    expect(after[0].message).toBe('survive restart');
+  });
+
+  it('contrast: removeProcessed would have lost the message (documents the old bug)', async () => {
+    await enqueueMessage('sess-bug', 'lost forever');
+    await markProcessing('sess-bug');
+
+    // The OLD (buggy) processNext catch path did this on delivery failure:
+    await removeProcessed('sess-bug');
+
+    const after = await getQueue('sess-bug');
+    expect(after).toHaveLength(0); // message gone — exactly the bug we fixed
   });
 });

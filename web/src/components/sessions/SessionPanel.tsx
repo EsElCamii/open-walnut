@@ -123,7 +123,7 @@ export const SessionPanel = memo(function SessionPanel({ sessionId, onClose, loc
   const enabledModes = useEnabledModes();
   const [session, setSession] = useState<SessionRecord | null>(null);
   const [loading, setLoading] = useState(true);
-  const { optimisticMsgs, sendError, send, interruptSend, retryFailed, dismissFailed, handleMessagesDelivered, handleBatchCompleted, handleEditQueued, handleDeleteQueued, addExternalQueued, clearCommitted } = useSessionSend(sessionId);
+  const { optimisticMsgs, sendError, send, interruptSend, retryFailed, dismissFailed, handleMessagesDelivered, handleBatchCompleted, handleBatchFailed, handleEditQueued, handleDeleteQueued, addExternalQueued, clearCommitted } = useSessionSend(sessionId);
   // isStreaming is bubbled up from the single useSessionStream instance that lives
   // inside SessionChatHistory (via onStreamingChange). We used to mount a second
   // hook instance here, which doubled stream-subscribe RPCs and produced two
@@ -495,11 +495,11 @@ export const SessionPanel = memo(function SessionPanel({ sessionId, onClose, loc
   });
 
   const handleSend = useCallback((message: string, images?: ImageAttachment[]) => {
-    send(sessionId, message, images);
+    return send(sessionId, message, images);
   }, [sessionId, send]);
 
   const handleInterruptSend = useCallback((message: string, images?: ImageAttachment[]) => {
-    interruptSend(sessionId, message, images);
+    return interruptSend(sessionId, message, images);
   }, [sessionId, interruptSend]);
 
   const handleEdit = useCallback((queueId: string, newText: string) => {
@@ -876,6 +876,7 @@ export const SessionPanel = memo(function SessionPanel({ sessionId, onClose, loc
             optimisticMessages={optimisticMsgs}
             onMessagesDelivered={handleMessagesDelivered}
             onBatchCompleted={handleBatchCompleted}
+            onBatchFailed={handleBatchFailed}
             onEditQueued={handleEdit}
             onDeleteQueued={handleDelete}
             onAgentQueued={addExternalQueued}

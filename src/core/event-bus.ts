@@ -53,6 +53,7 @@ export const EventNames = {
   SESSION_STATUS_CHANGED: 'session:status-changed',
   SESSION_MESSAGES_DELIVERED: 'session:messages-delivered',
   SESSION_BATCH_COMPLETED: 'session:batch-completed',
+  SESSION_BATCH_FAILED: 'session:batch-failed',
   SESSION_MESSAGE_QUEUED: 'session:message-queued',
   SESSION_SYSTEM_EVENT: 'session:system-event',
   SESSION_USAGE_UPDATE: 'session:usage-update',

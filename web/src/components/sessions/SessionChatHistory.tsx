@@ -164,6 +164,7 @@ interface SessionChatHistoryProps {
   optimisticMessages?: OptimisticMessage[];
   onMessagesDelivered?: (count: number) => void;
   onBatchCompleted?: (count: number) => void;
+  onBatchFailed?: (messageIds: string[], error: string) => void;
   onEditQueued?: (queueId: string, newText: string) => void;
   onDeleteQueued?: (queueId: string) => void;
   onAgentQueued?: (msg: { queueId: string; text: string }) => void;
@@ -560,7 +561,7 @@ function buildTimeline(
 // ── Auto-scroll constant ──
 const NEAR_BOTTOM_PX = 80;  // px from bottom to consider "at bottom"
 
-export const SessionChatHistory = memo(function SessionChatHistory({ sessionId, phase, initialPrompt, sessionCwd, sessionHost, optimisticMessages, onMessagesDelivered, onBatchCompleted, onEditQueued, onDeleteQueued, onAgentQueued, onClearCommitted, onRetryFailed, onDismissFailed, onTaskClick, onSessionClick, onFileOpen, onStreamingChange }: SessionChatHistoryProps) {
+export const SessionChatHistory = memo(function SessionChatHistory({ sessionId, phase, initialPrompt, sessionCwd, sessionHost, optimisticMessages, onMessagesDelivered, onBatchCompleted, onBatchFailed, onEditQueued, onDeleteQueued, onAgentQueued, onClearCommitted, onRetryFailed, onDismissFailed, onTaskClick, onSessionClick, onFileOpen, onStreamingChange }: SessionChatHistoryProps) {
   const [historyVersion, setHistoryVersion] = useState(0);
   const awaitingRefresh = useRef(false);
   const pendingBatchTotal = useRef(0);
@@ -687,6 +688,17 @@ export const SessionChatHistory = memo(function SessionChatHistory({ sessionId, 
           pendingBatchTotal.current = 0;
         }
       }, 5000);
+    }
+  });
+
+  // Batch delivery failed (e.g. SSH/daemon down): mark the matching optimistic
+  // messages 'failed' so they keep their text + show Retry. Crucially we do NOT
+  // refresh history here — the messages were never delivered, they remain in the
+  // server-side pending queue, and a refresh would wipe the optimistic entries.
+  useEvent('session:batch-failed', (data) => {
+    const d = data as { sessionId?: string; messageIds?: string[]; error?: string };
+    if (d.sessionId === sessionId && Array.isArray(d.messageIds)) {
+      onBatchFailed?.(d.messageIds, d.error ?? 'Send failed');
     }
   });
 

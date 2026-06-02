@@ -287,12 +287,12 @@ export function SessionsPage() {
 
   const handleSend = useCallback((message: string, images?: ImageAttachment[]) => {
     if (!selectedId) return;
-    sessionSend.send(selectedId, message, images);
+    return sessionSend.send(selectedId, message, images);
   }, [selectedId, sessionSend]);
 
   const handleInterruptSend = useCallback((message: string, images?: ImageAttachment[]) => {
     if (!selectedId) return;
-    sessionSend.interruptSend(selectedId, message, images);
+    return sessionSend.interruptSend(selectedId, message, images);
   }, [selectedId, sessionSend]);
 
   const handleRetryFailed = useCallback((queueId: string) => {
@@ -352,6 +352,7 @@ export function SessionsPage() {
           optimisticMessages={sessionSend.optimisticMsgs}
           onMessagesDelivered={sessionSend.handleMessagesDelivered}
           onBatchCompleted={sessionSend.handleBatchCompleted}
+          onBatchFailed={sessionSend.handleBatchFailed}
           onEditQueued={handleEditQueued}
           onDeleteQueued={handleDeleteQueued}
           onAgentQueued={sessionSend.addExternalQueued}

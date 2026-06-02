@@ -1881,6 +1881,17 @@ export async function getDaemonConnection(hostKey: string, sshTarget: SshTarget)
 }
 
 /**
+ * Forget a cached connection failure so the next getDaemonConnection() retries
+ * immediately instead of fast-failing for up to 60s. Call this on a user-initiated
+ * retry (e.g. after they run mwinit) — the 60s cache is meant to throttle automatic
+ * reconnects, not to block a deliberate human retry.
+ */
+export function clearDaemonFailureCache(hostKey?: string): void {
+  if (hostKey) failureCache.delete(hostKey)
+  else failureCache.clear()
+}
+
+/**
  * Disconnect all daemon connections. Called on server shutdown.
  */
 export function disconnectAllDaemons(): void {
