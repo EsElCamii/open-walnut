@@ -95,4 +95,29 @@ describe('L2.2 DaemonConnection event forwarding', () => {
     await new Promise((r) => setTimeout(r, 30))
     expect(handler).not.toHaveBeenCalled()
   })
+
+  // D6 — registering the SAME handler reference twice must NOT double-deliver.
+  // This is the streamed-text-doubling root cause: a leaked re-subscribe left
+  // the same handler in eventHandlers twice, so every line dispatched twice in
+  // one tick. The onEvent guard dedups by reference.
+  it('D6: duplicate handler registration does not double-deliver', async () => {
+    const handler = vi.fn()
+    conn.onEvent(handler)
+    conn.onEvent(handler) // same reference — must be ignored
+    daemon.emitEvent('jsonl', { sid: 'x', line: '{"type":"stream_event"}' })
+    await new Promise((r) => setTimeout(r, 30))
+    expect(handler).toHaveBeenCalledTimes(1)
+  })
+
+  // D7 — the unsubscribe returned for a deduped (already-registered) handler
+  // still removes it; after unsubscribing, no further delivery.
+  it('D7: unsub from a deduped registration still stops delivery', async () => {
+    const handler = vi.fn()
+    conn.onEvent(handler)
+    const unsubDup = conn.onEvent(handler) // deduped — returns a working unsub
+    unsubDup()
+    daemon.emitEvent('jsonl', { sid: 'x', line: 'after-unsub' })
+    await new Promise((r) => setTimeout(r, 30))
+    expect(handler).not.toHaveBeenCalled()
+  })
 })

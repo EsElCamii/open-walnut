@@ -231,6 +231,17 @@ export class DaemonConnection {
    * Returns an unsubscribe function.
    */
   onEvent(handler: EventHandler): () => void {
+    // Defensive: never register the same handler reference twice. A double
+    // registration makes every daemon event dispatch to that handler twice in
+    // a single tick — the root cause of streamed text doubling. RSM routes all
+    // (re)subscribes through rebindEventListener() (which unsubscribes first),
+    // so this is a belt-and-suspenders guard against any future leaking path.
+    if (this.eventHandlers.includes(handler)) {
+      return () => {
+        const idx = this.eventHandlers.indexOf(handler)
+        if (idx >= 0) this.eventHandlers.splice(idx, 1)
+      }
+    }
     this.eventHandlers.push(handler)
     // DUP-DEBUG: handler count > 1 means multiple subscribers on the same conn —
     // every daemon-pushed event will fan out to all of them, doubling downstream

@@ -307,6 +307,17 @@ const _registry = new Map<string, SessionManager>()
 
 /** Register a SessionManager for a given session ID. */
 export function registerSessionManager(sid: string, m: SessionManager): void {
+  // Evict + detach any prior manager for this sid. Without this, a second
+  // RemoteSessionManager registered for the same session (e.g. a rehydrate
+  // path that lost the race, or a reconnect that built a fresh instance) stays
+  // subscribed to the shared daemon connection — both instances then forward
+  // every JSONL line, doubling streamed text (each has its own _seenUuids, so
+  // uuid dedup can't catch the cross-instance copy). Detach releases the old
+  // instance's event listener before the new one takes over.
+  const prev = _registry.get(sid)
+  if (prev && prev !== m) {
+    try { prev.detach() } catch { /* best-effort — old instance may already be torn down */ }
+  }
   _registry.set(sid, m)
 }
 

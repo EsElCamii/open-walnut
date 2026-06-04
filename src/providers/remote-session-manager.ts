@@ -121,15 +121,11 @@ export class RemoteSessionManager implements SessionManager {
   async start(opts: TransportStartOptions): Promise<TransportStartResult> {
     await this.ensureConnected()
 
-    // Subscribe to daemon events (clean up any leaked listener from a prior start/resume)
-    if (this.unsubscribeEvent) {
-      this.unsubscribeEvent()
-      this.unsubscribeEvent = null
-    }
+    // Subscribe to daemon events (rebind cleans up any prior listener).
     this._onOutput = opts.onOutput
     this._onExit = opts.onExit
     this._sid = this.tmpId
-    this.unsubscribeEvent = this.conn!.onEvent((event) => this.handleDaemonEvent(event))
+    this.rebindEventListener()
 
     // Quick Start spill file: upload to the same absolute path on the remote host
     // before the session starts. The message already references this path as a
@@ -218,10 +214,7 @@ export class RemoteSessionManager implements SessionManager {
     await this.ensureConnected()
 
     // Re-subscribe event listener on the fresh connection
-    if (this.unsubscribeEvent) {
-      this.unsubscribeEvent()
-    }
-    this.unsubscribeEvent = this.conn!.onEvent((event) => this.handleDaemonEvent(event))
+    this.rebindEventListener()
 
     // Idempotent probe: check if daemon already started this sid
     const sid = startPayload.sid as string
@@ -255,15 +248,10 @@ export class RemoteSessionManager implements SessionManager {
   async attach(opts: TransportAttachOptions): Promise<TransportAttachResult> {
     await this.ensureConnected()
 
-    // Clean up any leaked listener from a prior attach/start
-    if (this.unsubscribeEvent) {
-      this.unsubscribeEvent()
-      this.unsubscribeEvent = null
-    }
     this._onOutput = opts.onOutput
     this._onExit = opts.onExit
     this._sid = opts.sessionId
-    this.unsubscribeEvent = this.conn!.onEvent((event) => this.handleDaemonEvent(event))
+    this.rebindEventListener()
 
     const attachPayload = {
       sid: opts.sessionId,
@@ -286,8 +274,7 @@ export class RemoteSessionManager implements SessionManager {
         // The pool's getDaemonConnection() will reconnect if needed.
         this.conn = null
         await this.ensureConnected()
-        if (this.unsubscribeEvent) this.unsubscribeEvent()
-        this.unsubscribeEvent = this.conn!.onEvent((event) => this.handleDaemonEvent(event))
+        this.rebindEventListener()
         result = await this.conn!.send('attach', attachPayload)
       } else {
         throw err
@@ -340,11 +327,7 @@ export class RemoteSessionManager implements SessionManager {
     try {
       await this.ensureConnected()
       // Rebind event listener on the (possibly new) DaemonConnection instance.
-      if (this.unsubscribeEvent) {
-        this.unsubscribeEvent()
-        this.unsubscribeEvent = null
-      }
-      this.unsubscribeEvent = this.conn!.onEvent((event) => this.handleDaemonEvent(event))
+      this.rebindEventListener()
 
       // Resume from the last byte walnut has processed — avoids replaying
       // content the UI has already rendered (would cause duplicate blocks).
@@ -597,6 +580,22 @@ export class RemoteSessionManager implements SessionManager {
         })
       })
     }
+  }
+
+  // Single entry point for (re)binding the daemon event listener. ALWAYS
+  // unsubscribes the previous handler before registering a new one, so the
+  // shared pooled DaemonConnection never accumulates duplicate handlers for
+  // this RSM. Duplicate registration was the root cause of streamed text
+  // doubling ("TheThe pl pl…"): the same JSONL line dispatched twice in one
+  // tick, and no-uuid stream_event deltas bypassed _seenUuids dedup. Every
+  // start/attach/reconnect path MUST route through here, never call
+  // conn.onEvent() directly.
+  private rebindEventListener(): void {
+    if (this.unsubscribeEvent) {
+      this.unsubscribeEvent()
+      this.unsubscribeEvent = null
+    }
+    this.unsubscribeEvent = this.conn!.onEvent((event) => this.handleDaemonEvent(event))
   }
 
   detach(): void {
