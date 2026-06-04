@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react';
 import type { Config } from '@open-walnut/core';
 import { SectionCard } from '../inputs/SectionCard';
 import { NumberInput } from '../inputs/NumberInput';
+import { useAutoSave } from '@/hooks/useAutoSave';
 
 interface HostEntry {
   _key: number; // stable React key
@@ -55,8 +56,10 @@ export function RemoteHostsSection({ config, onSave }: Props) {
     setExpanded(null);
   };
 
-  const handleSave = async () => {
-    const hostsConfig: Config['hosts'] = {};
+  // Build the persisted `hosts` map from local entries, dropping incomplete rows (no alias/hostname).
+  // Used both by the save call and the auto-save fingerprint so half-typed hosts never get written.
+  const buildHostsConfig = (): NonNullable<Config['hosts']> => {
+    const hostsConfig: NonNullable<Config['hosts']> = {};
     for (const h of hosts) {
       if (!h.alias || !h.hostname) continue;
       hostsConfig[h.alias] = {
@@ -67,11 +70,40 @@ export function RemoteHostsSection({ config, onSave }: Props) {
         shell_setup: h.shell_setup || undefined,
       };
     }
-    await onSave({ hosts: hostsConfig });
+    return hostsConfig;
   };
 
+  const handleSave = async () => {
+    await onSave({ hosts: buildHostsConfig() });
+  };
+
+  // Re-normalize the persisted hosts through the SAME field order buildHostsConfig produces,
+  // so the baseline can't differ from `current` purely by YAML key ordering (which would
+  // otherwise loop: save → refresh → reorder mismatch → save again).
+  const normalizeHosts = (h: Config['hosts']): NonNullable<Config['hosts']> => {
+    const out: NonNullable<Config['hosts']> = {};
+    for (const [alias, v] of Object.entries(h ?? {})) {
+      out[alias] = {
+        hostname: v.hostname,
+        user: v.user || undefined,
+        port: v.port,
+        label: v.label || undefined,
+        shell_setup: v.shell_setup || undefined,
+      };
+    }
+    return out;
+  };
+
+  // Fingerprint the VALIDATED hosts map (not raw entries) so typing a partial host — or a row
+  // with no alias yet — doesn't trigger a write until it's a complete, savable entry.
+  useAutoSave({
+    current: JSON.stringify(buildHostsConfig()),
+    baseline: JSON.stringify(normalizeHosts(config.hosts)),
+    save: handleSave,
+  });
+
   return (
-    <SectionCard id="remote-hosts" title="Remote Hosts" description="SSH hosts for running remote Claude Code sessions." onSave={handleSave}>
+    <SectionCard id="remote-hosts" title="Remote Hosts" description="SSH hosts for running remote Claude Code sessions. Changes save automatically." onSave={handleSave} showSave={false}>
       {hosts.map((host, idx) => (
         <details
           key={host._key}

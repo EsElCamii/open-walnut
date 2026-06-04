@@ -8,7 +8,11 @@ import { fetchProviders, fetchAwsProfiles, testProvider, testConnection, type Pr
 import { InstallButton } from '@/components/common/InstallButton';
 
 // Providers we actively test and support.
-const ALL_PROVIDERS: { name: string; label: string; api: string; base_url?: string; needsKey: boolean }[] = [
+// `api` matches ProviderConfig.api (the ApiProtocol union). Typing the field as the union
+// (not `string`) lets `template.api` assign cleanly into ProviderConfig without widening,
+// while keeping `base_url` optional across all entries (an `as const` tuple would drop it).
+type ProviderApi = 'anthropic-messages' | 'openai-chat' | 'bedrock' | 'google-generative-ai' | 'ollama';
+const ALL_PROVIDERS: { name: string; label: string; api: ProviderApi; base_url?: string; needsKey: boolean }[] = [
   { name: 'bedrock', label: 'AWS Bedrock', api: 'bedrock', needsKey: false },
   { name: 'anthropic', label: 'Anthropic', api: 'anthropic-messages', needsKey: true },
   { name: 'openai', label: 'OpenAI', api: 'openai-chat', needsKey: true },
@@ -119,8 +123,10 @@ function BedrockConfig({
     fetchAwsProfiles().then(setProfiles).catch(() => {});
   }, []);
 
-  // Save with a specific method (uses current field values)
-  const saveWithMethod = async (method: 'token' | 'keys' | 'profile') => {
+  // Save with a specific method (uses current field values).
+  // `regionOverride` lets the region <select> save immediately without waiting for the
+  // async setRegion state update to flush (onChange handler still holds the old `region`).
+  const saveWithMethod = async (method: 'token' | 'keys' | 'profile', regionOverride?: string) => {
     const creds: Record<string, string> = {};
     if (method === 'token' && token) creds.bearer_token = token;
     if (method === 'keys' && accessKey) creds.aws_access_key_id = accessKey;
@@ -132,7 +138,7 @@ function BedrockConfig({
         ...config.providers,
         bedrock: {
           api: 'bedrock' as const,
-          region,
+          region: regionOverride ?? region,
           ...creds,
         },
       },
@@ -186,7 +192,7 @@ function BedrockConfig({
       <div className="provider-config-row">
         <div className="form-group" style={{ margin: 0, flex: 1, maxWidth: 200 }}>
           <label htmlFor="bedrock-region">Region</label>
-          <select id="bedrock-region" value={region} onChange={(e) => setRegion(e.target.value)}>
+          <select id="bedrock-region" value={region} onChange={(e) => { const r = e.target.value; setRegion(r); if (methodReady(selectedMethod)) saveWithMethod(selectedMethod, r); }}>
             {BEDROCK_REGIONS.map((r) => <option key={r} value={r}>{r}</option>)}
           </select>
         </div>

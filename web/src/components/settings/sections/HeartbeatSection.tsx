@@ -3,6 +3,7 @@ import type { Config } from '@open-walnut/core';
 import { SectionCard } from '../inputs/SectionCard';
 import { ToggleSwitch } from '../inputs/ToggleSwitch';
 import { apiGet, apiPut } from '@/api/client';
+import { useAutoSave } from '@/hooks/useAutoSave';
 
 interface Props {
   config: Config;
@@ -44,6 +45,17 @@ export function HeartbeatSection({ config, onSave }: Props) {
     });
   };
 
+  // Auto-save the heartbeat config (the checklist below has its own separate Save button).
+  useAutoSave({
+    current: JSON.stringify({ enabled, every: every || '30m', activeHours: activeHours || '' }),
+    baseline: JSON.stringify({
+      enabled: config.heartbeat?.enabled ?? false,
+      every: config.heartbeat?.every ?? '30m',
+      activeHours: config.heartbeat?.activeHours ?? '',
+    }),
+    save: handleSave,
+  });
+
   const handleChecklistSave = async () => {
     setClSaving(true);
     setClError(null);
@@ -60,7 +72,7 @@ export function HeartbeatSection({ config, onSave }: Props) {
   };
 
   return (
-    <SectionCard id="heartbeat" title="Heartbeat" description="Periodic AI self-check system." onSave={handleSave}>
+    <SectionCard id="heartbeat" title="Heartbeat" description="Periodic AI self-check system. Changes save automatically." onSave={handleSave} showSave={false}>
       <div className="form-group">
         <ToggleSwitch id="hb-enabled" checked={enabled} onChange={setEnabled} label="Enable Heartbeat" />
       </div>

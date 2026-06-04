@@ -3,6 +3,7 @@ import type { Config } from '@open-walnut/core';
 import { SectionCard } from '../inputs/SectionCard';
 import { ToggleSwitch } from '../inputs/ToggleSwitch';
 import { SecretInput } from '../inputs/SecretInput';
+import { useAutoSave } from '@/hooks/useAutoSave';
 
 interface Props {
   config: Config;
@@ -73,8 +74,27 @@ export function IntegrationsSection({ config, onSave }: Props) {
     });
   };
 
+  useAutoSave({
+    current: JSON.stringify({
+      msTodoEnabled, msTodoClientId, slackToken, slackChannel,
+      searchProvider, searchApiKey, perplexityKey, ttsProvider, ttsVoice,
+    }),
+    baseline: JSON.stringify({
+      msTodoEnabled: !!((config.plugins?.['ms-todo'] ?? {}) as Record<string, unknown>).enabled,
+      msTodoClientId: (((config.plugins?.['ms-todo'] ?? {}) as Record<string, unknown>).client_id as string) ?? '',
+      slackToken: config.tools?.slack?.bot_token ?? '',
+      slackChannel: config.tools?.slack?.default_channel ?? '',
+      searchProvider: config.tools?.web_search?.provider || 'tavily',
+      searchApiKey: config.tools?.web_search?.api_key ?? '',
+      perplexityKey: config.tools?.web_search?.perplexity_api_key ?? '',
+      ttsProvider: config.tools?.tts?.provider ?? '',
+      ttsVoice: config.tools?.tts?.voice ?? '',
+    }),
+    save: handleSave,
+  });
+
   return (
-    <SectionCard id="integrations" title="Integrations" description="External services and tool API keys." onSave={handleSave}>
+    <SectionCard id="integrations" title="Integrations" description="External services and tool API keys. Changes save automatically." onSave={handleSave} showSave={false}>
       {/* MS-Todo */}
       <details className="settings-collapsible" open={msTodoEnabled}>
         <summary className="settings-collapsible-title">MS To-Do</summary>

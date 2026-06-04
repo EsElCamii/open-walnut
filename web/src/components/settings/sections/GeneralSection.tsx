@@ -1,5 +1,7 @@
 import { useState, useEffect } from 'react';
 import type { Config, TaskPriority } from '@open-walnut/core';
+import { fetchConfig } from '@/api/config';
+import { useAutoSave } from '@/hooks/useAutoSave';
 import { SectionCard } from '../inputs/SectionCard';
 import { ListEditor } from '../inputs/ListEditor';
 import { useTheme, type ThemePreference } from '@/hooks/useTheme';
@@ -18,6 +20,20 @@ const PANEL_OPTIONS: { value: SessionPanelMode; label: string }[] = [
   { value: 'auto', label: 'Auto' },
 ];
 
+type BumpTier = 'focus' | 'next' | 'satellite' | 'wait';
+const BUMP_TIERS: BumpTier[] = ['focus', 'next', 'satellite', 'wait'];
+// Defaults when a tier key is unset: focus off (preserve hand-ordered sprint), others on.
+const bumpTierDefault = (tier: BumpTier): boolean => tier !== 'focus';
+
+type BumpTiersState = Record<BumpTier, boolean>;
+function resolveBumpTiers(config: Config): BumpTiersState {
+  const cfg = config.ui?.bump_tiers;
+  return BUMP_TIERS.reduce((acc, tier) => {
+    acc[tier] = cfg?.[tier] ?? bumpTierDefault(tier);
+    return acc;
+  }, {} as BumpTiersState);
+}
+
 interface Props {
   config: Config;
   onSave: (partial: Partial<Config>) => Promise<void>;
@@ -31,27 +47,47 @@ export function GeneralSection({ config, onSave }: Props) {
   const [defaultPriority, setDefaultPriority] = useState<TaskPriority>(config.defaults?.priority ?? 'none');
   const [defaultCategory, setDefaultCategory] = useState(config.defaults?.category ?? '');
   const [localCategories, setLocalCategories] = useState<string[]>(config.local?.categories ?? []);
-  const [bumpPinnedOnChat, setBumpPinnedOnChat] = useState(config.ui?.bump_pinned_on_chat !== false);
+  const [bumpTiers, setBumpTiers] = useState<BumpTiersState>(() => resolveBumpTiers(config));
 
   useEffect(() => {
     setUserName(config.user?.name ?? '');
     setDefaultPriority(config.defaults?.priority ?? 'none');
     setDefaultCategory(config.defaults?.category ?? '');
     setLocalCategories(config.local?.categories ?? []);
-    setBumpPinnedOnChat(config.ui?.bump_pinned_on_chat !== false);
+    setBumpTiers(resolveBumpTiers(config));
   }, [config]);
 
   const handleSave = async () => {
+    // `ui` has multiple independent writers (e.g. session_panels via useSessionPanelMode),
+    // and updateConfig REPLACES the whole `ui` key (not a deep merge). The `config` prop is a
+    // page-load snapshot, so spreading config.ui here would clobber sibling keys written since.
+    // Re-fetch the latest ui block right before merging our own field into it.
+    const latest = await fetchConfig().catch(() => null);
+    const baseUi = latest?.ui ?? config.ui;
     await onSave({
       user: { name: userName },
       defaults: { priority: defaultPriority, category: defaultCategory },
       local: { ...config.local, categories: localCategories },
-      ui: { ...config.ui, bump_pinned_on_chat: bumpPinnedOnChat },
+      ui: { ...baseUi, bump_tiers: bumpTiers },
     });
   };
 
+  // Auto-save: write when local edits drift from the persisted config. The `baseline` is
+  // recomputed from the config prop so a post-save refresh matches `current` and won't echo.
+  useAutoSave({
+    current: JSON.stringify({ userName, defaultPriority, defaultCategory, localCategories, bumpTiers }),
+    baseline: JSON.stringify({
+      userName: config.user?.name ?? '',
+      defaultPriority: config.defaults?.priority ?? 'none',
+      defaultCategory: config.defaults?.category ?? '',
+      localCategories: config.local?.categories ?? [],
+      bumpTiers: resolveBumpTiers(config),
+    }),
+    save: handleSave,
+  });
+
   return (
-    <SectionCard id="general" title="General" description="Basic preferences and defaults." onSave={handleSave}>
+    <SectionCard id="general" title="General" description="Changes save automatically." onSave={handleSave} showSave={false}>
       <div className="form-group">
         <label>Theme</label>
         <div className="theme-picker">
@@ -108,17 +144,24 @@ export function GeneralSection({ config, onSave }: Props) {
       </div>
 
       <div className="form-group">
-        <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer' }}>
-          <input
-            type="checkbox"
-            checked={bumpPinnedOnChat}
-            onChange={(e) => setBumpPinnedOnChat(e.target.checked)}
-            style={{ width: 16, height: 16, accentColor: 'var(--accent)' }}
-            data-testid="bump-pinned-on-chat"
-          />
-          Move chatted task to top of its tier
-          <span className="text-sm text-muted" style={{ marginLeft: 4 }}>&mdash; chatting with a pinned task bubbles it to the front</span>
-        </label>
+        <label>Move chatted task to top of its tier</label>
+        <div style={{ display: 'flex', gap: 16, alignItems: 'center', flexWrap: 'wrap', marginTop: 4 }}>
+          {BUMP_TIERS.map((tier) => (
+            <label key={tier} style={{ display: 'flex', alignItems: 'center', gap: 4, cursor: 'pointer', fontSize: 13 }}>
+              <input
+                type="checkbox"
+                checked={bumpTiers[tier]}
+                onChange={(e) => setBumpTiers((prev) => ({ ...prev, [tier]: e.target.checked }))}
+                style={{ width: 16, height: 16, accentColor: 'var(--accent)' }}
+                data-testid={`bump-tier-${tier}`}
+              />
+              <span style={{ textTransform: 'capitalize' }}>{tier}</span>
+            </label>
+          ))}
+        </div>
+        <p className="text-sm text-muted" style={{ margin: '4px 0 0' }}>
+          Chatting with a pinned task bubbles it to the front of its tier. Off for Focus by default to preserve your manual sprint order.
+        </p>
       </div>
 
       <div className="form-group">

@@ -27,7 +27,7 @@ export function SectionCard({
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState(false);
-  const successTimerRef = useRef<ReturnType<typeof setTimeout>>();
+  const successTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
 
   // Clear success timer on unmount to avoid setState on unmounted component
   useEffect(() => () => clearTimeout(successTimerRef.current), []);

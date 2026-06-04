@@ -1,8 +1,9 @@
-import { useCallback } from 'react';
+import { useCallback, useEffect, useRef } from 'react';
 import type { Config } from '@open-walnut/core';
 import { SectionCard } from '../inputs/SectionCard';
 import { UI_ONLY_CATEGORIES, setShowUiOnlyCategory, type UiOnlyCategory } from '@/hooks/useDeveloperSettings';
 import { updateConfig } from '@/api/config';
+import { AUTOSAVE_DELAY_MS } from '@/hooks/useAutoSave';
 
 interface Props { config: Config; onSave: (partial: Partial<Config>) => Promise<void>; }
 
@@ -50,6 +51,30 @@ export function AdvancedSection({ config, onSave }: Props) {
     });
   }, [config, onSave]);
 
+  // Auto-save: this section uses uncontrolled inputs (defaultValue/defaultChecked + FormData),
+  // so there's no React state to fingerprint — and config-prop refreshes don't reset the DOM
+  // inputs, so there's no save→reset loop to guard against. Just debounce on form edits.
+  // The "Chat Notifications" checkboxes save themselves via handleToggleUiOnly (developer key,
+  // which handleSave doesn't touch), so re-saving on their change is a harmless no-op.
+  const handleSaveRef = useRef(handleSave);
+  handleSaveRef.current = handleSave;
+  useEffect(() => {
+    const form = document.getElementById('advanced');
+    if (!form) return;
+    let t: ReturnType<typeof setTimeout> | undefined;
+    const onEdit = () => {
+      clearTimeout(t);
+      t = setTimeout(() => handleSaveRef.current().catch(() => {}), AUTOSAVE_DELAY_MS);
+    };
+    form.addEventListener('input', onEdit);
+    form.addEventListener('change', onEdit);
+    return () => {
+      clearTimeout(t);
+      form.removeEventListener('input', onEdit);
+      form.removeEventListener('change', onEdit);
+    };
+  }, []);
+
   // Read dev settings from localStorage directly (no hook).
   // Respects defaultOn — raw localStorage.getItem would treat never-set keys as false.
   const getDevChecked = (key: string) => {
@@ -79,7 +104,7 @@ export function AdvancedSection({ config, onSave }: Props) {
   };
 
   return (
-    <SectionCard id="advanced" title="Advanced" description="Git versioning, exec security, subagent defaults, developer options." onSave={handleSave}>
+    <SectionCard id="advanced" title="Advanced" description="Git versioning, exec security, subagent defaults, developer options. Changes save automatically." onSave={handleSave} showSave={false}>
       <div style={{ display: 'contents' }}>
         {/* Git Versioning */}
         <details className="settings-collapsible" open>

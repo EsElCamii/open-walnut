@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 import type { Config } from '@open-walnut/core';
 import { SectionCard } from '../inputs/SectionCard';
 import { log } from '@/utils/log';
+import { useAutoSave } from '@/hooks/useAutoSave';
 
 interface Props {
   config: Config;
@@ -204,13 +205,26 @@ export function SearchSection({ config, onSave }: Props) {
     userEditedRef.current = false;
   };
 
+  // ── Auto-save ──
+  // The model value that WOULD be persisted. Custom + invalid URL (empty or not hf:) is gated
+  // out via `enabled` so a half-typed custom URL never auto-writes — handleSave would reject it
+  // anyway, but gating avoids the wasted call + error flash on every keystroke.
+  const effectiveModel = selectedModel === 'custom' ? customUrl.trim() : selectedModel;
+  const customValid = selectedModel !== 'custom' || (!!customUrl.trim() && customUrl.trim().startsWith('hf:'));
+  useAutoSave({
+    enabled: customValid,
+    current: JSON.stringify({ qmd_model: effectiveModel || undefined }),
+    baseline: JSON.stringify({ qmd_model: (config.search?.qmd_model ?? DEFAULT_MODEL) || undefined }),
+    save: handleSave,
+  });
+
   // ── Derived state ──
   const isBusy = qmdStatus?.status === 'downloading' || qmdStatus?.status === 'indexing';
   const buttonsDisabled = actionPending || isBusy;
   const modelDownloaded = qmdStatus?.model.downloaded ?? false;
 
   return (
-    <SectionCard id="search" title="Search & Embeddings" description="Local embedding model for semantic search (QMD)." onSave={handleSave}>
+    <SectionCard id="search" title="Search & Embeddings" description="Local embedding model for semantic search (QMD). Changes save automatically." onSave={handleSave} showSave={false}>
       {/* Inject pulse keyframes */}
       <style>{PULSE_KEYFRAMES}</style>
 

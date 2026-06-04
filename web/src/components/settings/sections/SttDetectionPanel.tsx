@@ -539,7 +539,7 @@ function SherpaModelManager({
           <input id="stt-sherpa-manual-dir" type="text" value={manualDir} onChange={e => setManualDir(e.target.value)} placeholder="~/.local/share/sherpa-onnx/my-model" />
           <div style={{ marginTop: 8 }}>
             <label htmlFor="stt-sherpa-manual-type">Model type</label>
-            <select id="stt-sherpa-manual-type" value={manualType} onChange={e => setManualType(e.target.value)}>
+            <select id="stt-sherpa-manual-type" value={manualType} onChange={e => setManualType(e.target.value as typeof manualType)}>
               <option value="sense_voice">SenseVoice</option>
               <option value="whisper">Whisper</option>
               <option value="paraformer">Paraformer</option>

@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback } from 'react';
 import type { Config } from '@open-walnut/core';
 import { SectionCard } from '../inputs/SectionCard';
 import { fetchAudioApps, type AppInfo } from '@/api/audio';
+import { useAutoSave } from '@/hooks/useAutoSave';
 
 /** Well-known music/entertainment apps to pre-populate the exclude list. */
 const DEFAULT_EXCLUDE_APPS = [
@@ -66,6 +67,17 @@ export function AudioCaptureSection({ config, onSave }: Props) {
     });
   };
 
+  useAutoSave({
+    current: JSON.stringify({ excludeApps, refreshInterval, deleteAfterTranscription, retentionDays }),
+    baseline: JSON.stringify({
+      excludeApps: config.audio?.exclude_apps ?? [],
+      refreshInterval: config.audio?.refresh_interval_sec ?? 60,
+      deleteAfterTranscription: config.audio?.delete_after_transcription !== false,
+      retentionDays: config.audio?.retention_days ?? 7,
+    }),
+    save: handleSave,
+  });
+
   // Running apps NOT in exclude list (candidates to add)
   const availableApps = runningApps.filter(
     a => !excludeApps.includes(a.bundleIdentifier) && !excludeApps.includes(a.applicationName)
@@ -75,8 +87,9 @@ export function AudioCaptureSection({ config, onSave }: Props) {
     <SectionCard
       id="audio-capture"
       title="Audio Capture"
-      description="Configure system audio recording. Exclude apps like music players so only meeting/work audio is captured."
+      description="Configure system audio recording. Exclude apps like music players so only meeting/work audio is captured. Changes save automatically."
       onSave={handleSave}
+      showSave={false}
     >
       {/* Exclude list */}
       <div className="form-group">

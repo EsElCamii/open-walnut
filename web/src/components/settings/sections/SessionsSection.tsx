@@ -1,9 +1,10 @@
 import { useState, useEffect } from 'react';
-import type { Config } from '@open-walnut/core';
+import type { Config, SessionMode } from '@open-walnut/core';
 import { SectionCard } from '../inputs/SectionCard';
 import { NumberInput } from '../inputs/NumberInput';
 import { KeyValueEditor } from '../inputs/KeyValueEditor';
 import { ToggleSwitch } from '../inputs/ToggleSwitch';
+import { useAutoSave } from '@/hooks/useAutoSave';
 
 interface Props {
   config: Config;
@@ -18,8 +19,8 @@ export function SessionsSection({ config, onSave }: Props) {
   const [permissionPrompt, setPermissionPrompt] = useState(config.session?.permission_prompt ?? true);
   const [autoApproveBypass, setAutoApproveBypass] = useState(config.session?.auto_approve_bypass !== false);
   const ALL_MODES = ['default', 'bypass', 'plan', 'accept'] as const;
-  const DEFAULT_MODES = ['bypass', 'plan'];
-  const [enabledModes, setEnabledModes] = useState<string[]>(config.session?.enabled_modes ?? DEFAULT_MODES);
+  const DEFAULT_MODES: SessionMode[] = ['bypass', 'plan'];
+  const [enabledModes, setEnabledModes] = useState<SessionMode[]>(config.session?.enabled_modes ?? DEFAULT_MODES);
   const [sdkEnabled, setSdkEnabled] = useState(config.session_server?.enabled ?? false);
   const [sdkPort, setSdkPort] = useState<number | undefined>(config.session_server?.port ?? 7890);
 
@@ -30,18 +31,23 @@ export function SessionsSection({ config, onSave }: Props) {
     setSessionLimits(config.session_limits ?? {});
     setPermissionPrompt(config.session?.permission_prompt ?? true);
     setAutoApproveBypass(config.session?.auto_approve_bypass !== false);
-    setEnabledModes(config.session?.enabled_modes ?? ['bypass', 'plan']);
+    setEnabledModes(config.session?.enabled_modes ?? DEFAULT_MODES);
     setSdkEnabled(config.session_server?.enabled ?? false);
     setSdkPort(config.session_server?.port ?? 7890);
   }, [config]);
 
-  const handleSave = async () => {
-    // Convert limits to numbers
-    const limits: Record<string, number> = {};
-    for (const [k, v] of Object.entries(sessionLimits)) {
-      limits[k] = typeof v === 'number' ? v : parseInt(v, 10) || 0;
+  // Normalize the per-host limits to numbers. The KeyValueEditor yields strings while a
+  // post-save config round-trip yields numbers; normalizing keeps the auto-save fingerprint
+  // stable so semantically-equal values don't trigger repeated writes.
+  const normalizeLimits = (raw: Record<string, string | number>): Record<string, number> => {
+    const out: Record<string, number> = {};
+    for (const [k, v] of Object.entries(raw)) {
+      out[k] = typeof v === 'number' ? v : parseInt(v, 10) || 0;
     }
+    return out;
+  };
 
+  const handleSave = async () => {
     await onSave({
       agent: { ...config.agent, session_model: sessionModel },
       session: {
@@ -51,7 +57,7 @@ export function SessionsSection({ config, onSave }: Props) {
         auto_approve_bypass: autoApproveBypass,
         enabled_modes: enabledModes,
       },
-      session_limits: limits,
+      session_limits: normalizeLimits(sessionLimits),
       session_server: {
         ...config.session_server,
         enabled: sdkEnabled,
@@ -60,8 +66,28 @@ export function SessionsSection({ config, onSave }: Props) {
     });
   };
 
+  useAutoSave({
+    current: JSON.stringify({
+      sessionModel, idleTimeout, maxIdle,
+      sessionLimits: normalizeLimits(sessionLimits),
+      permissionPrompt, autoApproveBypass, enabledModes, sdkEnabled, sdkPort,
+    }),
+    baseline: JSON.stringify({
+      sessionModel: config.agent?.session_model ?? 'opus-1m',
+      idleTimeout: config.session?.idle_timeout_minutes ?? 30,
+      maxIdle: config.session?.max_idle,
+      sessionLimits: normalizeLimits(config.session_limits ?? {}),
+      permissionPrompt: config.session?.permission_prompt ?? true,
+      autoApproveBypass: config.session?.auto_approve_bypass !== false,
+      enabledModes: config.session?.enabled_modes ?? ['bypass', 'plan'],
+      sdkEnabled: config.session_server?.enabled ?? false,
+      sdkPort: config.session_server?.port ?? 7890,
+    }),
+    save: handleSave,
+  });
+
   return (
-    <SectionCard id="sessions" title="Claude Code Session" description="Default model, timeouts, and limits for Claude Code sessions." onSave={handleSave}>
+    <SectionCard id="sessions" title="Claude Code Session" description="Default model, timeouts, and limits for Claude Code sessions. Changes save automatically." onSave={handleSave} showSave={false}>
       <div className="form-group">
         <label htmlFor="session-model">Session Model</label>
         <select
