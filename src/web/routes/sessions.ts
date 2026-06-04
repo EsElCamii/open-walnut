@@ -1305,7 +1305,7 @@ sessionsRouter.post('/:sessionId/execute', async (req: Request, res: Response, n
             reject(new Error(d.error ?? 'Execution session failed to start'))
           }
         }
-      }, { global: true })
+      }, { global: true, interest: ['session:status-changed', 'session:error'] })
     })
 
     bus.emit(EventNames.SESSION_START, {

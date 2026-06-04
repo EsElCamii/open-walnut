@@ -209,6 +209,81 @@ describe('EventBus', () => {
     expect(first).toHaveLength(0);
     expect(second).toHaveLength(1);
   });
+
+  // ── interest-set: skip global subscribers on irrelevant high-frequency events ──
+
+  it('interest — global subscriber only receives events whose name matches a prefix', () => {
+    const received: BusEvent[] = [];
+    eventBus.subscribe('narrow', (e) => received.push(e), {
+      global: true,
+      interest: ['task:'],
+    });
+
+    eventBus.emit(EventNames.SESSION_TEXT_DELTA, {}, ['main-ai']); // skipped (no match)
+    eventBus.emit(EventNames.TASK_CREATED, {}, ['main-ai']);       // delivered (prefix match)
+    eventBus.emit(EventNames.TASK_COMPLETED, {}, ['main-ai']);     // delivered
+
+    expect(received.map(e => e.name)).toEqual([
+      EventNames.TASK_CREATED,
+      EventNames.TASK_COMPLETED,
+    ]);
+  });
+
+  it('interest — exact event-name prefix matches only that event', () => {
+    const received: BusEvent[] = [];
+    eventBus.subscribe('exact', (e) => received.push(e), {
+      global: true,
+      interest: ['task:completed'],
+    });
+
+    eventBus.emit(EventNames.TASK_CREATED, {}, ['*']);
+    eventBus.emit(EventNames.TASK_COMPLETED, {}, ['*']);
+
+    expect(received).toHaveLength(1);
+    expect(received[0].name).toBe(EventNames.TASK_COMPLETED);
+  });
+
+  it('interest — global subscriber WITHOUT interest still receives everything', () => {
+    const received: BusEvent[] = [];
+    eventBus.subscribe('catch-all', (e) => received.push(e), { global: true });
+
+    eventBus.emit(EventNames.SESSION_TEXT_DELTA, {}, ['someone-else']);
+    eventBus.emit(EventNames.TASK_CREATED, {}, ['someone-else']);
+
+    expect(received).toHaveLength(2);
+  });
+
+  it('interest — startsWith is a substring match, so a partial prefix matches longer names', () => {
+    // Documents the contract: 'session:status' (no full event name) matches
+    // 'session:status-changed' because startsWith is prefix/substring, not segment-aware.
+    // Callers must pick prefixes deliberately (use full event names for exact matches).
+    const received: BusEvent[] = [];
+    eventBus.subscribe('partial', (e) => received.push(e), {
+      global: true,
+      interest: ['session:status'],
+    });
+
+    eventBus.emit(EventNames.SESSION_STATUS_CHANGED, {}, ['*']);
+    eventBus.emit(EventNames.SESSION_STARTED, {}, ['*']); // does NOT start with 'session:status'
+
+    expect(received).toHaveLength(1);
+    expect(received[0].name).toBe(EventNames.SESSION_STATUS_CHANGED);
+  });
+
+  it('interest — high-frequency streaming event skips a narrow global subscriber (handler never invoked)', () => {
+    let invoked = 0;
+    eventBus.subscribe('streaming-irrelevant', () => { invoked++; }, {
+      global: true,
+      interest: ['audio:'],
+    });
+
+    // Simulate a burst of streaming deltas — none should wake this subscriber.
+    for (let i = 0; i < 100; i++) {
+      eventBus.emit(EventNames.SESSION_TEXT_DELTA, { i }, ['main-ai']);
+    }
+
+    expect(invoked).toBe(0);
+  });
 });
 
 // ── Singleton ──

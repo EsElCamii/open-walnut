@@ -50,7 +50,20 @@ export class GitVersioningService {
   start(): void {
     bus.subscribe(this.subscriberName, (event) => {
       this.handleEvent(event.name, event.data as Record<string, unknown> | undefined);
-    }, { global: true });
+    }, {
+      global: true,
+      // KEEP IN SYNC with handleEvent's switch below: every case there must have a
+      // matching prefix here, or that event silently won't trigger a commit (drift = bug).
+      // Listed narrowly (not just 'session:'/'cron:') so the high-frequency streaming
+      // deltas — session:text-delta/tool-use/… — never wake this subscriber.
+      // Note: cron only commits on added/updated/removed (NOT started/finished), so the
+      // prefixes are exact rather than the broader 'cron:job-'.
+      interest: [
+        'task:', 'session:started', 'session:ended', 'session:result',
+        'config:changed', 'chat:compacted',
+        'cron:job-added', 'cron:job-updated', 'cron:job-removed',
+      ],
+    });
 
     if (this.pushEnabled && this.pushIntervalMs > 0) {
       this.pushTimer = setInterval(() => {

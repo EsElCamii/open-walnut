@@ -144,6 +144,23 @@ interface Subscriber {
   filter?: SubscriberFilter;
   /** When true, this subscriber receives ALL events regardless of destinations. */
   global?: boolean;
+  /**
+   * Optional event-name prefixes this (global) subscriber actually cares about.
+   * When set, the bus skips this subscriber BEFORE invoking its handler for any
+   * event whose name doesn't start with one of these prefixes. This keeps a
+   * global subscriber from being woken on every high-frequency streaming event
+   * (session:text-delta / tool-use / …) it would only early-return on anyway.
+   * Only meaningful together with `global: true`. Match is `name.startsWith(prefix)`,
+   * so a full event name acts as an exact match and `'task:'` matches all task events.
+   */
+  interest?: string[];
+}
+
+/** Options object form for {@link EventBus.subscribe}. */
+export interface SubscribeOptions {
+  filter?: SubscriberFilter;
+  global?: boolean;
+  interest?: string[];
 }
 
 // ── Event history ring buffer (for live debugging) ──
@@ -179,9 +196,9 @@ export class EventBus {
    * (or destinations includes "*"), unless `global: true` is set — then the subscriber
    * receives ALL events regardless of destinations.
    */
-  subscribe(name: string, handler: SubscriberHandler, filter?: SubscriberFilter | { filter?: SubscriberFilter; global?: boolean }): void {
-    if (filter && typeof filter === 'object' && 'global' in filter) {
-      this.subscribers.set(name, { name, handler, filter: filter.filter, global: filter.global });
+  subscribe(name: string, handler: SubscriberHandler, filter?: SubscriberFilter | SubscribeOptions): void {
+    if (filter && typeof filter === 'object' && ('global' in filter || 'interest' in filter || 'filter' in filter)) {
+      this.subscribers.set(name, { name, handler, filter: filter.filter, global: filter.global, interest: filter.interest });
     } else {
       this.subscribers.set(name, { name, handler, filter: filter as SubscriberFilter | undefined });
     }
@@ -233,6 +250,17 @@ export class EventBus {
       // Global subscribers receive all events regardless of destinations
       // Normal subscribers must be in the event's destinations (or destinations includes "*")
       if (!subscriber.global && !destinations.includes('*') && !destinations.includes(subscriber.name)) {
+        continue;
+      }
+
+      // Interest filter (global subscribers only): skip BEFORE invoking the handler
+      // when the event name doesn't match any declared prefix. This is the hot-path
+      // optimization — a high-frequency streaming event (session:text-delta, …) no
+      // longer wakes every global subscriber that would just early-return on it.
+      // Guard on `global`: a non-global subscriber is already gated by destinations
+      // above, and interest is only ever set via the options-object path, but the
+      // explicit check keeps the intent clear and prevents future misuse.
+      if (subscriber.global && subscriber.interest && !subscriber.interest.some(p => name.startsWith(p))) {
         continue;
       }
 

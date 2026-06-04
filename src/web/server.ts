@@ -811,7 +811,8 @@ export async function startServer(options: ServerOptions = {}): Promise<HttpServ
             scheduleTaskFlush();
           }
         }
-      }, { global: true })
+        // interest below keeps this off the high-frequency streaming fan-out
+      }, { global: true, interest: ['task:created', 'task:updated', 'task:completed', 'task:deleted'] })
 
       bus.subscribe('qmd-session-sync', (event) => {
         if (event.name === EventNames.SESSION_STARTED || event.name === EventNames.SESSION_RESULT
@@ -822,7 +823,7 @@ export async function startServer(options: ServerOptions = {}): Promise<HttpServ
             scheduleSessionFlush();
           }
         }
-      }, { global: true })
+      }, { global: true, interest: ['session:started', 'session:result', 'session:error', 'session:status-changed'] })
     }
   } catch (err) {
     log.memory.warn('QMD startup failed', {
@@ -977,7 +978,7 @@ export async function startServer(options: ServerOptions = {}): Promise<HttpServ
     } catch (err) {
       log.web.error('dependency-unblock subscriber error', { error: err instanceof Error ? err.message : String(err) })
     }
-  }, { global: true })
+  }, { global: true, interest: ['task:completed'] })
 
   // -- Heartbeat config reload: restart runner when heartbeat config changes --
   bus.subscribe('heartbeat-config', async (event) => {
@@ -1042,6 +1043,12 @@ export async function startServer(options: ServerOptions = {}): Promise<HttpServ
 
   // -- Main AI triage: process session results with AI judgment --
   // All session events now route through main-ai first; forward to web-ui for display.
+  // NO `interest` filter here ON PURPOSE: main-ai is the SOLE path streaming reaches the
+  // browser (session:text-delta → sessionStreamBuffer → sendStreamEvent → ws broadcast),
+  // so it must receive EVERY event including high-frequency deltas. Adding an interest
+  // array here would silently break real-time streaming. Per-event cost is cheap
+  // (in-memory append + ws send). The interest optimization targets the OTHER global
+  // subscribers that would only early-return on these deltas anyway.
   bus.subscribe('main-ai', async (event) => {
     // ── Streaming events: buffer server-side + broadcast to all clients (filtered client-side) ──
     if (event.name === 'session:text-delta') {

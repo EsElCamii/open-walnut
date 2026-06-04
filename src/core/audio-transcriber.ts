@@ -126,7 +126,7 @@ export function initAudioTranscriber(): void {
     const { recordingId, chunkIndex, filePath, duration } = eventData<'audio:chunk-saved'>(event)
     queue.push({ recordingId, chunkIndex, filePath, duration })
     processQueue()
-  }, { global: true })
+  }, { global: true, interest: ['audio:'] })
 
   log.audio.info('audio transcriber initialized')
 }

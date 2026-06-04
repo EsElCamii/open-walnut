@@ -100,7 +100,11 @@ export class SessionHookDispatcher {
           error: err instanceof Error ? err.message : String(err),
         });
       });
-    }, { global: true });
+      // interest === handleEvent's own fast path (`if (!name.startsWith('session:')) return`):
+      // session-hooks genuinely needs ALL session: streaming (turn-start detection from
+      // text-delta, tool-use→onToolUse/ExitPlanMode, tool-result→cwd-rename), so we keep
+      // every session: event and drop everything else (task:/audio:/cron:/…) at the bus.
+    }, { global: true, interest: ['session:'] });
 
     // Periodic cache cleanup (.unref() so it doesn't prevent Node process exit in tests)
     this.pruneTimer = setInterval(() => this.payloadBuilder.prune(), 60_000);
