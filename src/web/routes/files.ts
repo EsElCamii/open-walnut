@@ -18,6 +18,7 @@ import { Router, type Request, type Response, type NextFunction } from 'express'
 import path from 'node:path'
 import os from 'node:os'
 import fsp from 'node:fs/promises'
+import { execFile } from 'node:child_process'
 import { getConfig } from '../../core/config-manager.js'
 
 export const filesRouter = Router()
@@ -40,6 +41,7 @@ function sortEntries(entries: DirEntry[]): DirEntry[] {
 }
 
 const MAX_UPWARD_LEVELS = 8
+const MAX_DOWNWARD_DEPTH = 4
 
 /** Build the ordered list of base dirs to try: cwd, then each parent up to N levels. */
 function candidateBases(cwd: string): string[] {
@@ -52,6 +54,45 @@ function candidateBases(cwd: string): string[] {
     cur = parent
   }
   return bases
+}
+
+/**
+ * Local breadth-first search under `root` for the first directory where
+ * `dir/rel` exists. BFS → shallowest match wins (closest to the search root).
+ * Bounded by depth + total dirs scanned, skipping heavy/noise directories.
+ *
+ * Bounds + skip-set are declared INSIDE the function on purpose: esbuild compiles
+ * module-level consts into a lazy-init block, and this hoisted function can run
+ * before that block evaluates — leaving the consts `undefined`, which silently
+ * disables the cap/depth guard and recurses into node_modules forever.
+ */
+async function findDownwardLocal(root: string, rel: string): Promise<string | null> {
+  // One `find` subprocess instead of many fs calls: the server process wraps
+  // fs/promises (log forwarding) which makes per-call latency high, so an N-dir
+  // BFS in-process took >10s. A single spawn searches natively in milliseconds,
+  // mirroring the remote daemon's `fs.find` path. We match by basename + prune
+  // heavy dirs, then keep the shallowest path ending with the requested rel.
+  const baseName = rel.split('/').pop() ?? rel
+  const isDirTarget = !baseName.includes('.')
+  const prune = ['node_modules', '.git', 'dist', 'build', 'out', '.next', 'target', 'coverage', '.cache', 'vendor', '__pycache__', '.venv', 'venv']
+  // find <root> -maxdepth 5 ( -name x -o ... ) -prune ... -name <base>
+  const pruneArgs: string[] = []
+  for (const p of prune) { pruneArgs.push('-name', p, '-prune', '-o') }
+  const typeArg = isDirTarget ? ['-type', 'd'] : ['-type', 'f']
+  const args = [root, '-maxdepth', '5', '(', ...pruneArgs.slice(0, -1), ')', '-o', ...typeArg, '-name', baseName, '-print']
+
+  return await new Promise<string | null>((resolve) => {
+    const child = execFile('find', args, { timeout: 5000, maxBuffer: 1 << 20 }, (_err, stdout) => {
+      const suffix = '/' + rel
+      const exact = path.posix.join(root, rel)
+      const hit = stdout.split('\n')
+        .filter(Boolean)
+        .filter((f) => f === exact || f.endsWith(suffix))
+        .sort((a, b) => a.split('/').length - b.split('/').length)[0]
+      resolve(hit ?? null)
+    })
+    child.on('error', () => resolve(null))
+  })
 }
 
 /**
@@ -115,6 +156,7 @@ filesRouter.get('/resolve-path', async (req: Request, res: Response, next: NextF
         res.json({ path: fallback, resolved: false })
         return
       }
+      let remoteRepoRoot: string | null = null
       for (const base of bases) {
         const candidate = path.posix.join(base, cleanRel)
         const st = await conn.send('fs.stat', { path: candidate })
@@ -122,15 +164,32 @@ filesRouter.get('/resolve-path', async (req: Request, res: Response, next: NextF
           res.json({ path: candidate, resolved: true })
           return
         }
-        // Stop one level past the repo root.
+        // Stop at the repo root (one .git up), remember it for downward search.
         const git = await conn.send('fs.stat', { path: path.posix.join(base, '.git') })
-        if (git.ok && git.exists) break
+        if (git.ok && git.exists) { remoteRepoRoot = base; break }
+      }
+      // Downward: one fs.find RPC by basename under the repo root, then keep the
+      // first hit whose full path ends with the requested rel (server-side walk
+      // avoids a round-trip per directory). Only locates files, not bare dirs.
+      const downRoot = remoteRepoRoot ?? bases[bases.length - 1]
+      const baseName = cleanRel.split('/').pop() ?? cleanRel
+      const find = await conn.send('fs.find', { path: downRoot, name: baseName, maxDepth: MAX_DOWNWARD_DEPTH })
+      if (find.ok && Array.isArray(find.files)) {
+        const suffix = '/' + cleanRel
+        const hit = (find.files as string[])
+          .filter((f) => f === path.posix.join(downRoot, cleanRel) || f.endsWith(suffix))
+          .sort((a, b) => a.split('/').length - b.split('/').length)[0]
+        if (hit) {
+          res.json({ path: hit, resolved: true })
+          return
+        }
       }
       res.json({ path: fallback, resolved: false })
       return
     }
 
-    // ── Local: stat each candidate ──
+    // ── Local: walk up first, then search down from the repo root ──
+    let repoRoot: string | null = null
     for (const base of bases) {
       const candidate = path.posix.join(base, cleanRel)
       try {
@@ -140,8 +199,22 @@ filesRouter.get('/resolve-path', async (req: Request, res: Response, next: NextF
       } catch { /* not here, keep walking up */ }
       try {
         await fsp.stat(path.join(base, '.git'))
-        break // reached repo root — stop after this level
+        repoRoot = base
+        break // reached repo root — stop walking up
       } catch { /* not a repo root, continue */ }
+    }
+    // Nothing upward — Claude may have shown a path relative to a deeper dir
+    // (e.g. cwd=repo but the file lives in repo/a/b/<rel>). Search downward from
+    // the repo root (or the topmost base we reached) for the first match.
+    // Search downward from the repo root if known, else from cwd itself — NEVER
+    // from an ancestor above cwd (that could mean scanning from / across the whole
+    // filesystem). The repo root is always at or below cwd's ancestors but bounded
+    // by .git; without it, cwd is the safe floor.
+    const downRoot = repoRoot ?? cwd.replace(/\/+$/, '')
+    const downHit = await findDownwardLocal(downRoot, cleanRel)
+    if (downHit) {
+      res.json({ path: downHit, resolved: true })
+      return
     }
     res.json({ path: fallback, resolved: false })
   } catch (err) {
