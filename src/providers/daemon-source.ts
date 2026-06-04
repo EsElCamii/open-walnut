@@ -811,7 +811,11 @@ function cmdStart(ws, id, cmd) {
     detached: true,
     stdio: [pipeFd, outputFd, stderrFd],
     cwd: cwd,
-    env: { ...process.env, CLAUDE_CODE_DISABLE_BACKGROUND_TASKS: '1' },
+    // MCP_CONNECTION_NONBLOCKING=1: CLI emits init immediately instead of blocking
+    // up to 5s waiting for MCP servers (they keep connecting in background). Cuts
+    // time-to-init ~6.9s → ~2.9s with no loss of MCP functionality. Keep in sync
+    // with daemon-standalone.ts.
+    env: { ...process.env, CLAUDE_CODE_DISABLE_BACKGROUND_TASKS: '1', MCP_CONNECTION_NONBLOCKING: '1' },
   });
 
   // Write initial message to FIFO

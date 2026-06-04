@@ -619,7 +619,12 @@ function cmdStart(ws: ServerWebSocket<WsData>, id: number, cmd: Record<string, u
     detached: true,
     stdio: [pipeFd, outputFd, stderrFd],
     cwd: cwd,
-    env: { ...process.env, CLAUDE_CODE_DISABLE_BACKGROUND_TASKS: '1' },
+    // MCP_CONNECTION_NONBLOCKING=1 makes the CLI emit its `init` event immediately
+    // instead of blocking up to 5s for MCP servers to connect (they keep connecting
+    // in the background). This is the dominant time-to-init cost for Walnut sessions:
+    // measured ~6.9s → ~2.9s with no loss of MCP functionality. The CLI only honors
+    // this via env (no CLI flag); the daemon's spawn env is the single inject point.
+    env: { ...process.env, CLAUDE_CODE_DISABLE_BACKGROUND_TASKS: '1', MCP_CONNECTION_NONBLOCKING: '1' },
   })
 
   // Detect spawn failure immediately — proc.pid is undefined when posix_spawn fails.
