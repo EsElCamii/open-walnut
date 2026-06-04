@@ -4211,6 +4211,21 @@ export class SessionRunner {
     // serializes behind every other session's task updates; awaiting them here
     // would delay delivery by seconds when other sessions are busy.
     // Message is already enqueued by session:send RPC (or session_send agent tool).
+    // Visibility: record WHY we pick a path — activeProcessing decides processNext
+    // (drain queue, can spawn/resume) vs injectMidTurn (live FIFO write). The
+    // target session's hasPipe/pid/active are the inputs injectMidTurn gates on,
+    // so logging them here lets `walnut-logs.sh trace` explain any queued stall
+    // without guessing.
+    const dbgTarget = this.findSessionByClaudeId(sessionId)
+    log.session.info('handleSend: routing send', {
+      sessionId,
+      interrupt: !!interrupt,
+      activeProcessing: this.activeProcessing.has(sessionId),
+      hasPipe: dbgTarget?.hasPipe ?? false,
+      pid: dbgTarget?.processPid ?? null,
+      host: dbgTarget?.host ?? null,
+      path: this.activeProcessing.has(sessionId) ? 'injectMidTurn' : 'processNext',
+    })
     if (!this.activeProcessing.has(sessionId)) {
       log.session.info('handleSend: triggering processNext', { sessionId, interrupt: !!interrupt })
       this.processNext(sessionId, mode).catch((err) => {
@@ -4290,9 +4305,25 @@ export class SessionRunner {
       }
     }
 
-    if (!targetSession || !targetSession.hasPipe) {
-      log.session.info('handleSend: session already processing, message queued (no FIFO pipe)', { sessionId })
-      return
+    // Do NOT gate on the local `hasPipe` flag here. `hasPipe` is a locally-cached
+    // guess at remote liveness, and for remote (daemon) sessions it goes stale: the
+    // CLI is alive and its FIFO is readable, yet `hasPipe=false` (pid=None) because
+    // walnut never learned the remote state. Gating on it strands the message —
+    // injectMidTurn used to silently `return` and wait for some later event to call
+    // processNext, producing the 30–50s QUEUED stall users saw mid-turn.
+    //
+    // The authoritative liveness check lives in the daemon: `writeMessage` →
+    // `cmdSend` does an atomic O_WRONLY|O_NONBLOCK FIFO probe (ENXIO if no reader),
+    // exactly like processNext's stdin path. So: if the session object is missing,
+    // OR we can't write the FIFO, delegate to processNext — it owns rehydrate /
+    // attach / --resume and will deliver via the source of truth instead of guessing.
+    // (Root-cause fix, mirrors the 2026-04-22 removal of the _hasPipe cache; see
+    // memory: don't cache remote state locally.)
+    if (!targetSession) {
+      log.session.info('injectMidTurn: no live session object — delegating to processNext', {
+        sessionId,
+      })
+      return this.processNext(sessionId)
     }
 
     // If Claude is blocked on a permission prompt, auto-deny it so the user's
@@ -4340,10 +4371,15 @@ export class SessionRunner {
         count: newMsgs.length,
       }, ['main-ai'], { source: 'session-runner' })
     } else {
-      // stdin write failed (pipe broken, process died) — revert to pending
-      // so processNext can pick them up after the turn completes or on respawn
+      // stdin write failed — the daemon's FIFO probe says the CLI isn't reading
+      // (turn-between gap, process died, etc.). Revert to pending, then delegate to
+      // processNext NOW rather than stranding the message until some later event.
+      // processNext owns the authoritative recovery path (rehydrate / attach /
+      // --resume), so the message is delivered promptly instead of waiting out the
+      // whole turn (the old behavior logged a warn and left it queued = 30–50s stall).
       await revertToPending(newMsgs)
-      log.session.warn('handleSend: mid-turn stdin injection failed, reverted to pending', { sessionId })
+      log.session.info('injectMidTurn: stdin write failed — delegating to processNext', { sessionId, count: newMsgs.length })
+      return this.processNext(sessionId)
     }
   }
 
