@@ -262,93 +262,110 @@ describe('touchLastSessionUpdate bumps a pinned task within its tier', () => {
     expect(tierRes.status).toBe(200);
   }
 
-  async function focusOrder(): Promise<string[]> {
+  async function tierOrder(tier: 'focus' | 'next' | 'satellite' | 'wait', ids: string[]): Promise<string[]> {
     const res = await fetch(apiUrl('/api/focus/tasks'));
-    expect(res.status).toBe(200);
-    const body = (await res.json()) as { focus_tasks: string[] };
-    return body.focus_tasks;
+    const body = (await res.json()) as Record<string, string[]>;
+    return (body[`${tier}_tasks`] ?? []).filter((id) => ids.includes(id));
   }
 
-  it('chatting with a task moves it to the front of its tier, preserving the rest', async () => {
-    const t1 = await createTask('Bump tier — t1');
-    const t2 = await createTask('Bump tier — t2');
-    const t3 = await createTask('Bump tier — t3');
+  it('chatting with a NEXT task (default-on tier) moves it to the front, preserving the rest', async () => {
+    const t1 = await createTask('Bump next — t1');
+    const t2 = await createTask('Bump next — t2');
+    const t3 = await createTask('Bump next — t3');
 
-    await pinToTier(t1.id, 'focus');
-    await pinToTier(t2.id, 'focus');
-    await pinToTier(t3.id, 'focus');
+    await pinToTier(t1.id, 'next');
+    await pinToTier(t2.id, 'next');
+    await pinToTier(t3.id, 'next');
 
-    const before = (await focusOrder()).filter((id) => [t1.id, t2.id, t3.id].includes(id));
+    const ids = [t1.id, t2.id, t3.id];
+    const before = await tierOrder('next', ids);
     expect(before.length).toBe(3);
 
     // Chat with whichever task is currently last among our three.
     const last = before[2];
     await touchLastSessionUpdate(last);
 
-    const after = (await focusOrder()).filter((id) => [t1.id, t2.id, t3.id].includes(id));
+    const after = await tierOrder('next', ids);
     // Touched task jumps to the front; the other two keep their relative order.
     expect(after[0]).toBe(last);
     expect(after.slice(1)).toEqual(before.slice(0, 2));
   });
 
-  it('only reorders within the same tier, leaving other tiers untouched', async () => {
-    const f1 = await createTask('Tier isolation — focus 1');
-    const f2 = await createTask('Tier isolation — focus 2');
-    const n1 = await createTask('Tier isolation — next 1');
-    const n2 = await createTask('Tier isolation — next 2');
+  it('FOCUS tier does NOT bump by default (preserves manual sprint order)', async () => {
+    const f1 = await createTask('Focus no-bump — f1');
+    const f2 = await createTask('Focus no-bump — f2');
+    const f3 = await createTask('Focus no-bump — f3');
 
     await pinToTier(f1.id, 'focus');
     await pinToTier(f2.id, 'focus');
+    await pinToTier(f3.id, 'focus');
+
+    const ids = [f1.id, f2.id, f3.id];
+    const before = await tierOrder('focus', ids);
+    expect(before.length).toBe(3);
+
+    // Chat with the last FOCUS task — default config keeps FOCUS order fixed.
+    await touchLastSessionUpdate(before[2]);
+
+    const after = await tierOrder('focus', ids);
+    expect(after).toEqual(before);
+    // Timestamp still updates even when this tier's bump is off.
+    const touched = await getTask(before[2]);
+    expect(touched.last_session_update).toBeDefined();
+  });
+
+  it('only reorders within the same tier, leaving other tiers untouched', async () => {
+    const s1 = await createTask('Tier isolation — sat 1');
+    const s2 = await createTask('Tier isolation — sat 2');
+    const n1 = await createTask('Tier isolation — next A');
+    const n2 = await createTask('Tier isolation — next B');
+
+    await pinToTier(s1.id, 'satellite');
+    await pinToTier(s2.id, 'satellite');
     await pinToTier(n1.id, 'next');
     await pinToTier(n2.id, 'next');
 
-    const focusBefore = (await focusOrder()).filter((id) => [f1.id, f2.id].includes(id));
+    const satIds = [s1.id, s2.id];
+    const satBefore = await tierOrder('satellite', satIds);
 
     // Chat with the second NEXT task — it should jump to the front of NEXT only.
     await touchLastSessionUpdate(n2.id);
 
-    const res = await fetch(apiUrl('/api/focus/tasks'));
-    const body = (await res.json()) as { focus_tasks: string[]; next_tasks: string[] };
-
-    // FOCUS tier (a different tier) must keep its relative order — bumping a NEXT
-    // task must not touch FOCUS ordering.
-    const focusAfter = body.focus_tasks.filter((id) => [f1.id, f2.id].includes(id));
-    expect(focusAfter).toEqual(focusBefore);
+    // SATELLITE tier (a different default-on tier) must keep its relative order.
+    const satAfter = await tierOrder('satellite', satIds);
+    expect(satAfter).toEqual(satBefore);
 
     // NEXT tier: n2 bubbled to the front.
-    expect(body.next_tasks[0]).toBe(n2.id);
+    const nextAfter = await tierOrder('next', [n1.id, n2.id]);
+    expect(nextAfter[0]).toBe(n2.id);
   });
 
-  it('does NOT bump when ui.bump_pinned_on_chat is disabled', async () => {
-    const a = await createTask('No-bump — a');
-    const b = await createTask('No-bump — b');
-    const c = await createTask('No-bump — c');
+  it('respects per-tier config: disabling a tier stops its bump', async () => {
+    const a = await createTask('Per-tier off — a');
+    const b = await createTask('Per-tier off — b');
+    const c = await createTask('Per-tier off — c');
 
     await pinToTier(a.id, 'wait');
     await pinToTier(b.id, 'wait');
     await pinToTier(c.id, 'wait');
 
-    const waitOrder = async () => {
-      const res = await fetch(apiUrl('/api/focus/tasks'));
-      const body = (await res.json()) as { wait_tasks: string[] };
-      return body.wait_tasks.filter((id) => [a.id, b.id, c.id].includes(id));
-    };
-
-    const before = await waitOrder();
+    const ids = [a.id, b.id, c.id];
+    const before = await tierOrder('wait', ids);
     expect(before.length).toBe(3);
 
     try {
-      await updateConfig({ ui: { bump_pinned_on_chat: false } });
-      // Chat with whichever task is currently last — with bumping disabled the
-      // order must NOT change.
+      // Turn OFF the wait tier (default would be on).
+      await updateConfig({ ui: { bump_tiers: { wait: false } } });
       await touchLastSessionUpdate(before[2]);
-      const after = await waitOrder();
-      expect(after).toEqual(before);
-      // The timestamp must still update even when bumping is off.
-      const touched = await getTask(a.id);
-      expect(touched.last_session_update).toBeDefined();
+      expect(await tierOrder('wait', ids)).toEqual(before);
+
+      // Turn it back ON — now the bump applies.
+      await updateConfig({ ui: { bump_tiers: { wait: true } } });
+      await touchLastSessionUpdate(before[2]);
+      const after = await tierOrder('wait', ids);
+      expect(after[0]).toBe(before[2]);
     } finally {
-      await updateConfig({ ui: { bump_pinned_on_chat: true } });
+      await updateConfig({ ui: { bump_tiers: undefined } });
     }
   });
 });

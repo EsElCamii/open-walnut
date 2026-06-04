@@ -331,11 +331,18 @@ export interface Config {
     show_ui_only_agent_error?: boolean;
   };
   ui?: {
-    /** How many session panels to show side-by-side: '1', '2', or 'auto' (breakpoint-driven). */
+    /** How many session panels to show side-by-side: '1', '2', or 'auto' (breakpoint-driven).
+     *  Default: '2'. */
     session_panels?: '1' | '2' | 'auto';
-    /** When chatting with a pinned task, bump it to the front of its Focus tier.
-     *  Default: true. Set to false to keep the manual drag order fixed. */
-    bump_pinned_on_chat?: boolean;
+    /** Per-tier control of "chatting with a pinned task bumps it to the front of its tier".
+     *  Each tier independently configurable. Defaults (when a key is undefined):
+     *  focus=false (preserve the manually ordered current sprint), next/satellite/wait=true. */
+    bump_tiers?: {
+      focus?: boolean;
+      next?: boolean;
+      satellite?: boolean;
+      wait?: boolean;
+    };
   };
   /** Audio capture configuration (system audio recording) */
   audio?: {

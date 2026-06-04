@@ -2300,6 +2300,21 @@ export async function linkSession(
 }
 
 /**
+ * Whether chatting with a pinned task in the given tier should bump it to the
+ * front of that tier. Per-tier configurable via ui.bump_tiers.
+ * Defaults when unset: focus=false (keep the hand-ordered current sprint),
+ * next/satellite/wait=true.
+ */
+function isBumpEnabledForTier(
+  config: { ui?: { bump_tiers?: { focus?: boolean; next?: boolean; satellite?: boolean; wait?: boolean } } },
+  tier: 'focus' | 'next' | 'satellite' | 'wait',
+): boolean {
+  const configured = config.ui?.bump_tiers?.[tier];
+  if (configured !== undefined) return configured;
+  return tier !== 'focus'; // default: focus off, others on
+}
+
+/**
  * Move a pinned task to the front of its own tier by reassigning pin_order.
  * Tiers are derived by filtering pinned tasks on focus_tier, so only the target
  * task's own tier reorders — other tiers keep their relative order untouched.
@@ -2333,11 +2348,13 @@ export async function touchLastSessionUpdate(taskIdPrefix: string): Promise<void
     const task = store.tasks.find((t) => t.id.startsWith(taskIdPrefix));
     if (!task) return;
     task.last_session_update = new Date().toISOString();
-    // Opt-out config: when bump_pinned_on_chat is explicitly false, keep the
-    // manual drag order fixed and only update the timestamp.
+    // Per-tier opt-out: chatting bumps a pinned task to the front of its tier,
+    // configurable per tier. Defaults preserve the manually ordered current sprint
+    // (focus=false) while surfacing recent activity in the other tiers.
     const config = await getConfig();
-    const bumpEnabled = config.ui?.bump_pinned_on_chat !== false;
-    const focusBarChanged = bumpEnabled && task.pinned ? bumpPinnedTaskWithinTier(store, task) : false;
+    const focusBarChanged = task.pinned && isBumpEnabledForTier(config, task.focus_tier ?? 'satellite')
+      ? bumpPinnedTaskWithinTier(store, task)
+      : false;
     await writeStore(store);
     bus.emit(EventNames.TASK_UPDATED, { task }, ['web-ui'], { source: 'session-touch' });
     if (focusBarChanged) {
