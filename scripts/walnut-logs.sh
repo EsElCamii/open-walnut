@@ -11,6 +11,10 @@
 #   <sid>.jsonl / .jsonl.err / .pipe / .pgid   per-session CLI output (source of truth)
 #
 # Usage:
+#   scripts/walnut-logs.sh diagnose [sid]       ⭐⭐ AUTO-CLASSIFY each send's slowness → names the bug (event-loop / Bug D mid-turn stall / slow resume) + p50/p90 summary
+#   scripts/walnut-logs.sh busstorm [sid]       ⭐ quantify high-freq streaming fan-out per global subscriber (verify interest-set; spot a new storm source)
+#   scripts/walnut-logs.sh trace <sid>          per-message timeline: dispatch→RPC→enqueue→route→delivered, w/ deltas + hasPipe/path
+#   scripts/walnut-logs.sh pipe <sid>           hasPipe/lifecycle transitions (start vs attach, exit, reap) — why a send was queued
 #   scripts/walnut-logs.sh session <sid>        full timeline for a session (enqueue→deliver→result)
 #   scripts/walnut-logs.sh delivery [sid]       message enqueue→delivered latency table (all or one sid)
 #   scripts/walnut-logs.sh slow [ms]            deliveries slower than <ms> (default 3000)
@@ -38,6 +42,11 @@ fi
 
 die() { echo "error: $*" >&2; exit 1; }
 need_log() { [[ -f "$JSON_LOG" ]] || die "no JSON log found in $LOG_DIR"; }
+
+# Timestamps are UTC but the filename uses the LOCAL date, so a session active
+# across UTC-midnight has rows split over two files. Commands that stitch a
+# whole session timeline scan the two most-recent dated logs, oldest-first.
+recent_logs() { ls -t "$LOG_DIR"/open-walnut-*.log 2>/dev/null | head -2 | tail -r 2>/dev/null || ls -t "$LOG_DIR"/open-walnut-*.log 2>/dev/null | head -2; }
 
 # Pretty-print selected fields from matching JSON lines: HH:MM:SS LVL [sub] message  {extras}
 fmt() {
@@ -77,6 +86,222 @@ case "$cmd" in
     grep -aF '"message delivered"' "$JSON_LOG" | \
       jq -rc --argjson t "$thresh" 'select(.deliveryMs >= $t) |
         "\(.time|sub("^.*T";"")|sub("\\..*$";""))  deliveryMs=\(.deliveryMs)  path=\(.path)  sid=\(.sessionId)  msg=\(.messageId)"'
+    ;;
+
+  diagnose)
+    # Auto-classify WHY a send was slow, per message, then summarize. This is the
+    # "tell me which bug it is" entry point — pairs enqueue→route→delivered by
+    # messageId (qm-…), measures the felt wait, and labels the cause so we don't
+    # have to eyeball the raw trace every time.
+    # Usage: diagnose [sid] [mins]  — mins defaults to 30 (recent window so old
+    # historical stalls don't pollute "is it happening NOW?"); pass 0 for all-time.
+    sid="${1:-}"; mins="${2:-30}"
+    echo "── send-latency diagnosis${sid:+ for $sid} (last ${mins}min; 0=all) — auto-labelled cause ──"
+    # shellcheck disable=SC2046
+    python3 - "$sid" "$mins" $(recent_logs) <<'PY'
+import sys,json
+from datetime import datetime,timezone
+sid=sys.argv[1]; mins=float(sys.argv[2]); files=sys.argv[3:]
+# Log timestamps are UTC ('...Z'); parse as UTC so the window math matches wall clock.
+cutoff = (datetime.now(timezone.utc).timestamp()*1000 - mins*60000) if mins>0 else 0
+def ms(t):
+    try: return datetime.strptime(t[:23],'%Y-%m-%dT%H:%M:%S.%f').replace(tzinfo=timezone.utc).timestamp()*1000
+    except: return None
+# Per-message timeline keyed by messageId (qm-…). The routing-send + cannot-inject
+# logs carry sessionId but NOT messageId, so we attach them to the most-recent
+# not-yet-routed enqueue for that sid. Once a message is tagged with a routing
+# decision (path/hasPipe) or a stall, those fields are LOCKED so a later
+# processNext routing-send for the same message can't overwrite the mid-turn path.
+msgs={}   # messageId -> {enq, deliv, sid, path, hasPipe, stall, locked, ...}
+for f in files:
+    for l in open(f,errors='ignore'):
+        if sid and sid[:8] not in l: continue
+        try: d=json.loads(l)
+        except: continue
+        m=d.get('message',''); tm=ms(d.get('time',''))
+        if tm is None or tm<cutoff: continue
+        s=d.get('sessionId') or ''
+        mid=d.get('messageId')
+        if m=='message enqueued' and mid:
+            msgs.setdefault(mid,{})['enq']=tm; msgs[mid]['sid']=s
+        elif m=='handleSend: routing send' and mid is None:
+            cand=[k for k,v in msgs.items() if v.get('sid')==s and not v.get('routed')]
+            if cand:
+                last=max(cand,key=lambda k:msgs[k].get('enq',0))
+                msgs[last]['routed']=True
+                for k in ('path','hasPipe','activeProcessing','pid'):
+                    if k in d: msgs[last][k]=d[k]
+        elif 'cannot inject' in m:   # Bug D fingerprint (only emitted pre-fix)
+            cand=[k for k,v in msgs.items() if v.get('sid')==s and not v.get('stall')]
+            if cand:
+                last=max(cand,key=lambda k:msgs[k].get('enq',0)); msgs[last]['stall']=True
+        elif 'delegating to processNext' in m:  # Bug D post-fix fingerprint
+            cand=[k for k,v in msgs.items() if v.get('sid')==s and not v.get('delegated')]
+            if cand:
+                last=max(cand,key=lambda k:msgs[k].get('enq',0)); msgs[last]['delegated']=True
+        elif m=='message delivered' and mid:
+            msgs.setdefault(mid,{})['deliv']=tm
+            # delivery path is the FINAL path; keep the earlier routing path separately
+            msgs[mid]['dpath']=d.get('path'); msgs[mid]['deliveryMs']=d.get('deliveryMs')
+rows=[]
+for mid,v in msgs.items():
+    enq=v.get('enq'); deliv=v.get('deliv')
+    e2d = (deliv-enq) if (enq and deliv) else None     # enqueue→delivered (the felt wait)
+    path=v.get('path'); hp=v.get('hasPipe'); stall=v.get('stall'); deleg=v.get('delegated')
+    # ---- classify (most specific first) ----
+    label='ok'
+    if e2d is None and 'deliv' not in v:
+        label='STUCK (enqueued, not delivered in window)'
+    elif stall:
+        label='BUG D: mid-turn stall (cannot-inject on stale hasPipe=False)'
+    elif deleg and e2d is not None and e2d>3000:
+        label='Bug D path (delegated to processNext) but still slow — investigate'
+    elif path=='injectMidTurn' and str(hp)=='False' and e2d is not None and e2d>3000:
+        label='BUG D: mid-turn stall (injectMidTurn, stale hasPipe=False)'
+    elif e2d is not None and e2d>3000 and v.get('dpath')=='resume':
+        label='SLOW RESUME (CLI dead → --resume cold path)'
+    elif e2d is not None and e2d>3000:
+        label=f'SLOW DELIVER (enqueue→delivered, path={v.get("dpath") or path})'
+    rows.append((enq or 0,mid,e2d,(path or v.get('dpath')),hp,v.get('deliveryMs'),label))
+rows.sort()
+def fmt(x): return f'{x:8.0f}ms' if isinstance(x,(int,float)) else '        ?'
+print(f"  {'time':10} {'enq→deliv':>11} {'route-path':>13} {'hasPipe':>7}  cause")
+worst={}
+for enq,mid,e2d,path,hp,dms,label in rows:
+    ts=datetime.fromtimestamp(enq/1000,timezone.utc).strftime('%H:%M:%S') if enq else '   ?    '
+    print(f"  {ts:10} {fmt(e2d):>11} {str(path):>13} {str(hp):>7}  {label}")
+    if label!='ok': worst[label]=worst.get(label,0)+1
+def pct(vals,p):
+    vals=sorted(v for v in vals if v is not None)
+    return vals[min(len(vals)-1,int(len(vals)*p/100))] if vals else None
+e2ds=[r[2] for r in rows]
+print(f"\n  n={len(rows)} messages")
+print(f"  enqueue→delivered: p50={fmt(pct(e2ds,50))} p90={fmt(pct(e2ds,90))} max={fmt(max([x for x in e2ds if x is not None],default=0))}")
+if worst:
+    print("  ── causes seen (count × label) ──")
+    for k,c in sorted(worst.items(),key=lambda x:-x[1]): print(f"    {c:3}×  {k}")
+else:
+    print("  ✅ no slow sends in window")
+if not rows: print("  (no messages found — check sid / log window)")
+PY
+    ;;
+
+  busstorm)
+    # Quantify how many high-frequency streaming events each GLOBAL subscriber was
+    # woken for. After the interest-set fix only main-ai + session-hooks should have
+    # nonzero counts; a narrow subscriber showing up = interest regression or a new
+    # global subscriber added without an interest array. Also totals raw fan-out.
+    # Usage: busstorm [sid] [mins] — mins defaults to 30 so historical pre-fix counts
+    # don't pollute "is a storm happening NOW?"; pass 0 for all-time. NOTE: needs the
+    # bus 'event delivered' debug log — only present when LOG_LEVEL includes debug.
+    sid="${1:-}"; mins="${2:-30}"
+    echo "── streaming fan-out per subscriber${sid:+ for $sid} (last ${mins}min; 0=all) — only main-ai + session-hooks expected ──"
+    # shellcheck disable=SC2046
+    python3 - "$sid" "$mins" $(recent_logs) <<'PY'
+import sys,json
+from datetime import datetime,timezone
+from collections import Counter
+sid=sys.argv[1]; mins=float(sys.argv[2]); files=sys.argv[3:]
+cutoff = (datetime.now(timezone.utc).timestamp()*1000 - mins*60000) if mins>0 else 0
+def ms(t):
+    try: return datetime.strptime(t[:23],'%Y-%m-%dT%H:%M:%S.%f').replace(tzinfo=timezone.utc).timestamp()*1000
+    except: return None
+STREAM={'session:text-delta','session:thinking-delta','session:tool-use','session:tool-result','session:usage-update'}
+per=Counter(); total=Counter()
+for f in files:
+    for l in open(f,errors='ignore'):
+        if '"event delivered"' not in l: continue
+        if sid and sid[:8] not in l: continue
+        try: d=json.loads(l)
+        except: continue
+        if cutoff and (ms(d.get('time','')) or 0)<cutoff: continue
+        nm=d.get('name'); sub=d.get('subscriber')
+        if nm in STREAM:
+            per[sub]+=1; total[nm]+=1
+if not per:
+    print("  (no streaming 'event delivered' lines in window — bus debug logging may be off, or no active streaming)")
+else:
+    # The narrow {global:true} subscribers interest-set was supposed to silence.
+    # If ANY of these show up on streaming events, the interest array regressed
+    # (or a new global subscriber was added without one) — that's the real alarm.
+    REGRESSION={'audio-transcriber','qmd-task-sync','qmd-session-sync','dependency-unblock','git-versioning'}
+    print("  per subscriber (woken count for streaming events):")
+    for sub,c in per.most_common():
+        if sub in ('main-ai','session-hooks'):
+            flag='   ✅ expected (needs streaming)'
+        elif sub in REGRESSION:
+            flag='   🚨 INTEREST REGRESSION — global subscriber back on streaming fan-out'
+        else:
+            # named subscriber reached via destinations:['*'] broadcast — normal, not
+            # an interest-set concern (interest only gates {global:true}). Watch volume.
+            flag='   (named, via wildcard broadcast — normal)'
+        print(f"    {c:8}  {sub}{flag}")
+    print("  per event type (raw fan-out):")
+    for nm,c in total.most_common(): print(f"    {c:8}  {nm}")
+PY
+    ;;
+
+  trace)
+    sid="${1:?usage: trace <sid>}"
+    echo "── per-message trace for $sid (dispatch → RPC → enqueue → route → delivered) ──"
+    # shellcheck disable=SC2046
+    python3 - "$sid" $(recent_logs) <<'PY'
+import sys,json
+from datetime import datetime
+sid=sys.argv[1]; files=sys.argv[2:]
+def ms(t):
+    try: return datetime.strptime(t[:23],'%Y-%m-%dT%H:%M:%S.%f').timestamp()*1000
+    except: return None
+rows=[]
+for f in files:
+    for l in open(f,errors='ignore'):
+        if sid[:8] not in l: continue
+        try: d=json.loads(l)
+        except: continue
+        if (d.get('sessionId') or '')[:len(sid)]!=sid and sid not in l: continue
+        t=d.get('time',''); m=d.get('message','')
+        rows.append((ms(t),t,d))
+rows=[r for r in rows if r[0] is not None]
+rows.sort(key=lambda r:r[0])
+# stages we care about, in order
+STAGES=['[send] dispatching','session message via RPC','message enqueued','handleSend: routing send',
+        'messages batched for delivery','message sent via stdin','injected mid-turn','message delivered',
+        'cannot inject','no FIFO pipe','triggering processNext','rehydrating','forcing --resume','consuming pending']
+prev=None
+for tm,t,d in rows:
+    m=d.get('message','')
+    if not any(s in m for s in STAGES): continue
+    dt=f"+{tm-prev:7.0f}ms" if prev is not None else "        start"
+    extra=''
+    for k in ('path','hasPipe','activeProcessing','pid','deliveryMs','count','messageId','found','model','mode'):
+        if k in d: extra+=f" {k}={d[k]}"
+    print(f"  {t[11:23]} {dt}  {m[:46]:46}{extra}")
+    prev=tm
+if not rows: print("  (no rows — check sid; logs scanned:", ", ".join(files)+")")
+PY
+    ;;
+
+  pipe)
+    sid="${1:?usage: pipe <sid>}"
+    echo "── hasPipe / lifecycle (start sets hasPipe=true; attach historically did NOT) for $sid ──"
+    # shellcheck disable=SC2046
+    python3 - "$sid" $(recent_logs) <<'PY'
+import sys,json
+sid=sys.argv[1]; files=sys.argv[2:]
+KEYS=['session started','attached to session','RemoteSessionManager: send failed','exit','session_state',
+      'reap','onExit','no FIFO pipe','cannot inject','routing send','stopped']
+for f in files:
+    for l in open(f,errors='ignore'):
+        if sid[:8] not in l: continue
+        try: d=json.loads(l)
+        except: continue
+        m=d.get('message','')
+        if not any(k in m for k in KEYS): continue
+        extra=''
+        for k in ('hasPipe','alive','pid','path','activeProcessing','reason','state','process_status'):
+            if k in d: extra+=f" {k}={d[k]}"
+        print(f"  {d.get('time','')[11:23]} [{d.get('subsystem','?')}] {m[:50]:50}{extra}")
+PY
     ;;
 
   req)

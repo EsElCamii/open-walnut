@@ -26,20 +26,6 @@ npm run dev:prod        # Build all → restart 3456 with latest code
 npm run dev:ephemeral   # Ephemeral server (random port, temp data, auto-cleans)
 ```
 
-### Watchdog (auto-restart on crash)
-
-A macOS LaunchAgent (`com.openwalnut.watchdog`) health-checks `http://localhost:3456/api/config` every 30s and restarts the server if it's down. It's a no-op when the server is already healthy, so it won't interfere with manual `dev:prod` runs.
-
-```bash
-bash scripts/install-watchdog.sh install|uninstall|status
-```
-
-- Scripts: `scripts/walnut-watchdog.sh`, `scripts/com.openwalnut.watchdog.plist`
-- Logs: `/tmp/open-walnut/watchdog.log` (watchdog), `/tmp/open-walnut/server.log` (auto-started server)
-- Restart command: `zsh -c 'source ~/.zshrc && exec node dist/cli.js web --port 3456'` — spawned via zsh so walnut inherits the user's full shell env (PATH for `claude` / homebrew, AWS_BEARER_TOKEN_BEDROCK, ANTHROPIC_*, etc.). LaunchAgent's minimal env would otherwise break provider auth and CLI spawning.
-- Override env without touching `.zshrc`: put KEY=VALUE lines in `~/.open-walnut/watchdog.env` (sourced after `.zshrc`).
-- No rebuild on restart — assumes `dist/` is fresh. Run `npm run build` after source changes.
-
 ## What Is Walnut
 
 Personal AI butler: tasks + knowledge + AI sessions. **Tasks are the atom.** `Category → Project → Task → Subtask`. Event Bus connects everything. See [ARCHITECTURE.md](./ARCHITECTURE.md).
@@ -58,7 +44,13 @@ Personal AI butler: tasks + knowledge + AI sessions. **Tasks are the atom.** `Ca
 
 **Remote files:** `/tmp/open-walnut/sessions.json` (registry), `/tmp/open-walnut-streams/<sid>.{pipe,jsonl,pgid}`. JSONL is source of truth.
 
-**CLI lifecycle:** `claude -p` exits 0 after each turn with `type=result` as last JSONL line — NOT long-running. Next send spawns new CLI with `--resume <sid>`.
+**CLI lifecycle (READ THIS — easy to get wrong):**
+- `claude -p --input-format stream-json` is **LONG-RUNNING**, NOT per-turn. One CLI process stays alive across many messages, reading new input from its FIFO stdin between turns. (Evidence: a session with 39 messages had only 4 spawns.)
+- The daemon holds the FIFO open with `O_RDWR` (`daemon-standalone.ts`) so the pipe survives between turns. Process is reaped only by the **idle timer** (`SESSION_IDLE_KILL_MS = 2h`, 5-min warning) or a real death (ENXIO / pid gone / crash) — never "turn ended".
+- `isTurnCompleteExit()` does NOT mean turns exit. It only runs *inside* `reapSession()` to normalize the exit code *when a death already happened*, deciding if the last JSONL `result` line was a clean turn-end vs a crash.
+- `--resume <sid>` is the **fallback** path (FIFO write failed / process really died), not the normal send path. Normal send = write the live FIFO.
+
+**Delivery paths (where mid-turn injection breaks):** A send to a session walnut thinks is "processing" (`activeProcessing`) goes through `injectMidTurn` (gated on `targetSession.hasPipe`); otherwise `processNext` (writes the FIFO directly, no hasPipe gate). Pitfall: `RemoteSessionManager._hasPipe` is set `true` only in `start()` — `attach()` (used when reconnecting to an already-alive CLI after a daemon restart) returns `alive:true` but historically left `_hasPipe=false`, so `injectMidTurn` falsely reported "no FIFO pipe" and queued the message until the turn ended (25–55s grey stall). Keep `_hasPipe` in sync with daemon-authoritative liveness, not with spawn-vs-attach.
 
 **Daemon restart:** old `cleanup()` leaves CLI alive. New daemon reconciles sessions.json then scans `.pgid` files — scan MUST skip sids already adopted (`if (sessions.has(sid)) continue`). All death paths funnel into `reapSession()` in `daemon-core.ts`; it calls `isTurnCompleteExit()` to normalize code to 0 when JSONL tail shows clean turn completion (otherwise every turn-end shows "exit -1" in UI).
 
@@ -67,6 +59,13 @@ Personal AI butler: tasks + knowledge + AI sessions. **Tasks are the atom.** `Ca
 **Auto-deploy (use this):** `DaemonConnection` compares local `.version` vs remote `binary --version`; if differs, gzips + chunks binary into 1MB pieces, each via separate SSH connection (bypasses corp proxy that kills >5MB transfers), retries 2x per chunk, falls back to 44KB source deploy if chunked binary fails. Just `npm run build && bash scripts/build-daemon.sh && npm run dev:prod` — next UI send to that host auto-upgrades (old CLI processes survive via Phase C).
 
 **Never scp manually** — corp SSH proxy (WSSH) kills large transfers. That's exactly what the chunked auto-deploy solves.
+
+**Debugging send/delivery latency (quick refs):**
+- Both local (`__local__`) AND remote sessions go through the daemon / `RemoteSessionManager`. There is no separate "local" transport — don't assume a stall is SSH-specific.
+- Logs: structured JSON at `/tmp/open-walnut/open-walnut-<date>.log` — but **timestamps are UTC** while the **filename is local date**, so a UTC-morning event lands in the *previous* local-day file. Filter by the UTC prefix, not the filename date.
+- Daemon's own logs: `/tmp/open-walnut/daemon-d-*.log` (JSON). `state_transition` + `reconcile-adopt` show the long-running process being re-adopted across daemon restarts (proof of long-running CLI).
+- Measure end-to-end honestly: `browser [send] dispatching` and `web session message via RPC` share the **same server-logger clock**, so pair them by `sessionId` (not by external `date`/bash time). Stages: `dispatching`→`session message via RPC`→`message enqueued`→`messages batched`→`message delivered`. The `deliveryMs` field only covers enqueue→delivered, so it *misses* any pre-enqueue event-loop lag.
+- `scripts/walnut-logs.sh diagnose [sid] | busstorm [sid] | trace <sid> | pipe <sid> | session <sid> | delivery [sid] | slow [ms] | daemon <sid>` — see the log-toolkit section below. **For "send is slow", start with `diagnose <sid>` — it auto-labels the cause (Bug D mid-turn stall / event-loop starvation / slow resume).**
 
 ### Subsystem Map
 
@@ -120,6 +119,10 @@ Use the structured logger (`log.info('subsystem', 'message', { sessionId, taskId
 One entry point for digging through Walnut logs (structured JSON at `/tmp/open-walnut/open-walnut-<date>.log`). Needs `jq`.
 
 ```bash
+scripts/walnut-logs.sh diagnose [sid] [mins]  # ⭐⭐ START HERE for "message is slow": auto-labels each send's cause
+scripts/walnut-logs.sh busstorm [sid] [mins]  # ⭐ streaming fan-out per subscriber (verify interest-set / spot a storm)
+scripts/walnut-logs.sh trace <sid>       # per-message timeline dispatch→RPC→enqueue→route→delivered + Δms/hasPipe/path
+scripts/walnut-logs.sh pipe <sid>        # hasPipe / lifecycle transitions — why a send was queued
 scripts/walnut-logs.sh session <sid>     # full timeline for a session
 scripts/walnut-logs.sh delivery [sid]    # message enqueue→delivered latency (deliveryMs)
 scripts/walnut-logs.sh slow [ms]         # deliveries slower than ms (default 3000) — find lag
@@ -127,6 +130,14 @@ scripts/walnut-logs.sh daemon <sid>      # which daemon-d-*.log serves a sid
 scripts/walnut-logs.sh jsonl <sid>       # tail the session's CLI .jsonl stream
 scripts/walnut-logs.sh req <id> | task <id> | errors [n] | tail [n]
 ```
+
+**When a user reports "message send is slow", run `diagnose <sid>` first.** It pairs each message's enqueue→route→delivered by `messageId` and prints a labelled cause per message + p50/p90, so you don't hand-grep. Labels it distinguishes (these are the known distinct root causes — don't conflate them):
+- **BUG D: mid-turn stall** — `injectMidTurn` on a stale `hasPipe=False` (remote sessions). The felt 30–50s QUEUED. Fixed by delegating to processNext; if this label reappears, the fix regressed.
+- **EVENT-LOOP STARVATION** — dispatch→enqueue blocked. Was caused by streaming fan-out to global subscribers; fixed by the event-bus `interest` set. Cross-check with `busstorm`.
+- **SLOW RESUME** — CLI dead, cold `--resume` path (inherently slower, not a bug).
+- **SLOW DELIVER / STUCK** — catch-alls; fall back to `trace`/`pipe` for the timeline.
+
+Both `diagnose` and `busstorm` default to a **30-min window** (so old historical stalls don't masquerade as "happening now"); pass a 3rd arg `mins` (e.g. `120`, or `0` for all-time) to widen it. Timestamps are UTC.
 
 Message-send latency is logged as `message delivered {deliveryMs, path, messageId}` at every delivery point (`path` = stdin / mid-turn / resume). `messageId` (`qm-…`) is the cross-layer request id — grep it to trace one message end-to-end.
 

@@ -167,10 +167,6 @@ When a session starts via `start_session`, `buildSessionContext(taskId)` in `src
 
 **Lightweight registered functions for cron jobs.** New `action` payload kind runs a registered function inline (no agent loop), optionally piping the result to a target agent. Actions register via `registerAction(id, fn, description)` in `src/core/cron/actions.ts`. Execution flow: cron timer → `executeJobCore()` → `runAction()` → if `targetAgent` specified, `runActionWithAgent()` (supports multimodal messages for vision models). REST: `GET /api/cron/actions` lists registered actions. Types extended in `src/core/cron/types.ts`.
 
-## Watchdog (LaunchAgent)
-
-**Auto-restarts the `:3456` server if it dies.** macOS LaunchAgent `com.openwalnut.watchdog` runs `scripts/walnut-watchdog.sh` every 30s; when `/api/config` fails it respawns via `zsh -c 'source ~/.zshrc && exec node dist/cli.js …'` so walnut inherits the user's full shell env (PATH for `claude`, AWS_BEARER_TOKEN_BEDROCK, etc.). Install/uninstall: `bash scripts/install-watchdog.sh {install|uninstall|status}`. Override env without touching `.zshrc`: `~/.open-walnut/watchdog.env`. Logs: `/tmp/open-walnut/watchdog.log`, `/tmp/open-walnut/server.log`.
-
 ## Timeline / Life Tracker
 
 **Screenshot-based activity tracker.** The `screenshot-track` action (`src/core/timeline/screenshot-action.ts`, macOS-only) captures screenshots via `screencapture`, creates 640px JPEG thumbnails, and uses file-size change detection to skip unchanged screens. Thumbnails stored at `~/.open-walnut/timeline/{date}/thumbnails/{timestamp}.jpg`. REST API at `src/web/routes/timeline.ts`: `GET /api/timeline?date=`, `GET /api/timeline/dates`, `GET /api/timeline/images/:date/:file`, `POST /api/timeline/toggle`. Frontend: `web/src/pages/TimelinePage.tsx` with date navigation, category bar chart, and activity list.
