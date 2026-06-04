@@ -21,7 +21,7 @@ const SELF_CHANGE_COOLDOWN = 3000;
  *   Used by auto mode to decide 1 vs 2 panels based on available space (not viewport).
  */
 export function useSessionPanelMode(containerWidth = 0) {
-  const [mode, setModeState] = useState<SessionPanelMode>('1');
+  const [mode, setModeState] = useState<SessionPanelMode>('2');
   const lastSelfChangeRef = useRef(0);
 
   // Fetch from config on mount
