@@ -281,6 +281,23 @@ export function MainPage({ visible = true, navigateRef }: MainPageProps) {
   // Set of session IDs currently open in columns — for active pill indicators
   const openSessionIdSet = useMemo(() => new Set(sessionColumns.map(c => c.id)), [sessionColumns]);
 
+  // Reverse map: task IDs whose session is currently open on the home page, so the
+  // Pinned/Recent cards can highlight them. A task may own several session IDs
+  // (plan/exec/legacy/array) — highlight if ANY of them is an open column.
+  const openSessionTaskIds = useMemo(() => {
+    const ids = new Set<string>();
+    if (openSessionIdSet.size === 0) return ids;
+    for (const t of tasks) {
+      if (
+        (t.session_id && openSessionIdSet.has(t.session_id)) ||
+        (t.exec_session_id && openSessionIdSet.has(t.exec_session_id)) ||
+        (t.plan_session_id && openSessionIdSet.has(t.plan_session_id)) ||
+        t.session_ids?.some((s) => openSessionIdSet.has(s))
+      ) ids.add(t.id);
+    }
+    return ids;
+  }, [tasks, openSessionIdSet]);
+
   // Detect pending ask_question tool call from chat messages
   const pendingQuestion = useMemo(() => {
     for (let i = chat.messages.length - 1; i >= 0; i--) {
@@ -1029,6 +1046,7 @@ export function MainPage({ visible = true, navigateRef }: MainPageProps) {
           onOpenSession={handleToggleSession}
           onTaskClick={handleFocusTaskById}
           openSessionIds={openSessionIdSet}
+          openSessionTaskIds={openSessionTaskIds}
           onOpenTriageForTask={handleOpenTriageForTask}
           onPinTask={focusBar.pin}
           onUnpinTask={focusBar.unpin}

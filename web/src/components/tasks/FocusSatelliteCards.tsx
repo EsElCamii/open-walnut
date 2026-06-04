@@ -46,6 +46,7 @@ interface SortableTierCardProps {
   task: Task;
   tier: FocusTier;
   isFocused: boolean;
+  isSessionOpen?: boolean;
   isDetailOpen?: boolean;
   onClick?: (task: Task) => void;
   onSetTier?: (taskId: string, tier: FocusTier) => void;
@@ -62,7 +63,7 @@ interface SortableTierCardProps {
   onDelete?: (id: string) => void;
 }
 
-export const SortableTierCard = memo(function SortableTierCard({ task, tier, isFocused, isDetailOpen, onClick, onSetTier, onUnpinTask, onPinTask, onSetPriority, onSetDate, onStar, onExpandDetail, onClearFocus, onOpenSession, onSetPhase, onUpdateTitle, onDelete }: SortableTierCardProps) {
+export const SortableTierCard = memo(function SortableTierCard({ task, tier, isFocused, isSessionOpen, isDetailOpen, onClick, onSetTier, onUnpinTask, onPinTask, onSetPriority, onSetDate, onStar, onExpandDetail, onClearFocus, onOpenSession, onSetPhase, onUpdateTitle, onDelete }: SortableTierCardProps) {
   const {
     attributes,
     listeners,
@@ -172,7 +173,7 @@ export const SortableTierCard = memo(function SortableTierCard({ task, tier, isF
       ref={setNodeRef}
       style={style}
       data-task-id={task.id}
-      className={`${cardClass}${isFocused ? ' todo-pinned-card-active' : ''}${needsAttention ? ' todo-pinned-card-attention' : ''}`}
+      className={`${cardClass}${isFocused ? ' todo-pinned-card-active' : ''}${needsAttention ? ' todo-pinned-card-attention' : ''}${isSessionOpen ? ' todo-pinned-card-session-open' : ''}`}
       onClick={(e) => {
         if (isEditing) return;
         if ((e.target as HTMLElement).closest('.pinned-phase-picker')) return;

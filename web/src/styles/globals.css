@@ -7748,6 +7748,21 @@ img[data-lightbox-src],
   background: rgba(255, 59, 48, 0.12);
 }
 
+/* Task whose session is currently open on the home page — left accent bar so it
+   reads as "live" without colliding with the active (bg) / attention (red) states. */
+.todo-pinned-card-session-open {
+  border-left: 3px solid var(--accent);
+  background: color-mix(in srgb, var(--accent) 6%, transparent);
+}
+
+.todo-pinned-card-session-open:hover {
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+}
+
+.todo-pinned-card-session-open.todo-pinned-card-active {
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+}
+
 .todo-pinned-unpin {
   background: none;
   border: none;

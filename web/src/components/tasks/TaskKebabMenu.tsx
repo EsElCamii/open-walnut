@@ -360,9 +360,7 @@ export function TaskKebabMenu({ task, isFocused, isDetailOpen, isPinned, pinnedT
                 className="task-kebab-item task-kebab-item-danger"
                 onClick={(e) => {
                   e.stopPropagation();
-                  if (window.confirm(`Delete task "${task.title}"? This cannot be undone.`)) {
-                    onDelete(task.id);
-                  }
+                  onDelete(task.id);
                   closeMenu();
                 }}
               >

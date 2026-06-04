@@ -682,5 +682,13 @@ export function useTasks(filter?: tasksApi.TaskFilter): UseTasksReturn {
     });
   }, []);
 
-  return { tasks, loading, error, operationError, clearOperationError, showOperationError, refetch, create, update, toggleComplete, setPhase, star, reorder, moveTask, reparentTask, bakeOrder };
+  const deleteTask = useCallback((taskId: string) => {
+    setTasks((prev) => prev.filter((t) => t.id !== taskId));
+    withRetry(() => tasksApi.deleteTask(taskId)).catch((err) => {
+      onOpError(err);
+      refetch();
+    });
+  }, [onOpError, refetch]);
+
+  return { tasks, loading, error, operationError, clearOperationError, showOperationError, refetch, create, update, toggleComplete, setPhase, star, reorder, moveTask, reparentTask, bakeOrder, deleteTask };
 }
