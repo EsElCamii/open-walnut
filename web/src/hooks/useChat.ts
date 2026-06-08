@@ -417,16 +417,20 @@ export function useChat(agentId: string = 'general'): UseChatReturn {
     return (eventAgentId || 'general') === agentIdRef.current;
   }, []);
 
-  // Handle thinking blocks
+  // Handle thinking blocks — insert before non-thinking blocks so thinking always renders first
   useEvent('agent:thinking', (data) => {
     if (!isMyAgent(data)) return;
     const { text } = data as { text: string };
     const src = currentSourceRef.current;
     setMessages((prev) =>
-      upsertLastAssistant(prev, (blocks, content) => ({
-        blocks: [...blocks, { type: 'thinking', content: text }],
-        content,
-      }), src),
+      upsertLastAssistant(prev, (blocks, content) => {
+        // Find the insertion point: after existing thinking blocks, before everything else
+        const firstNonThinking = blocks.findIndex((b) => b.type !== 'thinking');
+        const insertAt = firstNonThinking === -1 ? blocks.length : firstNonThinking;
+        const updated = [...blocks];
+        updated.splice(insertAt, 0, { type: 'thinking', content: text });
+        return { blocks: updated, content };
+      }, src),
     );
   });
 
