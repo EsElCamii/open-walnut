@@ -564,6 +564,13 @@ export class ClaudeCodeSession {
     permissionPrompt?: boolean,
     spillFile?: { localPath: string },
     streamPartialMessages?: boolean,
+    // Invoked once the daemon settles the spawn: ok=true when the CLI process
+    // actually started (pid returned), ok=false (with err) when spawn/SSH/daemon
+    // deploy failed. CRITICAL: spawn is fire-and-forget (startSpawn runs async and
+    // send() returns immediately), so callers MUST NOT treat send() returning as
+    // "delivered". Removing the message from the queue / reporting delivery must
+    // happen in THIS callback, never right after send() returns. See processNext.
+    onSpawnSettled?: (ok: boolean, err?: Error) => void,
   ): void {
     const args = ['-p', '--output-format', 'stream-json', '--verbose']
 
@@ -791,12 +798,23 @@ export class ClaudeCodeSession {
           }).catch(() => {}),
         ).catch(() => {})
       }
+
+      // Spawn confirmed by the daemon (pid returned). Only now is it safe to
+      // consider the message delivered — see onSpawnSettled doc on send().
+      try { onSpawnSettled?.(true) } catch { /* callback must never break spawn */ }
     }).catch((err) => {
       log.session.error('transport start failed', {
         taskId: this.taskId, host: host ?? 'local', cwd, isRemote: !!sshTarget,
         error: err instanceof Error ? err.message : String(err),
       })
       this._rejectSessionReady(err)
+      // Tell the caller the spawn failed BEFORE the SESSION_ERROR emit, so it can
+      // restore the message to the queue (revertToPending) instead of leaving it
+      // deleted. This is the path remote daemon-deploy failures (SSH/publickey)
+      // take — historically the message was already removeProcessed'd by the time
+      // we got here, silently losing it.
+      const e = err instanceof Error ? err : new Error(String(err))
+      try { onSpawnSettled?.(false, e) } catch { /* callback must never break error handling */ }
       if (!this.resultEmitted) {
         this.resultEmitted = true
         this._active = false
@@ -4410,6 +4428,48 @@ export class SessionRunner {
   }
 
   /**
+   * Settle a --resume spawn that the daemon CONFIRMED started (pid returned).
+   * Only now is it safe to drop the batch from the persistent queue and tell the
+   * UI it was delivered. Writes synthetic user events first so Phase-1 history has
+   * the user messages for optimistic-dedup. Called from send()'s onSpawnSettled(true).
+   */
+  private settleResumeSuccess(sessionId: string, session: ClaudeCodeSession, msgs: QueuedMessage[]): void {
+    for (const m of msgs) {
+      if (m.id) session.writeSyntheticUserEvent(m.message, m.id)
+    }
+    removeProcessed(sessionId).catch((err) => {
+      log.session.warn('eager removeProcessed failed after --resume spawn', { sessionId, error: err instanceof Error ? err.message : String(err) })
+    })
+    bus.emit(EventNames.SESSION_MESSAGES_DELIVERED, {
+      sessionId,
+      count: msgs.length,
+    }, ['main-ai'], { source: 'session-runner' })
+    this.logDeliveryLatency(sessionId, 'resume', msgs)
+  }
+
+  /**
+   * Settle a --resume spawn that FAILED (SSH/daemon-deploy/publickey error, EMFILE…).
+   * The message was never delivered, so it MUST survive: revert the batch from
+   * 'processing' back to 'pending' (recoverable on restart / user Retry) and tell the
+   * UI to mark the optimistic rows 'failed' (keep text + Retry) via batch-failed —
+   * NOT batch-completed (which deletes them). Called from send()'s onSpawnSettled(false).
+   */
+  private settleResumeFailure(sessionId: string, msgs: QueuedMessage[], err: Error): void {
+    this.clearActiveProcessing(sessionId)
+    log.session.warn('resume spawn failed — reverting batch to pending', { sessionId, error: err.message })
+    revertToPending(msgs).catch(() => {})
+    bus.emit(EventNames.SESSION_BATCH_FAILED, {
+      sessionId,
+      messageIds: msgs.map((m) => m.id),
+      error: err.message,
+    }, ['main-ai'], { source: 'session-runner' })
+    bus.emit(EventNames.SESSION_ERROR, {
+      sessionId,
+      error: err.message,
+    }, ['main-ai'], { source: 'session-runner' })
+  }
+
+  /**
    * Drain all pending messages for a session, combine them, and send as one claude --resume call.
    * @param mode - Optional permission mode override for the resumed session.
    */
@@ -4647,25 +4707,15 @@ export class SessionRunner {
           // mode silently reverting to 'default' on --resume (send() treats undefined as default).
           const resumeMode = resolvedMode ?? mode ?? record.mode
           log.session.info('resuming session via CLI', { sessionId, taskId: record.taskId, messageLength: combined.length, model: resolvedModel, mode: resumeMode })
-          session.send(combined, record.cwd ?? undefined, sessionId, resumeMode, resolvedModel, undefined, record.host ?? undefined, sshTarget, undefined, resumeConfig.session?.permission_prompt, undefined, resumeConfig.session?.stream_partial_messages)
-
-          // Write synthetic user events — send() is sync, _outputFile is set immediately
-          for (const wmId of walnutMessageIds) {
-            const msgText = msgs.find(m => m.id === wmId)!.message
-            session.writeSyntheticUserEvent(msgText, wmId)
-          }
-
-          // Eagerly remove from disk queue — message is now baked into --resume args
-          removeProcessed(sessionId).catch((err) => {
-            log.session.warn('eager removeProcessed failed after --resume spawn', { sessionId, error: err instanceof Error ? err.message : String(err) })
-          })
-
-          // Tell frontend these messages have been delivered to the CLI
-          bus.emit(EventNames.SESSION_MESSAGES_DELIVERED, {
-            sessionId,
-            count: msgs.length,
-          }, ['main-ai'], { source: 'session-runner' })
-          this.logDeliveryLatency(sessionId, 'resume', msgs)
+          // Settle the queue from send()'s spawn callback — NOT synchronously after
+          // send() returns. send() is fire-and-forget; the SSH/daemon deploy that can
+          // fail (publickey denied) happens asynchronously. Removing the message before
+          // that confirmation is what silently lost messages. See onSpawnSettled doc.
+          session.send(combined, record.cwd ?? undefined, sessionId, resumeMode, resolvedModel, undefined, record.host ?? undefined, sshTarget, undefined, resumeConfig.session?.permission_prompt, undefined, resumeConfig.session?.stream_partial_messages,
+            (ok, err) => {
+              if (ok) this.settleResumeSuccess(sessionId, session, msgs)
+              else this.settleResumeFailure(sessionId, msgs, err ?? new Error('resume spawn failed'))
+            })
 
           bus.emit(EventNames.SESSION_STARTED, {
             taskId: record.taskId,
@@ -4704,25 +4754,14 @@ export class SessionRunner {
       // Fall back to targetSession._mode to prevent mode silently reverting to 'default'.
       const existingResumeMode = resolvedMode ?? mode ?? targetSession.mode
       log.session.info('resuming session via CLI (existing target)', { sessionId, taskId: targetSession.taskId, messageLength: combined.length, host: resumeHost, model: resolvedModel, mode: existingResumeMode })
-      targetSession.send(combined, targetSession.cwd ?? undefined, sessionId, existingResumeMode, resolvedModel, undefined, resumeHost ?? undefined, resumeSshTarget, undefined, resumeConfig2.session?.permission_prompt, undefined, resumeConfig2.session?.stream_partial_messages)
-
-      // Write synthetic user events — send() is sync, _outputFile is set immediately
-      for (const wmId of walnutMessageIds) {
-        const msgText = msgs.find(m => m.id === wmId)!.message
-        targetSession.writeSyntheticUserEvent(msgText, wmId)
-      }
-
-      // Eagerly remove from disk queue — message is now baked into --resume args
-      removeProcessed(sessionId).catch((err) => {
-        log.session.warn('eager removeProcessed failed after --resume spawn', { sessionId, error: err instanceof Error ? err.message : String(err) })
-      })
-
-      // Tell frontend these messages have been delivered to the CLI
-      bus.emit(EventNames.SESSION_MESSAGES_DELIVERED, {
-        sessionId,
-        count: msgs.length,
-      }, ['main-ai'], { source: 'session-runner' })
-      this.logDeliveryLatency(sessionId, 'resume', msgs)
+      // Settle the queue from send()'s spawn callback, not synchronously — the remote
+      // SSH/daemon deploy can fail AFTER send() returns. See onSpawnSettled doc on send().
+      const settleTarget = targetSession
+      targetSession.send(combined, targetSession.cwd ?? undefined, sessionId, existingResumeMode, resolvedModel, undefined, resumeHost ?? undefined, resumeSshTarget, undefined, resumeConfig2.session?.permission_prompt, undefined, resumeConfig2.session?.stream_partial_messages,
+        (ok, err) => {
+          if (ok) this.settleResumeSuccess(sessionId, settleTarget, msgs)
+          else this.settleResumeFailure(sessionId, msgs, err ?? new Error('resume spawn failed'))
+        })
     } catch (err) {
       // Clean up activeProcessing + batchCounts on any error (send() EMFILE, lookup failure, etc.)
       this.clearActiveProcessing(sessionId)
