@@ -414,8 +414,12 @@ export function useSessionStream(sessionId: string | null): UseSessionStreamRetu
     });
   });
 
-  // ── Thinking delta: accumulate like text but in a separate block type ──
-  const thinkingBuffer = useRef('');
+  // pendingThinking holds only deltas not yet flushed to setBlocks; it is the
+  // raf-coalescing buffer, NOT the source of truth for any thinking block. The
+  // committed text lives inside the last thinking block in setBlocks. Cleared
+  // every flush, so a later thinking segment (after text/tool interrupts) can
+  // never carry forward text from an earlier segment.
+  const pendingThinking = useRef('');
   const thinkingDeltaRaf = useRef<number | null>(null);
 
   useEvent('session:thinking-delta', (data) => {
@@ -423,25 +427,24 @@ export function useSessionStream(sessionId: string | null): UseSessionStreamRetu
     if (!sessionId || sid !== sessionId) return;
 
     setIsStreaming(true);
-    thinkingBuffer.current += delta;
+    pendingThinking.current += delta;
 
     if (thinkingDeltaRaf.current === null) {
       thinkingDeltaRaf.current = requestAnimationFrame(() => {
         thinkingDeltaRaf.current = null;
-        const accumulated = thinkingBuffer.current;
+        const incoming = pendingThinking.current;
+        pendingThinking.current = '';
+        if (!incoming) return;
         setBlocks((prev) => {
           const last = prev[prev.length - 1];
           if (last && last.type === 'thinking') {
-            return [...prev.slice(0, -1), { type: 'thinking', content: accumulated }];
+            return [...prev.slice(0, -1), { type: 'thinking', content: last.content + incoming }];
           }
-          return [...prev, { type: 'thinking', content: accumulated }];
+          return [...prev, { type: 'thinking', content: incoming }];
         });
       });
     }
   });
-
-  // Reset thinking buffer when anything else interrupts (text/tool/system)
-  // — handled below by flushing on tool-use / system-event.
 
   // ── Unknown-event catch-all: surface as an info system block so new CLI
   //    event types never silently disappear from the UI. ──
