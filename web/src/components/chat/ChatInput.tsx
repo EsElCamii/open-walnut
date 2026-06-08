@@ -74,6 +74,8 @@ interface ChatInputProps {
   sessionCommands?: SlashCommandItem[];
   /** Callback to search/filter session commands (provided by useSlashCommands hook). */
   searchSessionCommands?: (query: string) => SlashCommandItem[];
+  /** Session-mode: force a re-scan of skills/commands (e.g. after creating one remotely). */
+  onRefreshSessionCommands?: () => void;
   /** Session-mode: control commands like /model are intercepted and trigger UI actions */
   onControlCommand?: (command: string) => void;
   /** localStorage key for persisting draft text. When set, input value is saved on change (debounced) and restored on mount. */
@@ -86,7 +88,7 @@ interface ChatInputProps {
   mentionHost?: string;
 }
 
-export function ChatInput({ onSend, onCommand, onStop, onInterruptSend, onClearQueue, disabled, isStreaming, focusedTaskTitle, focusedTask, onClearFocus, queueCount, placeholder, showCommands = true, sessionCommands, searchSessionCommands, onControlCommand, draftKey, onToggleMode, mentionCwd, mentionHost }: ChatInputProps) {
+export function ChatInput({ onSend, onCommand, onStop, onInterruptSend, onClearQueue, disabled, isStreaming, focusedTaskTitle, focusedTask, onClearFocus, queueCount, placeholder, showCommands = true, sessionCommands, searchSessionCommands, onRefreshSessionCommands, onControlCommand, draftKey, onToggleMode, mentionCwd, mentionHost }: ChatInputProps) {
   const [value, setValue] = useState(() => {
     if (!draftKey) return '';
     try { return localStorage.getItem(draftKey) ?? ''; } catch { return ''; }
@@ -161,6 +163,17 @@ export function ChatInput({ onSend, onCommand, onStop, onInterruptSend, onClearQ
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [paletteResults, setPaletteResults] = useState<PaletteItem[]>([]);
   const [selectedIndex, setSelectedIndex] = useState(0);
+  const [refreshing, setRefreshing] = useState(false);
+
+  // Re-scan session commands (remote skill list), keeping the palette open. The
+  // spinner is cleared (and the open palette reflows) by the sessionCommands effect
+  // below when the new list lands; a ceiling guards against a fetch that errors out.
+  const handleRefreshCommands = useCallback(() => {
+    if (!onRefreshSessionCommands) return;
+    setRefreshing(true);
+    onRefreshSessionCommands();
+    window.setTimeout(() => setRefreshing(false), 8000);
+  }, [onRefreshSessionCommands]);
 
   // Ref mirror for palette state — guarantees handleKeyDown always reads latest values
   // even if React hasn't flushed the re-render from onChange before the next keydown fires
@@ -168,6 +181,19 @@ export function ChatInput({ onSend, onCommand, onStop, onInterruptSend, onClearQ
   useLayoutEffect(() => {
     paletteRef.current = { open: paletteOpen, results: paletteResults, selectedIndex };
   }, [paletteOpen, paletteResults, selectedIndex]);
+
+  // When a refresh brings in a new sessionCommands list, reflow the open palette to
+  // show it (and stop the spinner) without the user needing to retype.
+  useEffect(() => {
+    if (!refreshing) return;
+    setRefreshing(false);
+    if (!paletteOpen || !isSessionMode || !value.startsWith('/') || value.includes(' ')) return;
+    const results = searchSessionCommands!(value.slice(1));
+    setPaletteResults(results);
+    setSelectedIndex(0);
+    paletteRef.current = { open: results.length > 0, results, selectedIndex: 0 };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sessionCommands]);
 
   // "@" file mention state. mentionAtIndexRef/mentionEndRef bracket the "@query"
   // span in `value` so selection can splice in the path without relying on the
@@ -575,6 +601,8 @@ export function ChatInput({ onSend, onCommand, onStop, onInterruptSend, onClearQ
           selectedIndex={selectedIndex}
           onSelect={handleSelectCommand}
           showSource={isSessionMode}
+          onRefresh={isSessionMode && onRefreshSessionCommands ? handleRefreshCommands : undefined}
+          refreshing={refreshing}
         />
       )}
       {mentionOpen && mentionCwd && (

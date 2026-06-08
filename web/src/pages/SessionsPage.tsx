@@ -267,7 +267,7 @@ export function SessionsPage() {
 
   // Slash command autocomplete for session input — pass host so REMOTE sessions
   // get the remote host's skills, not the Mac's local ones.
-  const { items: slashCommands, search: searchSlashCommands } = useSlashCommands(selectedSession?.cwd, selectedSession?.host);
+  const { items: slashCommands, search: searchSlashCommands, refresh: refreshSlashCommands } = useSlashCommands(selectedSession?.cwd, selectedSession?.host);
 
   // When "Clear Context & Execute" replaces the session, switch to the new session
   const handleSessionReplaced = useCallback((newSessionId: string) => {
@@ -377,6 +377,7 @@ export function SessionsPage() {
               showCommands={false}
               sessionCommands={slashCommands}
               searchSessionCommands={searchSlashCommands}
+              onRefreshSessionCommands={refreshSlashCommands}
               onControlCommand={handleControlCommand}
               draftKey={selectedId ? `draft:session:${selectedId}` : undefined}
             />

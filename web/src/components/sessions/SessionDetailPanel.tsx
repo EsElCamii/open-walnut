@@ -428,6 +428,14 @@ export function SessionDetailPanel({ session, taskTitle, summary, onTitleChanged
         <div className="session-detail-header">
           {/* Title row with badges */}
           <div className="session-detail-title-row">
+            {session.taskId && (
+              <TaskQuickActions
+                taskId={session.taskId}
+                task={sessionTask}
+                slot="phase"
+                compact
+              />
+            )}
             <EditableTitle sessionId={sessionId} taskId={session.taskId} title={title} onSaved={onTitleChanged} />
             {session.taskId && (
               <button
@@ -438,6 +446,18 @@ export function SessionDetailPanel({ session, taskTitle, summary, onTitleChanged
               >
                 {ICON_LOCATE}
               </button>
+            )}
+            {session.taskId && (
+              <TaskQuickActions
+                taskId={session.taskId}
+                task={sessionTask}
+                isPinned={pinned}
+                pinnedTier={pinnedTier}
+                onPinTask={handlePinTask}
+                onUnpinTask={handleUnpinTask}
+                onSetTier={handleSetTier}
+                slot="kebab"
+              />
             )}
             <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
               {session.mode && session.mode !== 'default' && (
@@ -480,26 +500,6 @@ export function SessionDetailPanel({ session, taskTitle, summary, onTitleChanged
 
           {/* Compact meta bar */}
           <div className="session-detail-meta-bar">
-            {session.taskId && (
-              <>
-                <TaskQuickActions
-                  taskId={session.taskId}
-                  task={sessionTask}
-                  slot="phase"
-                  compact
-                />
-                <TaskQuickActions
-                  taskId={session.taskId}
-                  task={sessionTask}
-                  isPinned={pinned}
-                  pinnedTier={pinnedTier}
-                  onPinTask={handlePinTask}
-                  onUnpinTask={handleUnpinTask}
-                  onSetTier={handleSetTier}
-                  slot="kebab"
-                />
-              </>
-            )}
             {displayModel && (
               <span className="session-detail-model-pill" title={liveUsage.model || session?.model || ''}>
                 {displayModel}

@@ -137,7 +137,7 @@ export const SessionPanel = memo(function SessionPanel({ sessionId, onClose, loc
 
   // Slash command autocomplete for session input — pass host so REMOTE sessions
   // get the remote host's skills, not the Mac's local ones.
-  const { items: slashCommands, search: searchSlashCommands } = useSlashCommands(session?.cwd, session?.host);
+  const { items: slashCommands, search: searchSlashCommands, refresh: refreshSlashCommands } = useSlashCommands(session?.cwd, session?.host);
 
   // Model picker state
   const [modelPickerOpen, setModelPickerOpen] = useState(false);
@@ -536,6 +536,14 @@ export const SessionPanel = memo(function SessionPanel({ sessionId, onClose, loc
         <div className="session-panel-header">
           <div className="session-panel-header-top">
             <div className="session-panel-title-area">
+              {!loading && session?.taskId && (
+                <TaskQuickActions
+                  taskId={session.taskId}
+                  task={sessionTask}
+                  slot="phase"
+                  compact
+                />
+              )}
               {headerTitle
                 ? <EditableSessionTitle
                     sessionId={sessionId}
@@ -554,6 +562,18 @@ export const SessionPanel = memo(function SessionPanel({ sessionId, onClose, loc
                 >
                   {ICON_LOCATE}
                 </button>
+              )}
+              {!loading && session?.taskId && (
+                <TaskQuickActions
+                  taskId={session.taskId}
+                  task={sessionTask}
+                  isPinned={pinned}
+                  pinnedTier={pinnedTier}
+                  onPinTask={handlePinTask}
+                  onUnpinTask={handleUnpinTask}
+                  onSetTier={handleSetTier}
+                  slot="kebab"
+                />
               )}
               {!loading && session?.provider === 'embedded' && (
                 <span
@@ -602,26 +622,6 @@ export const SessionPanel = memo(function SessionPanel({ sessionId, onClose, loc
               </button>
             </div>
           </div>
-          {session?.taskId && (
-            <div className="session-panel-task-row">
-              <TaskQuickActions
-                taskId={session.taskId}
-                task={sessionTask}
-                slot="phase"
-                compact
-              />
-              <TaskQuickActions
-                taskId={session.taskId}
-                task={sessionTask}
-                isPinned={pinned}
-                pinnedTier={pinnedTier}
-                onPinTask={handlePinTask}
-                onUnpinTask={handleUnpinTask}
-                onSetTier={handleSetTier}
-                slot="kebab"
-              />
-            </div>
-          )}
           {/* Meta row 1: ID + copy chips + SSH */}
           <div className="session-panel-meta">
             <span
@@ -947,6 +947,7 @@ export const SessionPanel = memo(function SessionPanel({ sessionId, onClose, loc
             showCommands={false}
             sessionCommands={slashCommands}
             searchSessionCommands={searchSlashCommands}
+            onRefreshSessionCommands={refreshSlashCommands}
             onControlCommand={handleControlCommand}
             mentionCwd={session?.cwd}
             mentionHost={session?.host}

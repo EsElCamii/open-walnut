@@ -12374,7 +12374,7 @@ a.task-kebab-info:hover {
 
 /* ===== Command Palette ===== */
 
-.command-palette {
+.command-palette-wrap {
   position: absolute;
   bottom: 100%;
   left: 0;
@@ -12384,11 +12384,50 @@ a.task-kebab-info:hover {
   border: 1px solid var(--border-strong);
   border-radius: var(--radius-md);
   box-shadow: var(--card-shadow-hover);
+  z-index: 50;
+  overflow: hidden;
+  animation: commandPaletteIn 0.15s ease-out;
+}
+
+.command-palette {
   max-height: 280px;
   overflow-y: auto;
-  z-index: 50;
   padding: 4px;
-  animation: commandPaletteIn 0.15s ease-out;
+}
+
+.command-palette-refresh {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 7px 10px;
+  border: none;
+  border-top: 1px solid var(--border);
+  background: var(--bg-secondary);
+  color: var(--text-secondary);
+  font-size: 12px;
+  cursor: pointer;
+  transition: background 0.1s, color 0.1s;
+}
+
+.command-palette-refresh:hover:not(:disabled) {
+  background: var(--bg-tertiary, var(--bg-secondary));
+  color: var(--text-primary);
+}
+
+.command-palette-refresh:disabled {
+  cursor: default;
+  opacity: 0.7;
+}
+
+.command-palette-refresh-icon {
+  display: inline-block;
+  font-size: 13px;
+  line-height: 1;
+}
+
+.command-palette-refresh-icon.spinning {
+  animation: spin 0.7s linear infinite;
 }
 
 .command-palette-item {

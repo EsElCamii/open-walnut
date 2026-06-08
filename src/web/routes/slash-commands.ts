@@ -35,8 +35,13 @@ export interface SlashCommandItem {
 }
 
 const REMOTE_TIMEOUT_MS = 15_000
-/** Per-host cache TTL — skill lists rarely change; avoids ssh round-trip on every "/". */
-const REMOTE_CACHE_TTL_MS = 5 * 60_000
+/**
+ * Per-host cache TTL — avoids an ssh round-trip on every "/". Kept short (60s) so a
+ * skill just created on the remote host shows up soon without a manual refresh; the
+ * frontend serves its own copy instantly (stale-while-revalidate), so this TTL only
+ * bounds how stale a background revalidation can be. `?fresh=1` bypasses it entirely.
+ */
+const REMOTE_CACHE_TTL_MS = 60_000
 const remoteCache = new Map<string, { time: number; items: SlashCommandItem[] }>()
 
 /**
@@ -219,6 +224,8 @@ export function createSlashCommandsRouter(): Router {
     try {
       const cwd = typeof req.query.cwd === 'string' ? req.query.cwd : undefined
       const host = typeof req.query.host === 'string' && req.query.host ? req.query.host : undefined
+      // `fresh=1` forces a re-scan, bypassing the per-host cache (manual palette refresh).
+      const fresh = req.query.fresh === '1' || req.query.fresh === 'true'
 
       // ── Local session ──
       if (!host) {
@@ -228,10 +235,12 @@ export function createSlashCommandsRouter(): Router {
 
       // ── Remote session ──
       const cacheKey = `${host}::${cwd ?? ''}`
-      const cached = remoteCache.get(cacheKey)
-      if (cached && Date.now() - cached.time < REMOTE_CACHE_TTL_MS) {
-        res.json({ items: cached.items })
-        return
+      if (!fresh) {
+        const cached = remoteCache.get(cacheKey)
+        if (cached && Date.now() - cached.time < REMOTE_CACHE_TTL_MS) {
+          res.json({ items: cached.items })
+          return
+        }
       }
 
       try {
