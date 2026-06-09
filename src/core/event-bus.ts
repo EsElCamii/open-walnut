@@ -69,6 +69,11 @@ export const EventNames = {
   CHAT_COMPACTING: 'chat:compacting',
   CHAT_COMPACTED: 'chat:compacted',
 
+  // Conversation events (multi-conversation per agent)
+  CONVERSATION_CREATED: 'conversation:created',
+  CONVERSATION_DELETED: 'conversation:deleted',
+  CONVERSATION_UPDATED: 'conversation:updated',   // rename / pin / active-change
+
   // Cron events
   CRON_JOB_ADDED: 'cron:job-added',
   CRON_JOB_UPDATED: 'cron:job-updated',

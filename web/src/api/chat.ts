@@ -108,12 +108,14 @@ export async function fetchChatHistory(
   page = 1,
   pageSize = 100,
   agentId?: string,
+  conversationId?: string,
 ): Promise<ChatHistoryResponse> {
   const params: Record<string, string> = {
     page: String(page),
     pageSize: String(pageSize),
   };
   if (agentId) params.agentId = agentId;
+  if (conversationId) params.conversationId = conversationId;
   return apiGet<ChatHistoryResponse>('/api/chat/history', params);
 }
 
@@ -133,8 +135,11 @@ export async function fetchTriageHistory(
   return apiGet<TriageHistoryResponse>('/api/chat/triage', params);
 }
 
-export async function clearChatHistory(agentId?: string): Promise<void> {
-  const params = agentId ? `?agentId=${agentId}` : '';
+export async function clearChatHistory(agentId?: string, conversationId?: string): Promise<void> {
+  const qs = new URLSearchParams();
+  if (agentId) qs.set('agentId', agentId);
+  if (conversationId) qs.set('conversationId', conversationId);
+  const params = qs.toString() ? `?${qs.toString()}` : '';
   await apiPost(`/api/chat/clear${params}`);
 }
 
@@ -154,8 +159,9 @@ export interface ChatStats {
   contextWindow?: number;
 }
 
-export async function fetchChatStats(agentId?: string): Promise<ChatStats> {
+export async function fetchChatStats(agentId?: string, conversationId?: string): Promise<ChatStats> {
   const params: Record<string, string> = {};
   if (agentId) params.agentId = agentId;
+  if (conversationId) params.conversationId = conversationId;
   return apiGet<ChatStats>('/api/chat/stats', params);
 }

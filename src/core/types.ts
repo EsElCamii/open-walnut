@@ -494,6 +494,34 @@ export interface ChatHistoryStore {
   entries?: ChatEntry[];
 }
 
+/**
+ * Metadata for one conversation under an agent. The conversation's actual
+ * messages live in a separate ChatHistoryStore file ({conversationId}.json);
+ * this is the lightweight registry entry used for listing/sorting/distill.
+ */
+export interface ConversationMeta {
+  id: string;                          // 'conv-<uuid>'
+  agentId: string;
+  title: string;                       // auto from 1st user msg (≤60 chars), renameable
+  createdAt: string;                   // ISO
+  lastMessageAt: string;               // ISO — sort key (desc)
+  messageCount: number;                // logical message count (approx, for display)
+  pinned?: boolean;
+  /** Exactly ONE conversation per agent is the "main" one (invariant). It receives
+   *  background/system notifications (cron, heartbeat, triage, subagent results) and
+   *  cannot be deleted via the UI. */
+  isMain?: boolean;
+  lastDistilledAt: string | null;      // null = never distilled
+  lastDistilledMessageCount: number;   // messageCount at last distill (dedup key)
+}
+
+/** Per-agent conversation registry, persisted as _index.json. */
+export interface ConversationIndex {
+  version: 1;
+  activeConversationId: string | null; // currently-selected conversation for this agent
+  conversations: ConversationMeta[];   // sorted lastMessageAt desc by convention
+}
+
 export type ProcessStatus = 'running' | 'idle' | 'stopped' | 'error';
 export type SessionMode = 'bypass' | 'accept' | 'default' | 'plan';
 export type SessionProvider = 'cli' | 'sdk' | 'embedded';
@@ -511,6 +539,7 @@ export type StatusReason =
   | 'remote_unreachable'
   | 'api_error'
   | 'liveness_check_failed'
+  | 'orphan_no_pid'
   | 'daemon_reported_exit'
   | 'daemon_reconnected'
   | 'retry_reconnect'

@@ -50,6 +50,16 @@ export function createMockConstants(prefix = 'walnut-test', overrides: Record<st
       if (!agentId || agentId === 'general') return path.join(tmpBase, 'chat-history.json');
       return path.join(tmpBase, `chat-history-${agentId}.json`);
     },
+    // Per-agent conversation registry (multi-conversation model).
+    CONVERSATIONS_DIR: path.join(tmpBase, 'conversations'),
+    conversationDir: (agentId: string) => path.join(tmpBase, 'conversations', agentId),
+    conversationIndexFile: (agentId: string) => path.join(tmpBase, 'conversations', agentId, '_index.json'),
+    conversationFile: (agentId: string, conversationId: string) =>
+      path.join(tmpBase, 'conversations', agentId, `${conversationId}.json`),
+    validateConversationId: (id: string) => {
+      if (!id || !/^conv-[A-Za-z0-9-]+$/.test(id)) throw new Error(`Invalid conversation id: ${id}`);
+      return id;
+    },
     agentMemoryDir: (agentId?: string) => {
       if (!agentId || agentId === 'general') return tmpBase;
       return path.join(tmpBase, 'memory', 'agents', agentId);

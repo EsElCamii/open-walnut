@@ -17,6 +17,8 @@ export interface AgentConsoleState {
   agents: AgentDefinition[];
   /** Switch to a different agent. */
   switchAgent: (agentId: string) => void;
+  /** Re-fetch the console agent list (e.g. after creating a new agent). */
+  refresh: () => void;
   /** Unread message counts per agent (excludes the active agent). */
   unreadCounts: Record<string, number>;
 }
@@ -34,22 +36,24 @@ export function useAgentConsole(): AgentConsoleState {
   const activeAgentIdRef = useRef(activeAgentId);
   activeAgentIdRef.current = activeAgentId;
 
+  const loadAgents = useCallback(async (signal?: { cancelled: boolean }) => {
+    try {
+      const { fetchAgents } = await import('@/api/agents');
+      const all = await fetchAgents();
+      if (signal?.cancelled) return;
+      const consoleAgents = all.filter((a: AgentDefinition) => a.console);
+      setAgents(consoleAgents);
+    } catch (err) {
+      console.warn('useAgentConsole: failed to load agents', err);
+    }
+  }, []);
+
   // Fetch console agents on mount
   useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      try {
-        const { fetchAgents } = await import('@/api/agents');
-        const all = await fetchAgents();
-        if (cancelled) return;
-        const consoleAgents = all.filter((a: AgentDefinition) => a.console);
-        setAgents(consoleAgents);
-      } catch (err) {
-        console.warn('useAgentConsole: failed to load agents', err);
-      }
-    })();
-    return () => { cancelled = true; };
-  }, []);
+    const signal = { cancelled: false };
+    void loadAgents(signal);
+    return () => { signal.cancelled = true; };
+  }, [loadAgents]);
 
   // TODO: wire up unread tracking using event subscriptions
 
@@ -60,10 +64,15 @@ export function useAgentConsole(): AgentConsoleState {
     } catch { /* localStorage unavailable */ }
   }, []);
 
+  const refresh = useCallback(() => {
+    void loadAgents();
+  }, [loadAgents]);
+
   return {
     activeAgentId,
     agents,
     switchAgent,
+    refresh,
     unreadCounts,
   };
 }

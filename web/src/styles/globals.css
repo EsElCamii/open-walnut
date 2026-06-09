@@ -4318,6 +4318,14 @@ input:focus, textarea:focus, select:focus {
   text-decoration: none;
 }
 
+.markdown-body img {
+  max-width: 100%;
+  height: auto;
+  border-radius: 6px;
+  cursor: pointer;
+  margin: 4px 0;
+}
+
 /* Tables in markdown */
 .markdown-body table {
   border-collapse: collapse;
@@ -11720,6 +11728,51 @@ a.task-kebab-info:hover {
   }
 }
 
+/* Console vs background kind badges (accent/green vs muted grey). */
+.agent-badge-console {
+  background: rgba(52, 199, 89, 0.14);
+  color: #2EA84F;
+}
+
+[data-theme="dark"] .agent-badge-console {
+  color: #34C759;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme]) .agent-badge-console {
+    color: #34C759;
+  }
+}
+
+.agent-badge-background {
+  background: rgba(142, 142, 147, 0.15);
+  color: var(--fg-muted);
+}
+
+/* /agents console-vs-background sections */
+.agent-section {
+  margin-bottom: 28px;
+}
+
+.agent-section-header {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.agent-section-title {
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--fg);
+  margin: 0;
+}
+
+.agent-section-subtitle {
+  font-size: 12px;
+  color: var(--fg-muted);
+}
+
 /* Agent card actions */
 .agent-card-actions {
   flex-shrink: 0;
@@ -18046,6 +18099,79 @@ a.file-link:hover {
   margin-left: auto;
 }
 
+/* Pop-out-to-window button — icon-only, sits at the toolbar's right edge.
+   When it's the ONLY control (plain code files), its toolbar right-aligns it. */
+.fv-popout-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 3px 6px;
+}
+.fv-toolbar-popout-only {
+  justify-content: flex-end;
+}
+
+/* Pop-out window: file view fills the standalone window. Overrides .popout-root's
+   padding so the file content reaches the edges and scrolls internally. */
+.popout-root:has(.popout-file) {
+  padding: 0;
+}
+.popout-file {
+  height: 100%;
+}
+.popout-file .file-content-view {
+  height: 100%;
+}
+
+/* Pop-out window: read-only session viewer fills the standalone window.
+   Mirrors .popout-file — strip the root padding so the chat history reaches
+   the edges and scrolls internally (.session-history is flex:1 + overflow). */
+.popout-root:has(.popout-session) {
+  padding: 0;
+}
+.popout-session {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+.popout-session-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+.popout-session-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--fg);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.popout-session-host {
+  background: var(--bg-tertiary);
+  color: var(--fg-muted);
+  padding: 1px 5px;
+  border-radius: 4px;
+  font-size: 10px;
+  font-weight: 600;
+  flex-shrink: 0;
+}
+.popout-session-body {
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+.popout-session-body .session-history {
+  flex: 1;
+  overflow-y: auto;
+}
+
 /* Fullscreen preview overlay — covers the viewport, escapes the panel chrome */
 .file-content-view.fv-fullscreen {
   position: fixed;
@@ -18363,4 +18489,40 @@ a.file-link:hover {
 .session-terminal-retry {
   margin-top: 4px;
   padding: 6px 16px;
+}
+
+/* AgentDropdown — reveal rename/delete icon buttons only on row hover */
+.agent-dd-hover-btn { opacity: 0; transition: opacity 0.12s; }
+.agent-dd-row:hover .agent-dd-hover-btn { opacity: 1; }
+.agent-dd-row:hover { background: var(--bg-hover); }
+.agent-dd-hover-btn:hover { color: var(--fg); background: var(--bg-tertiary); }
+
+/* ===== Pop-out windows (/popout) ===== */
+/* Standalone window shell — no sidebar/providers. Full-height, theme-aware,
+   scrolls internally. Leaf views (file/note/session/task) fill it. */
+.popout-root {
+  height: 100vh;
+  width: 100%;
+  overflow: auto;
+  background: var(--bg);
+  color: var(--fg);
+  padding: 16px;
+}
+/* STUB placeholder shown until integration agents flesh out a leaf view. */
+.popout-stub {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 24px;
+  color: var(--fg-muted);
+}
+.popout-stub h2 {
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--fg);
+}
+.popout-stub code {
+  font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', 'Menlo', monospace;
+  font-size: 12px;
+  word-break: break-all;
 }

@@ -5,7 +5,7 @@
  * `eventData<'event:name'>(event)` instead of manual `as { ... }` casts.
  */
 
-import type { Task, TaskPhase, SessionMode, ProcessStatus, SessionProvider } from './types.js';
+import type { Task, TaskPhase, SessionMode, ProcessStatus, SessionProvider, ConversationMeta } from './types.js';
 
 // ── Task events ──
 
@@ -319,10 +319,18 @@ export interface ChatHistoryUpdatedEvent {
     sessionId?: string;
     timestamp?: string;
   };
+  agentId?: string;
+  conversationId?: string;
 }
 
-export interface ChatCompactingEvent {}
-export interface ChatCompactedEvent { divider?: string }
+export interface ChatCompactingEvent { agentId?: string; conversationId?: string }
+export interface ChatCompactedEvent { divider?: string; agentId?: string; conversationId?: string }
+
+// ── Conversation events (multi-conversation per agent) ──
+
+export interface ConversationCreatedEvent { agentId: string; conversation: ConversationMeta }
+export interface ConversationDeletedEvent { agentId: string; conversationId: string; activeConversationId: string | null }
+export interface ConversationUpdatedEvent { agentId: string; conversation?: ConversationMeta; activeConversationId?: string }
 
 // ── Config events ──
 
@@ -450,6 +458,10 @@ export interface EventPayloadMap {
   'chat:history-updated': ChatHistoryUpdatedEvent;
   'chat:compacting': ChatCompactingEvent;
   'chat:compacted': ChatCompactedEvent;
+
+  'conversation:created': ConversationCreatedEvent;
+  'conversation:deleted': ConversationDeletedEvent;
+  'conversation:updated': ConversationUpdatedEvent;
 
   'notes:updated': NotesUpdatedEvent;
 

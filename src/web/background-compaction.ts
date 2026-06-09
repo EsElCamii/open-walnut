@@ -13,30 +13,37 @@ import { EventNames } from '../core/event-bus.js'
 import { createCompactionCallbacks, buildCompactionDivider } from './routes/chat.js'
 import { log } from '../logging/index.js'
 
-/** Per-agent compaction tracking — each agent can compact independently. */
-const compactingAgents = new Set<string>()
+/** Per (agent, conversation) compaction tracking — each can compact independently. */
+const compactingKeys = new Set<string>()
 
-export function isCompactionInProgress(agentId = 'general'): boolean {
-  return compactingAgents.has(agentId)
+/** Tracking key — backward compatible: undefined conversationId → ':_' suffix. */
+function trackKey(agentId?: string, conversationId?: string): string {
+  return `${agentId || 'general'}:${conversationId || '_'}`
 }
 
-export function triggerBackgroundCompaction(source: string, options?: { force?: boolean; agentId?: string }): void {
+export function isCompactionInProgress(agentId = 'general', conversationId?: string): boolean {
+  return compactingKeys.has(trackKey(agentId, conversationId))
+}
+
+export function triggerBackgroundCompaction(source: string, options?: { force?: boolean; agentId?: string; conversationId?: string }): void {
   const agentId = options?.agentId ?? 'general'
-  if (compactingAgents.has(agentId)) return
+  const conversationId = options?.conversationId
+  const key = trackKey(agentId, conversationId)
+  if (compactingKeys.has(key)) return
 
   // Claim the slot immediately (synchronous — no yield between check and set)
-  compactingAgents.add(agentId)
+  compactingKeys.add(key)
 
   void (async () => {
     try {
-      if (!options?.force && !await chatHistory.needsCompaction(agentId)) return
+      if (!options?.force && !await chatHistory.needsCompaction(agentId, conversationId)) return
 
-      log.agent.info('background compaction starting', { source, agentId })
-      const oldMsgCount = (await chatHistory.getModelContext(agentId)).length
-      broadcastEvent(EventNames.CHAT_COMPACTING, { agentId })
+      log.agent.info('background compaction starting', { source, agentId, conversationId })
+      const oldMsgCount = (await chatHistory.getModelContext(agentId, conversationId)).length
+      broadcastEvent(EventNames.CHAT_COMPACTING, { agentId, conversationId })
 
       const { summarizer, memoryFlusher } = await createCompactionCallbacks({ trackUsage: true })
-      const result = await chatHistory.compact(summarizer, memoryFlusher, agentId)
+      const result = await chatHistory.compact(summarizer, memoryFlusher, agentId, conversationId)
 
       if (result) {
         const divider = buildCompactionDivider(oldMsgCount, result)
@@ -46,22 +53,24 @@ export function triggerBackgroundCompaction(source: string, options?: { force?: 
           source: 'compaction',
           notification: true,
           agentId,
+          conversationId,
         })
-        broadcastEvent(EventNames.CHAT_COMPACTED, { divider, agentId })
-        log.agent.info('background compaction complete', { source, agentId, oldMsgCount })
+        broadcastEvent(EventNames.CHAT_COMPACTED, { divider, agentId, conversationId })
+        log.agent.info('background compaction complete', { source, agentId, conversationId, oldMsgCount })
       } else {
-        broadcastEvent(EventNames.CHAT_COMPACTED, { agentId })
-        log.agent.info('background compaction skipped (no result)', { source, agentId })
+        broadcastEvent(EventNames.CHAT_COMPACTED, { agentId, conversationId })
+        log.agent.info('background compaction skipped (no result)', { source, agentId, conversationId })
       }
     } catch (err) {
-      broadcastEvent(EventNames.CHAT_COMPACTED, { agentId })   // clear UI spinner on error
+      broadcastEvent(EventNames.CHAT_COMPACTED, { agentId, conversationId })   // clear UI spinner on error
       log.agent.warn('background compaction failed', {
         source,
         agentId,
+        conversationId,
         error: err instanceof Error ? err.message : String(err),
       })
     } finally {
-      compactingAgents.delete(agentId)
+      compactingKeys.delete(key)
     }
   })()
 }

@@ -7,6 +7,10 @@ import type { AgentDefinition, CreateAgentInput, UpdateAgentInput } from '@/api/
 
 type FilterTab = 'all' | 'builtin' | 'config';
 
+// Console agents show in the home chat switcher; everything else runs in the background.
+// 'general' is always a console agent regardless of its flag.
+const isConsoleAgent = (a: AgentDefinition) => a.id === 'general' || a.console === true;
+
 export function AgentsPage() {
   const { agents, toolNames, availableModels, skills, loading, error, create, update, remove, clone } = useAgents();
   const [filter, setFilter] = useState<FilterTab>('all');
@@ -22,6 +26,10 @@ export function AgentsPage() {
     if (filter === 'builtin') return agents.filter(isBuiltinOrOverride);
     return agents.filter(isConfigOnly);
   }, [agents, filter]);
+
+  // Split the (already filtered) list into console vs background sections.
+  const consoleAgents = useMemo(() => filtered.filter(isConsoleAgent), [filtered]);
+  const backgroundAgents = useMemo(() => filtered.filter((a) => !isConsoleAgent(a)), [filtered]);
 
   const counts = useMemo(() => ({
     all: agents.length,
@@ -118,8 +126,25 @@ export function AgentsPage() {
           )}
         </div>
       ) : (
+        <>
+          {renderAgentSection('Console agents', 'shown in the home chat switcher', consoleAgents)}
+          {renderAgentSection('Background agents', 'run automatically, not in the switcher', backgroundAgents)}
+        </>
+      )}
+    </div>
+  );
+
+  // Render a labeled section of agent cards; hides itself when the group is empty.
+  function renderAgentSection(title: string, subtitle: string, group: AgentDefinition[]) {
+    if (group.length === 0) return null;
+    return (
+      <section className="agent-section">
+        <div className="agent-section-header">
+          <h2 className="agent-section-title">{title}</h2>
+          <span className="agent-section-subtitle">{subtitle}</span>
+        </div>
         <div className="agent-list">
-          {filtered.map((agent) => (
+          {group.map((agent) => (
             <AgentCard
               key={agent.id}
               agent={agent}
@@ -130,7 +155,7 @@ export function AgentsPage() {
             />
           ))}
         </div>
-      )}
-    </div>
-  );
+      </section>
+    );
+  }
 }

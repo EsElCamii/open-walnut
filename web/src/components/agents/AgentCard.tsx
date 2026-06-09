@@ -10,12 +10,18 @@ interface AgentCardProps {
 }
 
 function badgeInfo(agent: AgentDefinition): { label: string; className: string }[] {
+  // Console vs background kind — visible even in the "All" filter. 'general' is always console.
+  const isConsole = agent.id === 'general' || agent.console === true;
+  const kindBadge = isConsole
+    ? { label: 'console', className: 'agent-badge agent-badge-console' }
+    : { label: 'background', className: 'agent-badge agent-badge-background' };
   if (agent.overrides_builtin) return [
+    kindBadge,
     { label: 'builtin', className: 'agent-badge agent-badge-builtin' },
     { label: 'override', className: 'agent-badge agent-badge-override' },
   ];
-  if (agent.source === 'builtin') return [{ label: 'builtin', className: 'agent-badge agent-badge-builtin' }];
-  return [{ label: 'config', className: 'agent-badge agent-badge-config' }];
+  if (agent.source === 'builtin') return [kindBadge, { label: 'builtin', className: 'agent-badge agent-badge-builtin' }];
+  return [kindBadge, { label: 'config', className: 'agent-badge agent-badge-config' }];
 }
 
 function toolSummary(agent: AgentDefinition): string {

@@ -16,6 +16,7 @@ import { registerMethod, broadcastEvent } from '../ws/handler.js'
 import { bus, EventNames } from '../../core/event-bus.js'
 import { usageTracker } from '../../core/usage/index.js'
 import * as chatHistory from '../../core/chat-history.js'
+import { getActiveConversationId } from '../../core/conversations.js'
 import { drainPendingCronNotifications } from '../server.js'
 import { getTask, appendConversationLog } from '../../core/task-manager.js'
 import { getProjectMemory } from '../../core/project-memory.js'
@@ -24,7 +25,7 @@ import { processAndSaveImages, buildImageAnnotation } from './images.js'
 import type { ImagePayload } from './images.js'
 import { truncateToTokenBudget } from '../../utils/token-truncate.js'
 import { log } from '../../logging/index.js'
-import { validateAgentId } from '../../constants.js'
+import { validateAgentId, validateConversationId } from '../../constants.js'
 import { enqueueAgentTurn } from '../agent-turn-queue.js'
 import { triggerBackgroundCompaction } from '../background-compaction.js'
 import {
@@ -133,6 +134,8 @@ interface ChatPayload {
   planModeOff?: boolean
   /** Console agent ID — defaults to 'general'. */
   agentId?: string
+  /** Conversation ID — defaults to the agent's active conversation. */
+  conversationId?: string
 }
 
 // ── Plan Mode prompt injection ──
@@ -278,7 +281,7 @@ interface EnrichedResult {
  *
  * Falls back to buildTaskContextPrefix on any error.
  */
-export async function enrichTaskContext(ctx: TaskContext): Promise<EnrichedResult> {
+export async function enrichTaskContext(ctx: TaskContext, conversationId?: string): Promise<EnrichedResult> {
   const task = await getTask(ctx.id);
 
   // Load hierarchical memory
@@ -292,8 +295,8 @@ export async function enrichTaskContext(ctx: TaskContext): Promise<EnrichedResul
   if (mem.selfContent) currentHashes[`pm:${mem.selfPath}`] = contentHash(mem.selfContent);
   if (mem.parentPath && mem.parentContent) currentHashes[`pm:${mem.parentPath}`] = contentHash(mem.parentContent);
 
-  // Get last injected hashes from chat history
-  const lastHashes = await chatHistory.getLastContextHashes();
+  // Get last injected hashes from chat history (scoped to this conversation)
+  const lastHashes = await chatHistory.getLastContextHashes('general', conversationId);
 
   // Helper: check if content changed
   const unchanged = (key: string): boolean => {
@@ -649,7 +652,7 @@ function abortKey(ws: WebSocket, agentId: string): string {
 export function registerChatRpc(): void {
   // Register stop method — aborts the calling client's active agent turn
   registerMethod('chat:stop', async (payload: unknown, client: WebSocket) => {
-    const { agentId: stopAgentId } = (payload ?? {}) as { agentId?: string }
+    const { agentId: stopAgentId } = (payload ?? {}) as { agentId?: string; conversationId?: string }
     const effectiveAgentId = stopAgentId ? validateAgentId(stopAgentId) : 'general'
     activeAbortControllers.get(abortKey(client, effectiveAgentId))?.abort()
     cancelQuestion(effectiveAgentId) // Also cancel any pending user_ask tool
@@ -657,8 +660,9 @@ export function registerChatRpc(): void {
 
   // Answer structured questions from the QuestionCard UI
   registerMethod('chat:answer-question', async (payload: unknown) => {
-    const { answers, agentId: ansAgentId } = payload as { answers: Record<string, string>; agentId?: string }
+    const { answers, agentId: ansAgentId, conversationId: ansConvId } = payload as { answers: Record<string, string>; agentId?: string; conversationId?: string }
     const effectiveAgentId = ansAgentId ? validateAgentId(ansAgentId) : 'general'
+    const conversationId = ansConvId ? validateConversationId(ansConvId) : await getActiveConversationId(effectiveAgentId)
     if (!hasPendingQuestion(effectiveAgentId)) {
       log.web.warn('chat:answer-question received but no pending question', { agentId: effectiveAgentId })
       return
@@ -666,19 +670,22 @@ export function registerChatRpc(): void {
     log.web.info('chat:answer-question received', { answerCount: Object.keys(answers).length, agentId: effectiveAgentId })
     // Persist user's answers as a UI-only chat entry
     const answerLines = Object.entries(answers).map(([k, v]) => `${k}: ${v}`).join('\n')
-    await chatHistory.addNotification({ role: 'user', content: answerLines, agentId: effectiveAgentId })
+    await chatHistory.addNotification({ role: 'user', content: answerLines, agentId: effectiveAgentId, conversationId })
     broadcastEvent(EventNames.CHAT_HISTORY_UPDATED, {
       entry: { role: 'user', content: answerLines, source: 'question-answer' },
       agentId: effectiveAgentId,
+      conversationId,
     })
     submitAnswers(answers, effectiveAgentId)
   })
 
   registerMethod('chat', async (payload: unknown, client: WebSocket) => {
-    const { message, taskContext, images, source: payloadSource, mode, planModeFirst, planModeOff, agentId: payloadAgentId } = payload as ChatPayload
+    const { message, taskContext, images, source: payloadSource, mode, planModeFirst, planModeOff, agentId: payloadAgentId, conversationId: payloadConvId } = payload as ChatPayload
     const agentId = payloadAgentId ? validateAgentId(payloadAgentId) : 'general'
+    // Resolve the conversation: explicit payload id wins, else the agent's active one.
+    const conversationId = payloadConvId ? validateConversationId(payloadConvId) : await getActiveConversationId(agentId)
     const chatSource = payloadSource === 'quick-start' ? 'quick-start' as const : undefined
-    log.web.info('chat message received', { taskId: taskContext?.id, messageLength: message.length, imageCount: images?.length ?? 0, source: payloadSource ?? 'chat', agentId })
+    log.web.info('chat message received', { taskId: taskContext?.id, messageLength: message.length, imageCount: images?.length ?? 0, source: payloadSource ?? 'chat', agentId, conversationId })
 
     // ── Intercept: if this agent is waiting for a question answer, route here ──
     // The agent loop is blocked on user_ask tool. We must NOT enqueue a new
@@ -687,10 +694,11 @@ export function registerChatRpc(): void {
     if (hasPendingQuestion(agentId)) {
       log.web.info('routing chat message to pending user_ask', { messageLength: message.length, agentId })
       // Persist the user's answer as a UI-only entry so it appears in chat history
-      await chatHistory.addNotification({ role: 'user', content: message, agentId })
+      await chatHistory.addNotification({ role: 'user', content: message, agentId, conversationId })
       broadcastEvent(EventNames.CHAT_HISTORY_UPDATED, {
         entry: { role: 'user', content: message, source: 'question-answer' },
         agentId,
+        conversationId,
       })
       submitTextAnswer(message, agentId)
       return
@@ -705,7 +713,7 @@ export function registerChatRpc(): void {
     let contextHashes: Record<string, string> | undefined
     if (taskContext && agentId === 'general') {
       try {
-        const enriched = await enrichTaskContext(taskContext)
+        const enriched = await enrichTaskContext(taskContext, conversationId)
         contextPrefix = enriched.prefix
         contextHashes = enriched.hashes
       } catch (err) {
@@ -765,7 +773,7 @@ export function registerChatRpc(): void {
       }
 
       // Load existing history from disk (inside queue = reads fresh state)
-      const history = await chatHistory.getApiMessages(agentId)
+      const history = await chatHistory.getApiMessages(agentId, conversationId)
       log.agent.info('agent loop starting', { taskId: taskContext?.id, source: 'chat', historyLength: history.length })
 
       // Drain any pending cron notifications (General only — cron is General's domain)
@@ -827,26 +835,27 @@ export function registerChatRpc(): void {
         ...(taskContext?.id && { taskId: taskContext.id }),
         ...(chatSource && { source: chatSource }),
         agentId,
+        conversationId,
       })
 
       try {
         const result = await runAgentLoop(userContent, history, {
           onTextDelta: (delta) => {
-            broadcastEvent(EventNames.AGENT_TEXT_DELTA, { delta, agentId })
+            broadcastEvent(EventNames.AGENT_TEXT_DELTA, { delta, agentId, conversationId })
           },
           onToolActivity: (activity) => {
-            broadcastEvent(EventNames.AGENT_TOOL_ACTIVITY, { ...activity, agentId })
+            broadcastEvent(EventNames.AGENT_TOOL_ACTIVITY, { ...activity, agentId, conversationId })
           },
           onThinking: (text) => {
-            broadcastEvent(EventNames.AGENT_THINKING, { text, agentId })
+            broadcastEvent(EventNames.AGENT_THINKING, { text, agentId, conversationId })
           },
           onToolCall: (toolName, input, toolUseId) => {
             toolsUsedInTurn.add(toolName)
             trackWmToolCall()
-            broadcastEvent(EventNames.AGENT_TOOL_CALL, { toolName, input, toolUseId, agentId })
+            broadcastEvent(EventNames.AGENT_TOOL_CALL, { toolName, input, toolUseId, agentId, conversationId })
           },
           onToolResult: (toolName, result, toolUseId) => {
-            broadcastEvent(EventNames.AGENT_TOOL_RESULT, { toolName, result, toolUseId, agentId })
+            broadcastEvent(EventNames.AGENT_TOOL_RESULT, { toolName, result, toolUseId, agentId, conversationId })
           },
           onUsage: (usage) => {
             bus.emit('agent:usage', { usage }, ['web-ui'], { source: 'agent' })
@@ -905,7 +914,7 @@ export function registerChatRpc(): void {
           }
           if (cleaned.length > 0) {
             const persistMsgs = replaceImagesWithPaths(cleaned, savedImages)
-            await chatHistory.addAIMessages(persistMsgs, { ...(chatSource && { source: chatSource }), agentId })
+            await chatHistory.addAIMessages(persistMsgs, { ...(chatSource && { source: chatSource }), agentId, conversationId })
           }
           // Even if cleaned is empty, user message is safe on disk ✅
           // Auto-append to conversation_log for aborted turns (General only)
@@ -914,7 +923,7 @@ export function registerChatRpc(): void {
               log.web.warn('autoAppendConversationLog failed (aborted)', { taskId: taskContext.id, error: err instanceof Error ? err.message : String(err) })
             })
           }
-          broadcastEvent(EventNames.AGENT_RESPONSE, { text: result.response, aborted: true, agentId })
+          broadcastEvent(EventNames.AGENT_RESPONSE, { text: result.response, aborted: true, agentId, conversationId })
           return
         }
 
@@ -937,6 +946,7 @@ export function registerChatRpc(): void {
           ...(taskContext?.id && { taskId: taskContext.id }),
           ...(chatSource && { source: chatSource }),
           agentId,
+          conversationId,
         })
         log.agent.info('agent response persisted', { taskId: taskContext?.id, messageCount: newApiMsgs.length })
 
@@ -947,7 +957,7 @@ export function registerChatRpc(): void {
           const { getConfig } = await import('../../core/config-manager.js')
           const config = await getConfig()
           const contextWindow = getContextWindowSize(config.agent?.main_model)
-          const compacted = !!(await chatHistory.getCompactionSummary(agentId))
+          const compacted = !!(await chatHistory.getCompactionSummary(agentId, conversationId))
           stats = {
             apiMessageCount: result.messages.filter((m: { compacted?: boolean }) => !m.compacted).length,
             estimatedTokens: result.tokenBreakdown.messages,
@@ -961,8 +971,8 @@ export function registerChatRpc(): void {
 
         // Signal turn complete to the client (resets isStreaming).
         // This resolves the RPC immediately — compaction runs separately below.
-        broadcastEvent(EventNames.AGENT_RESPONSE, { text: resolvedText, ...(stats ? { stats } : {}), agentId })
-        log.web.info('chat turn completed', { taskId: taskContext?.id, durationMs: Date.now() - turnStartMs, agentId })
+        broadcastEvent(EventNames.AGENT_RESPONSE, { text: resolvedText, ...(stats ? { stats } : {}), agentId, conversationId })
+        log.web.info('chat turn completed', { taskId: taskContext?.id, durationMs: Date.now() - turnStartMs, agentId, conversationId })
 
         // Auto-append to conversation_log if a task was focused (General only)
         if (taskContext?.id && agentId === 'general') {
@@ -1003,7 +1013,7 @@ export function registerChatRpc(): void {
 
         // Trigger background compaction outside the turn queue.
         // This fires and forgets — the user can send more messages immediately.
-        triggerBackgroundCompaction('chat', { agentId })
+        triggerBackgroundCompaction('chat', { agentId, conversationId })
       } catch (err) {
         activeAbortControllers.delete(aKey)
         const errMsg = err instanceof Error ? err.message : String(err)
@@ -1014,12 +1024,13 @@ export function registerChatRpc(): void {
           [
             { role: 'assistant', content: [{ type: 'text', text: `[Error: ${errMsg}]` }] },
           ] as MessageParam[],
-          { agentId },
+          { agentId, conversationId },
         )
         await chatHistory.addNotification({
           role: 'assistant', content: `Error: ${errMsg}`,
           source: 'agent-error', notification: true,
           agentId,
+          conversationId,
         })
 
         // Auto-append to conversation_log for error turns (General only)
@@ -1027,7 +1038,7 @@ export function registerChatRpc(): void {
           autoAppendConversationLog(taskContext.id, message, `[Error: ${errMsg}]`, [...toolsUsedInTurn]).catch(() => { /* non-critical */ })
         }
 
-        broadcastEvent(EventNames.AGENT_ERROR, { error: errMsg, agentId })
+        broadcastEvent(EventNames.AGENT_ERROR, { error: errMsg, agentId, conversationId })
       }
     })
   })

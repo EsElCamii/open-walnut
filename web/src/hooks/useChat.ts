@@ -346,7 +346,7 @@ function upsertLastAssistant(
   }];
 }
 
-export function useChat(agentId: string = 'general'): UseChatReturn {
+export function useChat(agentId: string = 'general', conversationId: string | null = null): UseChatReturn {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [isStreaming, setIsStreaming] = useState(false);
   const [isCompacting, setIsCompacting] = useState(false);
@@ -376,21 +376,34 @@ export function useChat(agentId: string = 'general'): UseChatReturn {
   // Keep refs in sync with state
   isStreamingRef.current = isStreaming;
 
-  // Keep agentId in a ref for stable callbacks
+  // Keep agentId + conversationId in refs for stable callbacks
   const agentIdRef = useRef(agentId);
   agentIdRef.current = agentId;
+  const conversationIdRef = useRef(conversationId);
+  conversationIdRef.current = conversationId;
 
   // Fetch real conversation stats from server
   const refreshStats = useCallback(() => {
-    fetchChatStats(agentIdRef.current).then(setStats).catch(() => {});
+    fetchChatStats(agentIdRef.current, conversationIdRef.current ?? undefined).then(setStats).catch(() => {});
   }, []);
 
-  // Load chat history from server on mount + on agentId change
+  // Load chat history from server on mount + on agentId/conversationId change.
+  // conversationId is null until useConversations resolves the active id — wait
+  // for it (render empty, not stuck loading) rather than fetch a bogus path.
   useEffect(() => {
     let cancelled = false;
+    if (conversationId === null) {
+      // No conversation selected yet — clear any previous agent's messages and
+      // settle into an empty, non-loading state until the active id arrives.
+      setMessages([]);
+      setHasMore(false);
+      nextPageRef.current = 2;
+      setIsLoading(false);
+      return () => { cancelled = true; };
+    }
     setIsLoading(true);
     const endHistory = perf.start('chat:history');
-    fetchChatHistory(1, PAGE_SIZE, agentId)
+    fetchChatHistory(1, PAGE_SIZE, agentId, conversationId)
       .then((resp) => {
         if (cancelled) return;
         endHistory(`${resp.messages.length} entries`);
@@ -405,21 +418,29 @@ export function useChat(agentId: string = 'general'): UseChatReturn {
         if (!cancelled) {
           setIsLoading(false);
           const endStats = perf.start('chat:stats');
-          fetchChatStats(agentId).then((s) => { endStats(); setStats(s); }).catch(() => endStats('error'));
+          fetchChatStats(agentId, conversationId).then((s) => { endStats(); setStats(s); }).catch(() => endStats('error'));
         }
       });
     return () => { cancelled = true; };
-  }, [agentId]);
+  }, [agentId, conversationId]);
 
-  // Helper: check if an event belongs to this agent
-  const isMyAgent = useCallback((data: unknown): boolean => {
-    const eventAgentId = (data as Record<string, unknown>)?.agentId as string | undefined;
-    return (eventAgentId || 'general') === agentIdRef.current;
+  // Helper: check if a streaming event belongs to this agent AND conversation.
+  // Streaming events (text-delta/thinking/tool-*/response/error/history-updated/
+  // compacting/compacted) all carry conversationId now — require both to match so
+  // a background turn in another conversation can't bleed into this view.
+  const isMine = useCallback((data: unknown): boolean => {
+    const d = data as Record<string, unknown>;
+    const eventAgentId = (d?.agentId as string | undefined) || 'general';
+    if (eventAgentId !== agentIdRef.current) return false;
+    const eventConvId = d?.conversationId as string | undefined;
+    // Tolerate legacy events with no conversationId (treat as matching the active one).
+    if (eventConvId === undefined) return true;
+    return eventConvId === conversationIdRef.current;
   }, []);
 
   // Handle thinking blocks — insert before non-thinking blocks so thinking always renders first
   useEvent('agent:thinking', (data) => {
-    if (!isMyAgent(data)) return;
+    if (!isMine(data)) return;
     const { text } = data as { text: string };
     const src = currentSourceRef.current;
     setMessages((prev) =>
@@ -449,7 +470,7 @@ export function useChat(agentId: string = 'general'): UseChatReturn {
   }, []);
 
   useEvent('agent:text-delta', (data) => {
-    if (!isMyAgent(data)) return;
+    if (!isMine(data)) return;
     const { delta, sessionId, source } = data as { delta: string; sessionId?: string; source?: string };
     if (sessionId) return;
 
@@ -489,7 +510,7 @@ export function useChat(agentId: string = 'general'): UseChatReturn {
 
   // Handle tool call start
   useEvent('agent:tool-call', (data) => {
-    if (!isMyAgent(data)) return;
+    if (!isMine(data)) return;
     const { toolName, input, toolUseId } = data as { toolName: string; input: Record<string, unknown>; toolUseId?: string };
     const src = currentSourceRef.current;
     setMessages((prev) => {
@@ -529,7 +550,7 @@ export function useChat(agentId: string = 'general'): UseChatReturn {
   // Handle tool result — match by unique toolUseId for deterministic pairing.
   // Searches all messages (not just last) because sourced messages can interleave.
   useEvent('agent:tool-result', (data) => {
-    if (!isMyAgent(data)) return;
+    if (!isMine(data)) return;
     const { toolName, result, toolUseId } = data as { toolName: string; result: string; toolUseId?: string };
     setMessages((prev) => {
       const updated = [...prev];
@@ -556,7 +577,7 @@ export function useChat(agentId: string = 'general'): UseChatReturn {
 
   // Handle tool activity indicators (keep transient spinner, skip session events)
   useEvent('agent:tool-activity', (data) => {
-    if (!isMyAgent(data)) return;
+    if (!isMine(data)) return;
     const activity = data as ToolActivity & { sessionId?: string };
     if (activity.sessionId) return;
     setToolActivity(activity.status === 'done' ? null : activity);
@@ -564,7 +585,7 @@ export function useChat(agentId: string = 'general'): UseChatReturn {
 
   // Handle inline subagent streaming — append blocks to the matching create_subagent tool call
   useEvent('agent:subagent-stream', (data) => {
-    if (!isMyAgent(data)) return;
+    if (!isMine(data)) return;
     const { toolUseId, block } = data as { toolUseId: string; block: StreamingBlock };
     setMessages((prev) => {
       // Search backwards for the tool_call with matching toolUseId
@@ -611,7 +632,7 @@ export function useChat(agentId: string = 'general'): UseChatReturn {
 
   // Handle final complete response
   useEvent('agent:response', (data) => {
-    if (!isMyAgent(data)) return;
+    if (!isMine(data)) return;
     const { source, stats: piggybacked } = (data ?? {}) as { source?: string; stats?: ChatStats };
     setToolActivity(null);
     if (piggybacked) {
@@ -730,7 +751,7 @@ export function useChat(agentId: string = 'general'): UseChatReturn {
 
   // Handle chat:history-updated — server pushes compact notifications (triage, subagent)
   useEvent('chat:history-updated', (data) => {
-    if (!isMyAgent(data)) return;
+    if (!isMine(data)) return;
     const { entry } = data as {
       entry?: { role: 'user' | 'assistant'; content: string; source?: string; notification?: boolean; taskId?: string; timestamp?: string };
     };
@@ -749,7 +770,7 @@ export function useChat(agentId: string = 'general'): UseChatReturn {
   // During disconnect, the agent may have completed or the user refreshed mid-processing.
   // Without this, main chat shows stale React state (session chat already has this).
   useEvent('_ws:reconnected', () => {
-    fetchChatHistory(1, PAGE_SIZE, agentIdRef.current)
+    fetchChatHistory(1, PAGE_SIZE, agentIdRef.current, conversationIdRef.current ?? undefined)
       .then((resp) => {
         setMessages(chatEntriesToMessages(resp.messages));
         setHasMore(resp.pagination.hasMore);
@@ -764,7 +785,7 @@ export function useChat(agentId: string = 'general'): UseChatReturn {
 
   // Handle errors — don't clear queue; after a delay, drain remaining queued messages
   useEvent('agent:error', (data) => {
-    if (!isMyAgent(data)) return;
+    if (!isMine(data)) return;
     const { error: errMsg } = data as { error: string };
     setError(errMsg);
     setToolActivity(null);
@@ -782,7 +803,7 @@ export function useChat(agentId: string = 'general'): UseChatReturn {
 
   // Handle compaction lifecycle
   useEvent('chat:compacting', (data) => {
-    if (!isMyAgent(data)) return;
+    if (!isMine(data)) return;
     setIsCompacting(true);
     // Insert a placeholder message at the current position in chat.
     // New messages sent during compaction appear BELOW this spinner.
@@ -797,7 +818,7 @@ export function useChat(agentId: string = 'general'): UseChatReturn {
   });
 
   useEvent('chat:compacted', (data) => {
-    if (!isMyAgent(data)) return;
+    if (!isMine(data)) return;
     setIsCompacting(false);
     const { divider } = data as { divider?: string };
     // Only reset pagination when actual compaction occurred (has divider).
@@ -879,6 +900,9 @@ export function useChat(agentId: string = 'general'): UseChatReturn {
 
     const currentAgentId = agentIdRef.current;
     const payload: Record<string, unknown> = { message: text, agentId: currentAgentId };
+    if (conversationIdRef.current) {
+      payload.conversationId = conversationIdRef.current;
+    }
     if (taskContext) {
       payload.taskContext = taskContext;
     }
@@ -940,7 +964,7 @@ export function useChat(agentId: string = 'general'): UseChatReturn {
   }, [sendRpc]);
 
   const clearMessages = useCallback(() => {
-    clearChatHistory(agentIdRef.current).catch(() => {});
+    clearChatHistory(agentIdRef.current, conversationIdRef.current ?? undefined).catch(() => {});
     clearQueue();
     setMessages([]);
     setError(null);
@@ -961,14 +985,16 @@ export function useChat(agentId: string = 'general'): UseChatReturn {
 
   const stopGeneration = useCallback(() => {
     clearQueue();
-    wsClient.sendRpc('chat:stop', { agentId: agentIdRef.current }).catch(() => {});
+    const stopPayload: Record<string, unknown> = { agentId: agentIdRef.current };
+    if (conversationIdRef.current) stopPayload.conversationId = conversationIdRef.current;
+    wsClient.sendRpc('chat:stop', stopPayload).catch(() => {});
   }, [clearQueue]);
 
   const loadOlderMessages = useCallback(() => {
     if (isLoadingOlder || !hasMore) return;
     setIsLoadingOlder(true);
     const page = nextPageRef.current;
-    fetchChatHistory(page, PAGE_SIZE, agentIdRef.current)
+    fetchChatHistory(page, PAGE_SIZE, agentIdRef.current, conversationIdRef.current ?? undefined)
       .then((resp) => {
         const older = chatEntriesToMessages(resp.messages);
         // Signal ChatPanel that we're prepending so it preserves scroll position

@@ -142,6 +142,37 @@ export function chatHistoryFile(agentId?: string): string {
   return path.join(WALNUT_HOME, `chat-history-${agentId}.json`);
 }
 
+// ── Multi-conversation per agent ──
+// Each agent gets a directory of conversations: an _index.json registry +
+// one {conversationId}.json per conversation (ChatHistoryStore schema).
+export const CONVERSATIONS_DIR = path.join(WALNUT_HOME, 'conversations');
+
+/** Per-agent conversation directory. 'general' is used literally (not root). */
+export function conversationDir(agentId: string): string {
+  return path.join(CONVERSATIONS_DIR, validateAgentId(agentId));
+}
+
+/** The conversation registry (_index.json) for an agent. */
+export function conversationIndexFile(agentId: string): string {
+  return path.join(conversationDir(agentId), '_index.json');
+}
+
+/** A single conversation's ChatHistoryStore file. conversationId must be pre-validated. */
+export function conversationFile(agentId: string, conversationId: string): string {
+  return path.join(conversationDir(agentId), `${conversationId}.json`);
+}
+
+/**
+ * Validate a conversationId from user input to prevent path traversal.
+ * Format: 'conv-' + alphanumeric/dash (allows crypto.randomUUID() dashes).
+ */
+export function validateConversationId(id: string): string {
+  if (!/^conv-[a-z0-9-]{1,64}$/i.test(id)) {
+    throw new Error(`Invalid conversationId: ${JSON.stringify(id)}`);
+  }
+  return id;
+}
+
 /**
  * Resolve the memory directory for a console agent.
  * General → MEMORY_DIR (existing path, zero migration).
@@ -169,7 +200,11 @@ export const CLAUDE_SETTINGS_FILE = path.join(CLAUDE_HOME, 'settings.json');
 export const CLAUDE_PLUGINS_DIR = path.join(CLAUDE_HOME, 'plugins');
 export const CRON_FILE = path.join(WALNUT_HOME, 'cron-jobs.json');
 export const USAGE_DB_FILE = path.join(WALNUT_HOME, 'usage.sqlite');
-export const LOG_DIR = '/tmp/open-walnut';
+// Env-aware so an isolated demo server (WALNUT_DAEMON_DIR=/tmp/open-walnut-demo)
+// keeps its logs/streams/images separate from production. Read at import time —
+// the env must be set by the launching shell (see dev:demo) before node starts,
+// same constraint as IS_EPHEMERAL above. Production sets nothing → /tmp/open-walnut.
+export const LOG_DIR = process.env.WALNUT_DAEMON_DIR || '/tmp/open-walnut';
 export const SESSION_STREAMS_DIR = path.join(LOG_DIR, 'streams');
 export const SESSION_QUEUE_FILE = path.join(WALNUT_HOME, 'session-message-queue.json');
 export const IMAGES_DIR = path.join(LOG_DIR, 'images');

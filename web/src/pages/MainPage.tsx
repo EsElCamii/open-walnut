@@ -3,6 +3,7 @@ import type { NavigateFunction } from 'react-router-dom';
 import type { Task } from '@open-walnut/core';
 import { useChat, type TaskContext, type ImageAttachment } from '@/hooks/useChat';
 import { useAgentConsole } from '@/hooks/useAgentConsole';
+import { useConversations } from '@/hooks/useConversations';
 import { usePlanMode } from '@/hooks/usePlanMode';
 import type { ChatStats } from '@/api/chat';
 import { useWebSocket, useEvent } from '@/hooks/useWebSocket';
@@ -23,7 +24,8 @@ import { TriagePanel } from '@/components/triage/TriagePanel';
 import { fetchSession, fetchSessionsForTask, quickStartSession } from '@/api/sessions';
 import { ContextInspectorPanel } from '@/components/context/ContextInspectorPanel';
 import { QuickAccessBar } from '@/components/chat/QuickAccessBar';
-import { AgentSwitcher } from '@/components/chat/AgentSwitcher';
+import { AgentDropdown, slugifyAgentId } from '@/components/chat/AgentDropdown';
+import { createAgentDef, updateAgentDef } from '@/api/agents';
 import { useContextInspector } from '@/hooks/useContextInspector';
 import { useUrlSync } from '@/hooks/useUrlSync';
 import { useSessionPanelMode } from '@/hooks/useSessionPanelMode';
@@ -51,6 +53,14 @@ import { useAutoAnimate } from '@formkit/auto-animate/react';
 // ── Compact chat header with dropdown menu ──
 
 const CONTEXT_WINDOW_DEFAULT = 200_000; // fallback when backend doesn't provide contextWindow
+
+// Prefill template for "Create by chat" (R2). This is PREFILLED into the chat input
+// (visible + editable), NOT auto-sent — the user fills in the purpose/name then presses
+// Send. Walnut then designs the agent conversationally and calls the agent_create tool.
+const AGENT_BUILDER_PREFILL = `Create an interactive agent that shows up in my console. Help me design it, then create it with the agent_create tool (runner: embedded, console: true).
+
+Purpose:
+Name (optional): `;
 
 function ChatHeaderRow({ title, stats, connectionState, inspectorOpen, onToggleInspector, hasMessages, onClear, agentSwitcher }: {
   title: string;
@@ -167,7 +177,8 @@ interface MainPageProps {
 
 export function MainPage({ visible = true, navigateRef }: MainPageProps) {
   const agentConsole = useAgentConsole();
-  const chat = useChat(agentConsole.activeAgentId);
+  const conversations = useConversations(agentConsole.activeAgentId);
+  const chat = useChat(agentConsole.activeAgentId, conversations.activeConversationId);
   const { health, setupComplete } = useSystemHealth();
   const { mode: chatMode, toggleMode, getPlanPayload } = usePlanMode();
   const { connectionState } = useWebSocket();
@@ -189,6 +200,56 @@ export function MainPage({ visible = true, navigateRef }: MainPageProps) {
   const handleNavigateSettings = useCallback((hash?: string) => {
     navigateRef?.current?.(`/settings${hash ?? ''}`);
   }, [navigateRef]);
+
+  // Create a new console agent from the dropdown's inline form, then refresh the
+  // agent list (so it appears without reload) and switch to it.
+  const handleCreateAgent = useCallback(async (name: string, description: string, systemPrompt?: string) => {
+    const id = slugifyAgentId(name);
+    const topic = description.trim() || name;
+    const autoPrompt = `You are ${name}. ${description || ''}\n\nHelp the user with ${topic}. Be concise and proactive.`;
+    // Explicit prompt wins; blank textarea (→ undefined) falls back to the auto-prompt.
+    const prompt = systemPrompt?.trim() || autoPrompt;
+    try {
+      await createAgentDef({ id, name, description: description || undefined, runner: 'embedded', console: true, system_prompt: prompt });
+      agentConsole.refresh();
+      agentConsole.switchAgent(id);
+    } catch (err) {
+      console.error('MainPage: failed to create agent', err);
+    }
+  }, [agentConsole]);
+
+  // ── "Create by chat" (R2) ──
+  // Routes the user into Walnut's own chat with a fresh, isolated conversation seeded
+  // with a guide prompt. The agent walks the user through designing + calling agent_create.
+  // We seed via an EFFECT (not setTimeout): switching agent/conversation re-mounts useChat
+  // with a new conversationId, and its internal sendRpc ref lags one render. Firing into a
+  // stale conversationId would land the seed in the wrong (old) conversation. So we stash the
+  // seed + target id in a ref and wait for activeConversationId to actually settle.
+  // "Create by chat": switch to Walnut and PREFILL the agent-builder template into the
+  // input (visible + editable, NOT auto-sent). The user fills in purpose/name and sends.
+  // A monotonic nonce drives the prefill so ChatInput re-applies it each time.
+  const [agentBuilderPrefillNonce, setAgentBuilderPrefillNonce] = useState(0);
+  const handleCreateAgentByChat = useCallback(() => {
+    agentConsole.switchAgent('general');
+    setAgentBuilderPrefillNonce((n) => n + 1);
+  }, [agentConsole]);
+
+  // After the agent calls agent_create, refresh the console list so the new agent
+  // appears in the switcher without a reload.
+  useEvent('agent:tool-result', (data: unknown) => {
+    const toolName = (data as { toolName?: string })?.toolName;
+    if (toolName === 'agent_create') agentConsole.refresh();
+  });
+
+  // Toggle whether an agent appears in the console (eye toggle in the dropdown).
+  const handleToggleAgentVisibility = useCallback(async (agentId: string, visible: boolean) => {
+    try {
+      await updateAgentDef(agentId, { console: visible });
+      agentConsole.refresh();
+    } catch (err) {
+      console.error('MainPage: failed to toggle agent visibility', err);
+    }
+  }, [agentConsole]);
 
   // Chat panel visibility — toggle via Focus Dock "Chat" button or Sidebar toggle
   const [chatVisible, setChatVisible] = useState<boolean>(
@@ -1083,14 +1144,22 @@ export function MainPage({ visible = true, navigateRef }: MainPageProps) {
             onToggleInspector={inspector.toggle}
             hasMessages={chat.messages.length > 0}
             onClear={chat.clearMessages}
-            agentSwitcher={agentConsole.agents.length > 1 ? (
-              <AgentSwitcher
+            agentSwitcher={(
+              <AgentDropdown
                 agents={agentConsole.agents}
                 activeAgentId={agentConsole.activeAgentId}
-                unreadCounts={agentConsole.unreadCounts}
-                onSwitch={agentConsole.switchAgent}
+                onSwitchAgent={agentConsole.switchAgent}
+                conversations={conversations.conversations}
+                activeConversationId={conversations.activeConversationId}
+                onSwitchConversation={conversations.switchTo}
+                onNewConversation={() => { void conversations.create(); }}
+                onDeleteConversation={(cid) => { void conversations.remove(cid); }}
+                onRenameConversation={(cid, title) => { void conversations.rename(cid, title); }}
+                onCreateAgent={handleCreateAgent}
+                onCreateAgentByChat={handleCreateAgentByChat}
+                onToggleAgentVisibility={handleToggleAgentVisibility}
               />
-            ) : undefined}
+            )}
           />
 
           {inspector.isOpen && (
@@ -1213,6 +1282,8 @@ export function MainPage({ visible = true, navigateRef }: MainPageProps) {
               onClearFocus={handleClearFocus}
               queueCount={chat.queueCount}
               draftKey="draft:main-chat"
+              prefillText={AGENT_BUILDER_PREFILL}
+              prefillNonce={agentBuilderPrefillNonce}
               onToggleMode={toggleMode}
               sessionCommands={quickStartPath ? quickStartCommands : undefined}
               searchSessionCommands={quickStartPath ? searchQuickStartCommands : undefined}

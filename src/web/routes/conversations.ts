@@ -1,0 +1,140 @@
+/**
+ * Conversations routes — per-agent conversation list CRUD.
+ *
+ * Mounted at /api/agents, sharing the prefix with the agents router. The agents
+ * router only matches single-segment ids (/:id), so the deeper
+ * /:agentId/conversations paths fall through here without collision.
+ *
+ *   GET    /api/agents/:agentId/conversations         -> { conversations, activeConversationId }
+ *   POST   /api/agents/:agentId/conversations         {title?} -> 201 { conversation }
+ *   PUT    /api/agents/:agentId/conversations/active   {conversationId} -> { activeConversationId }
+ *   PATCH  /api/agents/:agentId/conversations/:cid     {title?, pinned?} -> { conversation }
+ *   DELETE /api/agents/:agentId/conversations/:cid     -> 204 (distills before delete)
+ */
+
+import { Router, type Request, type Response, type NextFunction } from 'express'
+import { validateAgentId, validateConversationId } from '../../constants.js'
+import {
+  listConversations,
+  getActiveConversationId,
+  getMainConversationId,
+  setActiveConversationId,
+  createConversation,
+  deleteConversation,
+  renameConversation,
+  setPinned,
+} from '../../core/conversations.js'
+import { triggerConversationDistill } from '../../core/conversation-distill.js'
+import { broadcastEvent } from '../ws/handler.js'
+import { EventNames } from '../../core/event-bus.js'
+import { log } from '../../logging/index.js'
+
+export function createConversationsRouter(): Router {
+  const router = Router()
+
+  // GET /api/agents/:agentId/conversations
+  router.get('/:agentId/conversations', async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const agentId = validateAgentId(req.params.agentId as string)
+      // Resolve the main conversation FIRST so the lazy back-fill runs (legacy
+      // indexes get an isMain promoted + persisted) before we read the list —
+      // the returned metas then carry isMain so the UI badge shows immediately.
+      await getMainConversationId(agentId)
+      const [conversations, activeConversationId] = await Promise.all([
+        listConversations(agentId),
+        getActiveConversationId(agentId),
+      ])
+      res.json({ conversations, activeConversationId })
+    } catch (err) {
+      next(err)
+    }
+  })
+
+  // POST /api/agents/:agentId/conversations
+  router.post('/:agentId/conversations', async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const agentId = validateAgentId(req.params.agentId as string)
+      const title = typeof req.body?.title === 'string' ? req.body.title : undefined
+      const conversation = await createConversation(agentId, title)
+      broadcastEvent(EventNames.CONVERSATION_CREATED, { agentId, conversation })
+      res.status(201).json({ conversation })
+    } catch (err) {
+      next(err)
+    }
+  })
+
+  // PUT /api/agents/:agentId/conversations/active
+  router.put('/:agentId/conversations/active', async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const agentId = validateAgentId(req.params.agentId as string)
+      const conversationId = validateConversationId(req.body?.conversationId as string)
+      await setActiveConversationId(agentId, conversationId)
+      broadcastEvent(EventNames.CONVERSATION_UPDATED, { agentId, activeConversationId: conversationId })
+      res.json({ activeConversationId: conversationId })
+    } catch (err) {
+      if (err instanceof Error && err.message.includes('not found')) {
+        res.status(404).json({ error: err.message })
+        return
+      }
+      next(err)
+    }
+  })
+
+  // PATCH /api/agents/:agentId/conversations/:cid  — rename and/or pin
+  router.patch('/:agentId/conversations/:cid', async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const agentId = validateAgentId(req.params.agentId as string)
+      const cid = validateConversationId(req.params.cid as string)
+      let conversation
+      if (typeof req.body?.title === 'string') {
+        conversation = await renameConversation(agentId, cid, req.body.title)
+      }
+      if (typeof req.body?.pinned === 'boolean') {
+        conversation = await setPinned(agentId, cid, req.body.pinned)
+      }
+      if (!conversation) {
+        res.status(400).json({ error: 'No updatable fields provided (title or pinned)' })
+        return
+      }
+      broadcastEvent(EventNames.CONVERSATION_UPDATED, { agentId, conversation })
+      res.json({ conversation })
+    } catch (err) {
+      if (err instanceof Error && err.message.includes('not found')) {
+        res.status(404).json({ error: err.message })
+        return
+      }
+      next(err)
+    }
+  })
+
+  // DELETE /api/agents/:agentId/conversations/:cid — distill before delete
+  router.delete('/:agentId/conversations/:cid', async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const agentId = validateAgentId(req.params.agentId as string)
+      const cid = validateConversationId(req.params.cid as string)
+
+      // Distill the conversation into MEMORY.md BEFORE deleting it (best-effort,
+      // awaited so durable knowledge isn't lost). Errors are swallowed inside.
+      await triggerConversationDistill(agentId, cid, { reason: 'delete', awaitIt: true })
+
+      await deleteConversation(agentId, cid)
+      // The active id may have changed (if we deleted the active conversation).
+      const activeConversationId = await getActiveConversationId(agentId)
+      broadcastEvent(EventNames.CONVERSATION_DELETED, { agentId, conversationId: cid, activeConversationId })
+      res.status(204).end()
+    } catch (err) {
+      log.web.warn('conversation delete failed', {
+        agentId: req.params.agentId, conversationId: req.params.cid,
+        error: err instanceof Error ? err.message : String(err),
+      })
+      // The main conversation is not deletable → 409 Conflict.
+      if (err instanceof Error && err.message.toLowerCase().includes('main')) {
+        res.status(409).json({ error: err.message })
+        return
+      }
+      next(err)
+    }
+  })
+
+  return router
+}

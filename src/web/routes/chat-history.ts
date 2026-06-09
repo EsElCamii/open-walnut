@@ -8,7 +8,7 @@
  */
 
 import { Router, type Request, type Response, type NextFunction } from 'express'
-import { validateAgentId } from '../../constants.js'
+import { validateAgentId, validateConversationId } from '../../constants.js'
 import * as chatHistory from '../../core/chat-history.js'
 import { estimateMessagesTokens, estimateFullPayload } from '../../core/daily-log.js'
 import { getContextWindowSize } from '../../agent/model.js'
@@ -29,7 +29,9 @@ chatHistoryRouter.get('/history', async (req: Request, res: Response, next: Next
     const pageSize = req.query.pageSize ? parseInt(req.query.pageSize as string, 10) : 100
     const rawAgentId = (req.query.agentId as string) || undefined
     const agentId = rawAgentId ? validateAgentId(rawAgentId) : undefined
-    const result = await chatHistory.getDisplayEntries(page, pageSize, agentId)
+    const rawConvId = (req.query.conversationId as string) || undefined
+    const conversationId = rawConvId ? validateConversationId(rawConvId) : undefined
+    const result = await chatHistory.getDisplayEntries(page, pageSize, agentId, conversationId)
     res.json(result)
   } catch (err) {
     next(err)
@@ -41,10 +43,12 @@ chatHistoryRouter.get('/stats', async (req: Request, res: Response, next: NextFu
   try {
     const rawAgentId = (req.query.agentId as string) || undefined
     const agentId = rawAgentId ? validateAgentId(rawAgentId) : undefined
-    const cacheKey = agentId || 'general'
+    const rawConvId = (req.query.conversationId as string) || undefined
+    const conversationId = rawConvId ? validateConversationId(rawConvId) : undefined
+    const cacheKey = `${agentId || 'general'}:${conversationId || '_'}`
 
     // Check if cached stats are still valid (chat history hasn't changed)
-    const lastUpdated = await chatHistory.getLastUpdated(agentId)
+    const lastUpdated = await chatHistory.getLastUpdated(agentId, conversationId)
     const cachedStats = cachedStatsMap.get(cacheKey)
     const cachedMtime = cachedMtimeMap.get(cacheKey)
     if (cachedStats && cachedMtime === lastUpdated) {
@@ -53,9 +57,9 @@ chatHistoryRouter.get('/stats', async (req: Request, res: Response, next: NextFu
     }
 
     // Full computation (first call or after new messages/compaction)
-    const modelContext = await chatHistory.getModelContext(agentId)
+    const modelContext = await chatHistory.getModelContext(agentId, conversationId)
     const messageTokens = estimateMessagesTokens(modelContext)
-    const summary = await chatHistory.getCompactionSummary(agentId)
+    const summary = await chatHistory.getCompactionSummary(agentId, conversationId)
 
     // Compute full payload estimate (system + tools + messages)
     let systemTokens = 0
@@ -127,35 +131,41 @@ chatHistoryRouter.get('/triage', async (req: Request, res: Response, next: NextF
     const taskId = req.query.taskId as string | undefined
     const rawAgentId = (req.query.agentId as string) || undefined
     const agentId = rawAgentId ? validateAgentId(rawAgentId) : undefined
-    const result = await chatHistory.getTriageEntries(limit, taskId, agentId)
+    const rawConvId = (req.query.conversationId as string) || undefined
+    const conversationId = rawConvId ? validateConversationId(rawConvId) : undefined
+    const result = await chatHistory.getTriageEntries(limit, taskId, agentId, conversationId)
     res.json(result)
   } catch (err) {
     next(err)
   }
 })
 
-// POST /api/chat/clear?agentId=general
+// POST /api/chat/clear?agentId=general&conversationId=conv-...
 chatHistoryRouter.post('/clear', async (req: Request, res: Response, next: NextFunction) => {
   try {
     const rawAgentId = (req.query.agentId as string) || undefined
     const agentId = rawAgentId ? validateAgentId(rawAgentId) : undefined
-    await chatHistory.clear(agentId)
+    const rawConvId = (req.query.conversationId as string) || undefined
+    const conversationId = rawConvId ? validateConversationId(rawConvId) : undefined
+    await chatHistory.clear(agentId, conversationId)
     res.json({ ok: true })
   } catch (err) {
     next(err)
   }
 })
 
-// POST /api/chat/compact?agentId=general — fire-and-forget background compaction
+// POST /api/chat/compact?agentId=general&conversationId=conv-... — fire-and-forget background compaction
 chatHistoryRouter.post('/compact', async (req: Request, res: Response, next: NextFunction) => {
   try {
     const rawAgentId = (req.query.agentId as string) || undefined
     const agentId = rawAgentId ? validateAgentId(rawAgentId) : undefined
-    if (isCompactionInProgress(agentId)) {
+    const rawConvId = (req.query.conversationId as string) || undefined
+    const conversationId = rawConvId ? validateConversationId(rawConvId) : undefined
+    if (isCompactionInProgress(agentId, conversationId)) {
       res.json({ ok: true, alreadyRunning: true })
       return
     }
-    triggerBackgroundCompaction('rest-api', { force: true, agentId })
+    triggerBackgroundCompaction('rest-api', { force: true, agentId, conversationId })
     res.json({ ok: true, async: true })
   } catch (err) {
     next(err)

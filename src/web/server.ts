@@ -12,6 +12,7 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import express, { Router } from 'express'
 import cors from 'cors'
+import compression from 'compression'
 import { bus, EventNames, eventData } from '../core/event-bus.js'
 import { attachWss, broadcastEvent, sendStreamEvent, closeWss } from './ws/handler.js'
 import { sessionStreamBuffer } from './session-stream-buffer.js'
@@ -39,6 +40,7 @@ import { fileContentRouter } from './routes/file-content.js'
 import { filesRouter } from './routes/files.js'
 import { createCronRouter, setCronService } from './routes/cron.js'
 import { createAgentsRouter } from './routes/agents.js'
+import { createConversationsRouter } from './routes/conversations.js'
 import { createCommandsRouter } from './routes/commands.js'
 import { createSkillsRouter } from './routes/skills.js'
 import { createSlashCommandsRouter } from './routes/slash-commands.js'
@@ -71,6 +73,7 @@ import { migrateGlobalNotes } from '../core/notes-migration.js'
 import { authMiddleware } from './middleware/auth.js'
 import { pushRouter } from './routes/push.js'
 import { authRouter } from './routes/auth.js'
+import { incidentsRouter } from './routes/incidents.js'
 import { registerAuthRpc } from './routes/auth-rpc.js'
 import { initPushNotifications } from '../core/push-notification.js'
 import { enqueueMainAgentTurn, getQueueStatus } from './agent-turn-queue.js'
@@ -121,6 +124,7 @@ let qmdWatcherHandle: { stop: () => void } | null = null
 let gitAutoCommitHandle: { stop: () => void; health: GitAutoCommitHealth } | null = null
 let dreamTimerHandle: ReturnType<typeof setInterval> | null = null
 let dreamInitialHandle: ReturnType<typeof setTimeout> | null = null
+let distillTimerHandle: ReturnType<typeof setInterval> | null = null
 // Pending deferred-markDone timers from the session:status-changed handler.
 // Hoisted to module scope so stopServer() can cancel them before teardown,
 // otherwise a late-firing timer could mutate sessionStreamBuffer after the
@@ -248,6 +252,12 @@ export async function startServer(options: ServerOptions = {}): Promise<HttpServ
     log.web.warn('No AI provider configured — configure one in Settings')
   }
 
+  // Event-loop lag monitor — makes starvation visible (logs a warn whenever a
+  // single tick is blocked > threshold, naming the suspect periodic task).
+  // Cheap libuv histogram + self-timer; safe to run in production.
+  const { startEventLoopMonitor } = await import('../core/event-loop-monitor.js')
+  startEventLoopMonitor()
+
   // Migrate global-notes.md → notes/global.md (one-time, idempotent)
   await migrateGlobalNotes()
 
@@ -276,6 +286,16 @@ export async function startServer(options: ServerOptions = {}): Promise<HttpServ
 
   // -- Middleware --
   app.use(cors())
+  // gzip JSON/text responses. The list payloads (/api/tasks, /api/sessions,
+  // /api/sessions/:id/history) are 2-8MB of highly-repetitive JSON and dominate
+  // how long each response holds one of the browser's ~5 HTTP/1.1 lanes — the
+  // lane-hold that drives the NS_BINDING_ABORTED abort cascade under the home
+  // fan-out. compression cuts them ~8-12x on the wire. The 1KB threshold lets
+  // trivial responses (/api/config, /api/system/health) skip compression so
+  // they never pay encode CPU. Env-gated for instant revert.
+  if (process.env.WALNUT_HTTP_COMPRESS !== '0') {
+    app.use(compression({ threshold: 1024 }))
+  }
   app.use(express.json({ limit: '15mb' }))
   // Auth middleware: localhost passthrough, remote requires Bearer token
   app.use('/api', authMiddleware)
@@ -288,14 +308,21 @@ export async function startServer(options: ServerOptions = {}): Promise<HttpServ
     log: log.cron,
     broadcastCronNotification: async (text, jobName, opts) => {
       const timestamp = new Date().toISOString()
+      // Background events have no UI "tab" — they target the agent's stable MAIN
+      // conversation (NOT activeConversationId, which is whatever the user last
+      // clicked). This is the bug fix: previously these wrote the orphaned legacy
+      // chat-history file (no conversationId) instead of the visible conversation.
+      const { getMainConversationId } = await import('../core/conversations.js')
+      const conversationId = await getMainConversationId('general')
       // Toast notification
       broadcastEvent('cron:notification', { text, jobName, timestamp: Date.now() })
       // Chat message (for inline display)
-      broadcastEvent('cron:chat-message', { content: text, jobName, timestamp, agentWillRespond: opts?.agentWillRespond ?? false })
+      broadcastEvent('cron:chat-message', { content: text, jobName, timestamp, agentWillRespond: opts?.agentWillRespond ?? false, conversationId })
       // Persist notification to chat history (survives refresh)
       await chatHistory.addNotification({
         role: 'user', content: text, timestamp,
         source: 'cron', cronJobName: jobName,
+        agentId: 'general', conversationId,
       })
     },
     queueCronNotificationForAgent: (text, jobName) => {
@@ -305,11 +332,15 @@ export async function startServer(options: ServerOptions = {}): Promise<HttpServ
     runMainAgentWithPrompt: async (prompt, jobName) => {
       // Enqueue into the main agent turn queue — serialized with chat and triage turns
       await enqueueMainAgentTurn(`cron:${jobName}`, async () => {
+        // Background turn → general's stable MAIN conversation (see rationale in
+        // broadcastCronNotification above).
+        const { getMainConversationId } = await import('../core/conversations.js')
+        const conversationId = await getMainConversationId('general')
         try {
           const { runAgentLoop } = await import('../agent/loop.js')
           const { estimateMessagesTokens } = await import('../core/daily-log.js')
           // Load history inside the queue (reads fresh state after any preceding turn)
-          const history = await chatHistory.getApiMessages()
+          const history = await chatHistory.getApiMessages('general', conversationId)
           const historyTokens = estimateMessagesTokens(history)
           log.cron.info('runMainAgentWithPrompt', {
             jobName,
@@ -335,21 +366,22 @@ export async function startServer(options: ServerOptions = {}): Promise<HttpServ
           }
           // Persist agent response to chat history
           const newApiMsgs = result.messages.slice(history.length)
-          await chatHistory.addAIMessages(newApiMsgs, { source: 'cron' })
+          await chatHistory.addAIMessages(newApiMsgs, { source: 'cron', agentId: 'general', conversationId })
           log.cron.info('agent done', { jobName, newMessages: newApiMsgs.length })
           // Trigger background compaction outside the turn queue
-          triggerBackgroundCompaction(`cron:${jobName}`)
+          triggerBackgroundCompaction(`cron:${jobName}`, { agentId: 'general', conversationId })
         } catch (err) {
           const errMsg = err instanceof Error ? err.message : String(err)
           log.cron.error('cron runMainAgentWithPrompt failed', { jobName, error: errMsg })
           // Broadcast error so the UI clears streaming state
-          broadcastEvent('agent:error', { error: `Cron job "${jobName}" agent failed: ${errMsg}` })
+          broadcastEvent('agent:error', { error: `Cron job "${jobName}" agent failed: ${errMsg}`, conversationId })
           // Persist error to chat history so it survives page refresh
           await chatHistory.addNotification({
             role: 'assistant',
             content: `**Cron Error** (${jobName}): ${errMsg}`,
             source: 'agent-error',
             notification: true,
+            agentId: 'general', conversationId,
           })
           throw err // Re-throw so the cron system records the error status
         }
@@ -485,6 +517,10 @@ export async function startServer(options: ServerOptions = {}): Promise<HttpServ
   app.use('/api/file-content', fileContentRouter)
   app.use('/api/files', filesRouter)
   app.use('/api/agents', createAgentsRouter())
+  // Conversations share the /api/agents prefix. Registered AFTER the agents
+  // router; the agents router only matches single-segment ids (/:id), so the
+  // deeper /:agentId/conversations paths fall through here without collision.
+  app.use('/api/agents', createConversationsRouter())
   app.use('/api/commands', createCommandsRouter())
   app.use('/api/skills', createSkillsRouter())
   app.use('/api/slash-commands', createSlashCommandsRouter())
@@ -507,6 +543,7 @@ export async function startServer(options: ServerOptions = {}): Promise<HttpServ
   app.use('/api/browser-logs', browserLogsRouter)
   app.use('/api/audio', audioRouter)
   app.use('/api/stt', sttRouter)
+  app.use('/api/incidents', incidentsRouter)
   app.get('/api/task-phase-hooks', async (_req, res) => {
     const { getHookInfoList } = await import('../core/task-phase-hooks/index.js')
     res.json(getHookInfoList())
@@ -594,6 +631,19 @@ export async function startServer(options: ServerOptions = {}): Promise<HttpServ
 
   // -- Push notification service --
   initPushNotifications()
+
+  // -- Forensic observability: register the incident sink so invariant violations
+  //    at turn-completion become durable incidents (+ bundle + notification). The
+  //    recorder + invariants are always active; this wires the heavy sink. Dynamic
+  //    import keeps server boot resilient if the module is mid-build. --
+  try {
+    const { initIncidentSink } = await import('../core/observability/incidents.js')
+    initIncidentSink()
+  } catch (err) {
+    log.web.warn('forensic observability incident sink not initialized', {
+      error: err instanceof Error ? err.message : String(err),
+    })
+  }
 
   // -- Audio transcription service (auto-transcribes recorded chunks via STT) --
   {
@@ -1324,10 +1374,14 @@ export async function startServer(options: ServerOptions = {}): Promise<HttpServ
         const content = taskRef
           ? `${prefix} (${taskRef}):\n\n${result}`
           : `${prefix}:\n\n${result}`
+        // Background notification → general's stable MAIN conversation.
+        const { getMainConversationId } = await import('../core/conversations.js')
+        const conversationId = await getMainConversationId('general')
         await chatHistory.addNotification({
           role: 'assistant', content,
           source: isError ? 'session-error' : 'session',
           notification: true, taskId,
+          agentId: 'general', conversationId,
         })
       }
 
@@ -1414,9 +1468,13 @@ export async function startServer(options: ServerOptions = {}): Promise<HttpServ
       log.web.info('session error received', { sessionId, taskId, error: error?.slice(0, 200) })
       const errorTaskRef = taskId ? await resolveTaskRef(taskId) : null
       const content = `**Session Error**${errorTaskRef ? ` (${errorTaskRef})` : ''}: ${error}`
+      // Background notification → general's stable MAIN conversation.
+      const { getMainConversationId } = await import('../core/conversations.js')
+      const conversationId = await getMainConversationId('general')
       await chatHistory.addNotification({
         role: 'assistant', content,
         source: 'session-error', notification: true, taskId,
+        agentId: 'general', conversationId,
       })
       // Clear active session from task on error
       if (taskId && sessionId) {
@@ -1470,6 +1528,11 @@ export async function startServer(options: ServerOptions = {}): Promise<HttpServ
     if (event.name === 'subagent:result') {
       const { runId, agentId, agentName, taskId, result, usage, notification } = eventData<'subagent:result'>(event)
 
+      // Subagent/triage results are background notifications → general's stable MAIN
+      // conversation (NOT activeConversationId). See rationale in broadcastCronNotification.
+      const { getMainConversationId } = await import('../core/conversations.js')
+      const conversationId = await getMainConversationId('general')
+
       log.web.info('subagent result received', { runId, agentId, taskId, resultLength: result?.length ?? 0, hasNotification: !!notification })
       const subagentTaskRef = taskId ? await resolveTaskRef(taskId) : null
 
@@ -1520,6 +1583,7 @@ export async function startServer(options: ServerOptions = {}): Promise<HttpServ
 
           // Push to browser immediately so user sees collapsed triage while AI thinks
           bus.emit(EventNames.CHAT_HISTORY_UPDATED, {
+            conversationId,
             entry: { role: 'user', content: triageContent, source: 'triage', taskId, timestamp: triageTimestamp },
           }, ['web-ui'])
 
@@ -1542,7 +1606,7 @@ export async function startServer(options: ServerOptions = {}): Promise<HttpServ
               const { getConfig } = await import('../core/config-manager.js')
               const { buildSystemPrompt } = await import('../agent/context.js')
               const { getToolSchemas } = await import('../agent/tools.js')
-              const history = await chatHistory.getApiMessages()
+              const history = await chatHistory.getApiMessages('general', conversationId)
               const historyTokens = estimateMessagesTokens(history)
 
               // Pre-check: estimate full payload and bail to notification-only if near the limit.
@@ -1577,9 +1641,10 @@ export async function startServer(options: ServerOptions = {}): Promise<HttpServ
                 await chatHistory.addNotification({
                   role: 'assistant', content: bailContent,
                   source: 'triage', notification: true, taskId,
+                  agentId: 'general', conversationId,
                 })
-                broadcastEvent('agent:response', { text: bailContent, source: 'triage' })
-                triggerBackgroundCompaction('triage-bail')
+                broadcastEvent('agent:response', { text: bailContent, source: 'triage', conversationId })
+                triggerBackgroundCompaction('triage-bail', { agentId: 'general', conversationId })
                 return
               }
 
@@ -1602,20 +1667,21 @@ export async function startServer(options: ServerOptions = {}): Promise<HttpServ
               }, { source: 'triage' })
 
               if (agentResult.response) {
-                broadcastEvent('agent:response', { text: agentResult.response, source: 'triage' })
+                broadcastEvent('agent:response', { text: agentResult.response, source: 'triage', conversationId })
               }
               const newApiMsgs = agentResult.messages.slice(history.length)
-              await chatHistory.addAIMessages(newApiMsgs, { source: 'triage', taskId })
+              await chatHistory.addAIMessages(newApiMsgs, { source: 'triage', taskId, agentId: 'general', conversationId })
               log.web.info('triage main agent done', { taskId, newMessages: newApiMsgs.length })
-              triggerBackgroundCompaction('triage')
+              triggerBackgroundCompaction('triage', { agentId: 'general', conversationId })
             } catch (err) {
               const errMsg = err instanceof Error ? err.message : String(err)
               log.web.error('triage main agent failed', { taskId, error: errMsg })
-              broadcastEvent('agent:error', { error: `Triage notify failed for task ${taskId}: ${errMsg}` })
+              broadcastEvent('agent:error', { error: `Triage notify failed for task ${taskId}: ${errMsg}`, conversationId })
               await chatHistory.addNotification({
                 role: 'assistant',
                 content: `**Triage Error** (${taskId}): ${errMsg}`,
                 source: 'agent-error', notification: true,
+                agentId: 'general', conversationId,
               })
             }
           })
@@ -1628,10 +1694,12 @@ export async function startServer(options: ServerOptions = {}): Promise<HttpServ
             source: 'triage', notification: true, taskId,
             sessionId: runId,
             timestamp: triageTimestamp,
+            agentId: 'general', conversationId,
           })
           log.web.info('triage notification saved to chat (UI only)', { taskId, sessionId: runId })
 
           bus.emit(EventNames.CHAT_HISTORY_UPDATED, {
+            conversationId,
             entry: { role: 'assistant', content: triageContent, source: 'triage', notification: true, taskId, sessionId: runId, timestamp: triageTimestamp },
           }, ['web-ui'])
         }
@@ -1659,10 +1727,12 @@ export async function startServer(options: ServerOptions = {}): Promise<HttpServ
           role: 'assistant', content: notifContent,
           source: 'subagent', notification: true, taskId,
           timestamp: subagentTimestamp,
+          agentId: 'general', conversationId,
         })
 
         // Push notification directly to browser
         bus.emit(EventNames.CHAT_HISTORY_UPDATED, {
+          conversationId,
           entry: { role: 'assistant', content: notifContent, source: 'subagent', notification: true, taskId, timestamp: subagentTimestamp },
         }, ['web-ui'])
       }
@@ -1681,9 +1751,13 @@ export async function startServer(options: ServerOptions = {}): Promise<HttpServ
       const { agentId, taskId, error } = eventData<'subagent:error'>(event)
       const subErrTaskRef = taskId ? await resolveTaskRef(taskId) : null
       const content = `**Subagent Error**${agentId ? ` (${agentId})` : ''}${subErrTaskRef ? ` for task ${subErrTaskRef}` : ''}: ${error}`
+      // Background notification → general's stable MAIN conversation.
+      const { getMainConversationId } = await import('../core/conversations.js')
+      const conversationId = await getMainConversationId('general')
       await chatHistory.addNotification({
         role: 'assistant', content,
         source: 'subagent', notification: true, taskId,
+        agentId: 'general', conversationId,
       })
     }
   })
@@ -1775,6 +1849,17 @@ export async function startServer(options: ServerOptions = {}): Promise<HttpServ
     } catch { /* best-effort */ }
   }, 5 * 60 * 1000)
 
+  // -- Conversation distill sweep — at most one conversation distilled per tick --
+  // (cost guard; the sweep itself only distills the first eligible conversation).
+  // Gated behind !isEphemeral so ephemeral servers don't spend Opus tokens.
+  if (!isEphemeral) {
+    distillTimerHandle = setInterval(() => {
+      import('../core/conversation-distill.js')
+        .then(m => m.distillSweep())
+        .catch(() => { /* best-effort */ })
+    }, 30 * 60_000)
+  }
+
   startupPhase('ALL DONE — server fully initialized')
   return httpServer!
 }
@@ -1855,18 +1940,25 @@ function startGitAutoCommit(): { stop: () => void; health: GitAutoCommitHealth }
         if (health.consecutiveFailures >= 3 && !notifiedForEpisode) {
           const notifContent = `Data backup failing \u2014 git auto-commit has failed ${health.consecutiveFailures}+ times consecutively. Check logs: \`open-walnut logs -s git\``
           notifiedForEpisode = true
-          chatHistory.addNotification({
-            role: 'assistant',
-            content: notifContent,
-            source: 'agent-error',
-            notification: true,
-          }).then(() => {
-            bus.emit(EventNames.CHAT_HISTORY_UPDATED, {
-              entry: { role: 'assistant', content: notifContent, source: 'agent-error', notification: true, timestamp: new Date().toISOString() },
-            }, ['web-ui'])
-          }).catch(() => {
-            notifiedForEpisode = false // reset so next cycle retries
-          })
+          // Background notification \u2192 general's stable MAIN conversation.
+          import('../core/conversations.js')
+            .then(({ getMainConversationId }) => getMainConversationId('general'))
+            .then((conversationId) =>
+              chatHistory.addNotification({
+                role: 'assistant',
+                content: notifContent,
+                source: 'agent-error',
+                notification: true,
+                agentId: 'general', conversationId,
+              }).then(() => {
+                bus.emit(EventNames.CHAT_HISTORY_UPDATED, {
+                  conversationId,
+                  entry: { role: 'assistant', content: notifContent, source: 'agent-error', notification: true, timestamp: new Date().toISOString() },
+                }, ['web-ui'])
+              })
+            ).catch(() => {
+              notifiedForEpisode = false // reset so next cycle retries
+            })
         }
       }
     }
@@ -1907,9 +1999,13 @@ async function startHeartbeatIfConfigured(): Promise<void> {
         return enqueueMainAgentTurn('heartbeat', async () => {
           const { runAgentLoop } = await import('../agent/loop.js')
           const { estimateMessagesTokens } = await import('../core/daily-log.js')
+          // Background turn → general's stable MAIN conversation (see rationale in
+          // broadcastCronNotification above).
+          const { getMainConversationId } = await import('../core/conversations.js')
+          const conversationId = await getMainConversationId('general')
 
           // Load chat history (fresh state after any preceding turn)
-          const history = await chatHistory.getApiMessages()
+          const history = await chatHistory.getApiMessages('general', conversationId)
           const historyTokens = estimateMessagesTokens(history)
           log.heartbeat.info('running heartbeat agent turn', {
             historyMessages: history.length,
@@ -1923,6 +2019,7 @@ async function startHeartbeatIfConfigured(): Promise<void> {
           broadcastEvent('heartbeat:chat-message', {
             content: heartbeatUserContent,
             timestamp: heartbeatTs,
+            conversationId,
           })
           // Persist the heartbeat trigger as a user notification
           await chatHistory.addNotification({
@@ -1931,6 +2028,7 @@ async function startHeartbeatIfConfigured(): Promise<void> {
             timestamp: heartbeatTs,
             source: 'heartbeat',
             notification: true,
+            agentId: 'general', conversationId,
           })
 
           const result = await runAgentLoop(prompt, history, {
@@ -1977,14 +2075,15 @@ async function startHeartbeatIfConfigured(): Promise<void> {
               content: '**Heartbeat** — all clear, nothing needs attention.',
               source: 'heartbeat',
               notification: true,
+              agentId: 'general', conversationId,
             })
           } else {
             // Substantive response — persist full AI messages with heartbeat source
-            await chatHistory.addAIMessages(newApiMsgs, { source: 'heartbeat' })
+            await chatHistory.addAIMessages(newApiMsgs, { source: 'heartbeat', agentId: 'general', conversationId })
           }
 
           // Trigger background compaction outside the turn queue
-          triggerBackgroundCompaction('heartbeat')
+          triggerBackgroundCompaction('heartbeat', { agentId: 'general', conversationId })
 
           return responseText
         })
@@ -2290,6 +2389,10 @@ export async function stopServer(): Promise<void> {
   if (dreamInitialHandle) {
     clearTimeout(dreamInitialHandle)
     dreamInitialHandle = null
+  }
+  if (distillTimerHandle) {
+    clearInterval(distillTimerHandle)
+    distillTimerHandle = null
   }
   // Cancel pending deferred-markDone callbacks so they don't mutate
   // sessionStreamBuffer after shutdown.

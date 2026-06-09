@@ -86,9 +86,14 @@ interface ChatInputProps {
   mentionCwd?: string;
   /** SSH host for "@" mentions (undefined = local). */
   mentionHost?: string;
+  /** External prefill: text to drop into the input (e.g. an agent-builder template). */
+  prefillText?: string;
+  /** Bump this (monotonic, >0) to apply prefillText — replaces the input + focuses,
+   *  WITHOUT sending. Keyed on the nonce so the same text can be re-applied. */
+  prefillNonce?: number;
 }
 
-export function ChatInput({ onSend, onCommand, onStop, onInterruptSend, onClearQueue, disabled, isStreaming, focusedTaskTitle, focusedTask, onClearFocus, queueCount, placeholder, showCommands = true, sessionCommands, searchSessionCommands, onRefreshSessionCommands, onControlCommand, draftKey, onToggleMode, mentionCwd, mentionHost }: ChatInputProps) {
+export function ChatInput({ onSend, onCommand, onStop, onInterruptSend, onClearQueue, disabled, isStreaming, focusedTaskTitle, focusedTask, onClearFocus, queueCount, placeholder, showCommands = true, sessionCommands, searchSessionCommands, onRefreshSessionCommands, onControlCommand, draftKey, onToggleMode, mentionCwd, mentionHost, prefillText, prefillNonce }: ChatInputProps) {
   const [value, setValue] = useState(() => {
     if (!draftKey) return '';
     try { return localStorage.getItem(draftKey) ?? ''; } catch { return ''; }
@@ -139,6 +144,26 @@ export function ChatInput({ onSend, onCommand, onStop, onInterruptSend, onClearQ
   useEffect(() => {
     return () => { clearTimeout(draftTimerRef.current); };
   }, []);
+
+  // External prefill (e.g. "Create by chat" agent-builder template): replace the
+  // input value + focus + cursor-to-end, but DON'T send — the user reviews/edits
+  // (fills in purpose/name) and presses Send themselves. Keyed on the nonce so the
+  // parent can re-apply the same text; nonce 0/undefined = no-op (initial mount).
+  useEffect(() => {
+    if (!prefillNonce || !prefillText) return;
+    setValue(prefillText);
+    // Persist immediately (don't rely on the later-declared debounced saveDraft).
+    try { if (draftKeyRef.current) localStorage.setItem(draftKeyRef.current, prefillText); } catch { /* unavailable */ }
+    requestAnimationFrame(() => {
+      const el = textareaRef.current;
+      if (!el) return;
+      el.focus();
+      el.setSelectionRange(prefillText.length, prefillText.length);
+      el.style.height = 'auto';
+      el.style.height = Math.min(el.scrollHeight, getMaxHeight(el)) + 'px';
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [prefillNonce]);
 
   const queueFull = isStreaming && (queueCount ?? 0) >= MAX_QUEUE_SIZE;
 
