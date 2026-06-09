@@ -1405,14 +1405,29 @@ sessionsRouter.post('/:sessionId/retry', async (req: Request, res: Response, nex
         return
       }
 
-      // Case 1 — process dead: resume via --resume
-      const { sendMessageToSession } = await import('../../core/session-message-queue.js')
-      await sendMessageToSession(sessionId, 'continue', {
-        source: 'retry',
-        taskId: record.taskId,
-      })
-      log.web.info('session retry: resuming via --resume', { sessionId, taskId: record.taskId })
-      res.json({ status: 'resuming', sessionId })
+      // Case 1 — process dead: resume via --resume.
+      // If the pending queue already holds the user's original message (reverted by
+      // settleResumeFailure after a failed spawn), just re-trigger processNext which
+      // picks up pending messages. This sends the ORIGINAL text, not "continue".
+      // Only fall back to "continue" if the queue is empty (pure idle-dead process).
+      const { sendMessageToSession, getQueue } = await import('../../core/session-message-queue.js')
+      const pendingMsgs = await getQueue(sessionId)
+      if (pendingMsgs.length > 0) {
+        // Queue has the user's original message(s) — just kick processNext via SESSION_SEND
+        bus.emit(EventNames.SESSION_SEND, {
+          sessionId,
+          taskId: record.taskId,
+        }, ['session-runner'], { source: 'retry' })
+        log.web.info('session retry: re-processing pending queue messages', { sessionId, taskId: record.taskId, count: pendingMsgs.length })
+        res.json({ status: 'resuming', sessionId, restoredMessages: pendingMsgs.length })
+      } else {
+        await sendMessageToSession(sessionId, 'continue', {
+          source: 'retry',
+          taskId: record.taskId,
+        })
+        log.web.info('session retry: resuming via --resume (no pending messages)', { sessionId, taskId: record.taskId })
+        res.json({ status: 'resuming', sessionId })
+      }
       return
     }
 
