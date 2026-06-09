@@ -2019,6 +2019,17 @@ export class ClaudeCodeSession {
               // (i.e. we already showed an HTTP status — errName adds the category).
               detail: errStatus && hasRealErrName ? errName : undefined,
             }, ['main-ai'], { source: 'session-runner' })
+          } else if (sys.subtype === 'thinking_tokens') {
+            // Drop silently. The CLI emits a `thinking_tokens` system event
+            // between every pair of `thinking_delta`s as a running token-count
+            // estimate (100s–1000s per turn). It carries no user value, and
+            // rendering each as a UI system block shreds the live thinking view:
+            // each system block lands after the current thinking block, so the
+            // NEXT thinking-delta sees "last block is not thinking" and starts a
+            // brand-new thinking fragment. Verified on prod session 0b303a59 —
+            // one turn produced 194 thinking fragments, 0 clean appends, with
+            // 181 system blocks landing directly on a thinking block. Swallowing
+            // the event here lets thinking-delta keep appending to one block.
           } else if (sys.subtype && sys.subtype !== 'init' && sys.subtype !== 'status') {
             // Catch-all: unknown future subtypes — forward full payload so we
             // don't lose diagnostic info to a bare subtype name.
