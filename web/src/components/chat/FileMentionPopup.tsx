@@ -26,12 +26,15 @@ import { fetchDirList, type DirEntry } from '@/api/files';
 import { FileContentView } from '@/components/common/FileContentView';
 import { formatSize } from '@/utils/format';
 import { log } from '@/utils/log';
+import { recordRecentFolder, getRecentFolders, fuzzyMatchRecents, type RecentFolder } from '@/utils/recentFolders';
 
 export interface FileMentionHandle {
   /** Move selection by delta (wraps). */
   move: (delta: number) => void;
-  /** Enter: dir → navigate into it; file → select it. */
-  enter: () => void;
+  /** Right arrow / Enter on a dir → navigate into it; on a file → select it. */
+  into: () => void;
+  /** Left arrow → navigate to the parent directory. */
+  up: () => void;
   /** Cmd/Ctrl+Enter: select current item (file or dir) regardless of type. */
   selectCurrent: () => void;
 }
@@ -41,11 +44,16 @@ interface FileMentionPopupProps {
   cwd: string;
   /** SSH host (undefined = local). */
   host?: string;
-  /** Text typed after "@" — filters the current dir listing. */
+  /** Text typed after "@". Interpreted as a path: the portion up to the last "/"
+   *  navigates (absolute `/…` or `~/…` jump anywhere, otherwise resolved against
+   *  cwd); the final segment filters the listing. */
   query: string;
   /** Called when the user selects a file or folder. Path is absolute (avoids
    *  ambiguity about what a relative ref would resolve against). */
   onSelect: (absPath: string) => void;
+  /** Rewrite the "@query" text to browse an absolute dir (used when jumping to a
+   *  recent folder from "@?" mode — keeps the textarea and popup state in sync). */
+  onNavigate: (absDir: string) => void;
   onClose: () => void;
 }
 
@@ -68,8 +76,44 @@ function relativeTo(base: string, full: string): string {
   return full;
 }
 
+/**
+ * Collapse "." and ".." segments in an absolute (or "~"-rooted) path so the
+ * value sent to the backend is canonical. The backend rejects any literal ".."
+ * for safety, so we must resolve it here to support typing "../" to go up.
+ * A leading "~" is preserved as its own segment (the backend expands it).
+ */
+function normalizePath(p: string): string {
+  const lead = p.startsWith('~') ? '~' : '';
+  const rest = lead ? p.slice(1) : p;
+  const out: string[] = [];
+  for (const seg of rest.split('/')) {
+    if (seg === '' || seg === '.') continue;
+    if (seg === '..') { if (out.length) out.pop(); continue; }
+    out.push(seg);
+  }
+  if (lead) return out.length ? `~/${out.join('/')}` : '~';
+  return '/' + out.join('/');
+}
+
+/**
+ * Split the "@query" text into the directory to browse and the trailing filter.
+ * - No "/" → browse cwd, filter by the whole query.
+ * - Has "/" → the part before the last "/" is a path (absolute `/…`/`~…` used as-is,
+ *   else joined onto cwd); the part after the last "/" filters that dir. Any
+ *   "."/".." segments are collapsed so the resolved dir is a clean absolute path.
+ */
+function parseQuery(query: string, cwd: string): { dir: string; filter: string } {
+  const slash = query.lastIndexOf('/');
+  if (slash === -1) return { dir: cwd, filter: query };
+  const dirPart = query.slice(0, slash) || '/'; // leading "/abc" → dirPart "" → root
+  const filter = query.slice(slash + 1);
+  const isAbsolute = dirPart.startsWith('/') || dirPart.startsWith('~');
+  const joined = isAbsolute ? dirPart : joinPath(cwd.replace(/\/+$/, ''), dirPart);
+  return { dir: normalizePath(joined), filter };
+}
+
 export const FileMentionPopup = forwardRef<FileMentionHandle, FileMentionPopupProps>(
-  function FileMentionPopup({ cwd, host, query, onSelect, onClose }, ref) {
+  function FileMentionPopup({ cwd, host, query, onSelect, onNavigate, onClose }, ref) {
     // The canonical root resolved by the backend (~ → absolute). Selection paths
     // are computed relative to this so inserted refs are short + portable.
     const [rootPath, setRootPath] = useState<string>(cwd);
@@ -99,6 +143,8 @@ export const FileMentionPopup = forwardRef<FileMentionHandle, FileMentionPopupPr
           const canonical = res.path || dirPath;
           setBrowseDir(canonical);
           if (opts.isRoot) setRootPath(canonical);
+          // Record the visited folder so "@?" can fuzzy-jump back to it later.
+          recordRecentFolder(canonical, host);
           setEntries(res.entries);
           // If the requested path was a file, the backend listed its parent and
           // flagged the file — pre-select it so the right pane previews it.
@@ -133,9 +179,45 @@ export const FileMentionPopup = forwardRef<FileMentionHandle, FileMentionPopupPr
       // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [cwd, host]);
 
-    // Filter current dir by the "@query" text (case-insensitive prefix > contains).
+    // The "@query" doubles as a path: its dir portion drives navigation, its last
+    // segment filters. When typing crosses a "/" (e.g. "src/" → "src/web"), the
+    // target dir changes and we load it. Compare against browseDir so we only fetch
+    // when the resolved directory actually moves (typing the filter part is free).
+    // "@?" recents mode: a GLOBAL fuzzy search over folders the user has opened
+    // before — across ALL hosts, any depth, not limited to the current cwd. Recents
+    // come from the shared, server-persisted frequent-dirs store (not console-local).
+    // Folders under the current cwd / on the current host are boosted to the top but
+    // never excluded. The text after "?" is the fuzzy query.
+    const recentsMode = query.startsWith('?');
+    const recentQuery = recentsMode ? query.slice(1) : '';
+
+    const { dir: targetDir, filter: filterTerm } = parseQuery(query, cwd);
+    useEffect(() => {
+      // In recents mode "@?…" the query is a fuzzy search, NOT a path — don't let a
+      // "/" in it trigger a phantom background loadDir (which would also pollute the
+      // recents store with a dir the user never actually opened).
+      if (!cwd || recentsMode) return;
+      // Normalize trailing slash before comparing so "/a/b" and "/a/b/" match.
+      const norm = (p: string) => p.replace(/\/+$/, '') || '/';
+      if (norm(targetDir) !== norm(browseDir)) void loadDir(targetDir);
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [targetDir, recentsMode]);
+    const [allRecents, setAllRecents] = useState<RecentFolder[]>([]);
+    useEffect(() => {
+      if (!recentsMode) return;
+      let cancelled = false;
+      getRecentFolders().then((r) => { if (!cancelled) setAllRecents(r); }).catch(() => {});
+      return () => { cancelled = true; };
+    }, [recentsMode]);
+    const recentMatches = useMemo(
+      () => (recentsMode ? fuzzyMatchRecents(recentQuery, allRecents, { cwd: rootPath, host }) : []),
+      [recentsMode, recentQuery, allRecents, rootPath, host],
+    );
+
+    // Filter the current dir by the trailing path segment (case-insensitive,
+    // prefix matches rank before substring matches).
     const filtered = useMemo(() => {
-      const q = query.trim().toLowerCase();
+      const q = filterTerm.trim().toLowerCase();
       if (!q) return entries;
       const starts: DirEntry[] = [];
       const contains: DirEntry[] = [];
@@ -145,14 +227,26 @@ export const FileMentionPopup = forwardRef<FileMentionHandle, FileMentionPopupPr
         else if (n.includes(q)) contains.push(e);
       }
       return [...starts, ...contains];
-    }, [entries, query]);
+    }, [entries, filterTerm]);
 
-    // Reset selection to the top whenever the query changes — the result set can
-    // reorder (prefix vs contains buckets) at the same length, so clamping on
-    // length alone would silently leave the highlight on a different item.
+    // Reset selection to the top whenever the filter (or recents query) changes —
+    // the result set can reorder at the same length, so clamping on length alone
+    // would silently leave the highlight on a different item.
     useEffect(() => {
       setSelectedIndex(0);
-    }, [query]);
+    }, [filterTerm, recentQuery, recentsMode]);
+
+    // Global Escape closes the popup even after the user has clicked into it and
+    // the textarea lost focus (the parent's keydown handler only fires while the
+    // textarea is focused). Capture phase + stopPropagation so it doesn't also
+    // trigger an outer overlay's Escape handler.
+    useEffect(() => {
+      const handler = (e: KeyboardEvent) => {
+        if (e.key === 'Escape') { e.stopPropagation(); e.preventDefault(); onClose(); }
+      };
+      window.addEventListener('keydown', handler, true);
+      return () => window.removeEventListener('keydown', handler, true);
+    }, [onClose]);
 
     // Preview the selected file (skip dirs).
     useEffect(() => {
@@ -184,7 +278,9 @@ export const FileMentionPopup = forwardRef<FileMentionHandle, FileMentionPopupPr
     // Editable path: click the breadcrumb to type an absolute path and jump there.
     const [editingPath, setEditingPath] = useState(false);
     const commitPath = useCallback((raw: string) => {
-      const next = raw.trim();
+      // Collapse any "."/".." the user typed (backend rejects literal ".."), so the
+      // breadcrumb editor accepts "../foo" the same way the "@query" path does.
+      const next = raw.trim() ? normalizePath(raw.trim()) : '';
       setEditingPath(false);
       if (next && next !== browseDir) void loadDir(next);
     }, [browseDir, loadDir]);
@@ -196,28 +292,52 @@ export const FileMentionPopup = forwardRef<FileMentionHandle, FileMentionPopupPr
       [browseDir, onSelect],
     );
 
+    // Open a recent folder. Same host as the current session → browse into it (the
+    // popup leaves "@?" mode and lists its contents). Different host → we can't browse
+    // it over this session's transport, so just insert it as a path ref directly.
+    const chooseRecent = useCallback(
+      (r: RecentFolder) => {
+        if ((r.host ?? undefined) === (host ?? undefined)) onNavigate(r.path);
+        else onSelect(r.path);
+      },
+      [host, onNavigate, onSelect],
+    );
+
+    // Active list length depends on mode (recents vs current-dir entries).
+    const listLen = recentsMode ? recentMatches.length : filtered.length;
+
     useImperativeHandle(
       ref,
       (): FileMentionHandle => ({
         move: (delta) => {
           setSelectedIndex((i) => {
-            const n = filtered.length;
-            if (n === 0) return 0;
-            return (i + delta + n) % n;
+            if (listLen === 0) return 0;
+            return (i + delta + listLen) % listLen;
           });
         },
-        enter: () => {
+        into: () => {
+          if (recentsMode) {
+            const r = recentMatches[selectedIndex];
+            if (r) chooseRecent(r);
+            return;
+          }
           const item = filtered[selectedIndex];
           if (!item) return;
           if (item.type === 'dir') enterDir(joinPath(browseDir, item.name));
           else selectEntry(item);
         },
+        up: goUp,
         selectCurrent: () => {
+          if (recentsMode) {
+            const r = recentMatches[selectedIndex];
+            if (r) onSelect(r.path); // select the recent folder directly as the @ref
+            return;
+          }
           const item = filtered[selectedIndex];
           if (item) selectEntry(item);
         },
       }),
-      [filtered, selectedIndex, browseDir, enterDir, selectEntry],
+      [recentsMode, recentMatches, filtered, listLen, selectedIndex, browseDir, enterDir, selectEntry, chooseRecent, onSelect, goUp],
     );
 
     const atRoot = browseDir === rootPath;
@@ -256,6 +376,13 @@ export const FileMentionPopup = forwardRef<FileMentionHandle, FileMentionPopupPr
             </span>
           )}
           <button
+            className="fmp-btn fmp-select-folder"
+            onMouseDown={(e) => { e.preventDefault(); onSelect(browseDir); }}
+            title="Select this folder (⌘⏎ also selects the highlighted item)"
+          >
+            Select folder
+          </button>
+          <button
             className="fmp-btn fmp-close"
             onMouseDown={(e) => { e.preventDefault(); onClose(); }}
             title="Close (Esc)"
@@ -265,61 +392,113 @@ export const FileMentionPopup = forwardRef<FileMentionHandle, FileMentionPopupPr
         </div>
 
         <div className="file-mention-body">
-          <div className="file-mention-list" ref={listRef}>
-            {error && <div className="fmp-error">{error}</div>}
-            {!error && loading && <div className="fmp-loading">Loading…</div>}
-            {!error && !loading && filtered.length === 0 && (
-              <div className="fmp-empty">No matches</div>
-            )}
-            {!error &&
-              filtered.map((entry, i) => (
-                <div
-                  key={`${entry.type}:${entry.name}`}
-                  className={`file-mention-item${i === selectedIndex ? ' selected' : ''}`}
-                  onMouseEnter={() => setSelectedIndex(i)}
-                  onMouseDown={(e) => {
-                    e.preventDefault();
-                    if (entry.type === 'dir') enterDir(joinPath(browseDir, entry.name));
-                    else selectEntry(entry);
-                  }}
-                  title={joinPath(browseDir, entry.name)}
-                >
-                  <span className="fmp-icon">{entry.type === 'dir' ? '📁' : '📄'}</span>
-                  <span className="fmp-name">{entry.name}</span>
-                  {entry.type === 'dir' && <span className="fmp-into">→</span>}
-                  {entry.type === 'file' && entry.size != null && (
-                    <span className="fmp-size">{formatSize(entry.size)}</span>
-                  )}
-                  {/* Select-this affordance: works for both files and dirs */}
-                  <button
-                    className="fmp-pick"
-                    onMouseDown={(e) => { e.preventDefault(); e.stopPropagation(); selectEntry(entry); }}
-                    title="Select this (⌘⏎)"
+          {recentsMode ? (
+            /* "@?" recents mode: a single full-width list of recently-opened folders. */
+            <div className="file-mention-list file-mention-list-recents" ref={listRef}>
+              {recentMatches.length === 0 && (
+                <div className="fmp-empty">No recent folders yet — browse some with @ first</div>
+              )}
+              {recentMatches.map((r, i) => {
+                const name = r.path.slice(r.path.lastIndexOf('/') + 1) || r.path;
+                return (
+                  <div
+                    key={`${r.host ?? 'local'}:${r.path}`}
+                    className={`file-mention-item fmp-recent-item${i === selectedIndex ? ' selected' : ''}`}
+                    onMouseEnter={() => setSelectedIndex(i)}
+                    onMouseDown={(e) => { e.preventDefault(); chooseRecent(r); }}
+                    title={`${r.path}${r.host ? ` (on ${r.host})` : ''}`}
                   >
-                    ⏎
-                  </button>
-                </div>
-              ))}
-          </div>
-
-          <div className="file-mention-preview">
-            {previewFile ? (
-              <FileContentView key={previewFile} path={previewFile} host={host} />
-            ) : (
-              <div className="fmp-preview-empty">
-                {filtered[selectedIndex]?.type === 'dir'
-                  ? 'Folder — ⏎ to open, ⌘⏎ to select'
-                  : 'Select a file to preview'}
+                    <span className="fmp-icon">🕘</span>
+                    <span className="fmp-recent">
+                      <span className="fmp-recent-name">
+                        {name}
+                        {r.host && <span className="fmp-recent-host">{r.host}</span>}
+                      </span>
+                      <span className="fmp-recent-path">{r.path}</span>
+                    </span>
+                    <button
+                      className="fmp-pick"
+                      onMouseDown={(e) => { e.preventDefault(); e.stopPropagation(); onSelect(r.path); }}
+                      title="Select this folder (⌘⏎)"
+                    >
+                      Select
+                    </button>
+                  </div>
+                );
+              })}
+            </div>
+          ) : (
+            <>
+              <div className="file-mention-list" ref={listRef}>
+                {error && <div className="fmp-error">{error}</div>}
+                {!error && loading && <div className="fmp-loading">Loading…</div>}
+                {!error && !loading && filtered.length === 0 && (
+                  <div className="fmp-empty">No matches</div>
+                )}
+                {!error &&
+                  filtered.map((entry, i) => (
+                    <div
+                      key={`${entry.type}:${entry.name}`}
+                      className={`file-mention-item${i === selectedIndex ? ' selected' : ''}`}
+                      onMouseEnter={() => setSelectedIndex(i)}
+                      onMouseDown={(e) => {
+                        e.preventDefault();
+                        if (entry.type === 'dir') enterDir(joinPath(browseDir, entry.name));
+                        else selectEntry(entry);
+                      }}
+                      title={joinPath(browseDir, entry.name)}
+                    >
+                      <span className="fmp-icon">{entry.type === 'dir' ? '📁' : '📄'}</span>
+                      <span className="fmp-name">{entry.name}</span>
+                      {entry.type === 'dir' && <span className="fmp-into">→</span>}
+                      {entry.type === 'file' && entry.size != null && (
+                        <span className="fmp-size">{formatSize(entry.size)}</span>
+                      )}
+                      {/* Select-this affordance: works for both files and dirs */}
+                      <button
+                        className="fmp-pick"
+                        onMouseDown={(e) => { e.preventDefault(); e.stopPropagation(); selectEntry(entry); }}
+                        title="Select this (⌘⏎)"
+                      >
+                        Select
+                      </button>
+                    </div>
+                  ))}
               </div>
-            )}
-          </div>
+
+              <div className="file-mention-preview">
+                {previewFile ? (
+                  <FileContentView key={previewFile} path={previewFile} host={host} />
+                ) : (
+                  <div className="fmp-preview-empty">
+                    {filtered[selectedIndex]?.type === 'dir'
+                      ? 'Folder — →/⏎ to open, ⌘⏎ to select'
+                      : 'Select a file to preview'}
+                  </div>
+                )}
+              </div>
+            </>
+          )}
         </div>
 
         <div className="file-mention-hint">
-          <span>↑↓ navigate</span>
-          <span>⏎ open dir / pick file</span>
-          <span>⌘⏎ select</span>
-          <span>esc close</span>
+          {recentsMode ? (
+            <>
+              <span>↑↓ move</span>
+              <span>⏎ open folder</span>
+              <span>⌘⏎ select</span>
+              <span>esc close</span>
+            </>
+          ) : (
+            <>
+              <span>↑↓ move</span>
+              <span>→/⏎ open dir</span>
+              <span>← parent</span>
+              <span>⌘⏎ select</span>
+              <span>@? recents</span>
+              <span>esc close</span>
+            </>
+          )}
         </div>
       </div>
     );

@@ -20,6 +20,7 @@ import os from 'node:os'
 import fsp from 'node:fs/promises'
 import { execFile } from 'node:child_process'
 import { getConfig } from '../../core/config-manager.js'
+import { recordDirectory } from '../../core/frequent-dirs.js'
 
 export const filesRouter = Router()
 
@@ -357,6 +358,28 @@ filesRouter.get('/list', async (req: Request, res: Response, next: NextFunction)
       }),
     )
     res.json({ path: listDir, selectedFile, entries: sortEntries(entries).slice(0, MAX_ENTRIES) })
+  } catch (err) {
+    next(err)
+  }
+})
+
+// POST /api/files/record-dir — record a folder visit into the shared, server-persisted
+// frequent-directories store (same store the /session path picker reads). Lets the "@"
+// file picker's "recent folders" survive across browsers/devices instead of being
+// console-local. Fire-and-forget from the client; best-effort on the server.
+filesRouter.post('/record-dir', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { path: dirPath, host } = req.body ?? {}
+    if (!dirPath || typeof dirPath !== 'string' || !path.isAbsolute(dirPath)) {
+      res.status(400).json({ error: 'path must be an absolute string' })
+      return
+    }
+    if (dirPath.includes('..') || dirPath.length > 4096) {
+      res.status(400).json({ error: 'Invalid path' })
+      return
+    }
+    await recordDirectory(dirPath, typeof host === 'string' && host ? host : null)
+    res.json({ status: 'ok' })
   } catch (err) {
     next(err)
   }

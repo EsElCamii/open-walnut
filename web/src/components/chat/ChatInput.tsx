@@ -230,6 +230,9 @@ export function ChatInput({ onSend, onCommand, onStop, onInterruptSend, onClearQ
   const [mentionQuery, setMentionQuery] = useState('');
   const mentionAtIndexRef = useRef<number>(-1);
   const mentionEndRef = useRef<number>(-1);
+  // Index of an "@" the user dismissed with Esc — handleChange won't auto-reopen
+  // the popup for that same "@" (only a different "@" or edited text reopens).
+  const mentionDismissedAtRef = useRef<number>(-1);
   const mentionPopupRef = useRef<FileMentionHandle>(null);
   // Ref mirror so handleKeyDown reads latest open-state without stale closure.
   const mentionOpenRef = useRef(false);
@@ -435,6 +438,25 @@ export function ChatInput({ onSend, onCommand, onStop, onInterruptSend, onClearQ
     });
   }, [value, saveDraft, closeMention]);
 
+  // Rewrite the "@query" span to "@<dir>/" so the popup browses that dir (used when
+  // jumping to a recent folder from "@?" mode). Keeps the popup open (no close).
+  const handleMentionNavigate = useCallback((absDir: string) => {
+    const at = mentionAtIndexRef.current;
+    const end = mentionEndRef.current;
+    if (at < 0 || end < at) return;
+    const inserted = `@${absDir.replace(/\/+$/, '')}/`;
+    const newValue = value.slice(0, at) + inserted + value.slice(end);
+    setValue(newValue);
+    saveDraft(newValue);
+    const newCaret = at + inserted.length;
+    mentionEndRef.current = newCaret;
+    setMentionQuery(inserted.slice(1)); // drop the leading "@"
+    requestAnimationFrame(() => {
+      const ta = textareaRef.current;
+      if (ta) { ta.focus(); ta.setSelectionRange(newCaret, newCaret); }
+    });
+  }, [value, saveDraft]);
+
   const handleKeyDown = (e: KeyboardEvent) => {
     // Shift+Tab: toggle Execution / Plan mode
     if (e.key === 'Tab' && e.shiftKey) {
@@ -445,18 +467,31 @@ export function ChatInput({ onSend, onCommand, onStop, onInterruptSend, onClearQ
 
     // "@" file mention popup keyboard nav (takes priority over command palette;
     // they're mutually exclusive since one starts with "/" and the other "@").
+    //   ↑/↓ move highlight · →/Enter open dir (or pick file) · ← parent dir ·
+    //   Cmd/Ctrl+Enter select highlighted file OR folder · Esc close.
+    // ← / → are only intercepted when the caret sits at the very edge of the input
+    // so normal text cursor movement inside the @query still works.
     if (mentionOpenRef.current) {
       if (e.nativeEvent.isComposing || e.keyCode === 229) return;
       if (e.key === 'ArrowDown') { e.preventDefault(); mentionPopupRef.current?.move(1); return; }
       if (e.key === 'ArrowUp') { e.preventDefault(); mentionPopupRef.current?.move(-1); return; }
-      if (e.key === 'Escape') { e.preventDefault(); closeMention(); return; }
+      if (e.key === 'ArrowRight') { e.preventDefault(); mentionPopupRef.current?.into(); return; }
+      if (e.key === 'ArrowLeft') { e.preventDefault(); mentionPopupRef.current?.up(); return; }
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        // Remember this "@" was dismissed so handleChange doesn't immediately reopen
+        // it on the next keystroke (which fires onChange without changing the @).
+        mentionDismissedAtRef.current = mentionAtIndexRef.current;
+        closeMention();
+        return;
+      }
       if (e.key === 'Enter' || e.key === 'Tab') {
         e.preventDefault();
         // Cmd/Ctrl+Enter → select current (file or dir) regardless of type. Plain
         // Enter/Tab → open dir / pick file. This deliberately swallows Cmd/Ctrl+Enter
         // (the global "send" shortcut) while the popup is open so the user can pick.
         if (e.metaKey || e.ctrlKey) mentionPopupRef.current?.selectCurrent();
-        else mentionPopupRef.current?.enter();
+        else mentionPopupRef.current?.into();
         return;
       }
     }
@@ -513,11 +548,19 @@ export function ChatInput({ onSend, onCommand, onStop, onInterruptSend, onClearQ
     saveDraft(newValue);
 
     // "@" file mention detection: caret follows an "@" (at start or after whitespace)
-    // with no whitespace in between. The text after "@" becomes the dir filter.
+    // with no whitespace in between. The text after "@" is interpreted as a path
+    // (navigate + filter) by the popup.
     if (mentionEnabled) {
       const caret = textareaRef.current?.selectionStart ?? newValue.length;
       const m = detectMention(newValue, caret);
       if (m) {
+        // Don't reopen a popup the user just dismissed with Esc for this same "@".
+        if (m.atIndex === mentionDismissedAtRef.current) {
+          mentionAtIndexRef.current = m.atIndex;
+          mentionEndRef.current = caret;
+          return;
+        }
+        mentionDismissedAtRef.current = -1; // a live "@" — clear any stale dismissal
         mentionAtIndexRef.current = m.atIndex;
         mentionEndRef.current = caret; // end of the "@query" span = current caret
         setMentionQuery(m.query);
@@ -525,6 +568,7 @@ export function ChatInput({ onSend, onCommand, onStop, onInterruptSend, onClearQ
         mentionOpenRef.current = true;
         return; // "@" and "/" are mutually exclusive triggers
       }
+      mentionDismissedAtRef.current = -1; // no active "@" — reset dismissal memory
       if (mentionOpenRef.current) closeMention();
     }
 
@@ -537,7 +581,7 @@ export function ChatInput({ onSend, onCommand, onStop, onInterruptSend, onClearQ
         results = searchSessionCommands!(query);
         // Inject control commands into palette
         if ('model'.startsWith(query.toLowerCase())) {
-          results = [{ name: 'model', description: 'Switch model (opus / sonnet / haiku)', source: 'control' }, ...results];
+          results = [{ name: 'model', description: 'Switch model (opus / sonnet / haiku / fable)', source: 'control' }, ...results];
         }
       } else {
         results = searchCommands(query);
@@ -637,6 +681,7 @@ export function ChatInput({ onSend, onCommand, onStop, onInterruptSend, onClearQ
           host={mentionHost}
           query={mentionQuery}
           onSelect={handleMentionSelect}
+          onNavigate={handleMentionNavigate}
           onClose={closeMention}
         />
       )}

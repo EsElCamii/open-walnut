@@ -12617,7 +12617,16 @@ a.task-kebab-info:hover {
 }
 .fmp-btn:hover:not(:disabled) { background: var(--bg-secondary); }
 .fmp-btn:disabled { opacity: 0.4; cursor: default; }
-.fmp-close { margin-left: auto; }
+/* "Select folder" sits right-aligned, before the close button, with accent fill. */
+.fmp-select-folder {
+  margin-left: auto;
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+  white-space: nowrap;
+}
+.fmp-select-folder:hover:not(:disabled) { background: var(--accent); opacity: 0.9; }
+.fmp-close { flex-shrink: 0; }
 
 .fmp-breadcrumb {
   font-family: 'SF Mono', Menlo, monospace;
@@ -12652,16 +12661,21 @@ a.task-kebab-info:hover {
 }
 
 .file-mention-list {
-  width: 45%;
-  min-width: 180px;
+  width: 52%;
+  min-width: 280px;
   overflow-y: auto;
   border-right: 1px solid var(--border);
   padding: 4px;
 }
+/* Recents ("@?") mode uses the full popup width — there's no preview pane. */
+.file-mention-list-recents {
+  width: 100%;
+  border-right: none;
+}
 
 .file-mention-item {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   gap: 6px;
   padding: 4px 6px;
   border-radius: 6px;
@@ -12672,14 +12686,41 @@ a.task-kebab-info:hover {
 .file-mention-item:hover { background: var(--bg-secondary); }
 
 .fmp-icon { flex-shrink: 0; }
+/* Long names wrap onto multiple lines instead of being truncated/hidden. */
 .fmp-name {
   flex: 1;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
-.fmp-into { color: var(--fg-muted); font-size: 11px; }
-.fmp-size { color: var(--fg-muted); font-size: 11px; white-space: nowrap; }
+.fmp-into { color: var(--fg-muted); font-size: 11px; flex-shrink: 0; }
+.fmp-size { color: var(--fg-muted); font-size: 11px; white-space: nowrap; flex-shrink: 0; }
+
+/* Recents-mode row: folder name on top, full path dimmed below (wraps freely). */
+.fmp-recent {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.fmp-recent-name { font-weight: 600; overflow-wrap: anywhere; display: flex; align-items: center; gap: 6px; }
+/* Host badge on recents from a remote host — global search shows folders on all hosts. */
+.fmp-recent-host {
+  font-size: 10px;
+  font-weight: 500;
+  color: var(--fg-muted);
+  background: var(--bg-tertiary);
+  padding: 1px 5px;
+  border-radius: 3px;
+  white-space: nowrap;
+}
+.fmp-recent-path {
+  font-size: 11px;
+  color: var(--fg-muted);
+  font-family: 'SF Mono', Menlo, monospace;
+  overflow-wrap: anywhere;
+}
 
 .fmp-pick {
   flex-shrink: 0;
@@ -12690,12 +12731,12 @@ a.task-kebab-info:hover {
   cursor: pointer;
   font-size: 11px;
   line-height: 1;
-  padding: 2px 5px;
+  padding: 2px 6px;
   opacity: 0;
 }
 .file-mention-item.selected .fmp-pick,
 .file-mention-item:hover .fmp-pick { opacity: 1; }
-.fmp-pick:hover { background: var(--accent-subtle); color: var(--accent); }
+.fmp-pick:hover { background: var(--accent-subtle); color: var(--accent); border-color: var(--accent); }
 
 .file-mention-preview {
   flex: 1;
