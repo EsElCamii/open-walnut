@@ -13,6 +13,7 @@
 
 import { Router, type Request, type Response, type NextFunction } from 'express'
 import path from 'node:path'
+import os from 'node:os'
 import fsp from 'node:fs/promises'
 import { createFileReader } from '../../core/session-file-reader.js'
 
@@ -31,27 +32,73 @@ function isBinaryContent(buffer: Buffer): boolean {
 
 fileContentRouter.get('/', async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const filePath = req.query.path
+    const rawPath = req.query.path
     const host = req.query.host
 
-    if (!filePath || typeof filePath !== 'string') {
+    if (!rawPath || typeof rawPath !== 'string') {
       res.status(400).json({ error: 'Missing or invalid path parameter' })
       return
     }
 
-    // Must be absolute
-    if (!path.isAbsolute(filePath)) {
-      res.status(400).json({ error: 'Path must be absolute' })
-      return
-    }
-
     // No directory traversal
-    if (filePath.includes('..')) {
+    if (rawPath.includes('..')) {
       res.status(400).json({ error: 'Invalid path' })
       return
     }
 
+    // Expand `~`/`~/…` for local reads (Node fs has no shell expansion). Remote
+    // keeps `~` — the daemon's fs.read expands it on the remote host's HOME.
+    let filePath = rawPath
+    if (!host && (filePath === '~' || filePath.startsWith('~/'))) {
+      filePath = os.homedir() + filePath.slice(1)
+    }
+
+    // Must be absolute (after ~ expansion); remote `~` paths are allowed through.
+    const isRemote = typeof host === 'string' && host.length > 0
+    if (!isRemote && !path.isAbsolute(filePath)) {
+      res.status(400).json({ error: 'Path must be absolute' })
+      return
+    }
+
     const ext = path.extname(filePath).slice(1).toLowerCase()
+
+    // Raw mode: serve the file's bytes directly with a real Content-Type so the
+    // browser treats it as a standalone document. Used by the HTML preview iframe
+    // (via `src`), which gives the page its own URL — so in-page anchors, relative
+    // links and scripts resolve against the file itself instead of the Walnut SPA.
+    const raw = req.query.raw === '1' || req.query.raw === 'true'
+    if (raw) {
+      // Read may throw on a remote transport failure (DaemonFileReader.readFile
+      // only returns null for ENOENT). Catch it so the iframe gets a clean
+      // text/plain error instead of the outer error handler's JSON/stack body.
+      let content: string | null = null
+      try {
+        if (isRemote) {
+          const reader = await createFileReader(host as string)
+          content = await reader.readFile(filePath)
+        } else {
+          content = await fsp.readFile(filePath, 'utf-8')
+        }
+      } catch (err) {
+        const msg = isRemote
+          ? `Cannot reach remote host: ${err instanceof Error ? err.message : String(err)}`
+          : 'File not found'
+        res.status(isRemote ? 502 : 404).type('text/plain').send(msg)
+        return
+      }
+      if (content === null) {
+        res.status(404).type('text/plain').send('File not found')
+        return
+      }
+      const ctype = ext === 'htm' || ext === 'html' ? 'text/html; charset=utf-8'
+        : ext === 'svg' ? 'image/svg+xml'
+        : 'text/plain; charset=utf-8'
+      // The framed doc runs as the SPA's own origin (sandbox allow-scripts +
+      // allow-same-origin in FileContentView). Acceptable for a localhost personal
+      // tool serving files the user explicitly opened; no untrusted-upload surface.
+      res.type(ctype).send(content)
+      return
+    }
 
     if (typeof host === 'string' && host) {
       // Remote file via SSH daemon

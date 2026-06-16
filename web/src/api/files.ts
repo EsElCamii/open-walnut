@@ -21,6 +21,17 @@ export async function fetchFileContent(
   return res.json();
 }
 
+/**
+ * URL that serves a file's raw bytes with a real Content-Type. Used as an
+ * iframe `src` so HTML previews get their own document URL — in-page anchors,
+ * relative links and scripts then resolve against the file, not the Walnut SPA.
+ */
+export function rawFileContentUrl(filePath: string, host?: string): string {
+  const params = new URLSearchParams({ path: filePath, raw: '1' });
+  if (host) params.set('host', host);
+  return `/api/file-content?${params}`;
+}
+
 /** A single directory entry for the file explorer tree. */
 export interface DirEntry {
   name: string;

@@ -6,14 +6,18 @@
  * full-screen FileViewer overlay and the inline right pane of SessionFileExplorer.
  */
 import { useState, useEffect, useRef, useMemo } from 'react';
-import { fetchFileContent, type FileContentResponse } from '@/api/files';
+import { fetchFileContent, rawFileContentUrl, type FileContentResponse } from '@/api/files';
 import { formatSize } from '@/utils/format';
 import { renderMarkdownWithRefs } from '@/utils/markdown';
+import { ICON_NEW_TAB } from '@/components/common/Icons';
+import { openPopout } from '@/popout/openPopout';
 
 interface FileContentViewProps {
   path: string;
   line?: number;
   host?: string;
+  /** Hide the "pop out to window" button (e.g. when already rendered inside a pop-out). */
+  hidePopout?: boolean;
 }
 
 /** Build line-numbered HTML from raw file content. */
@@ -43,7 +47,7 @@ function isMarkdownExt(ext: string | undefined, path: string): boolean {
   return e === 'md' || e === 'markdown' || e === 'mdx';
 }
 
-export function FileContentView({ path: filePath, line, host }: FileContentViewProps) {
+export function FileContentView({ path: filePath, line, host, hidePopout }: FileContentViewProps) {
   const [data, setData] = useState<FileContentResponse | null>(null);
   const [loading, setLoading] = useState(true);
   // For HTML/Markdown files, default to the rendered preview; toggle to source on demand.
@@ -102,8 +106,24 @@ export function FileContentView({ path: filePath, line, host }: FileContentViewP
 
   const markdownHtml = useMemo(() => {
     if (!isMarkdown || !data?.content) return '';
-    return renderMarkdownWithRefs(data.content);
-  }, [isMarkdown, data]);
+    const dir = filePath.includes('/') ? filePath.slice(0, filePath.lastIndexOf('/')) : undefined;
+    return renderMarkdownWithRefs(data.content, dir, host);
+  }, [isMarkdown, data, host, filePath]);
+
+  // Open the file in its own standalone browser TAB (zero-WS, one-shot fetch).
+  // Hidden in fullscreen (fullscreen is the in-app expand) and when already popped out.
+  const popoutBtn =
+    !hidePopout && !fullscreen ? (
+      <button
+        type="button"
+        className="fv-html-tab fv-popout-btn"
+        onClick={() => openPopout('file', { path: filePath, host, line })}
+        title="Open in new tab"
+        aria-label="Open in new tab"
+      >
+        {ICON_NEW_TAB}
+      </button>
+    ) : null;
 
   return (
     <div className={`file-content-view${fullscreen ? ' fv-fullscreen' : ''}`} ref={contentRef}>
@@ -135,13 +155,23 @@ export function FileContentView({ path: filePath, line, host }: FileContentViewP
           >
             {fullscreen ? '✕ Exit' : '⛶ Fullscreen'}
           </button>
+          {popoutBtn}
         </div>
+      )}
+      {/* Non-renderable files (plain code) have no preview/source toolbar — give them
+          a minimal one just for the pop-out button. */}
+      {!loading && !isRenderable && popoutBtn && (
+        <div className="fv-html-toolbar fv-toolbar-popout-only">{popoutBtn}</div>
       )}
       {!loading && showPreview && isHtml && (
         <iframe
           className="fv-html-preview"
-          sandbox=""
-          srcDoc={data!.content ?? ''}
+          // `src` (not `srcDoc`) so the page has its OWN document URL — in-page
+          // anchors, relative links and scripts resolve against the file itself
+          // instead of navigating the Walnut SPA. Files the user explicitly opened
+          // are trusted; allow scripts/forms/popups so the page is interactive.
+          sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox allow-modals"
+          src={rawFileContentUrl(filePath, host)}
           title={filePath}
         />
       )}
