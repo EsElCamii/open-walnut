@@ -3,7 +3,7 @@
  *
  * Owns: open/attach RPC, subscription to `terminal:data:<id>` / `terminal:exit:<id>`,
  * and reconnect handling (`_ws:reconnected` → try attach, fall back to open which
- * re-attaches the persistent tmux session). The xterm instance itself is owned by
+ * re-attaches the persistent dtach session). The xterm instance itself is owned by
  * the component — this hook just calls `onData` with incoming bytes and exposes
  * `sendInput` / `sendResize` / `kill` / `retry`.
  */
@@ -17,11 +17,11 @@ import {
   terminalResize,
   terminalClose,
   terminalKill,
-  type TerminalNoTmux,
+  type TerminalNoDtach,
 } from '@/api/terminal';
 import { log } from '@/utils/log';
 
-export type TerminalStatus = 'idle' | 'connecting' | 'ready' | 'no_tmux' | 'error' | 'exited';
+export type TerminalStatus = 'idle' | 'connecting' | 'ready' | 'no_dtach' | 'error' | 'exited';
 
 interface UseSessionTerminalOpts {
   sessionId: string;
@@ -36,20 +36,20 @@ interface UseSessionTerminalOpts {
 
 interface UseSessionTerminalReturn {
   status: TerminalStatus;
-  noTmux: TerminalNoTmux | null;
+  noDtach: TerminalNoDtach | null;
   errorMessage: string | null;
   sendInput: (data: string) => void;
   sendResize: (cols: number, rows: number) => void;
-  /** Explicitly destroy (kills tmux). */
+  /** Explicitly destroy (kills dtach). */
   kill: () => void;
-  /** Re-attempt open (used by the NO_TMUX retry button). */
+  /** Re-attempt open (used by the NO_DTACH retry button). */
   retry: () => void;
 }
 
 export function useSessionTerminal(opts: UseSessionTerminalOpts): UseSessionTerminalReturn {
   const { sessionId, enabled, onData, onExit, getSize } = opts;
   const [status, setStatus] = useState<TerminalStatus>('idle');
-  const [noTmux, setNoTmux] = useState<TerminalNoTmux | null>(null);
+  const [noDtach, setNoDtach] = useState<TerminalNoDtach | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
   const terminalIdRef = useRef<string | null>(null);
@@ -70,15 +70,15 @@ export function useSessionTerminal(opts: UseSessionTerminalOpts): UseSessionTerm
     openingRef.current = true;
     const { cols, rows } = getSizeRef.current();
     setStatus('connecting');
-    setNoTmux(null);
+    setNoDtach(null);
     setErrorMessage(null);
     try {
       const res = await terminalOpen(sessionId, cols, rows);
       if (!res.ok) {
         terminalIdRef.current = null;
-        setNoTmux(res);
-        setStatus('no_tmux');
-        log.warn('terminal', 'open rejected: NO_TMUX', { sessionId, host: res.host });
+        setNoDtach(res);
+        setStatus('no_dtach');
+        log.warn('terminal', 'open rejected: NO_DTACH', { sessionId, host: res.host });
         return;
       }
       terminalIdRef.current = res.terminalId;
@@ -94,7 +94,7 @@ export function useSessionTerminal(opts: UseSessionTerminalOpts): UseSessionTerm
     }
   }, [sessionId]);
 
-  // Open when enabled; tear down (detach, keep tmux) when disabled/unmounted.
+  // Open when enabled; tear down (detach, keep dtach session) when disabled/unmounted.
   useEffect(() => {
     if (!enabled) return;
     void open();
@@ -126,7 +126,7 @@ export function useSessionTerminal(opts: UseSessionTerminalOpts): UseSessionTerm
   });
 
   // On WS reconnect: try cheap attach (pty still alive in grace window);
-  // on failure, reopen — server re-attaches the persistent tmux session.
+  // on failure, reopen — server re-attaches the persistent dtach session.
   useEvent('_ws:reconnected', () => {
     if (!enabled) return;
     const id = terminalIdRef.current;
@@ -168,5 +168,5 @@ export function useSessionTerminal(opts: UseSessionTerminalOpts): UseSessionTerm
 
   const retry = useCallback(() => { void open(); }, [open]);
 
-  return { status, noTmux, errorMessage, sendInput, sendResize, kill, retry };
+  return { status, noDtach, errorMessage, sendInput, sendResize, kill, retry };
 }

@@ -1,13 +1,15 @@
 /**
  * SessionTerminal — embedded xterm.js terminal for a session, in a portal modal.
  *
- * The shell runs in a tmux session on the target host (local or remote/SSH) so
- * its state survives disconnects. This component owns the xterm instance (in a
- * ref — never React state, since xterm manages its own canvas/DOM) and delegates
- * the WS lifecycle to useSessionTerminal.
+ * The shell runs under dtach on the target host (local or remote/SSH) so its
+ * state survives disconnects. dtach (unlike tmux) does NOT grab the mouse or use
+ * an alternate screen, so xterm.js keeps native scroll + drag-select + copy.
+ * This component owns the xterm instance (in a ref — never React state, since
+ * xterm manages its own canvas/DOM) and delegates the WS lifecycle to
+ * useSessionTerminal.
  *
- * When the target host lacks tmux, useSessionTerminal returns a NO_TMUX result
- * and we render an install-hint card instead of mounting xterm.
+ * When dtach can't be provisioned on the target, useSessionTerminal returns a
+ * NO_DTACH result and we render an install-hint card instead of mounting xterm.
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react';
@@ -37,7 +39,7 @@ export function SessionTerminal({ sessionId, label, host, onClose }: SessionTerm
     return t ? { cols: t.cols, rows: t.rows } : { cols: 80, rows: 24 };
   }, []);
 
-  const { status, noTmux, errorMessage, sendInput, sendResize, kill, retry } = useSessionTerminal({
+  const { status, noDtach, errorMessage, sendInput, sendResize, kill, retry } = useSessionTerminal({
     sessionId,
     enabled: true,
     onData: (data) => termRef.current?.write(data),
@@ -45,9 +47,9 @@ export function SessionTerminal({ sessionId, label, host, onClose }: SessionTerm
     getSize,
   });
 
-  // Create the xterm instance once. Skip while NO_TMUX (no terminal to mount).
+  // Create the xterm instance once. Skip while NO_DTACH (no terminal to mount).
   useEffect(() => {
-    if (noTmux) return;
+    if (noDtach) return;
     if (!containerRef.current || termRef.current) return;
 
     const term = new Terminal({
@@ -55,7 +57,10 @@ export function SessionTerminal({ sessionId, label, host, onClose }: SessionTerm
       fontSize: 13,
       fontFamily: 'Menlo, Monaco, "Courier New", monospace',
       theme: { background: '#1a1b26', foreground: '#c0caf5' },
-      scrollback: 5000,
+      // Large native scrollback: dtach doesn't use an alternate screen, so the
+      // browser keeps the full output history and the scroll wheel scrolls it
+      // natively (no tmux copy-mode, no mouse grab).
+      scrollback: 50000,
     });
     const fit = new FitAddon();
     term.loadAddon(fit);
@@ -72,11 +77,11 @@ export function SessionTerminal({ sessionId, label, host, onClose }: SessionTerm
       termRef.current = null;
       fitRef.current = null;
     };
-  }, [noTmux, sendInput]);
+  }, [noDtach, sendInput]);
 
   // Refit on container resize; push the new size to the pty (debounced).
   useEffect(() => {
-    if (noTmux || !containerRef.current) return;
+    if (noDtach || !containerRef.current) return;
     let raf = 0;
     let debounce: ReturnType<typeof setTimeout> | null = null;
     const ro = new ResizeObserver(() => {
@@ -96,7 +101,7 @@ export function SessionTerminal({ sessionId, label, host, onClose }: SessionTerm
       cancelAnimationFrame(raf);
       if (debounce) clearTimeout(debounce);
     };
-  }, [noTmux, sendResize]);
+  }, [noDtach, sendResize]);
 
   // Focus the terminal once ready.
   useEffect(() => {
@@ -110,7 +115,7 @@ export function SessionTerminal({ sessionId, label, host, onClose }: SessionTerm
     }
   }, [status, sendResize]);
 
-  // Escape closes (detach, tmux kept).
+  // Escape closes (detach, dtach session kept).
   useEffect(() => {
     const handler = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); };
     window.addEventListener('keydown', handler);
@@ -118,20 +123,20 @@ export function SessionTerminal({ sessionId, label, host, onClose }: SessionTerm
   }, [onClose]);
 
   const handleKill = useCallback(() => {
-    if (window.confirm('结束终端会关闭 tmux 会话,正在运行的进程将被终止。确定吗?')) {
+    if (window.confirm('结束终端会关闭 dtach 会话,正在运行的进程将被终止。确定吗?')) {
       kill();
       onClose();
     }
   }, [kill, onClose]);
 
   const handleCopyHint = useCallback(() => {
-    const cmd = noTmux?.installHint?.split(/\s+#/)[0]?.trim();
+    const cmd = noDtach?.installHint?.split(/\s+#/)[0]?.trim();
     if (!cmd) return;
     navigator.clipboard.writeText(cmd).then(() => {
       setCopied(true);
       setTimeout(() => setCopied(false), 1500);
     }).catch(() => {});
-  }, [noTmux]);
+  }, [noDtach]);
 
   const overlay = (
     <div className="session-terminal-overlay" onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}>
@@ -144,28 +149,28 @@ export function SessionTerminal({ sessionId, label, host, onClose }: SessionTerm
             <span className={`session-terminal-status session-terminal-status-${status}`}>{status}</span>
           </div>
           <div className="session-terminal-actions">
-            {!noTmux && status !== 'no_tmux' && (
-              <button className="session-terminal-btn session-terminal-btn-kill" onClick={handleKill} title="结束终端 (kill tmux)">
+            {!noDtach && status !== 'no_dtach' && (
+              <button className="session-terminal-btn session-terminal-btn-kill" onClick={handleKill} title="结束终端 (kill dtach)">
                 结束终端
               </button>
             )}
-            <button className="session-terminal-close" onClick={onClose} title="关闭 (Esc) — 保留 tmux">
+            <button className="session-terminal-close" onClick={onClose} title="关闭 (Esc) — 保留 dtach 会话">
               &#x2715;
             </button>
           </div>
         </div>
 
-        {noTmux ? (
+        {noDtach ? (
           <div className="session-terminal-error-card">
             <div className="session-terminal-error-icon">&#x26A0;&#xFE0F;</div>
             <div className="session-terminal-error-title">
-              无法启动终端:目标主机{noTmux.host ? ` (${noTmux.host})` : ''} 未安装 tmux
+              无法启动终端:无法在目标主机{noDtach.host ? ` (${noDtach.host})` : ''} 上准备 dtach
             </div>
             <p className="session-terminal-error-body">
-              终端需要 tmux 来保证 SSH 断开后会话不丢失。请在该主机安装:
+              终端用 dtach 保证 SSH 断开后会话不丢失。Walnut 会自动编译它,但该主机似乎缺少 C 编译器:
             </p>
             <div className="session-terminal-install">
-              <code>{noTmux.installHint}</code>
+              <code>{noDtach.installHint}</code>
               <button className="session-terminal-btn" onClick={handleCopyHint}>
                 {copied ? '已复制' : '复制'}
               </button>

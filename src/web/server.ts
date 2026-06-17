@@ -600,7 +600,7 @@ export async function startServer(options: ServerOptions = {}): Promise<HttpServ
   registerChatRpc()
   registerSessionChatRpc()
 
-  // -- Embedded terminal (xterm.js + node-pty over tmux) --
+  // -- Embedded terminal (xterm.js + node-pty over dtach) --
   {
     const { registerTerminalRpc } = await import('./terminal/register.js')
     const { onClientDisconnect } = await import('./ws/handler.js')
@@ -608,10 +608,10 @@ export async function startServer(options: ServerOptions = {}): Promise<HttpServ
     const enabled = await registerTerminalRpc()
     if (enabled) {
       onClientDisconnect((ws) => terminalManager.onClientDisconnect(ws))
-      // Sweep leaked walnut-* tmux sessions whose backing session is gone.
-      import('./terminal/tmux-lifecycle.js')
-        .then(({ reapOrphanTmux }) => reapOrphanTmux())
-        .catch((err) => log.web.warn('reapOrphanTmux failed', { error: String(err) }))
+      // Sweep leaked walnut-*.dsock dtach sessions whose backing session is gone.
+      import('./terminal/dtach-lifecycle.js')
+        .then(({ reapOrphanDtach }) => reapOrphanDtach())
+        .catch((err) => log.web.warn('reapOrphanDtach failed', { error: String(err) }))
     }
   }
 
@@ -2468,7 +2468,7 @@ export async function stopServer(): Promise<void> {
   bus.unsubscribe('setup-health')
   bus.unsubscribe('qmd-task-sync')
   bus.unsubscribe('qmd-session-sync')
-  // Release local terminal ptys (tmux sessions on targets survive).
+  // Release local terminal ptys (dtach sessions on targets survive).
   try {
     const { terminalManager } = await import('./terminal/terminal-manager.js')
     terminalManager.shutdown()

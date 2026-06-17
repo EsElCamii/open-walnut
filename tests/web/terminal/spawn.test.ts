@@ -1,53 +1,62 @@
 import { describe, it, expect } from 'vitest';
 import {
-  tmuxSessionName,
-  buildLocalTmuxArgs,
-  buildRemoteTmuxCommand,
+  dtachSocketPath,
+  buildDtachArgs,
+  buildRemoteDtachCommand,
   buildRemoteSshArgs,
+  DTACH_SOCKET_DIR,
 } from '../../../src/web/terminal/spawn.js';
 import type { SshTarget } from '../../../src/providers/session-io.js';
 
-describe('tmuxSessionName', () => {
-  it('derives a stable name from the session id', () => {
-    expect(tmuxSessionName('abc-123')).toBe('walnut-abc-123');
+describe('dtachSocketPath', () => {
+  it('derives a stable socket path under the dedicated dir from the session id', () => {
+    expect(dtachSocketPath('abc-123')).toBe(`${DTACH_SOCKET_DIR}/walnut-abc-123.dsock`);
   });
 
   it('is stable across calls — guarantees idempotent re-attach after server restart', () => {
     const sid = 'sess-xyz';
-    expect(tmuxSessionName(sid)).toBe(tmuxSessionName(sid));
+    expect(dtachSocketPath(sid)).toBe(dtachSocketPath(sid));
   });
 
   it('rejects ids with shell metacharacters (fail fast, no injectable command)', () => {
-    expect(() => tmuxSessionName('test$(whoami)')).toThrow(/Unsafe session id/);
-    expect(() => tmuxSessionName('test;id')).toThrow(/Unsafe session id/);
-    expect(() => tmuxSessionName('a b')).toThrow(/Unsafe session id/);
+    expect(() => dtachSocketPath('test$(whoami)')).toThrow(/Unsafe session id/);
+    expect(() => dtachSocketPath('test;id')).toThrow(/Unsafe session id/);
+    expect(() => dtachSocketPath('a b')).toThrow(/Unsafe session id/);
     // Real Claude session IDs (UUID form) are accepted.
-    expect(tmuxSessionName('7b370f7c-c1bd-4961-b7cf-2a69d34d5854')).toBe('walnut-7b370f7c-c1bd-4961-b7cf-2a69d34d5854');
+    expect(dtachSocketPath('7b370f7c-c1bd-4961-b7cf-2a69d34d5854')).toBe(
+      `${DTACH_SOCKET_DIR}/walnut-7b370f7c-c1bd-4961-b7cf-2a69d34d5854.dsock`,
+    );
   });
 });
 
-describe('buildLocalTmuxArgs', () => {
-  it('uses dedicated -L socket + new-session -A, NO -c (tmux 1.8 compat)', () => {
-    // Start dir comes from node-pty's cwd option, not tmux -c (which old tmux lacks).
-    // -L walnut isolates from the user's own tmux + dodges a wedged default socket.
-    expect(buildLocalTmuxArgs('sid1')).toEqual(['-L', 'walnut', 'new-session', '-A', '-s', 'walnut-sid1']);
+describe('buildDtachArgs (local)', () => {
+  it('uses -A (attach-or-create) + native-friendly flags, no mouse/screen grab', () => {
+    // -A: idempotent attach-or-create (like tmux new-session -A).
+    // -z: Ctrl-Z reaches the shell. -E: Ctrl-\ reaches the program (we detach by
+    // closing the connection, not a keystroke). -r winch: redraw on reattach.
+    const args = buildDtachArgs('/path/dtach', 'sid1', '/bin/zsh');
+    expect(args).toEqual([
+      '/path/dtach', '-A', `${DTACH_SOCKET_DIR}/walnut-sid1.dsock`, '-z', '-E', '-r', 'winch', '/bin/zsh',
+    ]);
   });
 });
 
-describe('buildRemoteTmuxCommand', () => {
-  it('sets start dir via leading cd + exec tmux -L (no -c flag — tmux 1.8 compat)', () => {
-    expect(buildRemoteTmuxCommand('sid2', '/var/data')).toBe(
-      "cd '/var/data' && exec tmux -L walnut new-session -A -s walnut-sid2",
+describe('buildRemoteDtachCommand', () => {
+  it('makes the socket dir, cds to cwd, then exec dtach -A', () => {
+    expect(buildRemoteDtachCommand('/home/u/.local/bin/walnut-dtach', 'sid2', 'bash', '/var/data')).toBe(
+      `mkdir -p '${DTACH_SOCKET_DIR}'; cd '/var/data' && exec '/home/u/.local/bin/walnut-dtach' -A '${DTACH_SOCKET_DIR}/walnut-sid2.dsock' -z -E -r winch 'bash'`,
     );
   });
 
-  it('shell-quotes cwd containing single quotes safely', () => {
-    const cmd = buildRemoteTmuxCommand('sid2', "/weird/it's here");
-    expect(cmd).toBe("cd '/weird/it'\\''s here' && exec tmux -L walnut new-session -A -s walnut-sid2");
+  it('shell-quotes a cwd containing single quotes safely', () => {
+    const cmd = buildRemoteDtachCommand('dtach', 'sid2', 'bash', "/weird/it's here");
+    expect(cmd).toContain("cd '/weird/it'\\''s here' &&");
   });
 
-  it('omits the cd prefix when no cwd', () => {
-    expect(buildRemoteTmuxCommand('sid2')).toBe('exec tmux -L walnut new-session -A -s walnut-sid2');
+  it('omits the cd prefix when no cwd (still makes the socket dir + execs dtach)', () => {
+    expect(buildRemoteDtachCommand('dtach', 'sid2', 'bash')).toBe(
+      `mkdir -p '${DTACH_SOCKET_DIR}'; exec 'dtach' -A '${DTACH_SOCKET_DIR}/walnut-sid2.dsock' -z -E -r winch 'bash'`,
+    );
   });
 });
 
@@ -55,30 +64,37 @@ describe('buildRemoteSshArgs', () => {
   const target: SshTarget = { hostname: 'dev.example.com', user: 'alice' };
 
   it('forces a remote PTY (-tt) and enables keepalive', () => {
-    const args = buildRemoteSshArgs('sid3', target, '/home/alice/x');
+    const args = buildRemoteSshArgs('dtach', 'sid3', target, 'bash', '/home/alice/x');
     expect(args).toContain('-tt');
     expect(args).toContain('ServerAliveInterval=15');
     expect(args).toContain('ServerAliveCountMax=3');
     expect(args).toContain('BatchMode=yes');
   });
 
-  it('targets user@hostname and ends with the cd + tmux command', () => {
-    const args = buildRemoteSshArgs('sid3', target, '/home/alice/x');
+  it('targets user@hostname and ends with the dtach command', () => {
+    const args = buildRemoteSshArgs('dtach', 'sid3', target, 'bash', '/home/alice/x');
     expect(args).toContain('alice@dev.example.com');
-    expect(args[args.length - 1]).toBe(
-      "cd '/home/alice/x' && exec tmux -L walnut new-session -A -s walnut-sid3",
-    );
+    const last = args[args.length - 1];
+    expect(last).toContain(`mkdir -p '${DTACH_SOCKET_DIR}'`);
+    expect(last).toContain("cd '/home/alice/x' && exec 'dtach' -A");
+    expect(last).toContain('walnut-sid3.dsock');
   });
 
   it('adds -p when a port is configured', () => {
-    const args = buildRemoteSshArgs('sid3', { hostname: 'h', port: 2222 }, undefined);
+    const args = buildRemoteSshArgs('dtach', 'sid3', { hostname: 'h', port: 2222 }, 'bash', undefined);
     expect(args).toContain('-p');
     expect(args).toContain('2222');
   });
 
   it('omits user prefix when no user is set', () => {
-    const args = buildRemoteSshArgs('sid3', { hostname: 'h' }, undefined);
+    const args = buildRemoteSshArgs('dtach', 'sid3', { hostname: 'h' }, 'bash', undefined);
     expect(args).toContain('h');
     expect(args).not.toContain('@h');
+  });
+
+  it('includes the ControlMaster socket args when a host alias is given', () => {
+    const args = buildRemoteSshArgs('dtach', 'sid3', target, 'bash', '/x', 'devbox');
+    expect(args).toContain('ControlMaster=auto');
+    expect(args.some((a) => a.includes('walnut-term-ssh-devbox'))).toBe(true);
   });
 });

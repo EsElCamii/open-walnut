@@ -2,12 +2,12 @@
  * TerminalManager — owns the live terminal ptys and bridges their bytes to the
  * attached WebSocket client.
  *
- * Reliability model (see plan): the shell itself lives in tmux on the target
- * host, so the pty here is just "the window into it". This manager only has to
- * survive WS flaps gracefully:
+ * Reliability model (see plan): the shell itself lives under dtach on the
+ * target host, so the pty here is just "the window into it". This manager only
+ * has to survive WS flaps gracefully:
  *   - a 256KB scrollback ring per terminal replays missed output on reconnect
  *   - WS disconnect → detach + 120s grace (pty kept alive, not killed)
- *   - 30min idle → detach the pty/ssh connection (NEVER kill the tmux session)
+ *   - 30min idle → detach the pty/ssh connection (NEVER kill the dtach session)
  *
  * Terminal bytes are sent only to the single attached client via `sendToClient`,
  * never broadcast.
@@ -22,7 +22,7 @@ import { log } from '../../logging/index.js'
 
 const RING_CAPACITY = 256 * 1024 // 256KB scrollback
 const GRACE_MS = 120_000 // keep pty alive 120s after client disconnects
-const IDLE_MS = 30 * 60_000 // detach pty (not tmux) after 30min no activity
+const IDLE_MS = 30 * 60_000 // detach pty (not dtach) after 30min no activity
 
 /** Fixed-size byte ring; drops oldest bytes when full. */
 class RingBuffer {
@@ -125,7 +125,7 @@ class TerminalSession {
     this.clearGrace()
     this.graceTimer = setTimeout(() => {
       // Grace expired with no reattach: release the local pty/ssh connection.
-      // The tmux session on the target host stays alive — reopen re-attaches.
+      // The dtach session on the target host stays alive — reopen re-attaches.
       log.web.info('terminal grace expired, releasing pty', { terminalId: this.id })
       this.destroyPty()
     }, GRACE_MS)
@@ -156,12 +156,12 @@ class TerminalSession {
       // live terminal out from under the user (violates the "don't surprise
       // the user" reliability goal). While attached we just re-arm; the pty is
       // held until the client disconnects (then the 120s grace timer releases
-      // it). tmux always survives either way.
+      // it). dtach always survives either way.
       if (this.attached) {
         this.bumpIdle()
         return
       }
-      log.web.info('terminal idle, releasing pty (tmux kept)', { terminalId: this.id })
+      log.web.info('terminal idle, releasing pty (dtach kept)', { terminalId: this.id })
       this.destroyPty()
     }, IDLE_MS)
   }
@@ -175,7 +175,7 @@ class TerminalSession {
     if (this.idleTimer) { clearTimeout(this.idleTimer); this.idleTimer = null }
   }
 
-  /** Release the local pty (kills ssh/tmux-attach process, NOT the tmux session). */
+  /** Release the local pty (kills ssh/dtach-attach process, NOT the dtach session). */
   private destroyPty(): void {
     this.clearTimers()
     if (!this.exited) {
@@ -209,7 +209,7 @@ class TerminalManager {
   /**
    * Open (or re-attach to) a terminal for a session. Reuses an existing live
    * terminal for the same session if present; otherwise spawns a new pty
-   * (which `tmux new-session -A` attaches to the persistent tmux session).
+   * (which `dtach -A` attaches to the persistent dtach session).
    */
   async open(sessionId: string, ws: WebSocket, cols: number, rows: number): Promise<OpenResult> {
     const existingId = this.bySession.get(sessionId)
@@ -271,7 +271,7 @@ class TerminalManager {
     this.terminals.get(terminalId)?.resize(cols, rows)
   }
 
-  /** Collapse UI / detach — keeps tmux + pty alive (grace period). */
+  /** Collapse UI / detach — keeps dtach + pty alive (grace period). */
   close(terminalId: string): void {
     this.terminals.get(terminalId)?.detach()
   }
@@ -293,7 +293,7 @@ class TerminalManager {
     }
   }
 
-  /** Release all local ptys on server shutdown (tmux sessions survive). */
+  /** Release all local ptys on server shutdown (dtach sessions survive). */
   shutdown(): void {
     for (const t of this.terminals.values()) t.shutdown()
     this.terminals.clear()

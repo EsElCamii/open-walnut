@@ -18435,7 +18435,7 @@ a.file-link:hover {
 .session-terminal-status-connecting { background: color-mix(in srgb, var(--warning, #ff9500) 22%, transparent); color: var(--warning, #ff9500); }
 .session-terminal-status-error,
 .session-terminal-status-exited,
-.session-terminal-status-no_tmux { background: color-mix(in srgb, var(--danger, #ff3b30) 22%, transparent); color: var(--danger, #ff3b30); }
+.session-terminal-status-no_dtach { background: color-mix(in srgb, var(--danger, #ff3b30) 22%, transparent); color: var(--danger, #ff3b30); }
 
 .session-terminal-actions {
   display: flex;
@@ -18497,7 +18497,7 @@ a.file-link:hover {
   border-top: 1px solid var(--border);
 }
 
-/* NO_TMUX error card */
+/* NO_DTACH error card */
 .session-terminal-error-card {
   flex: 1;
   display: flex;

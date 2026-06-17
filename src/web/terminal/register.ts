@@ -1,8 +1,9 @@
 /**
  * Terminal RPC registration. Wires the 6 terminal methods onto the existing
- * `/ws` handler. `terminal:open` first probes tmux; if it's missing it rejects
- * with a structured NO_TMUX error so the UI can show an install hint instead of
- * silently giving a state-losing shell.
+ * `/ws` handler. `terminal:open` first ensures dtach is provisioned on the
+ * target; if it can't be built it rejects with a structured NO_DTACH error so
+ * the UI can show an install hint instead of silently giving a state-losing
+ * shell.
  *
  * node-pty is a native binary — if it fails to load, terminal support is
  * disabled gracefully (the server still boots).
@@ -11,8 +12,8 @@
 import type { WebSocket } from 'ws'
 import { registerMethod } from '../ws/handler.js'
 import { terminalManager } from './terminal-manager.js'
-import { probeTmux } from './tmux-check.js'
-import { killTmuxSession } from './tmux-lifecycle.js'
+import { probeDtach } from './dtach-check.js'
+import { killDtachSession } from './dtach-lifecycle.js'
 import { getSessionByClaudeId } from '../../core/session-tracker.js'
 import { log } from '../../logging/index.js'
 
@@ -55,11 +56,11 @@ export async function registerTerminalRpc(): Promise<boolean> {
     const record = await getSessionByClaudeId(sessionId)
     if (!record) throw new Error(`Session not found: ${sessionId}`)
 
-    const probe = await probeTmux(record)
+    const probe = await probeDtach(record)
     if (!probe.ok) {
       // Return as a structured payload (not a thrown error) so the install hint
       // survives — thrown errors are flattened to a message string by the WS layer.
-      return { ok: false, code: 'NO_TMUX', host: probe.host, os: probe.os, installHint: probe.installHint }
+      return { ok: false, code: 'NO_DTACH', host: probe.host, installHint: probe.installHint }
     }
 
     const result = await terminalManager.open(sessionId, client, cols, rows)
@@ -82,7 +83,7 @@ export async function registerTerminalRpc(): Promise<boolean> {
   registerMethod('terminal:close', async (payload: unknown) => {
     const o = asObj(payload, 'terminal:close')
     const terminalId = str(o, 'terminalId', 'terminal:close')
-    // Collapse UI / detach only — tmux + pty kept alive (grace period).
+    // Collapse UI / detach only — dtach session + pty kept alive (grace period).
     terminalManager.close(terminalId)
   })
 
@@ -96,10 +97,10 @@ export async function registerTerminalRpc(): Promise<boolean> {
   registerMethod('terminal:kill', async (payload: unknown) => {
     const o = asObj(payload, 'terminal:kill')
     const terminalId = str(o, 'terminalId', 'terminal:kill')
-    // Explicit "结束终端": detach the pty AND kill the persistent tmux session.
+    // Explicit "结束终端": detach the pty AND kill the persistent dtach session.
     terminalManager.close(terminalId)
     const record = await getSessionByClaudeId(terminalId)
-    if (record) await killTmuxSession(record)
+    if (record) await killDtachSession(record)
     return { killed: true }
   })
 

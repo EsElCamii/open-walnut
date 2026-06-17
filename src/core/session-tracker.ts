@@ -791,10 +791,10 @@ export async function completeTaskSessions(sessionIds: string[]): Promise<number
       for (const pid of pidsToKill) {
         try { process.kill(pid, 'SIGINT'); } catch { /* already dead */ }
       }
-      // Conditionally reap each session's persistent terminal (tmux): a session
+      // Conditionally reap each session's persistent terminal (dtach): a session
       // still running a foreground build/test is kept; an idle shell is killed.
       // Best-effort, fire-and-forget — terminal feature may be disabled.
-      import('../web/terminal/tmux-lifecycle.js')
+      import('../web/terminal/dtach-lifecycle.js')
         .then(({ conditionalReap }) =>
           Promise.all(toReap.map((r) => conditionalReap(r).catch(() => { /* per-session best-effort */ }))),
         )

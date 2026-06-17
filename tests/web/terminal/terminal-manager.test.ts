@@ -44,7 +44,7 @@ vi.mock('../../../src/core/session-tracker.js', () => ({
 // resolveSpawnForSession returns our fake pty.
 vi.mock('../../../src/web/terminal/spawn.js', () => ({
   resolveSpawnForSession: vi.fn(async () => ({ pty: currentPty, cwd: '/home/u/proj', host: undefined })),
-  tmuxSessionName: (sid: string) => `walnut-${sid}`,
+  dtachSocketPath: (sid: string) => `/tmp/open-walnut-term/walnut-${sid}.dsock`,
 }));
 
 import { terminalManager } from '../../../src/web/terminal/terminal-manager.js';
@@ -124,7 +124,7 @@ describe('disconnect → detach keeps pty alive (no kill)', () => {
     expect(currentPty.kill).not.toHaveBeenCalled();
   });
 
-  it('close() only detaches — pty stays alive (tmux kept)', async () => {
+  it('close() only detaches — pty stays alive (dtach kept)', async () => {
     await terminalManager.open('sess-8', fakeWs, 80, 24);
     terminalManager.close('sess-8');
     expect(currentPty.kill).not.toHaveBeenCalled();
