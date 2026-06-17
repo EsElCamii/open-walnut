@@ -20,7 +20,8 @@ import os from 'node:os'
 import fsp from 'node:fs/promises'
 import { execFile } from 'node:child_process'
 import { getConfig } from '../../core/config-manager.js'
-import { recordDirectory } from '../../core/frequent-dirs.js'
+import { getFrequentDirs } from '../../core/frequent-dirs.js'
+import { recordMentionDir, getMentionDirs } from '../../core/mention-dirs.js'
 
 export const filesRouter = Router()
 
@@ -363,10 +364,10 @@ filesRouter.get('/list', async (req: Request, res: Response, next: NextFunction)
   }
 })
 
-// POST /api/files/record-dir — record a folder visit into the shared, server-persisted
-// frequent-directories store (same store the /session path picker reads). Lets the "@"
-// file picker's "recent folders" survive across browsers/devices instead of being
-// console-local. Fire-and-forget from the client; best-effort on the server.
+// POST /api/files/record-dir — record a folder the user browsed in the "@" picker.
+// Writes to the SEPARATE mention-dirs store (NOT frequent-dirs), so ad-hoc "@"
+// browsing never pollutes the /session path picker. Server-persisted so recents
+// survive across browsers/devices. Fire-and-forget from the client; best-effort.
 filesRouter.post('/record-dir', async (req: Request, res: Response, next: NextFunction) => {
   try {
     const { path: dirPath, host } = req.body ?? {}
@@ -378,8 +379,32 @@ filesRouter.post('/record-dir', async (req: Request, res: Response, next: NextFu
       res.status(400).json({ error: 'Invalid path' })
       return
     }
-    await recordDirectory(dirPath, typeof host === 'string' && host ? host : null)
+    await recordMentionDir(dirPath, typeof host === 'string' && host ? host : null)
     res.json({ status: 'ok' })
+  } catch (err) {
+    next(err)
+  }
+})
+
+// GET /api/files/recent-dirs — folders for the "@?" recents search: the UNION of
+// (a) session working dirs (frequent-dirs) and (b) folders browsed in "@"
+// (mention-dirs), deduped by cwd+host. This is intentionally broader than the
+// /session path picker (which reads frequent-dirs only). Returns {cwd, host}[]
+// with the most-recent first; the client does fuzzy ranking + cwd/host boosting.
+filesRouter.get('/recent-dirs', async (_req: Request, res: Response, next: NextFunction) => {
+  try {
+    const [freq, mention] = await Promise.all([getFrequentDirs(), getMentionDirs()])
+    const seen = new Set<string>()
+    const merged: Array<{ cwd: string; host: string | null; lastUsed: string }> = []
+    // mention-dirs first so an "@"-browsed folder keeps its own recency; freq fills the rest.
+    for (const d of [...mention, ...freq]) {
+      const key = `${d.cwd}::${d.host ?? '__local__'}`
+      if (seen.has(key)) continue
+      seen.add(key)
+      merged.push({ cwd: d.cwd, host: d.host, lastUsed: d.lastUsed })
+    }
+    merged.sort((a, b) => new Date(b.lastUsed).getTime() - new Date(a.lastUsed).getTime())
+    res.json({ dirs: merged.map(({ cwd, host }) => ({ cwd, host })) })
   } catch (err) {
     next(err)
   }

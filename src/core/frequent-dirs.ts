@@ -14,10 +14,6 @@ import path from 'node:path'
 import { FREQUENT_DIRS_FILE } from '../constants.js'
 import { log } from '../logging/index.js'
 
-// Upper bound on stored directories. The "@" picker records every browsed folder,
-// so the store is pruned to the top-N (by count, then recency) on write.
-const MAX_ENTRIES = 500
-
 // ── Types ──
 
 export interface FrequentDirEntry {
@@ -117,18 +113,6 @@ export async function recordDirectory(cwd: string, host: string | null, category
         lastUsed: new Date().toISOString(),
         categoryVotes: votes,
       })
-    }
-
-    // Cap the store. The "@" file picker records every folder the user browses
-    // into (not just session starts), so without a bound this file would grow
-    // unboundedly and the recents fuzzy-match would get slow + noisy. Keep the
-    // top MAX_ENTRIES by frequency, then recency.
-    if (store.directories.length > MAX_ENTRIES) {
-      store.directories.sort((a, b) =>
-        (b.count - a.count) ||
-        (new Date(b.lastUsed).getTime() - new Date(a.lastUsed).getTime()),
-      )
-      store.directories = store.directories.slice(0, MAX_ENTRIES)
     }
 
     writeStore(store)

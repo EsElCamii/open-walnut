@@ -1,13 +1,15 @@
 /**
  * Recently-opened folder history for the "@" file-mention picker.
  *
- * Backed by the SERVER-persisted frequent-directories store (the same one the
- * /session path picker uses), so recents are shared across browsers/devices and
- * survive restarts — not console-local. Folders the user browses in the "@" picker
- * are POSTed to /api/files/record-dir, feeding that shared store.
+ * Server-persisted (shared across browsers/devices, survives restart). "@?" reads
+ * the UNION of two stores via GET /api/files/recent-dirs:
+ *   - session working dirs (frequent-directories) — what /session also uses
+ *   - folders browsed in "@" (mention-directories) — recorded via POST /record-dir
+ * The two are kept SEPARATE server-side so "@" browsing never pollutes the /session
+ * path picker (which reads frequent-dirs only). This file only ever touches the
+ * union read + the mention-dir write — never the session store directly.
  */
-import { fetchWorkingDirs, invalidateWorkingDirsCache, type WorkingDirEntry } from '@/api/sessions';
-import { apiPost } from '@/api/client';
+import { apiGet, apiPost } from '@/api/client';
 import { log } from '@/utils/log';
 
 export interface RecentFolder {
@@ -15,35 +17,28 @@ export interface RecentFolder {
   host?: string;
 }
 
-/**
- * Record a folder visit into the shared server store (fire-and-forget).
- * Root ("/") is never recorded — it's noise every host trivially has, so the
- * `|| '/'` below is just defensive normalization that can't actually fire here.
- * Note: invalidating the cache busts the shared session-picker prefetch too, so
- * "@?" recents may lag one navigation behind until the next fetch lands.
- */
+/** Record an "@"-picker folder visit into the mention-dirs store (fire-and-forget).
+ *  Root ("/") is skipped as noise; the `|| '/'` is just defensive normalization. */
 export function recordRecentFolder(path: string, host?: string): void {
   if (!path || path === '/') return;
   const norm = path.replace(/\/+$/, '') || '/';
   apiPost('/api/files/record-dir', { path: norm, host })
-    .then(() => invalidateWorkingDirsCache()) // so the next "@?" sees this visit
     .catch((err) => log.error('recent-folders', 'record failed', { path: norm, error: String(err) }));
 }
 
 /**
- * ALL recent folders across every host, most-relevant first (server already scores
- * by recency+frequency). "@?" is a GLOBAL search — it returns folders on every host,
- * not just the current one; the current-path/same-host boost is applied at ranking
- * time (see fuzzyMatchRecents) so those still float to the top.
+ * ALL recent folders (session ∪ "@"-browsed) across every host, most-recent first.
+ * "@?" is a GLOBAL search — it returns folders on every host, not just the current
+ * one; the current-path/same-host boost is applied at ranking time (see
+ * fuzzyMatchRecents) so those still float to the top.
  */
 export async function getRecentFolders(): Promise<RecentFolder[]> {
-  let dirs: WorkingDirEntry[];
   try {
-    dirs = await fetchWorkingDirs();
+    const res = await apiGet<{ dirs: { cwd: string; host: string | null }[] }>('/api/files/recent-dirs');
+    return res.dirs.map((d) => ({ path: d.cwd, host: d.host ?? undefined }));
   } catch {
     return [];
   }
-  return dirs.map((d) => ({ path: d.cwd, host: d.host ?? undefined }));
 }
 
 /** Split a string into lowercase alphanumeric tokens (path separators and any

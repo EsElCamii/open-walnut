@@ -234,6 +234,11 @@ export const BUILTIN_SKILLS_DIR = (() => {
   return path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'data', 'skills');
 })();
 export const FREQUENT_DIRS_FILE = path.join(WALNUT_HOME, 'frequent-directories.json');
+/** Folders the user browsed in the "@" file picker — kept SEPARATE from the
+ *  session-derived frequent-directories so the /session path picker isn't polluted
+ *  by ad-hoc "@" browsing. "@?" searches the union of both; /session reads only the
+ *  frequent-directories store. */
+export const MENTION_DIRS_FILE = path.join(WALNUT_HOME, 'mention-directories.json');
 export const NOTES_DIR = path.join(WALNUT_HOME, 'notes');
 /** Reserved filename inside NOTES_DIR — consumers listing NOTES_DIR must exclude it */
 export const GLOBAL_NOTES_FILE = path.join(NOTES_DIR, 'global-notes.md');
