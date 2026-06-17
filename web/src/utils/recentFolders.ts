@@ -31,11 +31,19 @@ export function recordRecentFolder(path: string, host?: string): void {
  * "@?" is a GLOBAL search — it returns folders on every host, not just the current
  * one; the current-path/same-host boost is applied at ranking time (see
  * fuzzyMatchRecents) so those still float to the top.
+ *
+ * Scoped to `host` (undefined = local): folders live on a specific machine, so a
+ * remote session must NOT surface local folders (you can't reference them over
+ * that session's transport). "Global" here means across all PATHS on this host —
+ * not limited to the current cwd subtree — NOT across hosts.
  */
-export async function getRecentFolders(): Promise<RecentFolder[]> {
+export async function getRecentFolders(host?: string): Promise<RecentFolder[]> {
   try {
     const res = await apiGet<{ dirs: { cwd: string; host: string | null }[] }>('/api/files/recent-dirs');
-    return res.dirs.map((d) => ({ path: d.cwd, host: d.host ?? undefined }));
+    const wantHost = host ?? null;
+    return res.dirs
+      .filter((d) => (d.host ?? null) === wantHost)
+      .map((d) => ({ path: d.cwd, host: d.host ?? undefined }));
   } catch {
     return [];
   }

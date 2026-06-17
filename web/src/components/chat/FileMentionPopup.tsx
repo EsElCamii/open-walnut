@@ -206,9 +206,10 @@ export const FileMentionPopup = forwardRef<FileMentionHandle, FileMentionPopupPr
     useEffect(() => {
       if (!recentsMode) return;
       let cancelled = false;
-      getRecentFolders().then((r) => { if (!cancelled) setAllRecents(r); }).catch(() => {});
+      // Scoped to this session's host — a remote session won't list local folders.
+      getRecentFolders(host).then((r) => { if (!cancelled) setAllRecents(r); }).catch(() => {});
       return () => { cancelled = true; };
-    }, [recentsMode]);
+    }, [recentsMode, host]);
     const recentMatches = useMemo(
       () => (recentsMode ? fuzzyMatchRecents(recentQuery, allRecents, { cwd: rootPath, host }) : []),
       [recentsMode, recentQuery, allRecents, rootPath, host],
