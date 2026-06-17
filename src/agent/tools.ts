@@ -2256,6 +2256,55 @@ export function getToolSchemas(): Array<{ name: string; description: string; inp
 }
 
 /**
+ * Read-only tool allowlist for non-interactive notification paths (e.g. triage).
+ *
+ * Fail-closed by design: this is an ALLOWLIST, not a denylist. Any tool not
+ * named here is excluded — so a future write tool is barred by default and a
+ * notification path can never silently regain the ability to mutate state.
+ *
+ * Why this exists: the triage "notify the user about a task's status" path
+ * re-runs the main agent loop. With the full tool set it could call
+ * `task_create` and — when the bloated history got blind-trimmed past the
+ * "Do not use tools" instruction — actually did, spawning near-duplicate tasks
+ * in a self-propagating loop. Triage only ever needs to read state to phrase a
+ * 2-4 sentence summary, so it gets read-only tools only.
+ */
+export const READ_ONLY_TOOL_NAMES: ReadonlySet<string> = new Set([
+  // Task read
+  'task_query', 'task_get', 'task_search',
+  // Session read
+  'session_list', 'session_summary', 'session_history',
+  // Config read
+  'config_get',
+  // Cron read
+  'cron_list',
+  // File read
+  'file_read', 'file_list', 'file_glob', 'file_grep',
+  // Agent/command read
+  'agent_list', 'agent_get', 'command_list', 'command_get',
+  // Memory / heartbeat read
+  'memory_notes_search', 'heartbeat_get',
+  // Web read (no local state mutation)
+  'web_fetch', 'web_search',
+]);
+
+/**
+ * Tool schemas filtered to the read-only allowlist (see READ_ONLY_TOOL_NAMES).
+ * Used by notification-only agent turns that must not mutate state.
+ */
+export function getReadOnlyToolSchemas(): Array<{ name: string; description: string; input_schema: Record<string, unknown> }> {
+  return getToolSchemas().filter((t) => READ_ONLY_TOOL_NAMES.has(t.name));
+}
+
+/**
+ * Full ToolDefinitions filtered to the read-only allowlist (see READ_ONLY_TOOL_NAMES).
+ * Pass as runAgentLoop({ tools }) so the model only ever sees read-only schemas.
+ */
+export function getReadOnlyTools(): ToolDefinition[] {
+  return tools.filter((t) => READ_ONLY_TOOL_NAMES.has(t.name));
+}
+
+/**
  * Execute a tool by name with given parameters.
  */
 export async function executeTool(name: string, params: Record<string, unknown>, meta?: ToolExecuteMeta): Promise<ToolResultContent> {

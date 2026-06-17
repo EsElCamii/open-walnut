@@ -26,7 +26,7 @@ import type { ImagePayload } from './images.js'
 import { truncateToTokenBudget } from '../../utils/token-truncate.js'
 import { log } from '../../logging/index.js'
 import { validateAgentId, validateConversationId } from '../../constants.js'
-import { enqueueAgentTurn } from '../agent-turn-queue.js'
+import { enqueueAgentTurn, recordLastTurnTokens } from '../agent-turn-queue.js'
 import { triggerBackgroundCompaction } from '../background-compaction.js'
 import {
   shouldUpdateWorkingMemory,
@@ -871,6 +871,9 @@ export function registerChatRpc(): void {
             } catch (err) {
               log.web.warn('failed to record usage', { error: err instanceof Error ? err.message : String(err) })
             }
+            // Cache the EXACT input-token count (incl. cache) so the triage bail
+            // pre-check sees this conversation's real size after a chat turn grows it.
+            try { recordLastTurnTokens(conversationId, (usage.input_tokens ?? 0) + (usage.cache_read_input_tokens ?? 0) + (usage.cache_creation_input_tokens ?? 0)) } catch {}
           },
         // Note: onText is intentionally not provided — agent:response is sent once
         // at the end of the turn (not per text block) so isStreaming stays true

@@ -139,6 +139,27 @@ export function enqueueMainAgentTurn<T>(
   return enqueueAgentTurn('general', label, task);
 }
 
+// ─── Per-conversation last-turn exact token count ──────────────────────
+// The Bedrock API returns the EXACT input-token count (system + tools +
+// messages, incl. cache) on every successful call. That is the only
+// trustworthy size signal — our offline estimator (estimateFullPayload, built
+// on @anthropic-ai/tokenizer / Claude-2 BPE) systematically undercounts
+// Claude 3+ payloads by ~35%, which made the triage 0.92 bail check never fire
+// (it estimated ~760K for a real ~1.03M-token history and sailed under the
+// 920K threshold). We cache the last real count per conversation so the next
+// turn's pre-check can reason in real-token space instead of estimate space.
+const lastTurnExactTokens = new Map<string, number>();
+
+/** Record the exact input-token count reported by the API for a conversation's last turn. */
+export function recordLastTurnTokens(conversationId: string, exactInputTokens: number): void {
+  if (exactInputTokens > 0) lastTurnExactTokens.set(conversationId, exactInputTokens);
+}
+
+/** Get the exact input-token count from the conversation's last successful turn, if known. */
+export function getLastTurnTokens(conversationId: string): number | undefined {
+  return lastTurnExactTokens.get(conversationId);
+}
+
 /**
  * Get the current queue status for a specific agent (or all agents).
  */

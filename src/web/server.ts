@@ -76,7 +76,7 @@ import { authRouter } from './routes/auth.js'
 import { incidentsRouter } from './routes/incidents.js'
 import { registerAuthRpc } from './routes/auth-rpc.js'
 import { initPushNotifications } from '../core/push-notification.js'
-import { enqueueMainAgentTurn, getQueueStatus } from './agent-turn-queue.js'
+import { enqueueMainAgentTurn, getQueueStatus, recordLastTurnTokens, getLastTurnTokens } from './agent-turn-queue.js'
 import { triggerBackgroundCompaction } from './background-compaction.js'
 import {
   startHeartbeatRunner,
@@ -1605,7 +1605,11 @@ export async function startServer(options: ServerOptions = {}): Promise<HttpServ
               const { getContextWindowSize } = await import('../agent/model.js')
               const { getConfig } = await import('../core/config-manager.js')
               const { buildSystemPrompt } = await import('../agent/context.js')
-              const { getToolSchemas } = await import('../agent/tools.js')
+              // Fix 1 (root cause): triage only ever needs to READ state to phrase a
+              // 2-4 sentence status notification. It must NEVER hold task_create or any
+              // other write tool — that's what let a blind-trimmed turn re-create
+              // near-duplicate tasks in a self-propagating loop. Use the read-only set.
+              const { getReadOnlyTools, getReadOnlyToolSchemas } = await import('../agent/tools.js')
               const history = await chatHistory.getApiMessages('general', conversationId)
               const historyTokens = estimateMessagesTokens(history)
 
@@ -1618,7 +1622,8 @@ export async function startServer(options: ServerOptions = {}): Promise<HttpServ
               let estimatedTotal = historyTokens
               try {
                 const system = await buildSystemPrompt()
-                const tools = getToolSchemas()
+                // Estimate against the SAME (read-only) tool set we actually send below.
+                const tools = getReadOnlyToolSchemas()
                 const full = estimateFullPayload({ system, tools, messages: history })
                 estimatedTotal = full.total
               } catch (preCheckErr) {
@@ -1629,10 +1634,27 @@ export async function startServer(options: ServerOptions = {}): Promise<HttpServ
                 estimatedTotal = contextLimit // force bail
               }
 
-              if (estimatedTotal > contextLimit * TRIAGE_BAIL_PERCENT) {
+              // Fix 2: the offline estimator (estimateFullPayload → @anthropic-ai/tokenizer,
+              // Claude-2 BPE) undercounts Claude 3+ payloads by ~35%, so the raw estimate
+              // sailed under the 0.92 threshold even at a real ~1.03M tokens — the bail
+              // never fired. Decide in REAL-token space using two independent signals,
+              // taking the larger (more conservative):
+              //   1. estimate × ESTIMATE_CORRECTION — static calibration (~1.35 observed in logs)
+              //   2. last turn's EXACT API input_tokens for this conversation — ground truth;
+              //      history only grows between turns (a successful compaction would shrink it,
+              //      but over-bailing just degrades to notification-only, which is safe).
+              const ESTIMATE_CORRECTION = 1.35
+              const correctedEstimate = Math.round(estimatedTotal * ESTIMATE_CORRECTION)
+              const lastExact = getLastTurnTokens(conversationId) ?? 0
+              const effectiveTotal = Math.max(correctedEstimate, lastExact)
+
+              if (effectiveTotal > contextLimit * TRIAGE_BAIL_PERCENT) {
                 log.web.warn('triage main agent skipped: history near context limit', {
                   taskId,
-                  estimatedTotal: `~${Math.round(estimatedTotal / 1000)}K`,
+                  rawEstimate: `~${Math.round(estimatedTotal / 1000)}K`,
+                  correctedEstimate: `~${Math.round(correctedEstimate / 1000)}K`,
+                  lastExact: lastExact ? `~${Math.round(lastExact / 1000)}K` : 'unknown',
+                  effectiveTotal: `~${Math.round(effectiveTotal / 1000)}K`,
                   contextLimit: `${Math.round(contextLimit / 1000)}K`,
                   bailThreshold: `${Math.round(contextLimit * TRIAGE_BAIL_PERCENT / 1000)}K`,
                 })
@@ -1648,11 +1670,14 @@ export async function startServer(options: ServerOptions = {}): Promise<HttpServ
                 return
               }
 
+              const readOnlyTools = getReadOnlyTools()
               log.web.info('triage main agent turn starting', {
                 taskId,
                 historyMessages: history.length,
                 historyTokens: `~${Math.round(historyTokens / 1000)}K`,
-                estimatedTotal: `~${Math.round(estimatedTotal / 1000)}K`,
+                effectiveTotal: `~${Math.round(effectiveTotal / 1000)}K`,
+                toolCount: readOnlyTools.length,
+                readOnlyTools: true,
               })
 
               const agentResult = await runAgentLoop(prompt, history, {
@@ -1663,8 +1688,11 @@ export async function startServer(options: ServerOptions = {}): Promise<HttpServ
                 onToolActivity: (activity) => broadcastEvent('agent:tool-activity', activity),
                 onUsage: (u) => {
                   try { usageTracker.record({ source: 'triage', model: u.model ?? 'unknown', input_tokens: u.input_tokens, output_tokens: u.output_tokens, cache_creation_input_tokens: u.cache_creation_input_tokens, cache_read_input_tokens: u.cache_read_input_tokens }) } catch {}
+                  // Fix 2: cache the EXACT input-token count (incl. cache) so the next
+                  // triage turn's bail pre-check can reason in real-token space.
+                  try { recordLastTurnTokens(conversationId, (u.input_tokens ?? 0) + (u.cache_read_input_tokens ?? 0) + (u.cache_creation_input_tokens ?? 0)) } catch {}
                 },
-              }, { source: 'triage' })
+              }, { source: 'triage', tools: readOnlyTools })
 
               if (agentResult.response) {
                 broadcastEvent('agent:response', { text: agentResult.response, source: 'triage', conversationId })
