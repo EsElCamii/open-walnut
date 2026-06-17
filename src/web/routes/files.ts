@@ -375,7 +375,9 @@ filesRouter.post('/record-dir', async (req: Request, res: Response, next: NextFu
       res.status(400).json({ error: 'path must be an absolute string' })
       return
     }
-    if (dirPath.includes('..') || dirPath.length > 4096) {
+    // Reject traversal by SEGMENT, not substring — a real dir like "/foo/..bar"
+    // contains ".." but isn't traversal; only a "." or ".." path component is.
+    if (dirPath.length > 4096 || dirPath.split('/').some((seg) => seg === '..' || seg === '.')) {
       res.status(400).json({ error: 'Invalid path' })
       return
     }
@@ -394,15 +396,18 @@ filesRouter.post('/record-dir', async (req: Request, res: Response, next: NextFu
 filesRouter.get('/recent-dirs', async (_req: Request, res: Response, next: NextFunction) => {
   try {
     const [freq, mention] = await Promise.all([getFrequentDirs(), getMentionDirs()])
-    const seen = new Set<string>()
-    const merged: Array<{ cwd: string; host: string | null; lastUsed: string }> = []
-    // mention-dirs first so an "@"-browsed folder keeps its own recency; freq fills the rest.
+    // Dedup by cwd+host, keeping the MOST-RECENT lastUsed across both stores — a
+    // path can be both a session dir and "@"-browsed, and we want its freshest use
+    // (not whichever store we happened to iterate first) to drive recency ranking.
+    const byKey = new Map<string, { cwd: string; host: string | null; lastUsed: string }>()
     for (const d of [...mention, ...freq]) {
       const key = `${d.cwd}::${d.host ?? '__local__'}`
-      if (seen.has(key)) continue
-      seen.add(key)
-      merged.push({ cwd: d.cwd, host: d.host, lastUsed: d.lastUsed })
+      const existing = byKey.get(key)
+      if (!existing || new Date(d.lastUsed).getTime() > new Date(existing.lastUsed).getTime()) {
+        byKey.set(key, { cwd: d.cwd, host: d.host, lastUsed: d.lastUsed })
+      }
     }
+    const merged = [...byKey.values()]
     merged.sort((a, b) => new Date(b.lastUsed).getTime() - new Date(a.lastUsed).getTime())
     res.json({ dirs: merged.map(({ cwd, host }) => ({ cwd, host })) })
   } catch (err) {

@@ -7,11 +7,12 @@
  * file (FileContentView). Local + remote (daemon) via /api/files/list.
  *
  * Keyboard is driven by the parent ChatInput through the imperative handle:
- *   move(±1)       — change selection
- *   enter()        — dir → navigate into it; file → select it
- *   selectCurrent()— Cmd/Ctrl+Enter: select current item regardless of type
- * Navigation (enter into dir / go up) is internal; selection returns an
- * absolute path via onSelect (the chat input inserts it as an "@" ref).
+ *   move(±1)        — change selection
+ *   into()          — →/Enter: dir → navigate into it; file → select it
+ *   up()            — ←: navigate to the parent directory
+ *   selectCurrent() — Cmd/Ctrl+Enter: select current item regardless of type
+ * Navigation (into dir / go up) is internal; selection returns an absolute
+ * path via onSelect (the chat input inserts it as an "@" ref).
  */
 import {
   useState,
@@ -143,8 +144,13 @@ export const FileMentionPopup = forwardRef<FileMentionHandle, FileMentionPopupPr
           const canonical = res.path || dirPath;
           setBrowseDir(canonical);
           if (opts.isRoot) setRootPath(canonical);
-          // Record the visited folder so "@?" can fuzzy-jump back to it later.
-          recordRecentFolder(canonical, host);
+          // Record the visited folder so "@?" can fuzzy-jump back to it later — but
+          // NOT on the root open, which fires on EVERY popup open. Each record POSTs
+          // a synchronous full-file rewrite server-side (event-loop-starvation history
+          // in this repo), so we only persist folders the user deliberately navigated
+          // into (into/up/breadcrumb/path-typing), not the passive open-at-cwd. The cwd
+          // is already a session working dir, so it's covered by the frequent-dirs union.
+          if (!opts.isRoot) recordRecentFolder(canonical, host);
           setEntries(res.entries);
           // If the requested path was a file, the backend listed its parent and
           // flagged the file — pre-select it so the right pane previews it.
@@ -183,11 +189,12 @@ export const FileMentionPopup = forwardRef<FileMentionHandle, FileMentionPopupPr
     // segment filters. When typing crosses a "/" (e.g. "src/" → "src/web"), the
     // target dir changes and we load it. Compare against browseDir so we only fetch
     // when the resolved directory actually moves (typing the filter part is free).
-    // "@?" recents mode: a GLOBAL fuzzy search over folders the user has opened
-    // before — across ALL hosts, any depth, not limited to the current cwd. Recents
-    // come from the shared, server-persisted frequent-dirs store (not console-local).
-    // Folders under the current cwd / on the current host are boosted to the top but
-    // never excluded. The text after "?" is the fuzzy query.
+    // "@?" recents mode: a fuzzy search over folders the user has opened before —
+    // any depth, not limited to the current cwd. Recents come from the shared,
+    // server-persisted UNION of session working dirs (frequent-dirs) + "@"-browsed
+    // folders (mention-dirs) — scoped to THIS session's host (you can't reference a
+    // folder on another machine over this transport). Folders under the current cwd
+    // are boosted to the top but never excluded. The text after "?" is the fuzzy query.
     const recentsMode = query.startsWith('?');
     const recentQuery = recentsMode ? query.slice(1) : '';
 
@@ -211,8 +218,8 @@ export const FileMentionPopup = forwardRef<FileMentionHandle, FileMentionPopupPr
       return () => { cancelled = true; };
     }, [recentsMode, host]);
     const recentMatches = useMemo(
-      () => (recentsMode ? fuzzyMatchRecents(recentQuery, allRecents, { cwd: rootPath, host }) : []),
-      [recentsMode, recentQuery, allRecents, rootPath, host],
+      () => (recentsMode ? fuzzyMatchRecents(recentQuery, allRecents, { cwd: rootPath }) : []),
+      [recentsMode, recentQuery, allRecents, rootPath],
     );
 
     // Filter the current dir by the trailing path segment (case-insensitive,
@@ -293,15 +300,12 @@ export const FileMentionPopup = forwardRef<FileMentionHandle, FileMentionPopupPr
       [browseDir, onSelect],
     );
 
-    // Open a recent folder. Same host as the current session → browse into it (the
-    // popup leaves "@?" mode and lists its contents). Different host → we can't browse
-    // it over this session's transport, so just insert it as a path ref directly.
+    // Open a recent folder: leave "@?" mode and browse into it (lists its contents).
+    // Recents are already host-filtered (getRecentFolders(host)), so every entry is on
+    // this session's host and is always browsable — no cross-host fallback needed.
     const chooseRecent = useCallback(
-      (r: RecentFolder) => {
-        if ((r.host ?? undefined) === (host ?? undefined)) onNavigate(r.path);
-        else onSelect(r.path);
-      },
-      [host, onNavigate, onSelect],
+      (r: RecentFolder) => { onNavigate(r.path); },
+      [onNavigate],
     );
 
     // Active list length depends on mode (recents vs current-dir entries).
@@ -411,10 +415,7 @@ export const FileMentionPopup = forwardRef<FileMentionHandle, FileMentionPopupPr
                   >
                     <span className="fmp-icon">🕘</span>
                     <span className="fmp-recent">
-                      <span className="fmp-recent-name">
-                        {name}
-                        {r.host && <span className="fmp-recent-host">{r.host}</span>}
-                      </span>
+                      <span className="fmp-recent-name">{name}</span>
                       <span className="fmp-recent-path">{r.path}</span>
                     </span>
                     <button

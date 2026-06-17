@@ -104,21 +104,22 @@ export function fuzzyScore(query: string, path: string): number {
   return score;
 }
 
-/** Context for ranking — folders under the current path / on the current host
- *  get a relevance boost, but everything is still searched (global). */
+/** Context for ranking — folders under the current cwd get a tiebreaker bump.
+ *  (host is already hard-filtered upstream in getRecentFolders, so it's not a
+ *  ranking input here — every candidate is already on the right host.) */
 export interface RecentContext {
   cwd?: string;
-  host?: string;
 }
 
-const SAME_HOST_BOOST = 4;
-const UNDER_CWD_BOOST = 8;
-
 /**
- * Fuzzy-match recents against a query, best score first (ties keep input order).
- * GLOBAL: matches across all hosts. The `ctx` boost ranks folders on the current
- * host — and especially those under the current cwd — higher, without excluding
- * the rest. An empty query returns everything, re-sorted by the boost + recency.
+ * Fuzzy-match recents against a query, best fuzzy score first.
+ *
+ * "under the current cwd" is a SECONDARY sort key, NOT added into the fuzzy score
+ * — otherwise a weakly-matching folder under cwd could leapfrog a far stronger
+ * match elsewhere. So ranking is: (1) fuzzy relevance, then (2) under-cwd first,
+ * then (3) input order (which the server pre-sorted by recency). With an empty
+ * query all fuzzy scores are 0, so it degrades to under-cwd-then-recency.
+ * Folders with zero fuzzy signal (and a non-empty query) are dropped.
  */
 export function fuzzyMatchRecents(
   query: string,
@@ -127,22 +128,19 @@ export function fuzzyMatchRecents(
 ): RecentFolder[] {
   const q = query.trim();
   const cwd = ctx.cwd ? ctx.cwd.replace(/\/+$/, '') : '';
-  const boostFor = (r: RecentFolder): number => {
-    let b = 0;
-    if (ctx.host !== undefined && (r.host ?? undefined) === (ctx.host ?? undefined)) b += SAME_HOST_BOOST;
-    if (cwd && (r.path === cwd || r.path.startsWith(cwd + '/'))) b += UNDER_CWD_BOOST;
-    return b;
-  };
+  const underCwd = (r: RecentFolder): boolean =>
+    !!cwd && (r.path === cwd || r.path.startsWith(cwd + '/'));
 
-  const scored: { r: RecentFolder; score: number; idx: number }[] = [];
+  const scored: { r: RecentFolder; score: number; cwd: boolean; idx: number }[] = [];
   recents.forEach((r, idx) => {
     const base = q ? fuzzyScore(q, r.path) : 0;
-    // With a query, drop only the truly-irrelevant (zero signal). The cwd/host
-    // boost is NOT enough on its own to surface an unrelated folder — it only
-    // re-ranks among things that already matched.
-    if (q && base === 0) return;
-    scored.push({ r, score: base + boostFor(r), idx });
+    if (q && base === 0) return; // non-empty query with zero signal → drop
+    scored.push({ r, score: base, cwd: underCwd(r), idx });
   });
-  scored.sort((a, b) => (b.score - a.score) || (a.idx - b.idx));
+  scored.sort((a, b) =>
+    (b.score - a.score) ||              // 1. fuzzy relevance
+    (Number(b.cwd) - Number(a.cwd)) ||  // 2. under current cwd
+    (a.idx - b.idx),                    // 3. server recency order
+  );
   return scored.map((s) => s.r);
 }
