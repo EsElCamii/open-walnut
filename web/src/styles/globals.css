@@ -5628,6 +5628,28 @@ input:focus, textarea:focus, select:focus {
   animation: mic-pulse 1.2s ease-in-out infinite;
 }
 
+/* Live waveform meter shown inside the button while recording */
+.mic-waveform {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  width: 18px;
+  height: 18px;
+}
+.mic-waveform-bar {
+  width: 2px;
+  min-height: 3px;
+  border-radius: 1px;
+  background: currentColor;
+  /* Smooth the per-frame height changes so motion reads as fluid, not jittery */
+  transition: height 0.08s linear;
+}
+.mic-btn-sm .mic-waveform {
+  width: 14px;
+  height: 14px;
+}
+
 .mic-transcribing {
   color: var(--accent);
   border-color: var(--accent);

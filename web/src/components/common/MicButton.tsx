@@ -25,8 +25,27 @@ interface MicButtonProps {
 
 const RETRY_DISMISS_MS = 10_000;
 
+/**
+ * Live mic waveform shown while recording. Five columns whose heights track
+ * the input level (0..1) with fixed per-column weights so it reads as a voice
+ * meter. A near-flat waveform = the mic isn't picking up sound (the user's cue
+ * that something's wrong, before the auto-silence error fires).
+ */
+function MicWaveform({ level }: { level: number }) {
+  const weights = [0.45, 0.75, 1, 0.7, 0.4];
+  return (
+    <span className="mic-waveform" aria-hidden="true">
+      {weights.map((w, i) => {
+        // Idle floor so columns are always faintly visible; scale up with level.
+        const h = 3 + Math.min(1, level * w) * 15;
+        return <span key={i} className="mic-waveform-bar" style={{ height: `${h}px` }} />;
+      })}
+    </span>
+  );
+}
+
 export function MicButton({ onTranscribe, language, disabled, size = 'md' }: MicButtonProps) {
-  const { isSupported, isRecording, isTranscribing, error, toggleRecording, retryWithModel, lastDebugPath, hasLastRecording } = useSpeechToText({
+  const { isSupported, isRecording, isTranscribing, error, toggleRecording, retryWithModel, lastDebugPath, hasLastRecording, level } = useSpeechToText({
     onTranscribe,
     language,
   });
@@ -194,6 +213,8 @@ export function MicButton({ onTranscribe, language, disabled, size = 'md' }: Mic
           <svg className="mic-spinner" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
             <circle cx="12" cy="12" r="10" strokeDasharray="60" strokeDashoffset="20" />
           </svg>
+        ) : isRecording ? (
+          <MicWaveform level={level} />
         ) : (
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
             <rect x="9" y="1" width="6" height="12" rx="3" />

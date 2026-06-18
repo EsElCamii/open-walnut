@@ -33,7 +33,15 @@ export interface UseSpeechToTextReturn {
   lastDebugPath: string | null;
   /** Whether we have a last recording available for retry */
   hasLastRecording: boolean;
+  /** Live mic input level 0..1 (smoothed RMS) while recording — drives the waveform UI */
+  level: number;
 }
+
+// Mic-silence detection tunables.
+// Browser bug (esp. Firefox with a wedged capture process) yields a pure-zero stream
+// (~ -91 dB). We detect that early so the user isn't left talking into a dead mic.
+const SILENCE_RMS_THRESHOLD = 0.012; // below this = effectively silent
+const SILENCE_GRACE_MS = 2200;       // allow this long to start producing sound
 
 const isMediaRecorderSupported =
   typeof window !== 'undefined' &&
@@ -47,10 +55,22 @@ export function useSpeechToText({ onTranscribe, language }: UseSpeechToTextOptio
   const [error, setError] = useState<string | null>(null);
   const [lastDebugPath, setLastDebugPath] = useState<string | null>(null);
   const [hasLastRecording, setHasLastRecording] = useState(false);
+  const [level, setLevel] = useState(0);
 
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const chunksRef = useRef<Blob[]>([]);
+  // Web Audio analyser for live level + early silence detection
+  const audioCtxRef = useRef<AudioContext | null>(null);
+  const analyserRef = useRef<AnalyserNode | null>(null);
+  const rafRef = useRef<number | undefined>(undefined);
+  // True once we observed any non-silent audio this recording. Reset on each start.
+  const sawSoundRef = useRef(false);
+  // Set when we abort a recording due to silence, so onstop knows to skip transcription.
+  const abortedSilentRef = useRef(false);
+  // True when the analyser successfully attached this recording (so the silence
+  // backstop in onstop only applies when we actually had working level data).
+  const analyserAttachedRef = useRef(false);
   // Keep last audio for retry
   const lastAudioRef = useRef<{ base64: string; format: string } | null>(null);
   // Refs mirror props to avoid stale closures in MediaRecorder.onstop async callback
@@ -59,12 +79,27 @@ export function useSpeechToText({ onTranscribe, language }: UseSpeechToTextOptio
   const languageRef = useRef(language);
   languageRef.current = language;
   const isMountedRef = useRef(true);
-  useEffect(() => { return () => { isMountedRef.current = false; }; }, []);
+  // Reset on every mount, not just set-false on unmount: this component can be
+  // unmounted+remounted while a recording's async onstop is still pending (parent
+  // re-renders the chat input). A one-shot cleanup would leave isMounted=false
+  // forever, silently dropping the transcription. Re-arm it on each mount.
+  useEffect(() => {
+    isMountedRef.current = true;
+    return () => { isMountedRef.current = false; };
+  }, []);
 
   const stopStream = useCallback(() => {
+    if (rafRef.current !== undefined) {
+      cancelAnimationFrame(rafRef.current);
+      rafRef.current = undefined;
+    }
+    analyserRef.current = null;
+    audioCtxRef.current?.close().catch(() => {});
+    audioCtxRef.current = null;
     streamRef.current?.getTracks().forEach((t) => t.stop());
     streamRef.current = null;
     mediaRecorderRef.current = null;
+    setLevel(0);
   }, []);
 
   const toggleRecording = useCallback(async () => {
@@ -83,6 +118,57 @@ export function useSpeechToText({ onTranscribe, language }: UseSpeechToTextOptio
       });
       streamRef.current = stream;
 
+      // Set up Web Audio analyser for live level + early silence detection.
+      // Best-effort: if AudioContext is unavailable, recording still works (just no waveform).
+      sawSoundRef.current = false;
+      abortedSilentRef.current = false;
+      analyserAttachedRef.current = false;
+      try {
+        const AudioCtx = window.AudioContext ?? (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+        if (AudioCtx) {
+          const ctx = new AudioCtx();
+          audioCtxRef.current = ctx;
+          const source = ctx.createMediaStreamSource(stream);
+          const analyser = ctx.createAnalyser();
+          analyser.fftSize = 512;
+          source.connect(analyser);
+          analyserRef.current = analyser;
+          analyserAttachedRef.current = true;
+
+          const buf = new Uint8Array(analyser.fftSize);
+          const startedAt = performance.now();
+          const tick = () => {
+            const a = analyserRef.current;
+            if (!a) return;
+            a.getByteTimeDomainData(buf);
+            // RMS around the 128 center (silence == flat 128)
+            let sumSq = 0;
+            for (let i = 0; i < buf.length; i++) {
+              const v = (buf[i] - 128) / 128;
+              sumSq += v * v;
+            }
+            const rms = Math.sqrt(sumSq / buf.length);
+            if (rms >= SILENCE_RMS_THRESHOLD) sawSoundRef.current = true;
+            // Smooth + amplify a bit for a lively meter display
+            setLevel((prev) => prev * 0.6 + Math.min(1, rms * 3) * 0.4);
+
+            // Early silence abort: grace period elapsed and never saw real sound →
+            // the mic is feeding a dead/silent stream (classic Firefox wedge). Stop now.
+            if (!sawSoundRef.current && performance.now() - startedAt > SILENCE_GRACE_MS) {
+              abortedSilentRef.current = true;
+              setError('No sound detected from the microphone. Check your mic device (or restart the browser) and try again.');
+              const rec = mediaRecorderRef.current;
+              if (rec && rec.state !== 'inactive') rec.stop();
+              return; // stop the RAF loop; onstop will skip transcription
+            }
+            rafRef.current = requestAnimationFrame(tick);
+          };
+          rafRef.current = requestAnimationFrame(tick);
+        }
+      } catch {
+        // Analyser is best-effort; ignore and record without level/silence detection.
+      }
+
       // Prefer webm/opus, fall back to whatever is available
       const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
         ? 'audio/webm;codecs=opus'
@@ -99,6 +185,8 @@ export function useSpeechToText({ onTranscribe, language }: UseSpeechToTextOptio
       };
 
       recorder.onstop = async () => {
+        const abortedSilent = abortedSilentRef.current;
+        const sawSound = sawSoundRef.current;
         stopStream();
         setIsRecording(false);
 
@@ -106,6 +194,16 @@ export function useSpeechToText({ onTranscribe, language }: UseSpeechToTextOptio
         chunksRef.current = [];
 
         if (blob.size === 0) return;
+
+        // Don't transcribe silence — Whisper hallucinates "you"/"thank you" on empty audio.
+        // `abortedSilent` = auto-stopped mid-recording; `!sawSound` = user stopped but we
+        // never observed real input (analyser ran the whole time and saw only silence).
+        if (abortedSilent || (analyserAttachedRef.current && !sawSound)) {
+          if (!abortedSilent && isMountedRef.current) {
+            setError('No sound detected from the microphone. Check your mic device (or restart the browser) and try again.');
+          }
+          return;
+        }
 
         // Convert blob to base64 using FileReader (avoids stack overflow on large audio)
         if (!isMountedRef.current) return;
@@ -213,5 +311,6 @@ export function useSpeechToText({ onTranscribe, language }: UseSpeechToTextOptio
     retryWithModel,
     lastDebugPath,
     hasLastRecording,
+    level,
   };
 }
