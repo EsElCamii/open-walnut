@@ -958,7 +958,10 @@ describe('appendSystemPrompt parameter', () => {
 // ══════════════════════════════════════════════════════════════════
 
 describe('SessionRunner context enrichment', () => {
-  it('handleStart builds context and passes appendSystemPrompt to session', async () => {
+  // buildSessionContext is a no-op as of 2026-06-18 — starting a session for a
+  // task no longer injects a system prompt. The session must still start and
+  // deliver the message; it just carries no [has-system-prompt] marker.
+  it('handleStart starts the session without injecting a system prompt', async () => {
     const tasksDir = path.join(tmpBase, 'tasks');
     await fsp.mkdir(tasksDir, { recursive: true });
     await fsp.writeFile(
@@ -989,7 +992,7 @@ describe('SessionRunner context enrichment', () => {
     const result = await waitForResult(collected);
     const rd = result.data as { result: string };
 
-    expect(rd.result).toContain('[has-system-prompt]');
+    expect(rd.result).not.toContain('[has-system-prompt]');
     expect(rd.result).toContain('context enrichment test');
 
     runner.destroyAndKill();
@@ -1010,8 +1013,9 @@ describe('SessionRunner context enrichment', () => {
     const rd = result.data as { result: string };
 
     expect(rd.result).toContain('should still work');
-    // server_safety block is always appended, so system prompt is always present
-    expect(rd.result).toContain('[has-system-prompt]');
+    // buildSessionContext is a no-op now, so no system prompt is injected for a
+    // task with no explicit appendSystemPrompt — the session must still start.
+    expect(rd.result).not.toContain('[has-system-prompt]');
 
     runner.destroyAndKill();
   });

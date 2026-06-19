@@ -496,14 +496,11 @@ sessionsRouter.post('/quick-start', async (req: Request, res: Response, next: Ne
       bus.emit(EventNames.TASK_CREATED, { task: updatedTask }, ['web-ui', 'main-agent'], { source: 'quick-start' })
     }
 
-    // Build system prompt hint for session AI
-    const appendSystemPrompt = [
-      '<quick_start_task>',
-      'This task was created via Quick Start in Local / Quick Start. When your work is complete:',
-      '1. Update the task title to be descriptive (replace the generic "Session: ..." title) using task_update',
-      '2. Move the task to the correct category and project using task_update (category + project fields)',
-      '</quick_start_task>',
-    ].join('\n')
+    // No system-prompt hint is injected for quick-start sessions. (We used to
+    // tell the session to rename/recategorize the task on completion, but that
+    // pushed sessions into unrelated task-management side-quests.) Extension
+    // point: pass an `appendSystemPrompt` on SESSION_START below if a future
+    // need arises.
 
     // A quick-start (incl. its retry) to a remote host is a deliberate human action —
     // forget any cached connection failure so we reconnect fresh rather than fast-fail.
@@ -521,7 +518,6 @@ sessionsRouter.post('/quick-start', async (req: Request, res: Response, next: Ne
       mode,
       model,
       host,
-      appendSystemPrompt,
       largePromptFile,
       requestTs,
     }, ['session-runner'], { source: 'quick-start' })

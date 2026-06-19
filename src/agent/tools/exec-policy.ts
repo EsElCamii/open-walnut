@@ -53,9 +53,10 @@ export interface PolicyResult {
  * Returns a rejection PolicyResult if the command is dangerous, or undefined if OK.
  *
  * NOTE: These are defense-in-depth heuristics, not a hard security boundary.
- * The session context warning (`<server_safety>` in session-context.ts) is the
- * primary defense. These regex patterns catch common accidental kill patterns
- * but can be circumvented by sufficiently creative commands.
+ * (There used to be a complementary `<server_safety>` system-prompt warning
+ * built in session-context.ts; it was removed, so these regex rules are now the
+ * primary guard.) These patterns catch common accidental kill patterns but can
+ * be circumvented by sufficiently creative commands.
  */
 function checkHardcodedRules(command: string): PolicyResult | undefined {
   // Block ANY command that references port 3456 combined with kill-like intent.

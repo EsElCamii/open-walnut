@@ -383,10 +383,13 @@ describe('Session context injection', () => {
     await fs.rm(testPath, { recursive: true, force: true })
   })
 
-  it('builds session context with matched repo', async () => {
+  // buildSessionContext is a no-op as of 2026-06-18 — Walnut no longer injects
+  // repository (or any other) context into a session's system prompt. Repo
+  // matching itself (findRepoByPath, tested above) still works; it's just no
+  // longer fed into the system prompt. These tests pin the no-op contract.
+  it('does not inject repo context even when CWD matches a configured repo', async () => {
     const { buildSessionContext } = await import('../../src/agent/session-context.js')
 
-    // We need a task to build context — create one via API
     const createRes = await api('POST', '/api/tasks', {
       title: 'Context injection test task',
       category: 'test',
@@ -396,16 +399,12 @@ describe('Session context injection', () => {
 
     const ctx = await buildSessionContext(taskId, testPath)
 
-    expect(ctx.systemPrompt).toContain('repository_context')
-    expect(ctx.systemPrompt).toContain('Context Test Repo')
-    expect(ctx.systemPrompt).toContain('Rust, Wasm')
-    // Should prefer overview over architecture_notes
-    expect(ctx.systemPrompt).toContain('verifying session context injection')
-    expect(ctx.systemPrompt).toContain('Rust library')
-    expect(ctx.systemPrompt).toContain('cargo build')
+    expect(ctx.systemPrompt).toBe('')
+    expect(ctx.systemPrompt).not.toContain('repository_context')
+    expect(ctx.systemPrompt).not.toContain('Context Test Repo')
   })
 
-  it('does not inject repo context when CWD does not match', async () => {
+  it('returns an empty prompt when CWD does not match any repo', async () => {
     const { buildSessionContext } = await import('../../src/agent/session-context.js')
 
     const createRes = await api('POST', '/api/tasks', {
@@ -417,6 +416,6 @@ describe('Session context injection', () => {
 
     const ctx = await buildSessionContext(taskId, '/tmp/no-repo-here')
 
-    expect(ctx.systemPrompt).not.toContain('repository_context')
+    expect(ctx.systemPrompt).toBe('')
   })
 })

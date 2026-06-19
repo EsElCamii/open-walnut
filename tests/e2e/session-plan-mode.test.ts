@@ -253,8 +253,10 @@ describe('Plan mode session lifecycle', () => {
     }
     expect(rd.taskId).toBe('plan-task-001')
     expect(rd.isError).toBe(false)
-    // Execution session should have system prompt (task context) and bypass mode
-    expect(rd.result).toContain('[has-system-prompt]')
+    // Execution session runs in bypass mode. (No system prompt is injected:
+    // buildSessionContext is a no-op as of 2026-06-18 and this path passes no
+    // explicit appendSystemPrompt.)
+    expect(rd.result).not.toContain('[has-system-prompt]')
     expect(rd.result).toContain('[permission-mode:bypassPermissions]')
     // The session ID should be different from the plan session (new clean context)
     expect(rd.sessionId).not.toBe(planSessionId)
