@@ -38,10 +38,18 @@ export interface UseSpeechToTextReturn {
 }
 
 // Mic-silence detection tunables.
-// Browser bug (esp. Firefox with a wedged capture process) yields a pure-zero stream
-// (~ -91 dB). We detect that early so the user isn't left talking into a dead mic.
-const SILENCE_RMS_THRESHOLD = 0.012; // below this = effectively silent
-const SILENCE_GRACE_MS = 2200;       // allow this long to start producing sound
+// We only abort on a DEAD stream — a wedged browser capture (esp. Firefox) emits pure
+// zero samples (~ -91 dB). We deliberately do NOT abort on "quiet" or "hasn't spoken
+// yet": a real mic always has a noise floor (~ -50..-60 dB) even during a pause, so a
+// user who thinks before speaking must never be cut off. The dead-stream floor below
+// (~ -62 dB) sits cleanly between the two.
+const DEAD_STREAM_RMS = 0.0008;      // RMS at/below this for the whole grace = dead mic
+// Grace counted in *sampled ticks*, not wall-clock: a backgrounded/blurred tab can
+// pause our sampler, and wall-clock would then expire while we captured nothing — which
+// false-fired the abort the instant the tab refocused. Ticks only advance while we are
+// actually sampling audio.
+const SAMPLE_INTERVAL_MS = 100;      // how often we sample RMS
+const SILENCE_GRACE_TICKS = 25;      // ~2.5s of actual sampling before declaring dead
 
 const isMediaRecorderSupported =
   typeof window !== 'undefined' &&
@@ -63,9 +71,13 @@ export function useSpeechToText({ onTranscribe, language }: UseSpeechToTextOptio
   // Web Audio analyser for live level + early silence detection
   const audioCtxRef = useRef<AudioContext | null>(null);
   const analyserRef = useRef<AnalyserNode | null>(null);
-  const rafRef = useRef<number | undefined>(undefined);
-  // True once we observed any non-silent audio this recording. Reset on each start.
-  const sawSoundRef = useRef(false);
+  // setInterval (NOT requestAnimationFrame) drives sampling — rAF is throttled/paused
+  // when the tab is backgrounded or blurred, which previously broke silence detection.
+  const sampleTimerRef = useRef<ReturnType<typeof setInterval> | undefined>(undefined);
+  // True once the signal rose above the dead-stream floor (incl. a live mic's noise
+  // floor). Distinguishes a truly dead stream from a quiet/short real recording so the
+  // onstop backstop never drops genuine audio. Reset on each start.
+  const sawAnyNonDeadRef = useRef(false);
   // Set when we abort a recording due to silence, so onstop knows to skip transcription.
   const abortedSilentRef = useRef(false);
   // True when the analyser successfully attached this recording (so the silence
@@ -89,9 +101,9 @@ export function useSpeechToText({ onTranscribe, language }: UseSpeechToTextOptio
   }, []);
 
   const stopStream = useCallback(() => {
-    if (rafRef.current !== undefined) {
-      cancelAnimationFrame(rafRef.current);
-      rafRef.current = undefined;
+    if (sampleTimerRef.current !== undefined) {
+      clearInterval(sampleTimerRef.current);
+      sampleTimerRef.current = undefined;
     }
     analyserRef.current = null;
     audioCtxRef.current?.close().catch(() => {});
@@ -120,7 +132,7 @@ export function useSpeechToText({ onTranscribe, language }: UseSpeechToTextOptio
 
       // Set up Web Audio analyser for live level + early silence detection.
       // Best-effort: if AudioContext is unavailable, recording still works (just no waveform).
-      sawSoundRef.current = false;
+      sawAnyNonDeadRef.current = false;
       abortedSilentRef.current = false;
       analyserAttachedRef.current = false;
       try {
@@ -128,6 +140,10 @@ export function useSpeechToText({ onTranscribe, language }: UseSpeechToTextOptio
         if (AudioCtx) {
           const ctx = new AudioCtx();
           audioCtxRef.current = ctx;
+          // An AudioContext can start `suspended` (no user-gesture autoplay). A suspended
+          // context feeds the analyser flat silence → sawSound never latches → false abort.
+          // resume() is best-effort; the toggle click is itself the gesture.
+          if (ctx.state === 'suspended') ctx.resume().catch(() => {});
           const source = ctx.createMediaStreamSource(stream);
           const analyser = ctx.createAnalyser();
           analyser.fftSize = 512;
@@ -136,8 +152,12 @@ export function useSpeechToText({ onTranscribe, language }: UseSpeechToTextOptio
           analyserAttachedRef.current = true;
 
           const buf = new Uint8Array(analyser.fftSize);
-          const startedAt = performance.now();
-          const tick = () => {
+          let sampledTicks = 0;          // ticks that actually ran (background-tab safe)
+
+          // setInterval, not rAF: rAF pauses when the tab is backgrounded/blurred. With the
+          // old wall-clock grace, refocusing fired the abort instantly even though the user
+          // had been speaking. Counting ticks ties the grace to real sampling progress.
+          sampleTimerRef.current = setInterval(() => {
             const a = analyserRef.current;
             if (!a) return;
             a.getByteTimeDomainData(buf);
@@ -148,22 +168,21 @@ export function useSpeechToText({ onTranscribe, language }: UseSpeechToTextOptio
               sumSq += v * v;
             }
             const rms = Math.sqrt(sumSq / buf.length);
-            if (rms >= SILENCE_RMS_THRESHOLD) sawSoundRef.current = true;
+            if (rms > DEAD_STREAM_RMS) sawAnyNonDeadRef.current = true;  // even noise floor counts as "alive"
             // Smooth + amplify a bit for a lively meter display
             setLevel((prev) => prev * 0.6 + Math.min(1, rms * 3) * 0.4);
+            sampledTicks++;
 
-            // Early silence abort: grace period elapsed and never saw real sound →
-            // the mic is feeding a dead/silent stream (classic Firefox wedge). Stop now.
-            if (!sawSoundRef.current && performance.now() - startedAt > SILENCE_GRACE_MS) {
+            // Abort ONLY on a dead stream: sampled long enough and the signal never once
+            // rose above the dead floor (pure-zero). A live mic's noise floor clears this
+            // even if the user hasn't spoken yet, so a thinking pause is never cut off.
+            if (!sawAnyNonDeadRef.current && sampledTicks >= SILENCE_GRACE_TICKS) {
               abortedSilentRef.current = true;
               setError('No sound detected from the microphone. Check your mic device (or restart the browser) and try again.');
               const rec = mediaRecorderRef.current;
               if (rec && rec.state !== 'inactive') rec.stop();
-              return; // stop the RAF loop; onstop will skip transcription
             }
-            rafRef.current = requestAnimationFrame(tick);
-          };
-          rafRef.current = requestAnimationFrame(tick);
+          }, SAMPLE_INTERVAL_MS);
         }
       } catch {
         // Analyser is best-effort; ignore and record without level/silence detection.
@@ -186,7 +205,7 @@ export function useSpeechToText({ onTranscribe, language }: UseSpeechToTextOptio
 
       recorder.onstop = async () => {
         const abortedSilent = abortedSilentRef.current;
-        const sawSound = sawSoundRef.current;
+        const deadStream = analyserAttachedRef.current && !sawAnyNonDeadRef.current;
         stopStream();
         setIsRecording(false);
 
@@ -195,10 +214,12 @@ export function useSpeechToText({ onTranscribe, language }: UseSpeechToTextOptio
 
         if (blob.size === 0) return;
 
-        // Don't transcribe silence — Whisper hallucinates "you"/"thank you" on empty audio.
-        // `abortedSilent` = auto-stopped mid-recording; `!sawSound` = user stopped but we
-        // never observed real input (analyser ran the whole time and saw only silence).
-        if (abortedSilent || (analyserAttachedRef.current && !sawSound)) {
+        // Don't transcribe a DEAD stream — Whisper hallucinates "you"/"thank you" on pure
+        // silence. `abortedSilent` = auto-stopped mid-recording; `deadStream` = user stopped
+        // but the analyser never saw the signal rise above the dead-stream floor (pure-zero).
+        // We gate on the dead floor, NOT on whether real speech was detected, so a quiet or
+        // very short genuine recording is still transcribed.
+        if (abortedSilent || deadStream) {
           if (!abortedSilent && isMountedRef.current) {
             setError('No sound detected from the microphone. Check your mic device (or restart the browser) and try again.');
           }
