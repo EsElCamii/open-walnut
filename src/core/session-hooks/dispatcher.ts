@@ -313,11 +313,16 @@ export class SessionHookDispatcher {
       }
 
       case EventNames.SESSION_RESULT: {
-        // Skip hooks entirely when team subagents are still active.
-        // The lead session emits intermediate `result` events while polling for
-        // teammate messages — these should NOT trigger triage (onTurnComplete).
-        if (data.teamActive) {
-          log.session.info('SESSION_RESULT skipped — teamActive', { sessionId });
+        // Skip hooks entirely when team subagents OR background workflow tasks are
+        // still active. The lead session emits intermediate `result` events while
+        // polling for teammate messages, and a dynamic-workflow turn emits one result
+        // per background subagent completion — neither should trigger triage
+        // (onTurnComplete). The session manager already withholds the SESSION_RESULT
+        // emit during background work; this is defense-in-depth on the flag.
+        if (data.teamActive || data.backgroundActive) {
+          log.session.info('SESSION_RESULT skipped — background work active', {
+            sessionId, teamActive: data.teamActive, backgroundActive: data.backgroundActive,
+          });
           break;
         }
 
