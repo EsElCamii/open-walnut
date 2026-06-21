@@ -659,10 +659,10 @@ function cmdStart(ws: ServerWebSocket<WsData>, id: number, cmd: Record<string, u
     // measured ~6.9s → ~2.9s with no loss of MCP functionality. The CLI only honors
     // this via env (no CLI flag); the daemon's spawn env is the single inject point.
     // CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS=1: opt into the authoritative
-    // session_state_changed{running|idle|requires_action} stream events. 'idle' is
-    // the only reliable turn-over signal — a dynamic-workflow turn emits MANY
-    // `result` events (one per background subagent finishing), so `result` is NOT a
-    // turn boundary. Keep in sync with daemon-source.ts.
+    // session_state_changed (running/idle/requires_action) stream events. idle is
+    // the only reliable turn-over signal; a dynamic-workflow turn emits MANY result
+    // events (one per background subagent finishing), so result is NOT a turn
+    // boundary. Keep in sync with daemon-source.ts.
     env: {
       ...process.env,
       CLAUDE_CODE_DISABLE_BACKGROUND_TASKS: '1',

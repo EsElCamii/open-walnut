@@ -859,13 +859,13 @@ function cmdStart(ws, id, cmd) {
     // up to 5s waiting for MCP servers (they keep connecting in background). Cuts
     // time-to-init ~6.9s → ~2.9s with no loss of MCP functionality. Keep in sync
     // with daemon-standalone.ts.
-    // CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS=1: opt into the CLI's authoritative
-    // session_state_changed{running|idle|requires_action} stream events. 'idle'
+    // CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS=1: opt into the CLI authoritative
+    // session_state_changed (running/idle/requires_action) stream events. idle
     // is the only reliable turn-over signal (a single dynamic-workflow turn emits
-    // MANY `result` events as background subagents finish — `result` is NOT a
-    // turn boundary). Verified by live capture: idle fires exactly once, strictly
-    // after the last result + all task_notifications. Walnut keys turn-completion
-    // off this instead of `result`. NOTE: this disables NOTHING — dynamic workflows
+    // MANY result events as background subagents finish, so result is NOT a turn
+    // boundary). Verified by live capture: idle fires exactly once, strictly after
+    // the last result + all task_notifications. Walnut keys turn-completion off
+    // this instead of result. NOTE: this disables NOTHING; dynamic workflows
     // (CLAUDE_CODE_DISABLE_WORKFLOWS) are orthogonal to CLAUDE_CODE_DISABLE_BACKGROUND_TASKS
     // (which only gates Bash run_in_background / Ctrl+B, not the Workflow tool).
     env: {
