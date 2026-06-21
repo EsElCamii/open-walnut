@@ -1,20 +1,17 @@
 import React from 'react';
+import { SESSION_MODELS } from '@open-walnut/core';
 
-const MODELS = [
-  { id: 'opus', label: 'Opus', description: 'Most capable' },
-  { id: 'opus-1m', label: 'Opus 1M', description: '1M context window' },
-  { id: 'sonnet', label: 'Sonnet', description: 'Balanced' },
-  { id: 'sonnet-1m', label: 'Sonnet 1M', description: '1M context window' },
-  { id: 'haiku', label: 'Haiku', description: 'Fastest' },
-] as const;
+// Picker options derived from the single source of truth (core/types.ts).
+const MODELS = SESSION_MODELS;
 
 /** Normalize a raw model string (e.g. init event model) to our picker IDs */
 function normalizeModelId(raw?: string): string {
   if (!raw) return 'opus';
   const lower = raw.toLowerCase();
   const is1m = lower.includes('[1m]');
-  if (lower.includes('haiku')) return 'haiku';
+  if (lower.includes('haiku')) return 'haiku';  // haiku has no 1M variant
   if (lower.includes('sonnet')) return is1m ? 'sonnet-1m' : 'sonnet';
+  if (lower.includes('fable')) return is1m ? 'fable-1m' : 'fable';
   return is1m ? 'opus-1m' : 'opus';
 }
 

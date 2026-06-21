@@ -6,7 +6,6 @@ import type { Task } from '@open-walnut/core';
 
 export interface TierLimits {
   focus: number;
-  next: number;
   satellite: number;
   wait: number;
 }
@@ -15,11 +14,9 @@ export interface UseFocusBarReturn {
   pinnedIds: string[];
   pinnedTasks: Task[];
   focusIds: string[];
-  nextIds: string[];
   satelliteIds: string[];
   waitIds: string[];
   focusTasks: Task[];
-  nextTasks: Task[];
   satelliteTasks: Task[];
   waitTasks: Task[];
   pin: (taskId: string) => Promise<void>;
@@ -37,7 +34,7 @@ export interface UseFocusBarReturn {
 const SELF_CHANGE_COOLDOWN = 3000;
 const VISIBLE_KEY = 'open-walnut-focus-dock-visible';
 const TIER_LIMITS_KEY = 'open-walnut-focus-tier-limits';
-export const DEFAULT_TIER_LIMITS: TierLimits = { focus: 7, next: 5, satellite: 5, wait: 5 };
+export const DEFAULT_TIER_LIMITS: TierLimits = { focus: 7, satellite: 5, wait: 5 };
 
 function readVisible(): boolean {
   try { return localStorage.getItem(VISIBLE_KEY) === 'true'; } catch { return false; }
@@ -50,7 +47,6 @@ function readTierLimits(): TierLimits {
     const parsed = JSON.parse(raw);
     return {
       focus: Number(parsed.focus) || DEFAULT_TIER_LIMITS.focus,
-      next: Number(parsed.next) || DEFAULT_TIER_LIMITS.next,
       satellite: Number(parsed.satellite) || DEFAULT_TIER_LIMITS.satellite,
       wait: Number(parsed.wait) || DEFAULT_TIER_LIMITS.wait,
     };
@@ -67,7 +63,6 @@ function arraysEqual(a: string[], b: string[]): boolean {
 export function useFocusBar(tasks: Task[]): UseFocusBarReturn {
   const [pinnedIds, setPinnedIds] = useState<string[]>([]);
   const [focusIds, setFocusIds] = useState<string[]>([]);
-  const [nextIds, setNextIds] = useState<string[]>([]);
   const [satelliteIds, setSatelliteIds] = useState<string[]>([]);
   const [waitIds, setWaitIds] = useState<string[]>([]);
   const [visible, setVisibleState] = useState(readVisible);
@@ -91,7 +86,6 @@ export function useFocusBar(tasks: Task[]): UseFocusBarReturn {
   const applyData = useCallback((data: Partial<focusApi.FocusBarData>) => {
     if (data.pinned_tasks) setPinnedIds(prev => arraysEqual(prev, data.pinned_tasks!) ? prev : data.pinned_tasks!);
     if (data.focus_tasks) setFocusIds(prev => arraysEqual(prev, data.focus_tasks!) ? prev : data.focus_tasks!);
-    if (data.next_tasks) setNextIds(prev => arraysEqual(prev, data.next_tasks!) ? prev : data.next_tasks!);
     if (data.satellite_tasks) setSatelliteIds(prev => arraysEqual(prev, data.satellite_tasks!) ? prev : data.satellite_tasks!);
     if (data.wait_tasks) setWaitIds(prev => arraysEqual(prev, data.wait_tasks!) ? prev : data.wait_tasks!);
   }, []);
@@ -113,7 +107,6 @@ export function useFocusBar(tasks: Task[]): UseFocusBarReturn {
   const removeFromAll = useCallback((taskId: string) => {
     setPinnedIds((prev) => prev.filter((id) => id !== taskId));
     setFocusIds((prev) => prev.filter((id) => id !== taskId));
-    setNextIds((prev) => prev.filter((id) => id !== taskId));
     setSatelliteIds((prev) => prev.filter((id) => id !== taskId));
     setWaitIds((prev) => prev.filter((id) => id !== taskId));
   }, []);
@@ -181,7 +174,6 @@ export function useFocusBar(tasks: Task[]): UseFocusBarReturn {
     const addTo = (prev: string[]) => prev.includes(taskId) ? prev : [...prev, taskId];
     const removeFrom = (prev: string[]) => prev.includes(taskId) ? prev.filter((id) => id !== taskId) : prev;
     setFocusIds(tier === 'focus' ? addTo : removeFrom);
-    setNextIds(tier === 'next' ? addTo : removeFrom);
     setSatelliteIds(tier === 'satellite' ? addTo : removeFrom);
     setWaitIds(tier === 'wait' ? addTo : removeFrom);
     if (newPinnedOrder) setPinnedIds(newPinnedOrder);
@@ -200,10 +192,9 @@ export function useFocusBar(tasks: Task[]): UseFocusBarReturn {
 
   const tierOf = useCallback((taskId: string): FocusTier => {
     if (focusIds.includes(taskId)) return 'focus';
-    if (nextIds.includes(taskId)) return 'next';
     if (waitIds.includes(taskId)) return 'wait';
     return 'satellite';
-  }, [focusIds, nextIds, waitIds]);
+  }, [focusIds, waitIds]);
 
   // Resolve IDs to Task objects
   const resolve = useCallback((ids: string[], allTasks: Task[]) => {
@@ -215,14 +206,13 @@ export function useFocusBar(tasks: Task[]): UseFocusBarReturn {
 
   const pinnedTasks = useMemo(() => resolve(pinnedIds, tasks), [resolve, pinnedIds, tasks]);
   const focusTasks = useMemo(() => resolve(focusIds, tasks), [resolve, focusIds, tasks]);
-  const nextTasks = useMemo(() => resolve(nextIds, tasks), [resolve, nextIds, tasks]);
   const satelliteTasks = useMemo(() => resolve(satelliteIds, tasks), [resolve, satelliteIds, tasks]);
   const waitTasks = useMemo(() => resolve(waitIds, tasks), [resolve, waitIds, tasks]);
 
   return {
     pinnedIds, pinnedTasks,
-    focusIds, nextIds, satelliteIds, waitIds,
-    focusTasks, nextTasks, satelliteTasks, waitTasks,
+    focusIds, satelliteIds, waitIds,
+    focusTasks, satelliteTasks, waitTasks,
     pin, unpin, reorder, setTier,
     isPinned, tierOf,
     visible, setVisible,

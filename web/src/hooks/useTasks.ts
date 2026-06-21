@@ -296,7 +296,9 @@ export function useTasks(filter?: tasksApi.TaskFilter): UseTasksReturn {
     const endPerf = attempt === 0 ? perf.start('tasks:fetch') : undefined;
     const t0 = performance.now();
     log.info('tasks', 'fetch started', { attempt, filter, wsState: wsClient.state });
-    tasksApi.fetchTasks(filter)
+    // minimal: home list never renders summary/description/ext — the detail
+    // pane lazy-loads them on focus. Cuts the list payload ~4MB -> ~0.4MB.
+    tasksApi.fetchTasks(filter, { minimal: true })
       .then((tasks) => {
         const elapsed = Math.round(performance.now() - t0);
         endPerf?.(`${tasks.length} tasks`);

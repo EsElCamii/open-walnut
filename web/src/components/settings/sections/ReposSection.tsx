@@ -4,10 +4,12 @@ import { RepoCard } from '@/components/repositories/RepoCard';
 import { RepoForm } from '@/components/repositories/RepoForm';
 import { RepoDetail } from '@/components/repositories/RepoDetail';
 import { LoadingSpinner } from '@/components/common/LoadingSpinner';
+import { useConfirm } from '@/hooks/useConfirm';
 import type { RepoSummary } from '@/api/repositories';
 
 export function ReposSection() {
   const { repos, loading, error, save, remove, refresh } = useRepositories();
+  const confirm = useConfirm();
   const [search, setSearch] = useState('');
   const [selected, setSelected] = useState<RepoSummary | null>(null);
   const [showForm, setShowForm] = useState(false);
@@ -43,14 +45,14 @@ export function ReposSection() {
   }, [save]);
 
   const handleDelete = useCallback(async (slug: string) => {
-    if (!confirm(`Delete repository "${slug}"?`)) return;
+    if (!(await confirm({ title: `Delete repository “${slug}”?`, confirmLabel: 'Delete', danger: true }))) return;
     try {
       await remove(slug);
       if (selected?.slug === slug) setSelected(null);
     } catch {
       // useRepositories.refresh() handles re-fetching; error is transient
     }
-  }, [remove, selected]);
+  }, [remove, selected, confirm]);
 
   const handleSelect = useCallback((repo: RepoSummary) => {
     setSelected(repo);

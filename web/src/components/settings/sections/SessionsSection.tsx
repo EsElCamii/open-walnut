@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
 import type { Config, SessionMode } from '@open-walnut/core';
+import { SESSION_MODELS } from '@open-walnut/core';
 import { SectionCard } from '../inputs/SectionCard';
 import { NumberInput } from '../inputs/NumberInput';
 import { KeyValueEditor } from '../inputs/KeyValueEditor';
@@ -96,11 +97,9 @@ export function SessionsSection({ config, onSave }: Props) {
           onChange={(e) => setSessionModel(e.target.value)}
           style={{ maxWidth: 200 }}
         >
-          <option value="opus">Opus</option>
-          <option value="opus-1m">Opus 1M</option>
-          <option value="sonnet">Sonnet</option>
-          <option value="sonnet-1m">Sonnet 1M</option>
-          <option value="haiku">Haiku</option>
+          {SESSION_MODELS.map((m) => (
+            <option key={m.id} value={m.id}>{m.label}</option>
+          ))}
         </select>
         <p className="text-sm text-muted" style={{ marginTop: 2 }}>
           Controls the <code style={{ fontSize: 11 }}>--model</code> flag for Claude Code CLI sessions.

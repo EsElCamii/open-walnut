@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 import { fetchGlobalNotes, saveGlobalNotes } from '@/api/notes';
 import { useEvent } from '@/hooks/useWebSocket';
 import { log } from '@/utils/log';
+import { splitFrontmatter, joinFrontmatter } from '@/components/notes/frontmatter';
 import type { Editor } from '@tiptap/core';
 
 export interface UseGlobalNotesReturn {
@@ -12,6 +13,7 @@ export interface UseGlobalNotesReturn {
   saveError: string | null;
   collapsed: boolean;
   toggleCollapse: () => void;
+  /** In-app fullscreen overlay state (GlobalNotesPopup) — NOT the new-tab pop-out. */
   popupOpen: boolean;
   openPopup: () => void;
   closePopup: () => void;
@@ -25,17 +27,24 @@ export function useGlobalNotes(): UseGlobalNotesReturn {
   // saving is a ref — no re-renders during typing. We expose a snapshot via return.
   const savingRef = useRef(false);
   const [saveError, setSaveError] = useState<string | null>(null);
+  const [popupOpen, setPopupOpen] = useState(false);
   const [collapsed, setCollapsed] = useState(() => {
     const stored = localStorage.getItem(COLLAPSE_KEY);
     return stored === null ? true : stored === 'true';
   });
-  const [popupOpen, setPopupOpen] = useState(false);
   const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const editorRef = useRef<Editor | null>(null);
   const dirty = useRef(false);
   const contentHashRef = useRef<string | null>(null);
   /** Set when reloading from external update — prevents reload from triggering a save */
   const externalUpdateRef = useRef(false);
+  /**
+   * global-notes.md now appears in the vault tree, so the notes-v2 editor/indexer
+   * may stamp a frontmatter id into it. Keep that block out of the editing
+   * surface (same contract as useNoteContent) and re-attach it on save so the
+   * id never renders as text and never gets duplicated.
+   */
+  const frontmatterRef = useRef('');
 
   // Load on mount with cancellation guard
   useEffect(() => {
@@ -43,7 +52,9 @@ export function useGlobalNotes(): UseGlobalNotesReturn {
     fetchGlobalNotes()
       .then(({ content: c, contentHash }) => {
         if (mounted) {
-          setContent(c);
+          const { frontmatter, body } = splitFrontmatter(c);
+          frontmatterRef.current = frontmatter;
+          setContent(body);
           contentHashRef.current = contentHash;
         }
       })
@@ -58,7 +69,9 @@ export function useGlobalNotes(): UseGlobalNotesReturn {
         contentHashRef.current = contentHash;
         dirty.current = false;
         externalUpdateRef.current = true;
-        setContent(c);
+        const { frontmatter, body } = splitFrontmatter(c);
+        frontmatterRef.current = frontmatter;
+        setContent(body);
       })
       .catch(() => {});
   }, []);
@@ -137,7 +150,7 @@ export function useGlobalNotes(): UseGlobalNotesReturn {
       try {
         const md = ed.storage.markdown.getMarkdown();
         const hash = contentHashRef.current ?? undefined;
-        saveGlobalNotes(md, hash)
+        saveGlobalNotes(joinFrontmatter(frontmatterRef.current, md), hash)
           .then(({ contentHash: newHash }) => {
             dirty.current = false;
             contentHashRef.current = newHash;
@@ -174,7 +187,7 @@ export function useGlobalNotes(): UseGlobalNotesReturn {
           try {
             const md = ed.storage.markdown.getMarkdown();
             const hash = contentHashRef.current ?? undefined;
-            saveGlobalNotes(md, hash).catch((e) => {
+            saveGlobalNotes(joinFrontmatter(frontmatterRef.current, md), hash).catch((e) => {
               log.warn('notes', 'Unmount flush failed', { error: e instanceof Error ? e.message : String(e) });
             });
           } catch { /* editor already gone */ }

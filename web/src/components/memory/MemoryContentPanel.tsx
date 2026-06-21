@@ -1,5 +1,6 @@
-import { useState, useCallback, useEffect, useRef } from 'react';
-import { renderMarkdownWithRefs } from '@/utils/markdown';
+import { useCallback } from 'react';
+import { MarkdownEditorPanel } from '@/components/notes/MarkdownEditorPanel';
+import { useFieldContent } from '@/hooks/useFieldContent';
 import { saveGlobalMemory, saveMemory } from '@/api/memory';
 
 interface MemoryContentPanelProps {
@@ -28,61 +29,26 @@ function formatTime(iso: string): string {
   return d.toLocaleDateString();
 }
 
+/**
+ * MemoryContentPanel — a memory .md file edited with the SHARED rich editor
+ * (MarkdownEditorPanel), the same one /notes uses. Always-on autosave (no
+ * Edit/Save buttons) via useFieldContent; memory files are flat markdown with no
+ * frontmatter / no contentHash, last-write-wins.
+ */
 export function MemoryContentPanel({ content, path, updatedAt, onSaved }: MemoryContentPanelProps) {
-  const [editing, setEditing] = useState(false);
-  const [draft, setDraft] = useState('');
-  const [saving, setSaving] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const textareaRef = useRef<HTMLTextAreaElement>(null);
-
-  // Reset edit state when path changes
-  useEffect(() => {
-    setEditing(false);
-    setError(null);
-  }, [path]);
-
-  const handleEdit = useCallback(() => {
-    setDraft(content ?? '');
-    setEditing(true);
-    setError(null);
-    // Focus textarea after render
-    requestAnimationFrame(() => textareaRef.current?.focus());
-  }, [content]);
-
-  const handleCancel = useCallback(() => {
-    setEditing(false);
-    setDraft('');
-    setError(null);
-  }, []);
-
-  const handleSave = useCallback(async () => {
+  const save = useCallback(async (body: string) => {
     if (!path) return;
-    setSaving(true);
-    setError(null);
-    try {
-      const result = path === 'MEMORY.md'
-        ? await saveGlobalMemory(draft)
-        : await saveMemory(path, draft);
-      setEditing(false);
-      onSaved?.(result.updatedAt);
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : 'Failed to save';
-      setError(msg);
-    } finally {
-      setSaving(false);
-    }
-  }, [path, draft, onSaved]);
+    const result = path === 'MEMORY.md'
+      ? await saveGlobalMemory(body)
+      : await saveMemory(path, body);
+    onSaved?.(result.updatedAt);
+  }, [path, onSaved]);
 
-  // Ctrl+S / Cmd+S to save while editing
-  const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
-    if ((e.metaKey || e.ctrlKey) && e.key === 's') {
-      e.preventDefault();
-      handleSave();
-    }
-    if (e.key === 'Escape') {
-      handleCancel();
-    }
-  }, [handleSave, handleCancel]);
+  const { content: editorContent, saveStatus, onEditorUpdate } = useFieldContent(
+    path,
+    content ?? '',
+    save,
+  );
 
   if (!content || !path) {
     return (
@@ -94,8 +60,6 @@ export function MemoryContentPanel({ content, path, updatedAt, onSaved }: Memory
     );
   }
 
-  const html = renderMarkdownWithRefs(content);
-
   return (
     <div className="memory-content-panel">
       <div className="memory-content-header">
@@ -103,51 +67,15 @@ export function MemoryContentPanel({ content, path, updatedAt, onSaved }: Memory
           <span className="memory-content-path">{formatPath(path)}</span>
           {updatedAt && <span className="memory-content-time">{formatTime(updatedAt)}</span>}
         </div>
-        <div className="memory-content-header-actions">
-          {editing ? (
-            <>
-              {error && <span className="memory-edit-error">{error}</span>}
-              <button
-                className="memory-edit-btn memory-cancel-btn"
-                onClick={handleCancel}
-                disabled={saving}
-              >
-                Cancel
-              </button>
-              <button
-                className="memory-edit-btn memory-save-btn"
-                onClick={handleSave}
-                disabled={saving}
-              >
-                {saving ? 'Saving...' : 'Save'}
-              </button>
-            </>
-          ) : (
-            <button className="memory-edit-btn memory-edit-toggle" onClick={handleEdit} title="Edit">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" width="14" height="14">
-                <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" />
-                <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z" />
-              </svg>
-              Edit
-            </button>
-          )}
-        </div>
       </div>
-      {editing ? (
-        <textarea
-          ref={textareaRef}
-          className="memory-edit-textarea"
-          value={draft}
-          onChange={(e) => setDraft(e.target.value)}
-          onKeyDown={handleKeyDown}
-          spellCheck={false}
-        />
-      ) : (
-        <div
-          className="memory-content-body markdown-body"
-          dangerouslySetInnerHTML={{ __html: html }}
-        />
-      )}
+      <MarkdownEditorPanel
+        content={editorContent}
+        onEditorUpdate={onEditorUpdate}
+        saveStatus={saveStatus}
+        docId={path}
+        showWidthToggle
+        enableBlockTools
+      />
     </div>
   );
 }

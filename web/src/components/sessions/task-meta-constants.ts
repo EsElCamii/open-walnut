@@ -8,14 +8,12 @@ import type { FocusTier } from '@/api/focus';
 
 export const TIER_OPTIONS: { value: FocusTier; label: string }[] = [
   { value: 'focus', label: 'Focus' },
-  { value: 'next', label: 'Next' },
   { value: 'satellite', label: 'Satellite' },
   { value: 'wait', label: 'Wait' },
 ];
 
 export const TIER_COLORS: Record<FocusTier, string> = {
   focus: 'var(--accent)',
-  next: '#FF9500',
   satellite: 'var(--fg-muted)',
   wait: '#8e8e93',
 };

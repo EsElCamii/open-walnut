@@ -10,12 +10,14 @@ import { UserMessagesSummary } from './UserMessagesSummary';
 import { ProcessStatusBadge } from './WorkStatusPicker';
 import { SessionCopyButtons } from './SessionCopyButtons';
 import { TaskQuickActions } from './TaskQuickActions';
-import { updateSession, executePlanSession, executePlanContinue, restartSession } from '@/api/sessions';
+import { updateSession, executePlanSession, executePlanContinue, restartSession, investigateSession } from '@/api/sessions';
 import { log } from '@/utils/log';
+import { buildInvestigationClip } from '@/utils/investigation-clipboard';
 import { fetchTask, updateTask } from '@/api/tasks';
 import { fetchPinnedTasks, pinTask, unpinTask, setTaskTier } from '@/api/focus';
 import type { FocusTier } from '@/api/focus';
 import { SessionRetryButton } from './SessionRetryButton';
+import { SideQuestionDrawer } from './SideQuestionDrawer';
 import { useSessionHistory } from '@/hooks/useSessionHistory';
 import { useSessionPlan } from '@/hooks/useSessionPlan';
 import { useSessionUsage, formatModelName, getContextWindowSize } from '@/hooks/useSessionUsage';
@@ -25,7 +27,7 @@ import type { SessionRecord, TaskPhase } from '@/types/session';
 import { useEnabledModes } from '@/hooks/useEnabledModes';
 import { timeAgo } from '@/utils/time';
 import { wsClient } from '@/api/ws';
-import { ICON_CLIPBOARD, ICON_LIGHTNING, ICON_WARNING, ICON_LOCATE } from '@/components/common/Icons';
+import { ICON_CLIPBOARD, ICON_LIGHTNING, ICON_WARNING, ICON_LOCATE, ICON_SEARCH } from '@/components/common/Icons';
 import { renderMarkdownWithRefs } from '@/utils/markdown';
 
 interface SessionDetailPanelProps {
@@ -175,7 +177,6 @@ export function SessionDetailPanel({ session, taskTitle, summary, onTitleChanged
       setPinned(isPinned);
       if (isPinned) {
         const tier: FocusTier = data.focus_tasks?.includes(taskId) ? 'focus'
-          : data.next_tasks?.includes(taskId) ? 'next'
           : data.wait_tasks?.includes(taskId) ? 'wait' : 'satellite';
         setPinnedTier(tier);
       } else {
@@ -312,6 +313,45 @@ export function SessionDetailPanel({ session, taskTitle, summary, onTitleChanged
     }
     setRestartBusy(false);
   }, [session?.claudeSessionId, session?.taskId]);
+
+  // Investigate — freeze an evidence bundle + open a manual incident. Shows a
+  // brief inline confirmation ("incident <id>") since there's no global toast bus.
+  const [investigating, setInvestigating] = useState(false);
+  const [investigateResult, setInvestigateResult] = useState<{ kind: 'ok'; id: string } | { kind: 'error' } | null>(null);
+  const investigateTimerRef = useRef<ReturnType<typeof setTimeout>>(undefined);
+  useEffect(() => () => { clearTimeout(investigateTimerRef.current); }, []);
+  const handleInvestigate = useCallback(async () => {
+    if (investigating || !session?.claudeSessionId) return;
+    const sid = session.claudeSessionId;
+    log.info('session-detail', 'investigate button clicked', { sessionId: sid, taskId: session?.taskId });
+    setInvestigating(true);
+    setInvestigateResult(null);
+    try {
+      const { incident } = await investigateSession(sid, session?.taskId);
+      log.info('session-detail', 'investigate captured evidence', { sessionId: sid, incidentId: incident.id, bundlePath: incident.bundlePath });
+      const clip = buildInvestigationClip({
+        sessionId: sid,
+        taskId: session?.taskId,
+        incidentId: incident.id,
+        bundlePath: incident.bundlePath,
+        host: session?.host,
+      });
+      await navigator.clipboard.writeText(clip).catch(() => {});
+      setInvestigateResult({ kind: 'ok', id: incident.id });
+      clearTimeout(investigateTimerRef.current);
+      investigateTimerRef.current = setTimeout(() => setInvestigateResult(null), 6000);
+    } catch (err) {
+      log.error('session-detail', 'investigate failed', {
+        sessionId: sid,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      setInvestigateResult({ kind: 'error' });
+      clearTimeout(investigateTimerRef.current);
+      investigateTimerRef.current = setTimeout(() => setInvestigateResult(null), 4000);
+    } finally {
+      setInvestigating(false);
+    }
+  }, [investigating, session?.claudeSessionId, session?.taskId, session?.host]);
   useEvent('task:updated', (data: unknown) => {
     const d = data as { task?: { id?: string; exec_session_id?: string; plan_session_id?: string } };
     const t = d.task;
@@ -544,6 +584,21 @@ export function SessionDetailPanel({ session, taskTitle, summary, onTitleChanged
                 {restartBusy ? 'Restarting...' : 'Restart'}
               </button>
             )}
+            <button
+              className="session-copy-chip"
+              onClick={handleInvestigate}
+              disabled={investigating}
+              title="Capture an evidence bundle (logs + CLI stream + daemon), open an incident, and copy all related ids to the clipboard"
+            >
+              {ICON_SEARCH}{' '}
+              {investigating
+                ? 'Capturing…'
+                : investigateResult?.kind === 'ok'
+                  ? `Copied — ${investigateResult.id} ✓`
+                  : investigateResult?.kind === 'error'
+                    ? 'Capture failed'
+                    : 'Investigate'}
+            </button>
             {(ps === 'stopped' || ps === 'error') && !session.archived && (
               <button
                 className="btn btn-sm"
@@ -871,6 +926,7 @@ export function SessionDetailPanel({ session, taskTitle, summary, onTitleChanged
           onFileOpen={handleFileOpen}
           onStreamingChange={onStreamingChange}
         />
+        <SideQuestionDrawer sessionId={session?.claudeSessionId} />
         {fileViewerState && (
           <FileViewer
             path={fileViewerState.path}

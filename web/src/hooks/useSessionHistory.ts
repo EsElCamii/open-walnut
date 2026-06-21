@@ -47,8 +47,15 @@ function diagnoseOrdering(phase: string, sid: string, msgs: SessionHistoryMessag
  * When version > 0 (re-fetch after batch-completed), skip Phase 1 — go directly to Phase 2.
  * Phase 1 reads local streams for fast initial display; on re-fetch the client
  * already has messages rendered, so the fast-path just adds latency for no benefit.
+ *
+ * `enabled` (default true) gates the EXPENSIVE Phase 2 SSH fetch only. Pass
+ * false for offscreen/restored-but-not-visible session columns so they render
+ * instantly from the local streams/cache (Phase 1) without each firing a 20-30s
+ * remote SSH history pull that would saturate the browser's ~5 HTTP/1.1 lanes
+ * during the home fan-out. Flip it true when the column becomes visible to
+ * trigger the full fetch. Default true preserves existing callers unchanged.
  */
-export function useSessionHistory(sessionId: string | null, version = 0): UseSessionHistoryReturn {
+export function useSessionHistory(sessionId: string | null, version = 0, enabled = true): UseSessionHistoryReturn {
   const [messages, setMessages] = useState<SessionHistoryMessage[]>([]);
   const [loading, setLoading] = useState(false);
   const [phase2Pending, setPhase2Pending] = useState(false);
@@ -74,8 +81,11 @@ export function useSessionHistory(sessionId: string | null, version = 0): UseSes
     // Track session so global cache accumulates its events in background
     trackSession(sessionId);
 
-    // Re-fetch (version > 0): skip Phase 1, go directly to Phase 2
+    // Re-fetch (version > 0): skip Phase 1, go directly to Phase 2.
+    // When disabled (offscreen column), there's nothing to do — Phase 2 is the
+    // only work here and we don't want its SSH cost until visible.
     if (version > 0) {
+      if (!enabled) return () => { cancelled = true; controller.abort(); };
       setLoading(true);
       setPhase2Pending(true);
       const endP2 = perf.start(`session:full:${sid}`);
@@ -108,10 +118,12 @@ export function useSessionHistory(sessionId: string | null, version = 0): UseSes
     // Initial load (version === 0): check cache first
     const cached = getHistoryCache(sessionId);
     if (cached) {
-      // Cache hit → 0ms instant display, then background Phase 2 verification
+      // Cache hit → 0ms instant display, then background Phase 2 verification.
       setMessages(cached.messages);
       setForkBoundaryIndex(cached.forkBoundaryIndex);
       setLoading(false);
+      // Offscreen column: show cache, skip the background SSH re-verify until visible.
+      if (!enabled) return () => { cancelled = true; controller.abort(); };
       setPhase2Pending(true);
 
       const endP2 = perf.start(`session:full:${sid}`);
@@ -164,6 +176,9 @@ export function useSessionHistory(sessionId: string | null, version = 0): UseSes
       })
       .finally(() => {
         if (cancelled) return;
+        // Offscreen column: Phase 1 (local streams) already gave instant
+        // content; skip the expensive Phase 2 SSH fetch until visible.
+        if (!enabled) { setPhase2Pending(false); return; }
         // Phase 2: Full fetch (source of truth, may SSH for remote sessions)
         const endP2 = perf.start(`session:full:${sid}`);
         fetchSessionHistory(sessionId, { signal: controller.signal })
@@ -190,7 +205,7 @@ export function useSessionHistory(sessionId: string | null, version = 0): UseSes
       });
 
     return () => { cancelled = true; controller.abort(); };
-  }, [sessionId, version]);
+  }, [sessionId, version, enabled]);
 
   return { messages, loading, phase2Pending, error, forkBoundaryIndex };
 }

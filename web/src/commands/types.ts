@@ -20,4 +20,9 @@ export interface CommandContext {
   navigate: (path: string) => void;
   /** Arguments passed after the command name (e.g. "/plan redesign auth" → "redesign auth") */
   args?: string;
+  /** Active agent the command was invoked for (defaults to 'general' when omitted). */
+  agentId?: string;
+  /** Active conversation the command was invoked for — required so commands like
+   * /compact act on the conversation the user is looking at, not the legacy file. */
+  conversationId?: string;
 }

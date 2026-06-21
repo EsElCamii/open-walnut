@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react';
 import { NavLink } from 'react-router-dom';
 import { useSystemHealth } from '@/hooks/useSystemHealth';
 import { useAudioCapture } from '@/hooks/useAudioCapture';
+import { useNotifications } from '@/contexts/notifications';
 import { NotificationPanel } from '@/components/common/NotificationPanel';
 
 const SS_CHAT_VISIBLE_KEY = 'open-walnut-home-chat-visible';
@@ -17,7 +18,22 @@ export function Sidebar({ open, collapsed, onToggleCollapse }: SidebarProps) {
   const cls = `sidebar${open ? ' open' : ''}${collapsed ? ' collapsed' : ''}`;
   const { hasIssues } = useSystemHealth();
   const audio = useAudioCapture();
+  const { notify, unreadCount } = useNotifications();
   const [notifOpen, setNotifOpen] = useState(false);
+
+  // Bridge audio capture errors into the unified toaster. useAudioCapture still
+  // owns lastError (it resets recording state + handles the no-WS local failure);
+  // here we just mirror it into a toast and immediately clear so the provider
+  // owns the lifecycle. Ephemeral — never lands in the feed.
+  useEffect(() => {
+    if (!audio.lastError) return;
+    notify({
+      kind: 'audio-error', severity: 'error', title: 'Recording error',
+      body: audio.lastError, persistent: false,
+      dedupKey: `audio:${audio.lastError}`,
+    });
+    audio.clearError();
+  }, [audio.lastError, audio.clearError, notify]);
 
   // Panel visibility state — synced from MainPage via custom events
   const [chatVisible, setChatVisible] = useState<boolean>(
@@ -34,11 +50,15 @@ export function Sidebar({ open, collapsed, onToggleCollapse }: SidebarProps) {
     const handleTodoVisible = (e: Event) => {
       setTodoVisible((e as CustomEvent).detail?.visible ?? true);
     };
+    // Clicking a persistent toast's body opens the notification center.
+    const handleOpenCenter = () => setNotifOpen(true);
     window.addEventListener('main:chat-visible', handleChatVisible);
     window.addEventListener('main:todo-visible', handleTodoVisible);
+    window.addEventListener('notification:open-center', handleOpenCenter);
     return () => {
       window.removeEventListener('main:chat-visible', handleChatVisible);
       window.removeEventListener('main:todo-visible', handleTodoVisible);
+      window.removeEventListener('notification:open-center', handleOpenCenter);
     };
   }, []);
 
@@ -156,17 +176,13 @@ export function Sidebar({ open, collapsed, onToggleCollapse }: SidebarProps) {
         >
           <BellIcon />
           <span className="sidebar-label">Notifications</span>
-          {hasIssues && <span className="notification-badge-dot" />}
+          {unreadCount > 0 ? (
+            <span className="notification-badge-count">{unreadCount > 99 ? '99+' : unreadCount}</span>
+          ) : hasIssues ? (
+            <span className="notification-badge-dot" />
+          ) : null}
         </button>
       </div>
-
-      {/* Audio error toast */}
-      {audio.lastError && (
-        <div className="audio-error-toast">
-          <span className="audio-error-toast__msg">{audio.lastError}</span>
-          <button className="audio-error-toast__close" onClick={audio.clearError} aria-label="Dismiss">&times;</button>
-        </div>
-      )}
 
       <NotificationPanel
         open={notifOpen}

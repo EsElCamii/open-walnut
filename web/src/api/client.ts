@@ -28,7 +28,16 @@ async function request<T>(method: string, path: string, body?: unknown, extra?: 
     res = await fetch(path, opts);
   } catch (err) {
     const elapsed = Math.round(performance.now() - t0);
+    // A superseded request (e.g. debounced search) aborts via the caller's
+    // signal — that's expected cancellation, not a failure. Don't log it at
+    // ERROR level (it pollutes the console and masks real errors). A genuine
+    // request timeout fires AbortSignal.timeout → 'TimeoutError', which we DO
+    // surface. AbortError without a timeout = intentional caller abort.
     const isTimeout = err instanceof DOMException && err.name === 'TimeoutError';
+    const isAbort = err instanceof DOMException && err.name === 'AbortError';
+    if (isAbort && !isTimeout) {
+      throw err;
+    }
     console.error(`[api] ${method} ${path} FAILED after ${elapsed}ms${isTimeout ? ` (timeout ${timeoutMs}ms)` : ''}`, err);
     throw err;
   }

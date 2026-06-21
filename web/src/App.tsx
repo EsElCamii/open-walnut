@@ -17,6 +17,8 @@ import { SkillsPage } from './pages/SkillsPage';
 import { MemoryPage } from './pages/MemoryPage';
 import { NotesPage } from './pages/NotesPage';
 
+import { PopoutRoot } from './popout/PopoutRoot';
+
 
 
 /**
@@ -28,6 +30,12 @@ const StableMainPage = memo(MainPage);
 export function App() {
   const location = useLocation();
   const navigate = useNavigate();
+
+  // Pop-out windows render a single view with NO app shell / providers / sidebar.
+  // Fork here, before <AppShell>, so they never mount MainPage or TasksProvider.
+  const isPopout = location.pathname.startsWith('/popout');
+  if (isPopout) return <PopoutRoot />;
+
   const isHome = location.pathname === '/';
 
   // Stable ref for navigate — MainPage reads this ref instead of calling

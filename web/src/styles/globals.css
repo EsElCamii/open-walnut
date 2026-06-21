@@ -399,6 +399,33 @@ input:focus, textarea:focus, select:focus {
   right: 12px;
 }
 
+/* Unread-count badge on the bell — supersedes the plain dot when unread > 0. */
+.notification-badge-count {
+  position: absolute;
+  top: 2px;
+  right: 4px;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  box-sizing: border-box;
+  border-radius: 8px;
+  background: #ff3b30;
+  border: 2px solid var(--bg-sidebar, var(--bg));
+  color: #fff;
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 12px;
+  text-align: center;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.sidebar.collapsed .notification-badge-count {
+  top: 2px;
+  right: 8px;
+}
+
 .notification-panel-backdrop {
   position: fixed;
   inset: 0;
@@ -560,6 +587,88 @@ input:focus, textarea:focus, select:focus {
 
 .notification-error-text {
   font-size: 11px;
+  word-break: break-word;
+}
+
+/* ===== Notification feed (Recent zone in the panel) ===== */
+
+.notification-section-label {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--fg-muted);
+  margin: 4px 0 8px;
+}
+
+.notification-section-label:not(:first-child) {
+  margin-top: 16px;
+}
+
+.notification-feed-empty {
+  font-size: 12px;
+  color: var(--fg-muted);
+  padding: 8px 2px 4px;
+}
+
+.notification-feed {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.notification-feed-item {
+  background: var(--card-bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 8px 10px;
+}
+
+.notification-feed-item.unread {
+  border-color: var(--border-strong);
+  background: color-mix(in srgb, var(--accent) 6%, var(--card-bg));
+}
+
+.notification-feed-item-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.notification-feed-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  background: var(--fg-muted);
+}
+
+.notification-feed-dot--info { background: var(--accent); }
+.notification-feed-dot--success { background: #34c759; }
+.notification-feed-dot--warning { background: #ff9500; }
+.notification-feed-dot--error { background: #ff3b30; }
+
+.notification-feed-item-title {
+  flex: 1;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--fg);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.notification-feed-item-time {
+  font-size: 10px;
+  color: var(--fg-muted);
+  flex-shrink: 0;
+}
+
+.notification-feed-item-body {
+  font-size: 12px;
+  color: var(--fg-secondary);
+  line-height: 1.4;
+  margin-top: 3px;
   word-break: break-word;
 }
 
@@ -3850,10 +3959,179 @@ input:focus, textarea:focus, select:focus {
   text-overflow: ellipsis;
 }
 
-.chat-header-pct {
-  font-size: 12px;
-  font-weight: 500;
+/* ── Agent tab bar (Walnut | conv 1 | conv 2 | … | +) ──
+   Replaces the old AgentDropdown trigger. Lives inside .chat-header-meta. */
+
+.agent-tab-bar {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  flex: 1;
+}
+
+.agent-tab-walnut-wrap {
+  position: relative;
   flex-shrink: 0;
+}
+
+.agent-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 26px;
+  padding: 0 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-secondary);
+  color: var(--fg-secondary);
+  font-size: 12px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 0.12s, color 0.12s, border-color 0.12s;
+}
+
+.agent-tab:hover {
+  background: var(--bg-hover);
+  color: var(--fg);
+}
+
+/* Walnut tab — agent switcher, always emphasized */
+.agent-tab-walnut {
+  font-weight: 600;
+  color: var(--fg);
+}
+
+.agent-tab-walnut.open {
+  border-color: var(--accent);
+}
+
+.agent-tab-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--accent);
+  flex-shrink: 0;
+}
+
+.agent-tab-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 140px;
+}
+
+.agent-tab-caret {
+  font-size: 9px;
+  opacity: 0.6;
+}
+
+.agent-tab-divider {
+  width: 1px;
+  height: 18px;
+  background: var(--border);
+  flex-shrink: 0;
+  margin: 0 2px;
+}
+
+/* Conversation tabs — scroll horizontally when they overflow.
+   Native scrollbar is hidden so it (a) doesn't steal vertical space — which
+   would misalign the conv tabs against the Walnut tab + the + button — and
+   (b) stays visually calm. Overflow still scrolls via trackpad / shift-wheel. */
+.agent-tab-conv-scroll {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: none;        /* Firefox */
+  -ms-overflow-style: none;     /* legacy Edge */
+}
+
+.agent-tab-conv-scroll::-webkit-scrollbar {
+  height: 0;                    /* WebKit — zero height = no layout impact */
+}
+
+.agent-tab-conv {
+  max-width: 200px;
+}
+
+.agent-tab-conv.active {
+  background: var(--accent-subtle);
+  border-color: var(--accent);
+  color: var(--fg);
+  font-weight: 600;
+}
+
+.agent-tab-conv-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 160px;
+}
+
+/* × delete — revealed on tab hover (hidden by default to keep the strip calm) */
+.agent-tab-close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 15px;
+  height: 15px;
+  border-radius: 4px;
+  font-size: 13px;
+  line-height: 1;
+  color: var(--fg-muted);
+  cursor: pointer;
+  flex-shrink: 0;
+  opacity: 0;
+  transition: opacity 0.12s, background 0.12s, color 0.12s;
+}
+
+.agent-tab-conv:hover .agent-tab-close,
+.agent-tab-conv.active .agent-tab-close {
+  opacity: 0.7;
+}
+
+.agent-tab-close:hover {
+  opacity: 1;
+  background: var(--bg-tertiary);
+  color: var(--fg);
+}
+
+.agent-tab-rename-input {
+  height: 26px;
+  padding: 0 8px;
+  border: 1px solid var(--accent);
+  border-radius: 8px;
+  background: var(--bg);
+  color: var(--fg);
+  font-size: 12px;
+  max-width: 180px;
+  box-sizing: border-box;
+}
+
+.agent-tab-new {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-secondary);
+  color: var(--fg-muted);
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: background 0.12s, color 0.12s, border-color 0.12s;
+}
+
+.agent-tab-new:hover {
+  background: var(--accent-subtle);
+  border-color: var(--accent);
+  color: var(--accent);
 }
 
 /* ── Chat header dropdown menu ── */
@@ -7938,14 +8216,6 @@ img[data-lightbox-src],
   flex-shrink: 0;
 }
 
-.todo-icon-next {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background: #f5a623;
-  flex-shrink: 0;
-}
-
 .todo-icon-satellite {
   width: 7px;
   height: 7px;
@@ -7965,10 +8235,9 @@ img[data-lightbox-src],
   opacity: 0.7;
 }
 
-/* ── Focus / Next card styles — same neutral base as .todo-pinned-card ── */
+/* ── Focus card styles — same neutral base as .todo-pinned-card ── */
 
-.todo-focus-card,
-.todo-next-card {
+.todo-focus-card {
   display: flex;
   align-items: center;
   gap: 6px;
@@ -7979,28 +8248,23 @@ img[data-lightbox-src],
   min-height: 28px;
 }
 
-.todo-focus-card:hover,
-.todo-next-card:hover {
+.todo-focus-card:hover {
   background: var(--hover-bg, rgba(0,0,0,0.04));
 }
 
-.todo-focus-card.todo-pinned-card-active,
-.todo-next-card.todo-pinned-card-active {
+.todo-focus-card.todo-pinned-card-active {
   background: color-mix(in srgb, var(--accent) 10%, transparent);
 }
 
-.todo-focus-card.todo-pinned-card-active:hover,
-.todo-next-card.todo-pinned-card-active:hover {
+.todo-focus-card.todo-pinned-card-active:hover {
   background: color-mix(in srgb, var(--accent) 15%, transparent);
 }
 
-.todo-focus-card.todo-pinned-card-attention,
-.todo-next-card.todo-pinned-card-attention {
+.todo-focus-card.todo-pinned-card-attention {
   background: rgba(255, 59, 48, 0.08);
 }
 
-.todo-focus-card.todo-pinned-card-attention:hover,
-.todo-next-card.todo-pinned-card-attention:hover {
+.todo-focus-card.todo-pinned-card-attention:hover {
   background: rgba(255, 59, 48, 0.14);
 }
 
@@ -10598,7 +10862,6 @@ img[data-lightbox-src],
 /* Show kebab on row hover or when menu is open */
 .todo-panel-item:hover .task-kebab-btn,
 .todo-focus-card:hover .task-kebab-btn,
-.todo-next-card:hover .task-kebab-btn,
 .todo-pinned-card:hover .task-kebab-btn,
 .task-kebab-btn:focus-visible,
 .task-kebab-wrapper:has(.task-kebab-menu) .task-kebab-btn {
@@ -11430,7 +11693,9 @@ a.task-kebab-info:hover {
 
 /* ===== Cron Toast Notifications ===== */
 
-.cron-toast-container {
+/* ===== Unified Notification Toaster (top-right) ===== */
+
+.notification-toaster {
   position: fixed;
   top: 16px;
   right: 16px;
@@ -11442,50 +11707,62 @@ a.task-kebab-info:hover {
   pointer-events: none;
 }
 
-.cron-toast {
+.notification-toast {
   pointer-events: auto;
   background: var(--card-bg);
   border: 1px solid var(--border-strong);
+  border-left: 3px solid var(--border-strong);
   border-radius: var(--radius-md);
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.12), 0 2px 8px rgba(0, 0, 0, 0.08);
   padding: 12px 14px;
-  animation: cron-toast-in 0.25s ease-out;
+  animation: notification-toast-in 0.25s ease-out;
 }
 
-@keyframes cron-toast-in {
-  from {
-    opacity: 0;
-    transform: translateX(40px);
-  }
-  to {
-    opacity: 1;
-    transform: translateX(0);
-  }
+/* Severity accents — left border + icon color. */
+.notification-toast--info { border-left-color: var(--accent); }
+.notification-toast--success { border-left-color: var(--success, #3aa757); }
+.notification-toast--warning { border-left-color: var(--warning); }
+.notification-toast--error { border-left-color: var(--danger, #d94a38); }
+
+/* Persistent toasts open the notification center on body click. */
+.notification-toast--clickable { cursor: pointer; transition: box-shadow 0.15s ease, transform 0.15s ease; }
+.notification-toast--clickable:hover {
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.16), 0 4px 12px rgba(0, 0, 0, 0.10);
+  transform: translateY(-1px);
 }
 
-.cron-toast-header {
+@keyframes notification-toast-in {
+  from { opacity: 0; transform: translateX(40px); }
+  to { opacity: 1; transform: translateX(0); }
+}
+
+.notification-toast-header {
   display: flex;
   align-items: center;
   gap: 6px;
   margin-bottom: 4px;
 }
 
-.cron-toast-icon {
+.notification-toast-icon {
   font-size: 14px;
   flex-shrink: 0;
 }
 
-.cron-toast-job {
+.notification-toast-title {
   font-size: 12px;
   font-weight: 600;
-  color: var(--accent);
+  color: var(--fg);
   flex: 1;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.cron-toast-close {
+.notification-toast--warning .notification-toast-title { color: var(--warning); }
+.notification-toast--error .notification-toast-title { color: var(--danger, #d94a38); }
+.notification-toast--info .notification-toast-title { color: var(--accent); }
+
+.notification-toast-close {
   background: none;
   border: none;
   color: var(--fg-muted);
@@ -11496,109 +11773,19 @@ a.task-kebab-info:hover {
   flex-shrink: 0;
 }
 
-.cron-toast-close:hover {
-  color: var(--fg);
-}
+.notification-toast-close:hover { color: var(--fg); }
 
-.cron-toast-body {
+.notification-toast-body {
   font-size: 13px;
   color: var(--fg-secondary);
   line-height: 1.4;
   word-break: break-word;
-}
-
-/* ===== Sort Mode Toast (TodoPanel) ===== */
-
-.sort-toast {
-  position: fixed;
-  right: 24px;
-  bottom: 24px;
-  z-index: 9999;
-  background: var(--card-bg);
-  border: 1px solid var(--border-strong);
-  border-radius: var(--radius-md);
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.12), 0 2px 8px rgba(0, 0, 0, 0.08);
-  padding: 10px 14px;
-  font-size: 13px;
-  color: var(--fg);
-  pointer-events: none;
-  animation: sort-toast-in 0.2s ease-out;
-}
-
-@keyframes sort-toast-in {
-  from { opacity: 0; transform: translateY(8px); }
-  to { opacity: 1; transform: translateY(0); }
-}
-
-/* ===== Permission Toast Notifications ===== */
-
-.permission-toast-container {
-  position: fixed;
-  top: 16px;
-  right: 16px;
-  z-index: 9998;
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  max-width: 380px;
-  pointer-events: none;
-}
-
-.permission-toast {
-  pointer-events: auto;
-  background: var(--card-bg);
-  border: 1px solid var(--warning);
-  border-left: 3px solid var(--warning);
-  border-radius: var(--radius-md);
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.12), 0 2px 8px rgba(0, 0, 0, 0.08);
-  padding: 12px 14px;
-  animation: cron-toast-in 0.25s ease-out;
-}
-
-.permission-toast-header {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  margin-bottom: 4px;
-}
-
-.permission-toast-icon {
-  font-size: 14px;
-  flex-shrink: 0;
-}
-
-.permission-toast-tool {
-  font-size: 12px;
-  font-weight: 600;
-  font-family: var(--font-mono, 'SF Mono', 'Menlo', monospace);
-  color: var(--warning);
-  flex: 1;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.permission-toast-close {
-  background: none;
-  border: none;
-  color: var(--fg-muted);
-  font-size: 16px;
-  line-height: 1;
-  cursor: pointer;
-  padding: 0 2px;
-  flex-shrink: 0;
-}
-
-.permission-toast-close:hover { color: var(--fg); }
-
-.permission-toast-body {
-  font-size: 13px;
-  color: var(--fg-secondary);
-  line-height: 1.4;
   margin-bottom: 8px;
 }
 
-.permission-toast-action {
+.notification-toast-body:last-child { margin-bottom: 0; }
+
+.notification-toast-action {
   font-size: 12px;
   font-weight: 500;
   color: var(--accent);
@@ -11610,55 +11797,9 @@ a.task-kebab-info:hover {
   transition: background 0.15s;
 }
 
-.permission-toast-action:hover {
+.notification-toast-action:hover {
   background: color-mix(in srgb, var(--accent) 10%, transparent);
 }
-
-/* ===== Operation Error Toast ===== */
-
-.operation-error-toast-container {
-  position: fixed;
-  bottom: 24px;
-  right: 24px;
-  z-index: 9998;
-  max-width: 420px;
-  pointer-events: none;
-}
-
-.operation-error-toast {
-  pointer-events: auto;
-  display: flex;
-  align-items: flex-start;
-  gap: 10px;
-  background: var(--card-bg);
-  border: 1px solid var(--danger, #d94a38);
-  border-left: 3px solid var(--danger, #d94a38);
-  border-radius: var(--radius-md);
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.14), 0 2px 8px rgba(0, 0, 0, 0.08);
-  padding: 12px 14px;
-  animation: cron-toast-in 0.25s ease-out;
-}
-
-.operation-error-toast-body {
-  flex: 1;
-  font-size: 13px;
-  line-height: 1.45;
-  color: var(--fg);
-  word-break: break-word;
-}
-
-.operation-error-toast-close {
-  background: none;
-  border: none;
-  color: var(--fg-muted);
-  font-size: 18px;
-  line-height: 1;
-  cursor: pointer;
-  padding: 0 2px;
-  flex-shrink: 0;
-}
-
-.operation-error-toast-close:hover { color: var(--fg); }
 
 /* ===== Agent Management ===== */
 
@@ -12645,8 +12786,8 @@ a.task-kebab-info:hover {
   border: 1px solid var(--border-strong);
   border-radius: var(--radius-md);
   box-shadow: var(--card-shadow-hover);
-  height: 340px;
-  max-height: 60vh;
+  height: 420px;
+  max-height: 65vh;
   overflow: hidden;
   z-index: 50;
   animation: commandPaletteIn 0.15s ease-out;
@@ -13083,6 +13224,17 @@ a.task-kebab-info:hover {
   background: color-mix(in srgb, currentColor 12%, transparent);
   font-weight: 600;
 }
+.sps-meta-model-select {
+  padding: 2px 8px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--fg);
+  font-size: 11px;
+  font-weight: 500;
+  cursor: pointer;
+}
+.sps-meta-model-select:hover { background: var(--accent-subtle); }
 
 /* ===== Quick Start Bar (context pill above chat input) ===== */
 
@@ -14340,7 +14492,10 @@ a.task-kebab-info:hover {
 
 /* Mode bar above session input */
 .session-mode-bar {
+  position: relative;        /* anchors the full-width btw popover */
   display: flex;
+  align-items: center;
+  gap: 8px;
   padding: 4px 12px 0;
 }
 
@@ -16531,6 +16686,17 @@ a.task-kebab-info:hover {
   opacity: 0.45;
 }
 
+/* Context-window usage % — pushed to the right edge of the quick-access row.
+   Moved here from the chat header so it sits next to /session + Execution. */
+.quick-access-pct {
+  margin-left: auto;
+  align-self: center;
+  font-size: 12px;
+  font-weight: 500;
+  flex-shrink: 0;
+  cursor: default;
+}
+
 /* ===== Repositories Page ===== */
 
 .repos-page {
@@ -17412,6 +17578,90 @@ a.task-kebab-info:hover {
   display: flex;
   flex-direction: column;
   min-width: 0;
+  position: relative;
+}
+
+/* ─── AI assistant column (#6) ─── */
+.notes-ai-toggle {
+  position: absolute;
+  top: 9px;
+  right: 56px;            /* sits left of the pop-out button (right:16) */
+  z-index: 6;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 9px;
+  font-size: 12px;
+  font-weight: 600;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm, 6px);
+  background: var(--bg);
+  color: var(--fg-secondary, #c4c7cc);
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s, border-color 0.15s;
+}
+.notes-ai-toggle:hover { background: var(--bg-hover); color: var(--fg); }
+.notes-ai-toggle.active {
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.notes-chat-divider {
+  flex: 0 0 1px;
+  background: var(--border);
+}
+.notes-chat-pane {
+  flex: 0 0 360px;
+  min-width: 300px;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+  overflow: hidden;
+}
+
+.notes-chat {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+}
+.notes-chat-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 16px 10px;
+  border-bottom: 1px solid var(--border);
+  flex: 0 0 auto;
+}
+.notes-chat-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--fg);
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.notes-chat-clear {
+  font-size: 12px;
+  color: var(--fg-muted);
+  background: none;
+  border: none;
+  cursor: pointer;
+}
+.notes-chat-clear:hover { color: var(--fg); }
+.notes-chat-loading { flex: 1; display: flex; align-items: center; justify-content: center; }
+.notes-chat-empty {
+  padding: 16px;
+  font-size: 13px;
+  color: var(--fg-muted);
+  line-height: 1.6;
+}
+.notes-chat-empty ul { margin: 10px 0 0; padding-left: 18px; }
+.notes-chat-empty li { margin: 3px 0; }
+.notes-chat-input {
+  flex: 0 0 auto;
+  border-top: 1px solid var(--border);
 }
 
 /* ─── Tree Panel ─── */
@@ -17522,6 +17772,20 @@ a.task-kebab-info:hover {
 .notes-tree-item.selected {
   background: color-mix(in srgb, var(--accent) 12%, transparent);
   color: var(--accent);
+}
+
+/* Drag-to-move (#5): dim the dragged node; highlight the folder/root drop target. */
+.notes-tree-item.notes-tree-dragging {
+  opacity: 0.4;
+}
+.notes-tree-item.notes-tree-drop-target {
+  background: color-mix(in srgb, var(--accent) 22%, transparent);
+  outline: 1px solid var(--accent);
+  outline-offset: -1px;
+}
+.notes-tree-body.notes-tree-drop-root {
+  box-shadow: inset 0 0 0 2px color-mix(in srgb, var(--accent) 45%, transparent);
+  border-radius: 6px;
 }
 
 .notes-tree-arrow {
@@ -17685,6 +17949,23 @@ a.task-kebab-info:hover {
   opacity: 1;
 }
 
+/* Clickable breadcrumb segments (#4): reveal the folder / locate the note in the
+   sidebar tree. Rendered as bare buttons that inherit the segment text styling. */
+.notes-breadcrumb-link {
+  font: inherit;
+  color: inherit;
+  font-weight: inherit;
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  border-radius: 3px;
+}
+.notes-breadcrumb-link:hover {
+  color: var(--accent);
+  text-decoration: underline;
+}
+
 .notes-editor-meta {
   display: flex;
   align-items: center;
@@ -17697,6 +17978,11 @@ a.task-kebab-info:hover {
   font-size: 11px;
   padding: 2px 8px;
   border-radius: 10px;
+  /* Reserve a constant slot: swapping Saving.../Saved/(idle) must not reflow
+     the header row — that reflow on every keystroke read as a page flash. */
+  min-width: 64px;
+  text-align: center;
+  transition: opacity 0.15s ease;
 }
 
 .notes-save-status.saving {
@@ -17713,6 +17999,9 @@ a.task-kebab-info:hover {
 
 .notes-editor-updated {
   font-size: 11px;
+  /* Fixed-width digits: the timestamp re-renders after every save; proportional
+     digits made its width wobble a few px → header micro-reflow while typing. */
+  font-variant-numeric: tabular-nums;
 }
 
 .notes-editor-content {
@@ -18369,51 +18658,6 @@ a.file-link:hover {
   50% { opacity: 0.3; }
 }
 
-/* ===== Audio Error Toast ===== */
-
-.audio-error-toast {
-  position: fixed;
-  bottom: 80px;
-  left: 60px;
-  z-index: 9999;
-  max-width: 360px;
-  display: flex;
-  align-items: flex-start;
-  gap: 8px;
-  padding: 10px 12px;
-  background: var(--card-bg);
-  border: 1px solid var(--error);
-  border-radius: var(--radius-md);
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.15);
-  animation: audio-toast-in 0.25s ease-out;
-  color: var(--fg-primary);
-  font-size: 12px;
-  line-height: 1.4;
-}
-
-.audio-error-toast__msg {
-  flex: 1;
-}
-
-.audio-error-toast__close {
-  background: none;
-  border: none;
-  color: var(--fg-muted);
-  cursor: pointer;
-  font-size: 16px;
-  line-height: 1;
-  padding: 0;
-  flex-shrink: 0;
-}
-
-.audio-error-toast__close:hover {
-  color: var(--fg-primary);
-}
-
-@keyframes audio-toast-in {
-  from { opacity: 0; transform: translateY(8px); }
-  to { opacity: 1; transform: translateY(0); }
-}
 
 /* ── Session Terminal (embedded xterm.js modal) ───────────────────────── */
 .session-terminal-overlay {
@@ -18622,4 +18866,225 @@ a.file-link:hover {
   font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', 'Menlo', monospace;
   font-size: 12px;
   word-break: break-all;
+}
+
+/* ── Side question ("/btw") — inline PILL trigger + floating POPOVER ── */
+.side-question-root {
+  position: static;          /* let the popover span the full panel width */
+  display: inline-flex;      /* the pill sits inline next to the mode pill */
+}
+
+/* Pill trigger — matches the native .mode-toggle-pill exactly (same bg, border,
+   padding, radius, transition) so it sits as a peer next to Bypass, not a stranger. */
+.side-question-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 10px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg);
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--fg-muted);
+  cursor: pointer;
+  transition: all 0.15s ease;
+  line-height: 1.4;
+  user-select: none;
+}
+.side-question-pill:hover:not(:disabled),
+.side-question-pill.is-open {
+  background: var(--accent-subtle);
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.side-question-pill:disabled { opacity: 0.5; cursor: default; }
+.side-question-count {
+  font-size: 10px;
+  font-weight: 600;
+  background: var(--accent);
+  color: var(--accent-fg, #fff);
+  border-radius: 999px;
+  padding: 0 6px;
+  line-height: 15px;
+}
+
+/* Floating popover — detached card above the pill row, spanning the FULL panel
+   width (anchored to .session-mode-bar, inset to match its 12px gutters). */
+.side-question-popover {
+  position: absolute;
+  bottom: calc(100% + 8px);
+  left: 12px;
+  right: 12px;
+  z-index: 40;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.28);
+}
+.side-question-popover-header {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--border);
+}
+.side-question-popover-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--fg);
+}
+.side-question-popover-hint { font-size: 11px; color: var(--fg-muted); }
+
+/* Scrolling stack of independent Q&A cards (oldest → newest). */
+.side-question-stack {
+  max-height: 300px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.side-question-empty {
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--fg-muted);
+  padding: 4px 2px;
+}
+
+/* One self-contained Q&A card — each fully boxed so it's obviously separate.
+   Uses --bg (the base surface) so it reads as a tile sitting on the slightly
+   darker --bg-elevated popover. */
+.side-question-card {
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius, 8px);
+  background: var(--bg);
+}
+.side-question-card-q {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--fg);
+  margin-bottom: 5px;
+}
+.side-question-card-a { font-size: 13px; color: var(--fg); }
+.side-question-card-actions { margin-top: 8px; display: flex; justify-content: flex-end; }
+.side-question-card-pending {
+  display: flex; align-items: center; gap: 8px;
+  color: var(--fg-muted); font-size: 12px;
+}
+
+.side-question-spinner {
+  width: 12px; height: 12px;
+  border: 2px solid var(--border);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  display: inline-block;
+  animation: side-question-spin 0.7s linear infinite;
+}
+@keyframes side-question-spin { to { transform: rotate(360deg); } }
+.side-question-promoted { font-size: 11px; color: var(--success); }
+.side-question-error { font-size: 12px; color: var(--error); }
+
+/* Composer — set apart by a top divider + a quiet uppercase label (NOT a loud
+   coloured box). The accent only appears on focus, keeping the resting state calm. */
+.side-question-composer {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+}
+.side-question-composer-label {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  font-weight: 600;
+  color: var(--fg-muted);
+}
+.side-question-composer-row { display: flex; gap: 6px; }
+.side-question-composer-row input {
+  flex: 1;
+  font-size: 13px;
+  padding: 7px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius, 8px);
+  background: var(--bg);
+  color: var(--fg);
+  outline: none;
+  transition: border-color 0.15s ease;
+}
+.side-question-composer-row input:focus { border-color: var(--accent); }
+
+/* ══ App confirm / alert dialog (replaces native window.confirm/alert) ════════ */
+.app-modal-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 9300;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.32);
+  backdrop-filter: blur(2px);
+  -webkit-backdrop-filter: blur(2px);
+  animation: lightbox-fade-in 0.12s ease-out;
+}
+.app-modal {
+  width: min(420px, calc(100vw - 48px));
+  background: var(--card-bg, var(--bg-elevated, #1c1f26));
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 20px 22px 16px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.35), 0 2px 8px rgba(0, 0, 0, 0.2);
+  -webkit-font-smoothing: antialiased;
+}
+.app-modal-title {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--fg);
+  line-height: 1.4;
+}
+.app-modal-message {
+  margin-top: 8px;
+  font-size: 13px;
+  color: var(--fg-secondary, #c4c7cc);
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.app-modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 20px;
+}
+.app-modal-btn {
+  padding: 6px 14px;
+  font-size: 13px;
+  font-weight: 500;
+  border-radius: 7px;
+  border: 1px solid var(--border);
+  background: var(--bg-secondary, transparent);
+  color: var(--fg);
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
+}
+.app-modal-btn:hover { background: var(--bg-hover, #2d3038); }
+.app-modal-btn.primary {
+  background: var(--accent, #6366f1);
+  border-color: var(--accent, #6366f1);
+  color: #fff;
+}
+.app-modal-btn.primary:hover { filter: brightness(1.08); }
+.app-modal-btn.primary.danger {
+  background: var(--error, #e5484d);
+  border-color: var(--error, #e5484d);
+}
+.app-modal-btn.primary:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--accent) 60%, transparent);
+  outline-offset: 2px;
 }

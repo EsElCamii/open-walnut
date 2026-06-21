@@ -166,7 +166,7 @@ export const SortableTierCard = memo(function SortableTierCard({ task, tier, isF
   };
 
   const needsAttention = task.phase === 'AGENT_COMPLETE' || task.phase === 'AWAIT_HUMAN_ACTION';
-  const cardClass = tier === 'focus' ? 'todo-focus-card' : tier === 'next' ? 'todo-next-card' : 'todo-pinned-card';
+  const cardClass = tier === 'focus' ? 'todo-focus-card' : 'todo-pinned-card';
 
   return (
     <div

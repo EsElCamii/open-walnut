@@ -1,8 +1,9 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
-import { useParams, useNavigate, useLocation } from 'react-router-dom';
+import { useParams, useNavigate, useLocation, useSearchParams } from 'react-router-dom';
 import type { Task } from '@open-walnut/core';
 import { renderNoteMarkdown } from '@/utils/markdown';
 import { fetchTask, toggleCompleteTask, starTask, addNote, updateNote, updateDescription, deleteTask, addTag, removeTag, addDependency, removeDependency, updateTask } from '@/api/tasks';
+import { TaskFieldEditor } from '@/components/tasks/TaskFieldEditor';
 import { SprintPicker } from '@/components/tasks/SprintPicker';
 import { DatePicker } from '@/components/common/DatePicker';
 import { fetchSessionsForTask, updateSession } from '@/api/sessions';
@@ -19,29 +20,73 @@ import { useSessionSend } from '@/hooks/useSessionSend';
 import type { ImageAttachment } from '@/api/chat';
 import { useIntegrations, getIntegrationMeta } from '@/hooks/useIntegrations';
 import { useTasksContext } from '@/contexts/TasksContext';
+import { useConfirm, useAlert } from '@/hooks/useConfirm';
+import { openPopout } from '@/popout/openPopout';
+import { ICON_NEW_TAB } from '@/components/common/Icons';
 
+/**
+ * Route entry. Resolves the task id and the operation-error reporter from
+ * app-shell context, then renders <TaskDetailView/>.
+ *
+ * Id comes from the route param (`/tasks/:id`) when present, falling back to a
+ * `?id=` query param (`/tasks?id=...`) — the route param always wins, so the
+ * canonical `/tasks/:id` route is unaffected.
+ *
+ * Lives inside <AppShell> (TasksProvider present), so `useTasksContext()` is
+ * safe here. The pop-out path uses <PopoutTaskDetail/> instead (no provider).
+ */
 export function TaskDetailPage() {
-  const { id } = useParams<{ id: string }>();
+  const { id: routeId } = useParams<{ id: string }>();
+  const [params] = useSearchParams();
+  const id = routeId ?? params.get('id') ?? undefined;
+  const { showOperationError } = useTasksContext();
+  return <TaskDetailView id={id} showOperationError={showOperationError} />;
+}
+
+/**
+ * Pop-out entry. Rendered by PopoutTask (under PopoutRoot, OUTSIDE AppShell —
+ * no TasksProvider), so it MUST NOT call useTasksContext. Sources the id from
+ * the `?id=` query param and falls back to `window.alert` for operation errors
+ * (the shell's unified notification toaster isn't mounted in a pop-out window).
+ */
+export function PopoutTaskDetail() {
+  const [params] = useSearchParams();
+  const id = params.get('id') ?? undefined;
+  const alert = useAlert();
+  return (
+    <TaskDetailView
+      id={id}
+      isPopout
+      showOperationError={(msg) => { void alert({ title: 'Operation failed', message: msg }); }}
+    />
+  );
+}
+
+interface TaskDetailViewProps {
+  /** Full task id (or unique prefix). From route param or `?id=` query. */
+  id: string | undefined;
+  /** True when rendered inside a pop-out window (hides the back button). */
+  isPopout?: boolean;
+  /** Report a failed operation (toast in-app, alert in pop-out). */
+  showOperationError: (msg: string) => void;
+}
+
+function TaskDetailView({ id, isPopout = false, showOperationError }: TaskDetailViewProps) {
   const navigate = useNavigate();
   const location = useLocation();
   const integrations = useIntegrations();
-  const { showOperationError } = useTasksContext();
+  const confirm = useConfirm();
+  const alert = useAlert();
   const [task, setTask] = useState<Task | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [newNote, setNewNote] = useState('');
-  const [editingNote, setEditingNote] = useState(false);
-  const [noteEditValue, setNoteEditValue] = useState('');
-  const [editingDescription, setEditingDescription] = useState(false);
-  const [descEditValue, setDescEditValue] = useState('');
   const [sessionRecords, setSessionRecords] = useState<Map<string, SessionRecord>>(new Map());
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
   const [showDepPicker, setShowDepPicker] = useState(false);
   const [depSearch, setDepSearch] = useState('');
   const [depSearchResults, setDepSearchResults] = useState<Task[]>([]);
   const [archivedOpen, setArchivedOpen] = useState(false);
-  const descRef = useRef<HTMLTextAreaElement>(null);
-  const noteRef = useRef<HTMLTextAreaElement>(null);
   const sessionSend = useSessionSend(activeSessionId);
 
   const handleBack = useCallback(() => {
@@ -223,13 +268,13 @@ export function TaskDetailPage() {
 
   const handleDelete = async () => {
     if (!id) return;
-    const confirmed = window.confirm(`Delete task "${task?.title}"? This cannot be undone.`);
+    const confirmed = await confirm({ title: `Delete task “${task?.title}”?`, message: 'This cannot be undone.', confirmLabel: 'Delete', danger: true });
     if (!confirmed) return;
     try {
       await deleteTask(id);
       navigate('/tasks');
     } catch (e) {
-      alert((e as Error).message);
+      await alert({ title: 'Delete failed', message: (e as Error).message });
     }
   };
 
@@ -239,21 +284,6 @@ export function TaskDetailPage() {
     setTask(updated);
     setNewNote('');
   };
-
-  const handleSaveNote = async () => {
-    if (!id) return;
-    const updated = await updateNote(id, noteEditValue);
-    setTask(updated);
-    setEditingNote(false);
-  };
-
-  const handleSaveDescription = async () => {
-    if (!id) return;
-    const updated = await updateDescription(id, descEditValue);
-    setTask(updated);
-    setEditingDescription(false);
-  };
-
 
   const activeSessionIds = useMemo(
     () => [task?.plan_session_id, task?.exec_session_id]
@@ -276,11 +306,6 @@ export function TaskDetailPage() {
     return { otherSessionIds: other, archivedSessionIds: archived };
   }, [task?.session_ids, sessionRecords, activeSessionIds]);
 
-  const renderedNote = useMemo(
-    () => task?.note ? renderNoteMarkdown(task.note) : '',
-    [task?.note],
-  );
-
   const renderedSummary = useMemo(
     () => task?.summary ? renderNoteMarkdown(task.summary) : '',
     [task?.summary],
@@ -300,12 +325,26 @@ export function TaskDetailPage() {
 
   return (
     <div>
-      <button className="btn mb-4" onClick={handleBack}>&larr; Back</button>
+      {/* Back button is meaningless in a pop-out window (no in-app history). */}
+      {!isPopout && (
+        <button className="btn mb-4" onClick={handleBack}>&larr; Back</button>
+      )}
 
       <div className="card mb-4">
         <div className="flex items-center gap-3 mb-2">
           <StarButton starred={!!task.starred} onClick={handleStar} />
           <h1 className="page-title" style={{ flex: 1 }}>{task.title}</h1>
+          {/* Open in a standalone browser tab. Hidden when already in one. */}
+          {!isPopout && (
+            <button
+              className="btn btn-icon"
+              title="Open in new tab"
+              aria-label="Open in new tab"
+              onClick={() => openPopout('task', { id: task.id })}
+            >
+              {ICON_NEW_TAB}
+            </button>
+          )}
         </div>
         <div className="flex gap-2 items-center mb-4">
           <StatusBadge status={task.status} phase={task.phase} />
@@ -720,75 +759,32 @@ export function TaskDetailPage() {
       )}
 
 
-      {/* Description */}
+      {/* Description — shared rich editor, always-on autosave. */}
       <div className="card mb-4">
         <div className="flex items-center gap-2 mb-2">
           <h2 style={{ fontSize: '16px', fontWeight: 600 }}>Description</h2>
-          {!editingDescription && (
-            <button
-              className="btn btn-sm"
-              onClick={() => { setDescEditValue(task.description || ''); setEditingDescription(true); }}
-            >
-              Edit
-            </button>
-          )}
         </div>
-        {editingDescription ? (
-          <div>
-            <textarea
-              ref={descRef}
-              value={descEditValue}
-              onChange={(e) => setDescEditValue(e.target.value)}
-              rows={4}
-              style={{ width: '100%', resize: 'vertical' }}
-              placeholder="What is this task about? Why does it exist?"
-              autoFocus
-            />
-            <div className="flex gap-2 mt-2">
-              <button className="btn btn-primary btn-sm" onClick={handleSaveDescription}>Save</button>
-              <button className="btn btn-sm" onClick={() => setEditingDescription(false)}>Cancel</button>
-            </div>
-          </div>
-        ) : task.description ? (
-          <div className="markdown-body" dangerouslySetInnerHTML={{ __html: renderNoteMarkdown(task.description) }} />
-        ) : (
-          <p className="text-muted text-sm">No description yet</p>
-        )}
+        <TaskFieldEditor
+          taskId={task.id}
+          field="description"
+          value={task.description || ''}
+          save={updateDescription}
+          placeholder="What is this task about? Why does it exist?"
+        />
       </div>
 
-      {/* Note */}
+      {/* Note — shared rich editor, always-on autosave. */}
       <div className="card mb-4">
         <div className="flex items-center gap-2 mb-2">
           <h2 style={{ fontSize: '16px', fontWeight: 600 }}>Note</h2>
-          {!editingNote && task.note && (
-            <button
-              className="btn btn-sm"
-              onClick={() => { setNoteEditValue(task.note || ''); setEditingNote(true); }}
-            >
-              Edit
-            </button>
-          )}
         </div>
-        {editingNote ? (
-          <div>
-            <textarea
-              ref={noteRef}
-              value={noteEditValue}
-              onChange={(e) => setNoteEditValue(e.target.value)}
-              rows={12}
-              style={{ width: '100%', resize: 'vertical', fontFamily: 'monospace', fontSize: 13 }}
-              autoFocus
-            />
-            <div className="flex gap-2 mt-2">
-              <button className="btn btn-primary btn-sm" onClick={handleSaveNote}>Save</button>
-              <button className="btn btn-sm" onClick={() => setEditingNote(false)}>Cancel</button>
-            </div>
-          </div>
-        ) : task.note ? (
-          <div className="markdown-body" dangerouslySetInnerHTML={{ __html: renderedNote }} />
-        ) : (
-          <p className="text-muted text-sm">No notes yet</p>
-        )}
+        <TaskFieldEditor
+          taskId={task.id}
+          field="note"
+          value={task.note || ''}
+          save={updateNote}
+          placeholder="Working notes, findings, context…"
+        />
         <div className="flex gap-2 mt-2">
           <input
             type="text"

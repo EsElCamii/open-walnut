@@ -5,6 +5,7 @@ import { StarButton } from '../common/StarButton';
 import { TagChip } from './TagChip';
 import { SessionPill } from './SessionPill';
 import { useIntegrations, getIntegrationMeta } from '@/hooks/useIntegrations';
+import { useConfirm } from '@/hooks/useConfirm';
 import { ICON_TRASH } from '../common/Icons';
 
 interface TaskCardProps {
@@ -77,6 +78,7 @@ function SyncIndicator({ task }: { task: Task }) {
 
 export function TaskCard({ task, onComplete, onStar, onDelete }: TaskCardProps) {
   const navigate = useNavigate();
+  const confirm = useConfirm();
   const subtasksDone = task.subtasks?.filter((s) => s.done).length ?? 0;
   const subtasksTotal = task.subtasks?.length ?? 0;
 
@@ -104,9 +106,9 @@ export function TaskCard({ task, onComplete, onStar, onDelete }: TaskCardProps) 
       {onDelete && (
         <button
           className="task-delete-btn"
-          onClick={(e) => {
+          onClick={async (e) => {
             e.stopPropagation();
-            if (window.confirm(`Delete task "${task.title}"? This cannot be undone.`)) {
+            if (await confirm({ title: `Delete task “${task.title}”?`, message: 'This cannot be undone.', confirmLabel: 'Delete', danger: true })) {
               onDelete(task.id);
             }
           }}

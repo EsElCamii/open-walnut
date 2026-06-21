@@ -2,6 +2,7 @@ import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
 import { BrowserRouter } from 'react-router-dom';
 import { App } from './App';
+import { ConfirmProvider } from './hooks/useConfirm';
 import { initBrowserLogger } from './utils/browser-logger';
 import './styles/globals.css';
 
@@ -17,7 +18,9 @@ document.addEventListener('mousedown', () => {
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
     <BrowserRouter>
-      <App />
+      <ConfirmProvider>
+        <App />
+      </ConfirmProvider>
     </BrowserRouter>
   </StrictMode>,
 );

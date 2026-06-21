@@ -56,11 +56,30 @@ const WS_CLOSE_CODES: Record<number, string> = {
   1011: 'server error', 1012: 'server restart', 1013: 'try again later',
 };
 
+/** Max RPCs buffered while the socket is still opening before we start rejecting. */
+const PRE_OPEN_QUEUE_CAP = 50;
+/** How long a buffered pre-open RPC waits for the socket before it rejects. */
+const PRE_OPEN_RPC_TIMEOUT_MS = 10_000;
+
+interface QueuedRpc {
+  method: string;
+  payload: unknown;
+  resolve: (v: unknown) => void;
+  reject: (e: Error) => void;
+  timer: ReturnType<typeof setTimeout>;
+}
+
 class WsClient {
   private ws: WebSocket | null = null;
   private eventListeners = new Map<string, Set<EventCallback>>();
   private connectionListeners = new Set<ConnectionCallback>();
   private pendingRpc = new Map<string, { resolve: (v: unknown) => void; reject: (e: Error) => void }>();
+  // RPCs issued before the socket reaches OPEN (cold-load race: useChat/session
+  // hooks fire RPCs in the first ~200-500ms while the lazy WS handshake is still
+  // in flight). Instead of rejecting immediately ("RPC failed — not connected"),
+  // buffer them here and flush on open. Bounded + per-item timeout so a socket
+  // that never opens can't leak.
+  private preOpenQueue: QueuedRpc[] = [];
   private _state: ConnectionState = 'disconnected';
   private reconnectDelay = 1000;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
@@ -90,6 +109,8 @@ class WsClient {
       this.reconnectDelay = 1000;
       this.setState('connected');
       log.info('ws', isReconnect ? 'connected (reconnect)' : 'connected');
+      // Flush any RPCs buffered while the socket was opening (cold-load race).
+      this.flushPreOpenQueue();
       // On reconnect, emit a synthetic event so components can re-fetch stale data.
       // Events during the disconnect window are permanently lost — the server has
       // no event buffer/replay; events are fire-and-forget over the live socket.
@@ -179,26 +200,80 @@ class WsClient {
   sendRpc<T = unknown>(method: string, payload: unknown): Promise<T> {
     return new Promise((resolve, reject) => {
       if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
-        log.warn('ws', 'RPC failed — not connected', { method });
-        reject(new Error('WebSocket not connected'));
+        // Not open yet. Rather than fail (the cold-load race), buffer and flush
+        // on open — UNLESS we're disposed or the buffer is full.
+        if (this.disposed) {
+          reject(new Error('WebSocket disposed'));
+          return;
+        }
+        if (this.preOpenQueue.length >= PRE_OPEN_QUEUE_CAP) {
+          log.warn('ws', 'RPC dropped — pre-open queue full', { method, cap: PRE_OPEN_QUEUE_CAP });
+          reject(new Error('WebSocket not connected (queue full)'));
+          return;
+        }
+        const timer = setTimeout(() => {
+          // Still not sent after the timeout — give up on this one.
+          const idx = this.preOpenQueue.findIndex((q) => q.timer === timer);
+          if (idx !== -1) this.preOpenQueue.splice(idx, 1);
+          log.warn('ws', 'RPC timed out waiting for connection', { method });
+          reject(new Error('WebSocket not connected (timeout)'));
+        }, PRE_OPEN_RPC_TIMEOUT_MS);
+        this.preOpenQueue.push({ method, payload, resolve: resolve as (v: unknown) => void, reject, timer });
+        log.info('ws', 'RPC queued (pre-open)', { method, queued: this.preOpenQueue.length });
+        // Kick off a connect if nothing is in flight (lazy handshake).
+        if (!this.ws && !this.disposed) this.connect();
         return;
       }
-      const id = nextReqId();
-      const frame: WsReqFrame = { type: 'req', id, method, payload };
-      this.pendingRpc.set(id, {
-        resolve: resolve as (v: unknown) => void,
-        reject,
-      });
-      // Extract IDs from payload for traceability
-      const rpcLog: Record<string, unknown> = { rpcId: id, method };
-      if (payload && typeof payload === 'object') {
-        const p = payload as Record<string, unknown>;
-        if (p.sessionId) rpcLog.sessionId = p.sessionId;
-        if (p.taskId) rpcLog.taskId = p.taskId;
-      }
-      log.info('ws', `RPC:${id} →`, rpcLog);
-      this.ws.send(JSON.stringify(frame));
+      this.dispatchRpc(method, payload, resolve as (v: unknown) => void, reject);
     });
+  }
+
+  /**
+   * Opt this connection into a delivery mode on the server.
+   *
+   * - `setInterest('lightweight', [sessionId])` → the server only forwards events
+   *   for the listed entity ids (plus entity-less lifecycle events). Used by pop-out
+   *   windows so they don't receive the full event firehose.
+   * - `setInterest('global')` → restore the default firehose (every broadcast).
+   *
+   * Goes through `sendRpc`, so it's queued until the socket opens and is re-applied
+   * by the caller after reconnect (listen for `_ws:reconnected`).
+   */
+  setInterest(mode: 'global' | 'lightweight', ids: string[] = []): Promise<{ mode: string; ids: string[] }> {
+    return this.sendRpc<{ mode: string; ids: string[] }>('set-interest', { mode, ids });
+  }
+
+  /** Send an RPC over the live OPEN socket. Caller guarantees readyState===OPEN. */
+  private dispatchRpc(method: string, payload: unknown, resolve: (v: unknown) => void, reject: (e: Error) => void): void {
+    const id = nextReqId();
+    const frame: WsReqFrame = { type: 'req', id, method, payload };
+    this.pendingRpc.set(id, { resolve, reject });
+    // Extract IDs from payload for traceability
+    const rpcLog: Record<string, unknown> = { rpcId: id, method };
+    if (payload && typeof payload === 'object') {
+      const p = payload as Record<string, unknown>;
+      if (p.sessionId) rpcLog.sessionId = p.sessionId;
+      if (p.taskId) rpcLog.taskId = p.taskId;
+    }
+    log.info('ws', `RPC:${id} →`, rpcLog);
+    this.ws!.send(JSON.stringify(frame));
+  }
+
+  /** Flush RPCs buffered while the socket was opening. Called from onopen. */
+  private flushPreOpenQueue(): void {
+    if (this.preOpenQueue.length === 0) return;
+    const queued = this.preOpenQueue;
+    this.preOpenQueue = [];
+    log.info('ws', 'flushing pre-open RPC queue', { count: queued.length });
+    for (const q of queued) {
+      clearTimeout(q.timer);
+      if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+        this.dispatchRpc(q.method, q.payload, q.resolve, q.reject);
+      } else {
+        // Socket went away between open and flush — fail the buffered RPC.
+        q.reject(new Error('WebSocket not connected'));
+      }
+    }
   }
 
   private setState(state: ConnectionState) {
@@ -219,8 +294,11 @@ class WsClient {
     const listenerCount = cbs?.size ?? 0;
 
     if (!SUPPRESSED_EVENTS.has(frame.name)) {
+      // debug: fires per inbound WS event. tool-use/result/system-event/usage
+      // on a large session are a hot path; at info they flood the server log via
+      // the browser-logger forwarder. Surface via the frontend debug gate.
       const summary = this.summarizeEventData(frame.name, frame.data);
-      log.info('ws', `event "${frame.name}"`, { seq: frame.seq, listeners: listenerCount, ...summary });
+      log.debug('ws', `event "${frame.name}"`, { seq: frame.seq, listeners: listenerCount, ...summary });
     }
 
     if (!cbs) return;
@@ -289,6 +367,17 @@ class WsClient {
       p.reject(new Error(reason));
     }
     this.pendingRpc.clear();
+    // On dispose, also drain the pre-open queue (no reconnect will flush it).
+    // On a transient disconnect we leave it intact: the scheduled reconnect's
+    // onopen will flush it, and each item's own timeout caps the wait.
+    if (this.disposed && this.preOpenQueue.length > 0) {
+      log.warn('ws', 'rejecting queued pre-open RPCs', { count: this.preOpenQueue.length, reason });
+      for (const q of this.preOpenQueue) {
+        clearTimeout(q.timer);
+        q.reject(new Error(reason));
+      }
+      this.preOpenQueue = [];
+    }
   }
 
   private scheduleReconnect() {

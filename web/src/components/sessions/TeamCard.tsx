@@ -21,6 +21,7 @@ function shortModel(model: string): string {
   if (model.includes('haiku')) return 'haiku';
   if (model.includes('sonnet')) return 'sonnet';
   if (model.includes('opus')) return 'opus';
+  if (model.includes('fable')) return 'fable';
   // Remove provider prefix (e.g., "us.anthropic.claude-opus-4-6-v1" → "opus-4-6")
   const parts = model.split('.');
   const last = parts[parts.length - 1];

@@ -3,12 +3,14 @@ import { useCommands } from '@/hooks/useCommands';
 import { CommandCard } from '@/components/commands/CommandCard';
 import { CommandForm } from '@/components/commands/CommandForm';
 import { LoadingSpinner } from '@/components/common/LoadingSpinner';
+import { useAlert } from '@/hooks/useConfirm';
 import type { CommandDef } from '@/api/commands';
 
 type FilterTab = 'all' | 'builtin' | 'user';
 
 export function CommandsPage() {
   const { commands, loading, error, create, update, remove } = useCommands();
+  const alert = useAlert();
   const [filter, setFilter] = useState<FilterTab>('all');
   const [showForm, setShowForm] = useState(false);
   const [editingCommand, setEditingCommand] = useState<CommandDef | undefined>(undefined);
@@ -48,9 +50,9 @@ export function CommandsPage() {
     try {
       await remove(name);
     } catch (err) {
-      alert(err instanceof Error ? err.message : 'Failed to delete command');
+      await alert({ title: 'Delete failed', message: err instanceof Error ? err.message : 'Failed to delete command' });
     }
-  }, [remove]);
+  }, [remove, alert]);
 
   if (loading) return <LoadingSpinner />;
   if (error) return <div className="empty-state"><p>Error: {error}</p></div>;

@@ -5,7 +5,6 @@ import { useChat, type TaskContext, type ImageAttachment } from '@/hooks/useChat
 import { useAgentConsole } from '@/hooks/useAgentConsole';
 import { useConversations } from '@/hooks/useConversations';
 import { usePlanMode } from '@/hooks/usePlanMode';
-import type { ChatStats } from '@/api/chat';
 import { useWebSocket, useEvent } from '@/hooks/useWebSocket';
 import { useTasksContext } from '@/contexts/TasksContext';
 import { useFavorites } from '@/hooks/useFavorites';
@@ -24,7 +23,7 @@ import { TriagePanel } from '@/components/triage/TriagePanel';
 import { fetchSession, fetchSessionsForTask, quickStartSession } from '@/api/sessions';
 import { ContextInspectorPanel } from '@/components/context/ContextInspectorPanel';
 import { QuickAccessBar } from '@/components/chat/QuickAccessBar';
-import { AgentDropdown, slugifyAgentId } from '@/components/chat/AgentDropdown';
+import { AgentTabBar, slugifyAgentId } from '@/components/chat/AgentTabBar';
 import { createAgentDef, updateAgentDef } from '@/api/agents';
 import { useContextInspector } from '@/hooks/useContextInspector';
 import { useUrlSync } from '@/hooks/useUrlSync';
@@ -52,8 +51,6 @@ import { useAutoAnimate } from '@formkit/auto-animate/react';
 
 // ── Compact chat header with dropdown menu ──
 
-const CONTEXT_WINDOW_DEFAULT = 200_000; // fallback when backend doesn't provide contextWindow
-
 // Prefill template for "Create by chat" (R2). This is PREFILLED into the chat input
 // (visible + editable), NOT auto-sent — the user fills in the purpose/name then presses
 // Send. Walnut then designs the agent conversationally and calls the agent_create tool.
@@ -62,9 +59,8 @@ const AGENT_BUILDER_PREFILL = `Create an interactive agent that shows up in my c
 Purpose:
 Name (optional): `;
 
-function ChatHeaderRow({ title, stats, connectionState, inspectorOpen, onToggleInspector, hasMessages, onClear, agentSwitcher }: {
+function ChatHeaderRow({ title, connectionState, inspectorOpen, onToggleInspector, hasMessages, onClear, agentSwitcher }: {
   title: string;
-  stats: ChatStats | null;
   connectionState: string;
   inspectorOpen: boolean;
   onToggleInspector: () => void;
@@ -85,19 +81,10 @@ function ChatHeaderRow({ title, stats, connectionState, inspectorOpen, onToggleI
     return () => document.removeEventListener('mousedown', handler);
   }, [menuOpen]);
 
-  const contextWindow = stats?.contextWindow ?? CONTEXT_WINDOW_DEFAULT;
-  const pct = stats ? Math.round((stats.estimatedTotalTokens ?? stats.estimatedTokens) / contextWindow * 100) : null;
-  const pctColor = pct != null && pct > 80 ? 'var(--error)' : pct != null && pct > 50 ? 'var(--warning)' : 'var(--fg-muted)';
-
   return (
     <div className="chat-header-row">
       <div className="chat-header-meta">
         {agentSwitcher || <span className="chat-header-title">{title}</span>}
-        {pct != null && (
-          <span className="chat-header-pct" style={{ color: pctColor }} title={`${stats!.apiMessageCount} msgs · ~${Math.round((stats!.estimatedTotalTokens ?? stats!.estimatedTokens) / 1000)}K tokens${stats!.compacted ? ' · compacted' : ''}`}>
-            {pct}%
-          </span>
-        )}
         {connectionState !== 'connected' && (
           <span className="text-xs" style={{ color: 'var(--warning)' }}>({connectionState})</span>
         )}
@@ -182,18 +169,17 @@ export function MainPage({ visible = true, navigateRef }: MainPageProps) {
   const { health, setupComplete } = useSystemHealth();
   const { mode: chatMode, toggleMode, getPlanPayload } = usePlanMode();
   const { connectionState } = useWebSocket();
-  const { tasks, loading, toggleComplete, setPhase, star, create, update, reorder, moveTask, reparentTask, deleteTask, bakeOrder, operationError, clearOperationError, showOperationError } = useTasksContext();
+  const { tasks, loading, toggleComplete, setPhase, star, create, update, reorder, moveTask, reparentTask, deleteTask, bakeOrder, clearOperationError, showOperationError } = useTasksContext();
   const favorites = useFavorites();
   const focusBar = useFocusBarContext();
   const pinnedTaskIdSet = useMemo(() => new Set(focusBar.pinnedIds), [focusBar.pinnedIds]);
   const focusTaskIdSet = useMemo(() => new Set(focusBar.focusIds), [focusBar.focusIds]);
-  const nextTaskIdSet = useMemo(() => new Set(focusBar.nextIds), [focusBar.nextIds]);
   const waitTaskIdSet = useMemo(() => new Set(focusBar.waitIds), [focusBar.waitIds]);
   const ordering = useOrdering();
   const [focusedTask, setFocusedTask] = useState<Task | null>(null);
   // Nonce that increments on every focus action — forces re-scroll even for same task
   const [focusNonce, setFocusNonce] = useState(0);
-  const inspector = useContextInspector(agentConsole.activeAgentId);
+  const inspector = useContextInspector(agentConsole.activeAgentId, conversations.activeConversationId ?? undefined);
   // Force re-render when UI Only settings change (hook subscribes to localStorage)
   useUiOnlySettings();
 
@@ -825,7 +811,7 @@ export function MainPage({ visible = true, navigateRef }: MainPageProps) {
     } catch { /* non-critical */ }
   }, []);
 
-  const handleCreate = useCallback(async (input: { title: string; priority: string; category?: string; project?: string; starred?: boolean; pinnedTier?: 'focus' | 'next' | 'satellite' | 'wait' }) => {
+  const handleCreate = useCallback(async (input: { title: string; priority: string; category?: string; project?: string; starred?: boolean; pinnedTier?: 'focus' | 'satellite' | 'wait' }) => {
     const task = await create({
       title: input.title,
       priority: input.priority as 'high' | 'low' | 'none',
@@ -976,6 +962,9 @@ export function MainPage({ visible = true, navigateRef }: MainPageProps) {
         priority: metaSnapshot.priority,
         pinTier: metaSnapshot.pinTier,
       } : undefined;
+      // Model is a session arg, not task metadata. undefined = Auto (let the
+      // CLI/config default decide) — only forwarded when the user picks one.
+      const model = metaSnapshot?.model;
 
       quickStartSession({
         cwd: qsp.cwd,
@@ -983,6 +972,7 @@ export function MainPage({ visible = true, navigateRef }: MainPageProps) {
         message: text,
         images,
         taskMeta,
+        model,
       }).then((result) => {
         // Update ref with real taskId (WS events use this to match)
         if (pendingQuickStartRef.current === tempTaskId) {
@@ -1066,9 +1056,11 @@ export function MainPage({ visible = true, navigateRef }: MainPageProps) {
       addLocalMessage: (content: string) => chat.addLocalMessage(content),
       navigate: navigateRef?.current ?? (() => {}),
       args,
+      agentId: agentConsole.activeAgentId,
+      conversationId: conversations.activeConversationId ?? undefined,
     };
     cmd.execute(ctx);
-  }, [handleSendMessage, chat, navigateRef]);
+  }, [handleSendMessage, chat, navigateRef, agentConsole.activeAgentId, conversations.activeConversationId]);
 
   const chatTitle = focusedTask
     ? `Chat — ${focusedTask.title}`
@@ -1115,10 +1107,8 @@ export function MainPage({ visible = true, navigateRef }: MainPageProps) {
           onSetTier={focusBar.setTier}
           pinnedTaskIds={pinnedTaskIdSet}
           focusTaskIds={focusTaskIdSet}
-          nextTaskIds={nextTaskIdSet}
           waitTaskIds={waitTaskIdSet}
           suppressDetail={suppressDetail}
-          operationError={operationError}
           onClearOperationError={clearOperationError}
           onOperationError={showOperationError}
           externalCategory={activeCategory}
@@ -1138,14 +1128,13 @@ export function MainPage({ visible = true, navigateRef }: MainPageProps) {
         <div className="chat-page">
           <ChatHeaderRow
             title={chatTitle}
-            stats={chat.stats}
             connectionState={connectionState}
             inspectorOpen={inspector.isOpen}
             onToggleInspector={inspector.toggle}
             hasMessages={chat.messages.length > 0}
             onClear={chat.clearMessages}
             agentSwitcher={(
-              <AgentDropdown
+              <AgentTabBar
                 agents={agentConsole.agents}
                 activeAgentId={agentConsole.activeAgentId}
                 onSwitchAgent={agentConsole.switchAgent}
@@ -1268,7 +1257,7 @@ export function MainPage({ visible = true, navigateRef }: MainPageProps) {
               onClose={() => {/* closed automatically when tool result arrives */}}
             />
 
-            <QuickAccessBar onSessionClick={() => setPathSelectorOpen(true)} mode={chatMode} onModeToggle={toggleMode} />
+            <QuickAccessBar onSessionClick={() => setPathSelectorOpen(true)} mode={chatMode} onModeToggle={toggleMode} stats={chat.stats} />
 
             <ChatInput
               onSend={handleSendMessage}

@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback } from 'react';
 import type { SkillInfo, RefFile } from '@/api/skills';
 import { fetchReferences } from '@/api/skills';
 import { formatSize } from '@/utils/format';
+import { useAlert } from '@/hooks/useConfirm';
 
 interface SkillDetailProps {
   skill: SkillInfo;
@@ -11,6 +12,7 @@ interface SkillDetailProps {
 }
 
 export function SkillDetail({ skill, onSave, onDelete, onToggle }: SkillDetailProps) {
+  const alert = useAlert();
   const [content, setContent] = useState(skill.content);
   const [dirty, setDirty] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -55,7 +57,7 @@ export function SkillDetail({ skill, onSave, onDelete, onToggle }: SkillDetailPr
       await onSave(skill.dirName, content);
       setDirty(false);
     } catch (err) {
-      alert(err instanceof Error ? err.message : 'Failed to save');
+      await alert({ title: 'Save failed', message: err instanceof Error ? err.message : 'Failed to save' });
     } finally {
       setSaving(false);
     }
@@ -70,7 +72,7 @@ export function SkillDetail({ skill, onSave, onDelete, onToggle }: SkillDetailPr
     try {
       await onDelete(skill.dirName);
     } catch (err) {
-      alert(err instanceof Error ? err.message : 'Failed to delete');
+      await alert({ title: 'Delete failed', message: err instanceof Error ? err.message : 'Failed to delete' });
     }
   };
 

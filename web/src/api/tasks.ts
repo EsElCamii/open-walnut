@@ -36,15 +36,20 @@ export interface UpdateTaskInput {
   set_depends_on?: string[];
 }
 
-export async function fetchTasks(filter?: TaskFilter, opts?: { slim?: boolean }): Promise<Task[]> {
+export async function fetchTasks(filter?: TaskFilter, opts?: { slim?: boolean; minimal?: boolean }): Promise<Task[]> {
   const params: Record<string, string> = {};
   if (filter) {
     for (const [k, v] of Object.entries(filter)) {
       if (v) params[k] = v;
     }
   }
-  // Default to slim mode (omits note/conversation_log, ~400KB savings)
-  if (opts?.slim !== false) {
+  if (opts?.minimal) {
+    // List payload: drops note/conversation_log AND summary/description/ext
+    // (~2.6MB on top of the slim ~400KB). The detail pane lazy-loads the full
+    // task on focus via fetchTask(id). Use for the home task list.
+    params.fields = 'list';
+  } else if (opts?.slim !== false) {
+    // Default to slim mode (omits note/conversation_log, ~400KB savings)
     params.slim = '1';
   }
   const res = await apiGet<{ tasks: Task[] }>('/api/tasks', Object.keys(params).length ? params : undefined);

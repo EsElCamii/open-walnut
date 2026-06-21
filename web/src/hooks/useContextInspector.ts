@@ -13,7 +13,7 @@ export interface UseContextInspectorReturn {
   refresh: () => void;
 }
 
-export function useContextInspector(agentId?: string): UseContextInspectorReturn {
+export function useContextInspector(agentId?: string, conversationId?: string): UseContextInspectorReturn {
   const [data, setData] = useState<ContextInspectorResponse | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -21,20 +21,22 @@ export function useContextInspector(agentId?: string): UseContextInspectorReturn
   const isOpenRef = useRef(false);
   const agentIdRef = useRef(agentId);
   agentIdRef.current = agentId;
+  const conversationIdRef = useRef(conversationId);
+  conversationIdRef.current = conversationId;
 
-  // Clear cached data when agent changes so stale context isn't shown
+  // Clear cached data when agent OR conversation changes so stale context isn't shown
   useEffect(() => {
     setData(null);
     if (isOpenRef.current) {
       doFetch();
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [agentId]);
+  }, [agentId, conversationId]);
 
   const doFetch = useCallback(() => {
     setLoading(true);
     setError(null);
-    fetchAgentContext(agentIdRef.current)
+    fetchAgentContext(agentIdRef.current, conversationIdRef.current)
       .then((res) => setData(res))
       .catch((err) => {
         setError(err instanceof Error ? err.message : String(err));

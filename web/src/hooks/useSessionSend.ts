@@ -220,12 +220,20 @@ export function useSessionSend(activeSessionId: string | null): UseSessionSendRe
   const handleBatchCompleted = useCallback((count: number) => {
     log.info('send', 'batch completed', { count });
     setOptimisticMsgs((prev) => {
-      // Remove the first `count` non-failed messages outright — the backend's batch
-      // count is authoritative and the re-fetched persisted history already contains
-      // them. Failed messages are never consumed by the backend, so skip them.
+      // Remove the first `count` DELIVERED messages — the backend's batch count is
+      // authoritative and the re-fetched persisted history already contains them.
+      //
+      // NO-LOSS GUARD: only 'delivered' messages are removable. A spurious or
+      // mismatched batch-completed (stale event after WS reconnect, interrupt
+      // cleanup, count fallback) must never delete a message the CLI never
+      // received — those are still 'pending'/'received' and live in the server
+      // disk queue. If a legit batch-completed arrives while messages are still
+      // 'received' (missed messages-delivered event), they stay visible and the
+      // text-dedup pass absorbs them when the refreshed history contains them —
+      // worst case a brief duplicate, never a silent loss.
       let remaining = count;
       return prev.filter(m => {
-        if (m.status === 'failed') return true; // keep failed messages
+        if (m.status !== 'delivered') return true; // keep failed/pending/received
         if (remaining > 0) {
           remaining--;
           return false; // remove this message

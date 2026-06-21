@@ -8,7 +8,7 @@ export const compactCommand: SlashCommand = {
   source: 'control',
   execute: async (ctx) => {
     try {
-      await compactChatHistory();
+      await compactChatHistory(ctx.agentId, ctx.conversationId);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       ctx.addLocalMessage(`Compaction failed: ${msg}`);

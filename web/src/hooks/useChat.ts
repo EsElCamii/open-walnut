@@ -382,6 +382,10 @@ export function useChat(agentId: string = 'general', conversationId: string | nu
   const conversationIdRef = useRef(conversationId);
   conversationIdRef.current = conversationId;
 
+  // Per-session dedup timestamps for delivery-failure error notifications
+  // (see the session:error handler below)
+  const deliveryFailureSeenAtRef = useRef(new Map<string, number>());
+
   // Fetch real conversation stats from server
   const refreshStats = useCallback(() => {
     fetchChatStats(agentIdRef.current, conversationIdRef.current ?? undefined).then(setStats).catch(() => {});
@@ -734,13 +738,31 @@ export function useChat(agentId: string = 'general', conversationId: string | nu
   // Handle session errors (General only)
   useEvent('session:error', (data) => {
     if (agentIdRef.current !== 'general') return;
-    const { error: errMsg, taskId: eventTaskId,
+    const { error: errMsg, taskId: eventTaskId, sessionId: errSessionId, errorKind,
             taskTitle, taskProject, taskCategory } = data as {
-      error: string; taskId?: string;
+      error: string; taskId?: string; sessionId?: string; errorKind?: string;
       taskTitle?: string; taskProject?: string; taskCategory?: string;
     };
+    // delivery_failed: connectivity status, not a turn outcome. Dedup live
+    // appends per session within a window — during an SSH outage each send
+    // fast-fails (~400ms) and without this the chat fills with identical red
+    // boxes (the 2026-06-10 error-storm). Server-side persistence has the same
+    // dedup, so refresh stays consistent with the live view.
+    if (errorKind === 'delivery_failed') {
+      const key = errSessionId ?? eventTaskId ?? 'unknown';
+      const now = Date.now();
+      const lastAt = deliveryFailureSeenAtRef.current.get(key) ?? 0;
+      // MUST stay equal to the server's DELIVERY_FAILURE_NOTIFY_WINDOW_MS
+      // (src/web/server.ts) so the live append window and the
+      // refreshed/persisted-history window match — otherwise a reload could show
+      // a different number of red boxes than the live view did.
+      if (now - lastAt < 5 * 60_000) return;
+      deliveryFailureSeenAtRef.current.set(key, now);
+    }
     const taskRef = eventTaskId ? buildTaskRef(eventTaskId, taskTitle, taskProject, taskCategory) : null;
-    const content = `**Session Error**${taskRef ? ` (${taskRef})` : ''}: ${errMsg}`;
+    const content = errorKind === 'delivery_failed'
+      ? `**Session Delivery Failed**${taskRef ? ` (${taskRef})` : ''}: ${errMsg}\n\n_Your message was NOT lost — it stays queued and will be re-sent when you press Retry, send another message, or the connection recovers._`
+      : `**Session Error**${taskRef ? ` (${taskRef})` : ''}: ${errMsg}`;
     setMessages((prev) => [...prev, {
       key: nextMessageKey(),
       role: 'assistant', content, blocks: [{ type: 'text', content }],

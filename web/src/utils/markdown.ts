@@ -82,9 +82,9 @@ export function injectJsonIdLinks(escapedText: string): string {
   });
 
   // file_path / path values — make clickable
-  // Matches: "file_path": "/abs/path/to/file.ts" or "path": "/abs/path"
+  // Matches: "file_path": "/abs/path/to/file.ts", "~/abs/path", or "path": "/abs/path"
   result = result.replace(
-    /(&quot;(?:file_path|path)&quot;:\s*&quot;)(\/[^&]+?)(&quot;)/g,
+    /(&quot;(?:file_path|path)&quot;:\s*&quot;)(~?\/[^&]+?)(&quot;)/g,
     (_m, prefix, filePath, suffix) => {
       return `${prefix}<a class="file-link" data-file-path="${filePath}" href="#">${filePath}</a>${suffix}`;
     },
@@ -179,10 +179,12 @@ export function filePathsToHtml(text: string, sessionCwd?: string): string {
   let result = text;
   const replacements: { start: number; end: number; replacement: string }[] = [];
 
-  // Pass 1: Absolute paths — /dir/file.ext or /dir/file.ext:42
+  // Pass 1: Absolute paths — /dir/file.ext, ~/dir/file.ext, optional :42 suffix.
   // Negative lookbehind: leading `/` must NOT be preceded by a word char or another `/`.
   // This prevents matching mid-path substrings like `/providers/foo.ts` from `src/providers/foo.ts`.
-  const absRe = /(?<![\/\w])(\/(?:[\w@.+-]+\/)+[\w@.+-]+\.[\w]+)(?::(\d+))?/g;
+  // The optional `~/` prefix keeps home-relative paths intact (`~` would otherwise be
+  // dropped, both visually and from data-file-path — backend expands `~`).
+  const absRe = /(?<![\/\w])(~?\/(?:[\w@.+-]+\/)+[\w@.+-]+\.[\w]+)(?::(\d+))?/g;
   let m: RegExpExecArray | null;
   while ((m = absRe.exec(text)) !== null) {
     const fullMatch = m[0];
@@ -203,7 +205,7 @@ export function filePathsToHtml(text: string, sessionCwd?: string): string {
   // Pass 1b: Absolute DIRECTORY paths (no file extension) — /dir/sub/leaf.
   // Requires ≥3 segments to avoid matching short prose-y roots like "/usr/bin".
   // Skips anything already linkified by Pass 1 (overlap check) and URLs/fences.
-  const absDirRe = /(?<![\/\w])(\/(?:[\w@.+-]+\/){2,}[\w@.+-]+)\/?(?=[\s,;)"'`\]]|$)/g;
+  const absDirRe = /(?<![\/\w])(~?\/(?:[\w@.+-]+\/){2,}[\w@.+-]+)\/?(?=[\s,;)"'`\]]|$)/g;
   while ((m = absDirRe.exec(text)) !== null) {
     const dirPath = m[1];
     if (shouldSkip(m.index, dirPath)) continue;
@@ -301,7 +303,7 @@ function linkifyPathsInCode(html: string, sessionCwd?: string): string {
     const inUrl = (idx: number) => urlRanges.some(([s, e]) => idx >= s && idx < e);
 
     // Absolute paths: /dir/file.ext(:line)
-    const absRe = /(?<![\/\w])(\/(?:[\w@.+-]+\/)+[\w@.+-]+\.[\w]+)(?::(\d+))?/g;
+    const absRe = /(?<![\/\w])(~?\/(?:[\w@.+-]+\/)+[\w@.+-]+\.[\w]+)(?::(\d+))?/g;
     let out = inner.replace(absRe, (m, filePath: string, lineNum: string | undefined, offset: number) => {
       if (inUrl(offset)) return m;
       const ext = filePath.split('.').pop()?.toLowerCase() ?? '';
@@ -318,7 +320,7 @@ function linkifyPathsInCode(html: string, sessionCwd?: string): string {
       urlRe.lastIndex = 0;
       while ((um = urlRe.exec(out)) !== null) urlR.push([um.index, um.index + um[0].length]);
       const inU = (idx: number) => urlR.some(([s, e]) => idx >= s && idx < e);
-      const absDirRe = /(?<![\/\w])(\/(?:[\w@.+-]+\/){2,}[\w@.+-]+)\/?(?=[\s,;)"'`\]<]|$)/g;
+      const absDirRe = /(?<![\/\w])(~?\/(?:[\w@.+-]+\/){2,}[\w@.+-]+)\/?(?=[\s,;)"'`\]<]|$)/g;
       out = out.replace(absDirRe, (m, dirPath: string, offset: number) => {
         if (inU(offset)) return m;
         if (m.includes('file-link')) return m;
@@ -412,12 +414,42 @@ export function stripLeakedToolCalls(text: string): string {
  * converts file paths to clickable links (including inside code blocks),
  * then runs marked.parse() + DOMPurify.sanitize().
  */
+/**
+ * Post-process sanitized HTML: rewrite <img src="..."> to use the /api/local-image proxy.
+ * Handles both absolute (/path/to/img.png) and relative (subdir/img.png) paths.
+ * Relative paths are resolved against `cwd` (the directory containing the .md file).
+ */
+function proxyImageSrcs(html: string, cwd?: string, host?: string): string {
+  return html.replace(/<img\s([^>]*)>/gi, (full, attrs: string) => {
+    const srcMatch = attrs.match(/src="([^"]*)"/);
+    if (!srcMatch) return full;
+    const src = srcMatch[1];
+    if (src.startsWith('/api/') || src.startsWith('http') || src.startsWith('data:')) return full;
+
+    let absPath: string;
+    if (src.startsWith('/')) {
+      absPath = src;
+    } else if (cwd) {
+      absPath = `${cwd.replace(/\/$/, '')}/${src.replace(/^\.\//, '')}`;
+    } else {
+      return full;
+    }
+
+    const hostParam = host ? `&host=${encodeURIComponent(host)}` : '';
+    const proxied = `/api/local-image?path=${encodeURIComponent(absPath)}${hostParam}`;
+    const newAttrs = attrs
+      .replace(/src="[^"]*"/, `src="${proxied}"`)
+      + ` data-lightbox-src="${proxied}" loading="lazy"`;
+    return `<img ${newAttrs}>`;
+  });
+}
+
 const mdCache = new Map<string, string>();
 const MD_CACHE_MAX = 200;
 const MD_CACHE_SKIP_LENGTH = 10_000; // skip caching very long texts to avoid memory bloat
 
-export function renderMarkdownWithRefs(text: string, sessionCwd?: string): string {
-  const key = sessionCwd ? `${text}\0${sessionCwd}` : text;
+export function renderMarkdownWithRefs(text: string, sessionCwd?: string, host?: string): string {
+  const key = host ? `${text}\0${sessionCwd ?? ''}\0${host}` : sessionCwd ? `${text}\0${sessionCwd}` : text;
   const cached = text.length <= MD_CACHE_SKIP_LENGTH ? mdCache.get(key) : undefined;
   if (cached !== undefined) {
     mdCache.delete(key);
@@ -437,6 +469,8 @@ export function renderMarkdownWithRefs(text: string, sessionCwd?: string): strin
   } catch {
     html = DOMPurify.sanitize(text);
   }
+
+  html = proxyImageSrcs(html, sessionCwd, host);
 
   if (text.length <= MD_CACHE_SKIP_LENGTH) {
     if (mdCache.size >= MD_CACHE_MAX) {
@@ -564,16 +598,98 @@ notePurify.addHook('afterSanitizeAttributes', (node) => {
     node.setAttribute('target', '_blank');
     node.setAttribute('rel', 'noopener noreferrer');
   }
+  if (node.tagName === 'IMG') {
+    const src = node.getAttribute('src');
+    if (src && !src.startsWith('/api/') && !src.startsWith('http') && !src.startsWith('data:')) {
+      if (src.startsWith('/')) {
+        const proxied = `/api/local-image?path=${encodeURIComponent(src)}`;
+        node.setAttribute('src', proxied);
+        node.setAttribute('data-lightbox-src', proxied);
+      }
+    } else if (src?.startsWith('/api/')) {
+      node.setAttribute('data-lightbox-src', src);
+    }
+    node.setAttribute('loading', 'lazy');
+  }
 });
+
+/**
+ * Preprocess text to convert bare image file paths into markdown image syntax.
+ * Handles:
+ * 1. Backtick-wrapped paths: `path/to/img.png` → ![img.png](path/to/img.png)
+ * 2. Bare absolute paths: /tmp/screenshot.png → ![screenshot.png](/tmp/screenshot.png)
+ * Skips paths inside triple-backtick fences or markdown image/link syntax.
+ */
+function bareImagePathsToMarkdown(text: string): string {
+  const tripleFenceRanges: [number, number][] = [];
+  const tripleFenceRe = /```[\s\S]*?```/g;
+  let fm: RegExpExecArray | null;
+  while ((fm = tripleFenceRe.exec(text)) !== null) {
+    tripleFenceRanges.push([fm.index, fm.index + fm[0].length]);
+  }
+  const inTripleFence = (i: number) => tripleFenceRanges.some(([s, e]) => i >= s && i < e);
+
+  const replacements: { start: number; end: number; replacement: string }[] = [];
+
+  // Pass 1: backtick-wrapped image paths — `path.png` → ![name](path)
+  const backtickImgRe = /`((?:\/(?:[\w. @+-]+\/)*)?[\w. @+-]+\.(?:png|jpe?g|gif|webp))`/gi;
+  let m: RegExpExecArray | null;
+  while ((m = backtickImgRe.exec(text)) !== null) {
+    if (inTripleFence(m.index)) continue;
+    const before = text.slice(Math.max(0, m.index - 2), m.index);
+    if (before.includes('!') || before.includes('](')) continue;
+    const imgPath = m[1];
+    const filename = imgPath.split('/').pop() ?? imgPath;
+    replacements.push({
+      start: m.index,
+      end: m.index + m[0].length,
+      replacement: `![${filename}](${imgPath})`,
+    });
+  }
+
+  // Pass 2: bare absolute image paths (not in backticks, not in triple fences)
+  const singleBacktickRanges: [number, number][] = [];
+  const singleBtRe = /`[^`\n]+`/g;
+  while ((fm = singleBtRe.exec(text)) !== null) {
+    singleBacktickRanges.push([fm.index, fm.index + fm[0].length]);
+  }
+  const inAnyBacktick = (i: number) =>
+    inTripleFence(i) || singleBacktickRanges.some(([s, e]) => i >= s && i < e);
+
+  const imgPathRe = /(\/(?:[\w. @+-]+\/)+[\w. @+-]+\.(?:png|jpe?g|gif|webp))/gi;
+  while ((m = imgPathRe.exec(text)) !== null) {
+    if (inAnyBacktick(m.index)) continue;
+    const before = text.slice(Math.max(0, m.index - 4), m.index);
+    if (before.includes('](') || before.includes('src=') || before.includes('![')) continue;
+    const overlaps = replacements.some(r => m!.index < r.end && m!.index + m![0].length > r.start);
+    if (overlaps) continue;
+    const filename = m[1].split('/').pop() ?? m[1];
+    replacements.push({
+      start: m.index,
+      end: m.index + m[0].length,
+      replacement: `![${filename}](${m[1]})`,
+    });
+  }
+
+  if (replacements.length === 0) return text;
+  replacements.sort((a, b) => b.start - a.start);
+  let result = text;
+  for (const r of replacements) {
+    result = result.slice(0, r.start) + r.replacement + result.slice(r.end);
+  }
+  return result;
+}
 
 /**
  * Render a note string as sanitized HTML with markdown support.
  * All <a> links open in a new tab with noopener/noreferrer.
+ * Bare image paths are detected and rendered as inline images via local-image proxy.
  */
 export function renderNoteMarkdown(text: string): string {
   let html: string;
   try {
-    const raw = marked.parse(text, { breaks: true, gfm: true });
+    const preprocessed = bareImagePathsToMarkdown(text);
+    const raw = marked.parse(preprocessed, { breaks: true, gfm: true });
     html = typeof raw === 'string' ? raw : '';
   } catch {
     // Fallback: escape and return raw text in a <p> tag
@@ -584,5 +700,5 @@ export function renderNoteMarkdown(text: string): string {
     return `<p>${escaped}</p>`;
   }
 
-  return notePurify.sanitize(html, { ADD_ATTR: ['target'] });
+  return notePurify.sanitize(html, { ADD_ATTR: ['target', 'data-lightbox-src', 'loading'] });
 }

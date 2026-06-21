@@ -19,6 +19,7 @@ import { FitAddon } from '@xterm/addon-fit';
 import { WebLinksAddon } from '@xterm/addon-web-links';
 import '@xterm/xterm/css/xterm.css';
 import { useSessionTerminal } from '@/hooks/useSessionTerminal';
+import { useConfirm } from '@/hooks/useConfirm';
 
 interface SessionTerminalProps {
   sessionId: string;
@@ -29,6 +30,7 @@ interface SessionTerminalProps {
 }
 
 export function SessionTerminal({ sessionId, label, host, onClose }: SessionTerminalProps) {
+  const confirm = useConfirm();
   const containerRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
@@ -122,12 +124,12 @@ export function SessionTerminal({ sessionId, label, host, onClose }: SessionTerm
     return () => window.removeEventListener('keydown', handler);
   }, [onClose]);
 
-  const handleKill = useCallback(() => {
-    if (window.confirm('结束终端会关闭 dtach 会话,正在运行的进程将被终止。确定吗?')) {
+  const handleKill = useCallback(async () => {
+    if (await confirm({ title: '结束终端?', message: '结束终端会关闭 dtach 会话,正在运行的进程将被终止。', confirmLabel: '结束', cancelLabel: '取消', danger: true })) {
       kill();
       onClose();
     }
-  }, [kill, onClose]);
+  }, [kill, onClose, confirm]);
 
   const handleCopyHint = useCallback(() => {
     const cmd = noDtach?.installHint?.split(/\s+#/)[0]?.trim();

@@ -24,6 +24,7 @@ import {
 } from '@/api/stt';
 import { SttSetupProgress } from './SttSetupProgress';
 import { invalidateSttStatusCache } from '@/hooks/useSttStatus';
+import { useConfirm } from '@/hooks/useConfirm';
 
 // ── Types ──────────────────────────────────────────────
 
@@ -194,6 +195,7 @@ function WhisperModelManager({
   const [deleting, setDeleting] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [manualPath, setManualPath] = useState(config.stt?.whisper_cpp_model ?? '');
+  const confirm = useConfirm();
 
   const downloadedNames = new Set(detection?.models.map(m => m.name) ?? []);
   const activeModel = activeModelFromConfig(config);
@@ -245,7 +247,7 @@ function WhisperModelManager({
   };
 
   const handleDelete = async (modelName: string) => {
-    if (!confirm(`Delete model "${modelName}"? The file will be permanently removed.`)) return;
+    if (!(await confirm({ title: `Delete model “${modelName}”?`, message: 'The file will be permanently removed.', confirmLabel: 'Delete', danger: true }))) return;
     setDeleting(modelName);
     setError(null);
     try {
@@ -389,6 +391,7 @@ function SherpaModelManager({
   const [deleting, setDeleting] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [downloadedNames, setDownloadedNames] = useState<Set<string>>(new Set());
+  const confirm = useConfirm();
   const [manualDir, setManualDir] = useState(config.stt?.sherpa_model_dir ?? '');
   const [manualType, setManualType] = useState(config.stt?.sherpa_model_type ?? 'sense_voice');
 
@@ -461,7 +464,7 @@ function SherpaModelManager({
   };
 
   const handleDelete = async (modelName: string) => {
-    if (!confirm(`Delete model "${modelName}"? All model files will be removed.`)) return;
+    if (!(await confirm({ title: `Delete model “${modelName}”?`, message: 'All model files will be removed.', confirmLabel: 'Delete', danger: true }))) return;
     setDeleting(modelName);
     setError(null);
     try {

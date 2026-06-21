@@ -4,8 +4,9 @@
  * Shift+Tab host cycling, SSH pre-warm on open.
  */
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
-import { fetchWorkingDirs, listDirs, type WorkingDirEntry } from '@/api/sessions';
+import { fetchWorkingDirs, listDirs, prewarmWorkingDirs, type WorkingDirEntry } from '@/api/sessions';
 import type { TaskPriority } from '@open-walnut/core';
+import { SESSION_MODELS } from '@open-walnut/core';
 import type { FocusTier } from '@/api/focus';
 import { TIER_OPTIONS, TIER_COLORS, PRIORITY_OPTIONS } from './task-meta-constants';
 
@@ -24,6 +25,8 @@ export interface QuickStartTaskMeta {
   needs_attention: boolean;
   priority: TaskPriority;
   pinTier: FocusTier | undefined;
+  /** Session model alias (SESSION_MODELS id). undefined = Auto — let the CLI/config default decide. */
+  model: string | undefined;
 }
 
 function timeAgo(iso: string): string {
@@ -75,6 +78,7 @@ const DEFAULT_META: QuickStartTaskMeta = {
   needs_attention: false,
   priority: 'none',
   pinTier: 'focus',
+  model: undefined,      // Auto — Claude/config default picks the model unless user overrides
 };
 
 export function SessionPathSelector({ open, onClose, onSelect }: Props) {
@@ -113,7 +117,11 @@ export function SessionPathSelector({ open, onClose, onSelect }: Props) {
     setLiveDirs([]);
     setLiveTaggedDirs([]);
     setMeta(DEFAULT_META);
-    // fetchWorkingDirs returns from cache if already prefetched on page load
+    // Pre-warm per-host SSH connections now that the picker is actually opening
+    // (moved off the unconditional module-import side effect that used to fire
+    // on every page load and contend with the home critical path).
+    prewarmWorkingDirs();
+    // fetchWorkingDirs returns from cache if already prefetched
     fetchWorkingDirs()
       .then(d => { setDirs(d); setLoading(false); })
       .catch(e => { setError(e.message); setLoading(false); });
@@ -570,6 +578,21 @@ export function SessionPathSelector({ open, onClose, onSelect }: Props) {
               </button>
             ))}
           </div>
+        </div>
+
+        <div className="sps-meta-row">
+          <span className="sps-meta-label">Model</span>
+          <select
+            className="sps-meta-model-select"
+            value={meta.model ?? ''}
+            onChange={(e) => setMeta(m => ({ ...m, model: e.target.value || undefined }))}
+            title="Session model — Auto lets Claude/config pick the default"
+          >
+            <option value="">Auto</option>
+            {SESSION_MODELS.map(sm => (
+              <option key={sm.id} value={sm.id}>{sm.label}</option>
+            ))}
+          </select>
         </div>
       </div>
     </div>

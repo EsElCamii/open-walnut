@@ -133,21 +133,33 @@ export async function listDirs(prefix: string, host?: string | null): Promise<{ 
   return { dirs: res.dirs, parent: res.parent };
 }
 
-// Prefetch working dirs + pre-warm SSH on page load (fire-and-forget).
-// Uses the most-frequent path per host (instead of root /) for a useful cache hit.
-fetchWorkingDirs().then(dirs => {
-  const bestPerHost = new Map<string, string>();
-  for (const d of dirs) {
-    if (d.host && !bestPerHost.has(d.host)) bestPerHost.set(d.host, d.cwd);
-  }
-  for (const [host, cwd] of bestPerHost) { listDirs(cwd, host).catch(() => {}); }
-}).catch(() => {});
+// Prefetch working dirs + pre-warm SSH (fire-and-forget). Uses the most-frequent
+// path per host (instead of root /) for a useful cache hit.
+//
+// IMPORTANT: this used to run as a top-level module-import SIDE EFFECT, firing
+// fetchWorkingDirs() + a per-host SSH listDirs on EVERY page that imported this
+// module — including non-session pages — during the cold-load fan-out, where it
+// raced the browser's ~5 HTTP/1.1 lanes against the home critical-path requests.
+// It is now an explicit, idempotent call: invoke it when the session-start UI
+// actually opens, not at import time.
+let _prewarmStarted = false;
+export function prewarmWorkingDirs(): void {
+  if (_prewarmStarted) return;
+  _prewarmStarted = true;
+  fetchWorkingDirs().then(dirs => {
+    const bestPerHost = new Map<string, string>();
+    for (const d of dirs) {
+      if (d.host && !bestPerHost.has(d.host)) bestPerHost.set(d.host, d.cwd);
+    }
+    for (const [host, cwd] of bestPerHost) { listDirs(cwd, host).catch(() => {}); }
+  }).catch(() => { _prewarmStarted = false; /* allow retry on next open */ });
+}
 
 export interface QuickStartTaskMeta {
   starred?: boolean;
   needs_attention?: boolean;
   priority?: 'immediate' | 'important' | 'backlog' | 'none';
-  pinTier?: 'focus' | 'next' | 'satellite' | 'wait';
+  pinTier?: 'focus' | 'satellite' | 'wait';
 }
 
 export async function quickStartSession(opts: {
@@ -204,4 +216,33 @@ export async function forkSessionInWalnut(
     create_child_task: true,
     ...opts,
   });
+}
+
+// ── Forensic Observability ──
+
+/** Minimal incident shape the UI needs back from the Investigate button. */
+export interface Incident {
+  id: string;
+  sessionId: string;
+  taskId?: string;
+  trigger: 'invariant' | 'manual' | 'canary';
+  label: string;
+  summary: string;
+  severity: 'warn' | 'error';
+  status: 'open' | 'investigating' | 'resolved' | 'dismissed';
+  bundlePath?: string;
+  createdAt: number;
+  updatedAt: number;
+}
+
+/**
+ * Investigate a session — freezes an all-layer evidence bundle and opens a
+ * manual incident. `sessionId` is the claudeSessionId; pass the linked taskId
+ * when available so the incident is filed against the right task.
+ */
+export async function investigateSession(
+  sessionId: string,
+  taskId?: string,
+): Promise<{ incident: Incident }> {
+  return apiPost('/api/incidents/investigate', { sessionId, ...(taskId ? { taskId } : {}) });
 }

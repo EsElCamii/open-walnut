@@ -704,9 +704,13 @@ export const SessionChatHistory = memo(function SessionChatHistory({ sessionId, 
     }
   });
 
-  // Errors: also trigger history refresh so optimistic messages clear
+  // Errors: also trigger history refresh so optimistic messages clear.
+  // EXCEPT delivery_failed — no turn ran, the optimistic messages must stay
+  // visible as 'failed' (batch-failed handles their status), and a history
+  // refetch would hit the very host that is down.
   useEvent('session:error', (data) => {
-    if ((data as { sessionId?: string }).sessionId === sessionId) {
+    const d = data as { sessionId?: string; errorKind?: string };
+    if (d.sessionId === sessionId && d.errorKind !== 'delivery_failed') {
       awaitingRefresh.current = true;
       setHistoryVersion((v) => v + 1);
     }

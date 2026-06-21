@@ -20,8 +20,8 @@ const PANEL_OPTIONS: { value: SessionPanelMode; label: string }[] = [
   { value: 'auto', label: 'Auto' },
 ];
 
-type BumpTier = 'focus' | 'next' | 'satellite' | 'wait';
-const BUMP_TIERS: BumpTier[] = ['focus', 'next', 'satellite', 'wait'];
+type BumpTier = 'focus' | 'satellite' | 'wait';
+const BUMP_TIERS: BumpTier[] = ['focus', 'satellite', 'wait'];
 // Defaults when a tier key is unset: focus off (preserve hand-ordered sprint), others on.
 const bumpTierDefault = (tier: BumpTier): boolean => tier !== 'focus';
 
@@ -120,7 +120,7 @@ export function GeneralSection({ config, onSave }: Props) {
       <div className="form-group">
         <label>Tier visible limits</label>
         <div style={{ display: 'flex', gap: 12, alignItems: 'center', flexWrap: 'wrap' }}>
-          {(['focus', 'next', 'satellite', 'wait'] as const).map((tier) => (
+          {(['focus', 'satellite', 'wait'] as const).map((tier) => (
             <label key={tier} style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 13 }}>
               <span style={{ textTransform: 'capitalize' }}>{tier}</span>
               <input

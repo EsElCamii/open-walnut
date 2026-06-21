@@ -1,12 +1,12 @@
 import { useState, useCallback, useEffect, useRef, type ReactNode } from 'react';
 import { useLocation } from 'react-router-dom';
 import { Sidebar } from './Sidebar';
-import { CronToast } from '../common/CronToast';
-import { PermissionToast } from '../common/PermissionToast';
-import { OperationErrorToast } from '../common/OperationErrorToast';
+import { NotificationToaster } from '../common/NotificationToaster';
+import { OperationErrorBridge } from '../common/OperationErrorBridge';
 
 import { FocusDock } from '../dock/FocusDock';
 import { TasksProvider } from '@/contexts/TasksContext';
+import { NotificationProvider } from '@/contexts/notifications';
 import { FocusBarProvider, useFocusBarContext } from '@/contexts/FocusBarContext';
 import { perf } from '@/utils/perf-logger';
 
@@ -26,9 +26,11 @@ function readCollapsed(): boolean {
 export function AppShell({ children }: AppShellProps) {
   return (
     <TasksProvider>
-      <FocusBarProvider>
-        <AppShellInner>{children}</AppShellInner>
-      </FocusBarProvider>
+      <NotificationProvider>
+        <FocusBarProvider>
+          <AppShellInner>{children}</AppShellInner>
+        </FocusBarProvider>
+      </NotificationProvider>
     </TasksProvider>
   );
 }
@@ -93,9 +95,8 @@ function AppShellInner({ children }: AppShellProps) {
         </div>
         {!isMainPage && focusBar.visible && <FocusDock focusBar={focusBar} />}
       </main>
-      <CronToast />
-      <PermissionToast />
-      <OperationErrorToast />
+      <NotificationToaster />
+      <OperationErrorBridge />
     </div>
   );
 }

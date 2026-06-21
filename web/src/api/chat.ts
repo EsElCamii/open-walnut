@@ -143,8 +143,11 @@ export async function clearChatHistory(agentId?: string, conversationId?: string
   await apiPost(`/api/chat/clear${params}`);
 }
 
-export async function compactChatHistory(agentId?: string): Promise<void> {
-  const params = agentId ? `?agentId=${agentId}` : '';
+export async function compactChatHistory(agentId?: string, conversationId?: string): Promise<void> {
+  const qs = new URLSearchParams();
+  if (agentId) qs.set('agentId', agentId);
+  if (conversationId) qs.set('conversationId', conversationId);
+  const params = qs.toString() ? `?${qs.toString()}` : '';
   await apiPost(`/api/chat/compact${params}`);
 }
 

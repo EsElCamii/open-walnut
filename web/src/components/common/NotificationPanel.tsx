@@ -1,9 +1,12 @@
 /**
- * Notification panel — slide-out overlay from sidebar showing system health.
- * iOS-style notification center: daemon status, git backup, etc.
+ * Notification panel — slide-out overlay from sidebar. Two zones:
+ *   1. Recent — the persistent notification feed (cron / permission / errors),
+ *      from NotificationProvider. Opening the panel marks all read.
+ *   2. System — ambient health (remote hosts, data backup, embedding search).
  */
-import { useState, useEffect } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useSystemHealth } from '@/hooks/useSystemHealth';
+import { useNotifications } from '@/contexts/notifications';
 import { log } from '@/utils/log';
 
 interface NotificationPanelProps {
@@ -34,7 +37,19 @@ interface QmdStatus {
 
 export function NotificationPanel({ open, onClose, sidebarCollapsed }: NotificationPanelProps) {
   const { health, gitSync, loading } = useSystemHealth();
+  const { feed, unreadCount, markAllRead } = useNotifications();
   const [qmdStatus, setQmdStatus] = useState<QmdStatus | null>(null);
+
+  // Newest-first for display. Memoized so the copy+reverse doesn't run on every
+  // render (e.g. the 3s QMD poll re-renders below while the panel is open).
+  const feedNewestFirst = useMemo(() => [...feed].reverse(), [feed]);
+
+  // Opening the panel clears the unread badge (everything in the feed is now seen).
+  // Re-fires while open if new persistent events arrive (unreadCount climbs again) —
+  // intentional: items seen while watching the panel should be marked read too.
+  useEffect(() => {
+    if (open && unreadCount > 0) markAllRead();
+  }, [open, unreadCount, markAllRead]);
 
   // Fetch QMD status on mount, poll every 3s while indexing/downloading
   useEffect(() => {
@@ -80,6 +95,27 @@ export function NotificationPanel({ open, onClose, sidebarCollapsed }: Notificat
         </div>
 
         <div className="notification-panel-body">
+          {/* Zone 1 — Recent: the persistent notification feed (newest first). */}
+          <div className="notification-section-label">Recent</div>
+          {feedNewestFirst.length === 0 ? (
+            <div className="notification-feed-empty">No notifications yet</div>
+          ) : (
+            <div className="notification-feed">
+              {feedNewestFirst.map((n) => (
+                <div key={n.id} className={`notification-feed-item notification-feed-item--${n.severity}${n.read ? '' : ' unread'}`}>
+                  <div className="notification-feed-item-head">
+                    <span className={`notification-feed-dot notification-feed-dot--${n.severity}`} />
+                    <span className="notification-feed-item-title">{n.title}</span>
+                    <span className="notification-feed-item-time">{formatRelative(new Date(n.timestamp).toISOString())}</span>
+                  </div>
+                  {n.body && <div className="notification-feed-item-body">{n.body}</div>}
+                </div>
+              ))}
+            </div>
+          )}
+
+          {/* Zone 2 — System: ambient health (daemons / backup / embedding search). */}
+          <div className="notification-section-label">System</div>
           {loading ? (
             <div className="notification-card">
               <span className="notification-card-icon loading">...</span>

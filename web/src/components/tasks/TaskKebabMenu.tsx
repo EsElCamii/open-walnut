@@ -39,14 +39,12 @@ interface TaskKebabMenuProps {
 
 const TIER_OPTIONS: { value: FocusTier; label: string; icon: string }[] = [
   { value: 'focus', label: 'Focus', icon: '●' },
-  { value: 'next', label: 'Next', icon: '●' },
   { value: 'satellite', label: 'Satellite', icon: '○' },
   { value: 'wait', label: 'Wait', icon: '◐' },
 ];
 
 const TIER_COLORS: Record<FocusTier, string> = {
   focus: 'var(--accent)',
-  next: '#FF9500',
   satellite: 'var(--fg-muted)',
   wait: '#8e8e93',
 };
@@ -100,7 +98,9 @@ export function TaskKebabMenu({ task, isFocused, isDetailOpen, isPinned, pinnedT
   const badge = task.source === 'local' ? 'L' : (sourceMeta?.badge ?? task.source?.charAt(0).toUpperCase());
   const integrationName = task.source === 'local' ? 'Local' : (sourceMeta?.name ?? task.source);
   const badgeColor = sourceMeta?.badgeColor;
-  const synced = task.source && task.source !== 'local' && (!!task.ext?.[task.source] || !!((task as unknown as Record<string, unknown>)[({ 'ms-todo': 'ms_todo_id' } as Record<string, string>)[task.source] ?? '']));
+  // has_synced is the server-precomputed `!!task.ext?.[task.source]` for the
+  // minimal list payload (ext is dropped there); fall back to it when ext isn't inlined.
+  const synced = task.source && task.source !== 'local' && (!!task.ext?.[task.source] || !!(task as unknown as Record<string, unknown>).has_synced || !!((task as unknown as Record<string, unknown>)[({ 'ms-todo': 'ms_todo_id' } as Record<string, string>)[task.source] ?? '']));
 
   return (
     <div className="task-kebab-wrapper">

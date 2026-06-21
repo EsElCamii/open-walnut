@@ -45,8 +45,9 @@ export interface ContextInspectorResponse {
   totalTokens: number;
 }
 
-export async function fetchAgentContext(agentId?: string): Promise<ContextInspectorResponse> {
+export async function fetchAgentContext(agentId?: string, conversationId?: string): Promise<ContextInspectorResponse> {
   const params: Record<string, string> = {};
   if (agentId) params.agentId = agentId;
+  if (conversationId) params.conversationId = conversationId;
   return apiGet<ContextInspectorResponse>('/api/context', params);
 }

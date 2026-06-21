@@ -3,6 +3,7 @@ import type { Config } from '@open-walnut/core';
 import { SectionCard } from '../inputs/SectionCard';
 import { log } from '@/utils/log';
 import { useAutoSave } from '@/hooks/useAutoSave';
+import { useConfirm } from '@/hooks/useConfirm';
 
 interface Props {
   config: Config;
@@ -71,6 +72,7 @@ const PULSE_KEYFRAMES = `
 // ── Component ──
 
 export function SearchSection({ config, onSave }: Props) {
+  const confirm = useConfirm();
   const search = config.search ?? {};
   const [selectedModel, setSelectedModel] = useState(() => {
     const saved = search.qmd_model ?? DEFAULT_MODEL;
@@ -164,7 +166,7 @@ export function SearchSection({ config, onSave }: Props) {
 
   const handleReindex = async () => {
     // MEDIUM-2: Confirmation before reindex
-    if (!window.confirm('Re-index all documents? This may take a few minutes.')) return;
+    if (!(await confirm({ title: 'Re-index all documents?', message: 'This may take a few minutes.', confirmLabel: 'Re-index' }))) return;
     setActionPending(true);
     try {
       const res = await fetch('/api/qmd/reindex', { method: 'POST' });

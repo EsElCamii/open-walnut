@@ -5,18 +5,21 @@ import { SessionNotes } from './SessionNotes';
 import { SessionFileExplorer } from './SessionFileExplorer';
 import { SessionTerminal } from './SessionTerminal';
 import { FileViewer } from '../common/FileViewer';
-import { ICON_ROBOT, ICON_EXPAND, ICON_COLLAPSE, ICON_CLOSE, ICON_LOCK, ICON_UNLOCK, ICON_LOCATE } from '../common/Icons';
+import { ICON_ROBOT, ICON_EXPAND, ICON_COLLAPSE, ICON_CLOSE, ICON_LOCK, ICON_UNLOCK, ICON_LOCATE, ICON_SEARCH, ICON_NEW_TAB } from '../common/Icons';
+import { openPopout } from '@/popout/openPopout';
 import { UserMessagesSummary } from './UserMessagesSummary';
 // PlanPreviewSection replaced by inline plan popover in meta bar
 import { ChatInput } from '@/components/chat/ChatInput';
+import { SideQuestionDrawer } from '@/components/sessions/SideQuestionDrawer';
 import { renderMarkdownWithRefs } from '@/utils/markdown';
 import { useSessionSend } from '@/hooks/useSessionSend';
 import { useSlashCommands } from '@/hooks/useSlashCommands';
 import { useSessionHistory } from '@/hooks/useSessionHistory';
 import type { ImageAttachment } from '@/api/chat';
 import { useEvent } from '@/hooks/useWebSocket';
-import { fetchSession, executePlanContinue, executePlanSession, updateSession, restartSession } from '@/api/sessions';
+import { fetchSession, executePlanContinue, executePlanSession, updateSession, restartSession, investigateSession } from '@/api/sessions';
 import { log } from '@/utils/log';
+import { buildInvestigationClip } from '@/utils/investigation-clipboard';
 import { fetchTask } from '@/api/tasks';
 import { EditableSessionTitle } from './EditableSessionTitle';
 import { fetchPinnedTasks, pinTask, unpinTask, setTaskTier } from '@/api/focus';
@@ -233,7 +236,6 @@ export const SessionPanel = memo(function SessionPanel({ sessionId, onClose, loc
         setPinned(isPinned);
         if (isPinned) {
           const tier: FocusTier = data.focus_tasks?.includes(taskId) ? 'focus'
-            : data.next_tasks?.includes(taskId) ? 'next'
             : data.wait_tasks?.includes(taskId) ? 'wait' : 'satellite';
           setPinnedTier(tier);
         } else {
@@ -485,6 +487,46 @@ export const SessionPanel = memo(function SessionPanel({ sessionId, onClose, loc
     }
     setRestartBusy(false);
   }, [sessionId]);
+
+  // Investigate — freeze an evidence bundle + open a manual incident, then copy
+  // every id (session/task/incident/bundle/host) to the clipboard so the human
+  // can paste them into a debug session. The chip confirms inline; the timer is
+  // cleaned up on unmount / session change.
+  const [investigating, setInvestigating] = useState(false);
+  const [investigateResult, setInvestigateResult] = useState<{ kind: 'ok'; id: string } | { kind: 'error' } | null>(null);
+  const investigateTimerRef = useRef<ReturnType<typeof setTimeout>>(undefined);
+  useEffect(() => () => { clearTimeout(investigateTimerRef.current); }, []);
+  const handleInvestigate = useCallback(async () => {
+    if (investigating) return;
+    log.info('session-panel', 'investigate button clicked', { sessionId, taskId: session?.taskId });
+    setInvestigating(true);
+    setInvestigateResult(null);
+    try {
+      const { incident } = await investigateSession(sessionId, session?.taskId);
+      log.info('session-panel', 'investigate captured evidence', { sessionId, incidentId: incident.id, bundlePath: incident.bundlePath });
+      const clip = buildInvestigationClip({
+        sessionId,
+        taskId: session?.taskId,
+        incidentId: incident.id,
+        bundlePath: incident.bundlePath,
+        host: session?.host,
+      });
+      await navigator.clipboard.writeText(clip).catch(() => {});
+      setInvestigateResult({ kind: 'ok', id: incident.id });
+      clearTimeout(investigateTimerRef.current);
+      investigateTimerRef.current = setTimeout(() => setInvestigateResult(null), 6000);
+    } catch (err) {
+      log.error('session-panel', 'investigate failed', {
+        sessionId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      setInvestigateResult({ kind: 'error' });
+      clearTimeout(investigateTimerRef.current);
+      investigateTimerRef.current = setTimeout(() => setInvestigateResult(null), 4000);
+    } finally {
+      setInvestigating(false);
+    }
+  }, [investigating, sessionId, session?.taskId, session?.host]);
   useEvent('task:updated', (data: unknown) => {
     const d = data as { task?: { id?: string; exec_session_id?: string; plan_session_id?: string } };
     const t = d.task;
@@ -610,6 +652,14 @@ export const SessionPanel = memo(function SessionPanel({ sessionId, onClose, loc
                 </button>
               )}
               <button
+                className="task-action-btn session-panel-popout"
+                onClick={() => openPopout('session', { id: sessionId, host: session?.host, cwd: session?.cwd })}
+                title="Open in new tab"
+                aria-label="Open session in new tab"
+              >
+                {ICON_NEW_TAB}
+              </button>
+              <button
                 className="task-action-btn session-panel-expand"
                 onClick={isFullscreen ? exitFullscreen : enterFullscreen}
                 title={isFullscreen ? 'Collapse back' : 'Expand to full screen'}
@@ -659,6 +709,21 @@ export const SessionPanel = memo(function SessionPanel({ sessionId, onClose, loc
                 {restartBusy ? 'Restarting...' : 'Restart'}
               </button>
             )}
+            <button
+              className="session-copy-chip"
+              onClick={handleInvestigate}
+              disabled={investigating}
+              title="Capture an evidence bundle (logs + CLI stream + daemon), open an incident, and copy all related ids to the clipboard"
+            >
+              {ICON_SEARCH}{' '}
+              {investigating
+                ? 'Capturing…'
+                : investigateResult?.kind === 'ok'
+                  ? `Copied — ${investigateResult.id} ✓`
+                  : investigateResult?.kind === 'error'
+                    ? 'Capture failed'
+                    : 'Investigate'}
+            </button>
             {session?.host && (
               <span
                 className="session-panel-host"
@@ -936,6 +1001,7 @@ export const SessionPanel = memo(function SessionPanel({ sessionId, onClose, loc
                   </span>
                   <span className="mode-toggle-pill-shortcut">{'\u21E7'}Tab</span>
                 </button>
+                <SideQuestionDrawer sessionId={session?.claudeSessionId} />
               </div>
             );
           })()}

@@ -48,15 +48,16 @@ export function formatModelName(model: string | undefined): string {
   if (lower.includes('opus')) family = 'Opus';
   else if (lower.includes('sonnet')) family = 'Sonnet';
   else if (lower.includes('haiku')) family = 'Haiku';
+  else if (lower.includes('fable')) family = 'Fable';
   else return model;
   // Detect 1M extended context from init model string
   const is1M = lower.includes('[1m]');
   const suffix = is1M ? ' 1M' : '';
   // Extract version: match "family-X-Y" pattern → "X.Y"
-  const versionMatch = lower.match(/(?:opus|sonnet|haiku)-(\d+)-(\d+)/);
+  const versionMatch = lower.match(/(?:opus|sonnet|haiku|fable)-(\d+)-(\d+)/);
   if (versionMatch) return `${family} ${versionMatch[1]}.${versionMatch[2]}${suffix}`;
   // Fallback: match "family-X" → "X"
-  const majorMatch = lower.match(/(?:opus|sonnet|haiku)-(\d+)/);
+  const majorMatch = lower.match(/(?:opus|sonnet|haiku|fable)-(\d+)/);
   if (majorMatch) return `${family} ${majorMatch[1]}${suffix}`;
   return `${family}${suffix}`;
 }
