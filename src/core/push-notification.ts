@@ -121,11 +121,9 @@ export function initPushNotifications(): void {
         case EventNames.AGENT_RESPONSE: {
           const data = eventData<typeof EventNames.AGENT_RESPONSE>(event)
           // Only push for non-interactive agent responses (cron, heartbeat, triage)
-          const source = (data as Record<string, unknown>).source as string | undefined
+          const source = data.source
           if (source && ['cron', 'heartbeat', 'triage'].includes(source)) {
-            const text = typeof data === 'object' && data !== null && 'text' in data
-              ? String((data as Record<string, unknown>).text).slice(0, 150)
-              : 'New response'
+            const text = data.text ? data.text.slice(0, 150) : 'New response'
             await maybePush('Walnut', text, { type: 'agent_response', source })
           }
           break
@@ -133,7 +131,7 @@ export function initPushNotifications(): void {
 
         case EventNames.SESSION_RESULT: {
           const data = eventData<typeof EventNames.SESSION_RESULT>(event)
-          const sessionId = (data as Record<string, unknown>).sessionId as string | undefined
+          const sessionId = data.sessionId
           await maybePush(
             'Session Complete',
             `Session ${sessionId?.slice(0, 8) ?? ''} finished`,
@@ -144,7 +142,11 @@ export function initPushNotifications(): void {
 
         case EventNames.SESSION_ERROR: {
           const data = eventData<typeof EventNames.SESSION_ERROR>(event)
-          const error = (data as Record<string, unknown>).error as string | undefined
+          // delivery_failed fires once per failed send attempt — pushing each one
+          // would spam the user's devices during an SSH outage. The in-app chat
+          // notification (deduped) covers it.
+          if (data.errorKind === 'delivery_failed') break
+          const error = data.error
           await maybePush(
             'Session Error',
             error?.slice(0, 150) ?? 'A session encountered an error',
@@ -164,9 +166,10 @@ export function initPushNotifications(): void {
 
         case EventNames.CHAT_HISTORY_UPDATED: {
           const data = eventData<typeof EventNames.CHAT_HISTORY_UPDATED>(event)
-          const d = data as Record<string, unknown>
-          if (d.source === 'triage') {
-            const text = d.displayText as string | undefined ?? 'A task needs your attention'
+          // source lives on the entry, not the top-level payload — reading the
+          // top-level d.source (always undefined) meant triage pushes never fired.
+          if (data.entry?.source === 'triage') {
+            const text = data.entry.content || 'A task needs your attention'
             await maybePush('Task Needs Attention', text.slice(0, 150), { type: 'triage' })
           }
           break
