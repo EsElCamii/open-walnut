@@ -928,6 +928,12 @@ export interface RecoveredSessionState {
   jsonlByteLength?: number;
   /** True if the last TeamCreate/TeamDelete pair leaves the session in team mode. */
   teamActive?: boolean;
+  /** Count of background tasks (dynamic workflows / subagents) still in flight per the
+   *  replayed task_started/task_notification events — used to rebuild running vs idle
+   *  after reconnect/restart so an intermediate `result` isn't mistaken for turn-over. */
+  bgTasksInFlight?: number;
+  /** Last observed CLI session_state_changed.state, when present in the stream. */
+  cliSessionState?: 'running' | 'idle' | 'requires_action';
   /** Pending control_request that was never answered (no matching control_response).
    *  Happens when Walnut server restarts while Claude Code is waiting for permission. */
   pendingControlRequest?: {

@@ -84,6 +84,12 @@ export interface SessionResultEvent {
   totalCost?: number;
   duration?: number;
   usage?: { input_tokens: number; output_tokens: number };
+  /** True when a Claude Code team (in_process_teammate) is still active — this is an
+   *  intermediate result, not turn-over. Consumers skip AGENT_COMPLETE/triage. */
+  teamActive?: boolean;
+  /** True when a dynamic-workflow / background subagent set is still in flight — this
+   *  result is intermediate, not turn-over. Consumers skip AGENT_COMPLETE/triage. */
+  backgroundActive?: boolean;
 }
 
 export interface SessionErrorEvent {

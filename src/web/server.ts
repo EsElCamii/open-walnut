@@ -1510,8 +1510,11 @@ export async function startServer(options: ServerOptions = {}): Promise<HttpServ
         return
       }
 
-      // Team mode: intermediate results should not trigger AGENT_COMPLETE or triage.
+      // Team mode OR active background workflow: intermediate results should not
+      // trigger AGENT_COMPLETE or triage. (Reuse the `teamActive` var name to thread
+      // through the existing guards below — semantics widened to "background work live".)
       const teamActive = (event.data as Record<string, unknown>)?.teamActive === true
+        || (event.data as Record<string, unknown>)?.backgroundActive === true
 
       try {
         // Session record update is handled by session-runner (claude-code-session.ts)
