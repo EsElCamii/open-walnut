@@ -1,0 +1,284 @@
+/**
+ * Forensic Observability — evidence bundle capture.
+ *
+ * When an incident opens, the felt bug ("delivery stalled", "silent success",
+ * "UI flashed") usually can't be reproduced and the logs that prove it rotate
+ * out within a day or two. captureBundle() freezes ALL-LAYER evidence for one
+ * sessionId into a single directory the moment the incident fires, so the
+ * investigation later is "open the bundle" instead of hours of cross-layer grep.
+ *
+ * It mirrors the exact sources scripts/walnut-logs.sh already greps — server
+ * JSON log, daemon log, the CLI's .jsonl stream, the CLI's own --debug file —
+ * plus the wide `obs` turn events. Pure read + write into the bundle dir; it
+ * never mutates a source log, and any missing file is noted, never thrown.
+ */
+
+import fs from 'node:fs';
+import path from 'node:path';
+import { CLAUDE_HOME, LOG_DIR, SESSION_STREAMS_DIR, WALNUT_HOME } from '../../constants.js';
+import { log } from '../../logging/index.js';
+
+/** Default look-back window for server/turn log lines. */
+const DEFAULT_WINDOW_MINS = 60;
+/** How many tail lines to keep from line-oriented streams (jsonl, debug). */
+const TAIL_LINES = 200;
+
+interface BundleMeta {
+  sessionId: string;
+  capturedAt: string;
+  windowMins: number;
+  filesIncluded: string[];
+  notesIfMissing: string[];
+}
+
+/**
+ * Capture an all-layer evidence bundle for a session into
+ * `WALNUT_HOME/incidents/<sessionId>-<ts>` and return that absolute dir path.
+ * Defensive: a missing/unreadable source is recorded in meta.notesIfMissing
+ * rather than thrown — the bundle is best-effort by design.
+ */
+export async function captureBundle(
+  sessionId: string,
+  opts?: { windowMins?: number },
+): Promise<string> {
+  const windowMins = opts?.windowMins ?? DEFAULT_WINDOW_MINS;
+  const ts = Date.now();
+  const dir = path.join(WALNUT_HOME, 'incidents', `${sessionId}-${ts}`);
+
+  const meta: BundleMeta = {
+    sessionId,
+    capturedAt: new Date(ts).toISOString(),
+    windowMins,
+    filesIncluded: [],
+    notesIfMissing: [],
+  };
+
+  // Record a produced artifact (only counts non-empty writes as "included").
+  const writeArtifact = (name: string, content: string, emptyNote: string) => {
+    try {
+      if (content.trim().length === 0) {
+        meta.notesIfMissing.push(emptyNote);
+        return;
+      }
+      fs.writeFileSync(path.join(dir, name), content);
+      meta.filesIncluded.push(name);
+    } catch (err) {
+      meta.notesIfMissing.push(`${name}: write failed (${errMsg(err)})`);
+    }
+  };
+
+  try {
+    fs.mkdirSync(dir, { recursive: true });
+
+    const cutoffMs = ts - windowMins * 60_000;
+    const recent = recentLogFiles();
+
+    // 1. server.log.txt — sid-mentioning lines from the 1-2 most recent dated
+    //    logs, filtered to the window. (UTC-vs-local-date gotcha: a session
+    //    active across UTC-midnight is split over two files — scan both.)
+    writeArtifact(
+      'server.log.txt',
+      grepDatedLogs(recent, sessionId, cutoffMs, () => true),
+      `server.log.txt: no lines mention ${sessionId} in the last ${windowMins}min (scanned ${recent.length} dated logs)`,
+    );
+
+    // 2. cli.jsonl.tail.txt — last ~200 lines of the CLI stream, + .err tail.
+    writeArtifact('cli.jsonl.tail.txt', captureCliJsonl(sessionId, meta), `cli.jsonl.tail.txt: no .jsonl stream found for ${sessionId}`);
+
+    // 3. cli-debug.txt — last ~200 lines of the CLI's own --debug file.
+    writeArtifact(
+      'cli-debug.txt',
+      tailFile(path.join(CLAUDE_HOME, 'debug', `${sessionId}.txt`), TAIL_LINES),
+      `cli-debug.txt: no ${path.join(CLAUDE_HOME, 'debug', `${sessionId}.txt`)} (CLI debug log; remote sessions write it on the remote host)`,
+    );
+
+    // 4. daemon.log.txt — sid-mentioning lines across every daemon-d-*.log.
+    writeArtifact('daemon.log.txt', captureDaemonLogs(sessionId), `daemon.log.txt: no daemon-d-*.log mentions ${sessionId}`);
+
+    // 5. turn-events.txt — the wide `obs` "turn" records for this sid.
+    writeArtifact(
+      'turn-events.txt',
+      grepDatedLogs(recent, sessionId, cutoffMs, isObsTurnLine),
+      `turn-events.txt: no obs turn events for ${sessionId} in the last ${windowMins}min`,
+    );
+  } catch (err) {
+    // Even the mkdir/orchestration failing must not throw on the incident path.
+    meta.notesIfMissing.push(`bundle capture error: ${errMsg(err)}`);
+    log.obs.warn('bundle capture failed', { sessionId, error: errMsg(err) });
+  }
+
+  // 6. meta.json — always written last so it reflects what actually landed.
+  try {
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, 'meta.json'), JSON.stringify(meta, null, 2));
+  } catch (err) {
+    log.obs.warn('bundle meta write failed', { sessionId, dir, error: errMsg(err) });
+  }
+
+  log.obs.info('evidence bundle captured', {
+    sessionId,
+    dir,
+    files: meta.filesIncluded.length,
+    missing: meta.notesIfMissing.length,
+  });
+  return dir;
+}
+
+// ── helpers ──
+
+function errMsg(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
+/**
+ * The 1-2 most recent `open-walnut-<date>.log` files, oldest-first. Mirrors
+ * walnut-logs.sh `recent_logs`: timestamps are UTC but filenames use the local
+ * date, so a single session can straddle two files — we scan both.
+ */
+function recentLogFiles(): string[] {
+  let files: string[];
+  try {
+    files = fs
+      .readdirSync(LOG_DIR)
+      .filter(f => f.startsWith('open-walnut-') && f.endsWith('.log'))
+      .map(f => path.join(LOG_DIR, f));
+  } catch {
+    return [];
+  }
+  // Sort by mtime descending, take 2, then reverse to oldest-first.
+  return files
+    .map(f => ({ f, mtime: safeMtime(f) }))
+    .sort((a, b) => b.mtime - a.mtime)
+    .slice(0, 2)
+    .map(x => x.f)
+    .reverse();
+}
+
+function safeMtime(file: string): number {
+  try {
+    return fs.statSync(file).mtimeMs;
+  } catch {
+    return 0;
+  }
+}
+
+/**
+ * Collect lines from the given dated JSON logs that mention `sessionId`, pass
+ * the `extra` predicate, and fall within the time window. A line whose `time`
+ * we can't parse is KEPT (don't drop evidence over a parse miss); a line older
+ * than the cutoff is dropped. Returns them oldest-first across files.
+ */
+function grepDatedLogs(
+  files: string[],
+  sessionId: string,
+  cutoffMs: number,
+  extra: (line: string) => boolean,
+): string {
+  const out: string[] = [];
+  for (const file of files) {
+    let content: string;
+    try {
+      content = fs.readFileSync(file, 'utf-8');
+    } catch {
+      continue;
+    }
+    for (const line of content.split('\n')) {
+      if (!line.includes(sessionId)) continue;
+      if (!extra(line)) continue;
+      const t = lineTimeMs(line);
+      if (t !== null && t < cutoffMs) continue; // older than window
+      out.push(line);
+    }
+  }
+  return out.join('\n');
+}
+
+/** Parse the `"time":"...Z"` field (UTC ISO) → epoch ms, or null if absent/unparseable. */
+function lineTimeMs(line: string): number | null {
+  const m = line.match(/"time":"([^"]+)"/);
+  if (!m) return null;
+  const ms = Date.parse(m[1]);
+  return Number.isNaN(ms) ? null : ms;
+}
+
+/** A structured log line emitted by the recorder's wide turn event. */
+function isObsTurnLine(line: string): boolean {
+  return line.includes('"subsystem":"obs"') && line.includes('"message":"turn"');
+}
+
+/**
+ * Tail the session's CLI .jsonl stream (+ its .jsonl.err if present). The stream
+ * lives in different dirs depending on session type — local/embedded sessions
+ * write to SESSION_STREAMS_DIR (LOG_DIR/streams) while the remote daemon writes
+ * to /tmp/open-walnut-streams — so we probe both and use whichever exists.
+ */
+function captureCliJsonl(sessionId: string, meta: BundleMeta): string {
+  const candidates = streamDirs().map(d => path.join(d, `${sessionId}.jsonl`));
+  const jsonl = candidates.find(p => fileExists(p));
+  if (!jsonl) return '';
+
+  const parts = [`### ${jsonl} (last ${TAIL_LINES} lines)`, tailFile(jsonl, TAIL_LINES)];
+  const errPath = `${jsonl}.err`;
+  if (fileExists(errPath)) {
+    const errTail = tailFile(errPath, TAIL_LINES);
+    if (errTail.trim().length > 0) {
+      parts.push(`\n### ${errPath} (stderr, last ${TAIL_LINES} lines)`, errTail);
+    }
+  } else {
+    meta.notesIfMissing.push(`${path.basename(errPath)}: not present (no CLI stderr captured)`);
+  }
+  return parts.join('\n');
+}
+
+/** Candidate stream directories, de-duplicated, in probe order. */
+function streamDirs(): string[] {
+  const dirs = [SESSION_STREAMS_DIR, '/tmp/open-walnut-streams'];
+  return [...new Set(dirs)];
+}
+
+/** Concatenate sid-mentioning lines from every daemon-d-*.log, labelled by file. */
+function captureDaemonLogs(sessionId: string): string {
+  let files: string[];
+  try {
+    files = fs
+      .readdirSync(LOG_DIR)
+      .filter(f => f.startsWith('daemon-d-') && f.endsWith('.log'))
+      .map(f => path.join(LOG_DIR, f));
+  } catch {
+    return '';
+  }
+  const blocks: string[] = [];
+  for (const file of files) {
+    let content: string;
+    try {
+      content = fs.readFileSync(file, 'utf-8');
+    } catch {
+      continue;
+    }
+    const hits = content.split('\n').filter(l => l.includes(sessionId));
+    if (hits.length > 0) blocks.push(`### ${file}`, hits.join('\n'));
+  }
+  return blocks.join('\n');
+}
+
+function fileExists(p: string): boolean {
+  try {
+    return fs.statSync(p).isFile();
+  } catch {
+    return false;
+  }
+}
+
+/** Last `n` lines of a file, or '' if missing/unreadable. */
+function tailFile(file: string, n: number): string {
+  let content: string;
+  try {
+    content = fs.readFileSync(file, 'utf-8');
+  } catch {
+    return '';
+  }
+  const lines = content.split('\n');
+  // Drop a trailing empty line from the final newline so the tail isn't blank-padded.
+  if (lines.length > 0 && lines[lines.length - 1] === '') lines.pop();
+  return lines.slice(-n).join('\n');
+}
