@@ -29,6 +29,7 @@ import path from 'node:path'
 import crypto from 'node:crypto'
 import { bus, EventNames, eventData } from '../core/event-bus.js'
 import { isProcessAliveAsync } from '../utils/process.js'
+import { isLocalJsonlFresh } from '../utils/session-liveness.js'
 import { SESSION_STREAMS_DIR, CLAUDE_HOME } from '../constants.js'
 import { log } from '../logging/index.js'
 import { markProcessing, removeProcessed, revertToPending, loadQueue, getAllSessionsWithPending } from '../core/session-message-queue.js'
@@ -41,7 +42,9 @@ import type { SessionManager } from './session-manager.js'
 import { checkCwdExists } from './cwd-check.js'
 import { recoverStateFromJsonl, extractImageFilePathFromInput } from '../core/session-history.js'
 import type { SessionRecord, SessionMode, ProcessStatus, TaskPhase } from '../core/types.js'
+import { SESSION_MODEL_CLI_MAP, DEFAULT_CLI_MODEL } from '../core/types.js'
 import { classifyStreamEvent, classifyDelta } from './claude-stream-event-map.js'
+import { recordTurn } from '../core/observability/recorder.js'
 import type { SessionServerClient } from './session-server-client.js'
 import { sanitizeInitModel, CONTEXT_WINDOW_DEFAULT } from '../agent/providers/defaults.js'
 
@@ -140,6 +143,13 @@ interface StreamControlRequestEvent {
   request: Record<string, unknown>
 }
 
+/** control_response: CLI's reply to a Walnut-initiated control_request (e.g.
+ *  side_question). Inbound counterpart of the permission flow's outbound response. */
+interface StreamControlResponseEvent {
+  type: 'control_response'
+  response?: Record<string, unknown>
+}
+
 /** stream_event: partial SSE events from --include-partial-messages */
 interface StreamPartialEvent {
   type: 'stream_event'
@@ -153,7 +163,7 @@ interface StreamPartialEvent {
   session_id?: string
 }
 
-type StreamEvent = StreamInitEvent | StreamStatusEvent | StreamMessageEvent | StreamResultEvent | StreamControlRequestEvent | StreamPartialEvent
+type StreamEvent = StreamInitEvent | StreamStatusEvent | StreamMessageEvent | StreamResultEvent | StreamControlRequestEvent | StreamControlResponseEvent | StreamPartialEvent
 
 /**
  * Map CLI permissionMode string to our internal SessionMode.
@@ -298,6 +308,13 @@ export class ClaudeCodeSession {
   private _turnStartOffset = 0
   /** Cumulative cost from the last result event — used to detect stale/replayed results. */
   private _lastResultCost: number | undefined
+  /** stop_reason of the most recent assistant message_delta — the truncated-success
+   *  invariant compares this against result.subtype (success + null = truncation). */
+  private _lastStopReason: string | null | undefined
+  /** Delivery latency + path of the most recent delivered batch, surfaced into the
+   *  per-turn wide event (forensic observability). Stamped by logDeliveryLatency. */
+  private _lastDeliveryMs: number | undefined
+  private _lastDeliveryPath: string | undefined
   private livenessTimer: ReturnType<typeof setInterval> | null = null
   private _outputFile: string | null = null
   private cliCommand: string
@@ -434,6 +451,27 @@ export class ClaudeCodeSession {
    *  turn that produced them). It looks like a leaking Set but bounded growth is
    *  accepted; see git history for the zombie permission-card incident. */
   private _resolvedPermissionRequestIds = new Set<string>()
+  /** Pending Walnut-initiated control_requests (e.g. side_question / "btw") awaiting
+   *  a matching control_response from the CLI. Keyed by request_id.
+   *
+   *  ── Claude Code stream-json control protocol (Walnut→CLI direction) ──
+   *  This is the SYMMETRIC counterpart of the permission flow: there, the CLI sends
+   *  Walnut a `control_request` and Walnut replies with a `control_response`
+   *  (respondToControlRequest). Here, WALNUT sends the CLI a `control_request` and
+   *  the CLI replies with a `control_response` that we must route back to the caller.
+   *  The fork's print mode (`claude -p`, exactly what Walnut spawns) handles these
+   *  natively — see fork src/cli/print.ts (subtype dispatch ~line 2831+:
+   *  side_question 3815, set_model 2933, get_context_usage 2961,
+   *  generate_session_title 3783) and the Zod schemas in
+   *  src/entrypoints/sdk/coreSchemas.ts. The full subtype catalog + payloads live in
+   *  memory note claude_code_stream_json_control_protocol.md.
+   *  Transport: writeRaw(json) → daemon sendRaw → CLI FIFO stdin — the SAME pipe the
+   *  permission control_response already uses (no new daemon plumbing, no new flag). */
+  private _pendingSideQuestions = new Map<string, {
+    resolve: (answer: string) => void
+    reject: (err: Error) => void
+    timer: ReturnType<typeof setTimeout>
+  }>()
   /** Timestamp when spawn() was called — used to measure time-to-init for diagnostics. */
   private _spawnTs = 0
   /** Wall-clock ts of the HTTP request that triggered this start (latency instrumentation only). */
@@ -604,15 +642,11 @@ export class ClaudeCodeSession {
       this._activity = 'implementing'
       args.push('--permission-mode', 'bypassPermissions')
     }
-    // Map picker short IDs → full CLI model identifiers.
-    // The CLI understands [1m] suffix for 1M context window.
-    // Map picker keys to CLI aliases. Non-1M models (opus, sonnet, haiku)
-    // pass through as-is via fallback — CLI resolves them per provider.
-    const MODEL_CLI_MAP: Record<string, string> = {
-      'opus-1m':   'opus[1m]',
-      'sonnet-1m': 'sonnet[1m]',
-    }
-    const cliModel = MODEL_CLI_MAP[model ?? ''] ?? (model || 'opus[1m]')
+    // Map picker short IDs → CLI model aliases via the SESSION_MODELS registry
+    // (single source of truth in core/types.ts). The CLI understands the [1m]
+    // suffix for the 1M context window. An unknown id falls through to passthrough
+    // (CLI resolves it per provider), and no model at all → DEFAULT_CLI_MODEL.
+    const cliModel = SESSION_MODEL_CLI_MAP[model ?? ''] ?? (model || DEFAULT_CLI_MODEL)
     this._cliModel = cliModel
     args.push('--model', cliModel)
     if (resumeSessionId) {
@@ -816,16 +850,35 @@ export class ClaudeCodeSession {
       const e = err instanceof Error ? err : new Error(String(err))
       try { onSpawnSettled?.(false, e) } catch { /* callback must never break error handling */ }
       if (!this.resultEmitted) {
+        // Always stop bookkeeping so this dead spawn emits no spurious events.
         this.resultEmitted = true
         this._active = false
-        this._processStatus = 'stopped'
-        this._activity = undefined
-        this.emitStatusChanged('AGENT_COMPLETE')
-        bus.emit(EventNames.SESSION_ERROR, {
-          sessionId: this.claudeSessionId,
-          taskId: this.taskId,
-          error: err instanceof Error ? err.message : String(err),
-        }, ['main-ai', 'session-runner'], { source: 'session-runner' })
+        // When a settle callback owns this spawn (queue-managed --resume), the
+        // callback's settleResumeFailure already drove the lifecycle: reverted the
+        // batch to 'pending' (session stays valid, message not lost) and emitted
+        // SESSION_ERROR errorKind:'delivery_failed'. We MUST NOT also flip to
+        // 'stopped' + emit AGENT_COMPLETE here: that status-changed (process_status
+        // 'stopped' → ['*']) hits server.ts's markDone+clear fallback and wipes the
+        // previous turn's blocks the user is viewing — the exact thing the
+        // delivery_failed buffer-protection (server.ts) is meant to prevent. The
+        // disk record's process_status is left as-is by the failure path (it was
+        // not 'running' before this resume attempt anyway for a dead remote), so
+        // settleResumeFailure has nothing to re-assert.
+        if (!onSpawnSettled) {
+          this._processStatus = 'stopped'
+          this._activity = undefined
+          this.emitStatusChanged('AGENT_COMPLETE')
+          // No errorKind here: without a settle callback this is a NEW-session
+          // start whose message is not in the disk queue (not 'delivery_failed').
+          // (The second SESSION_ERROR was what fed the session-runner's own handler
+          // and re-triggered processNext — the infinite redeliver loop of 2026-06-10,
+          // 104 cycles/min against a dead SSH host.)
+          bus.emit(EventNames.SESSION_ERROR, {
+            sessionId: this.claudeSessionId,
+            taskId: this.taskId,
+            error: err instanceof Error ? err.message : String(err),
+          }, ['main-ai', 'session-runner'], { source: 'session-runner' })
+        }
       }
     })
 
@@ -1115,9 +1168,17 @@ export class ClaudeCodeSession {
     // session-history API separately — we don't need the daemon to re-emit it.
     if (session._transport && record.claudeSessionId) {
       const isRemote = !!session._transport.isRemote
-      const fromOffset = isRemote
-        ? Number.MAX_SAFE_INTEGER  // remote fresh-attach: subscribe future-only
-        : (session._transport.fileSize || jsonlByteLength)
+      // Local sessions have the SAME two-file mismatch as remote: daemon offsets
+      // are byte positions in the STREAM file (/tmp/open-walnut-streams/<sid>.jsonl),
+      // while jsonlByteLength measures the canonical ~/.claude/projects JSONL — a
+      // different, much smaller file. Falling back to it after a walnut restart
+      // (fileSize=0) made the daemon replay [canonical_size, stream_size) — the
+      // exact "whole conversation replays" bug, just on the local path. Only a
+      // live in-process fileSize (>0, accumulated from stream events) is a valid
+      // stream offset; otherwise subscribe future-only like remote.
+      const fromOffset = session._transport.fileSize > 0 && !isRemote
+        ? session._transport.fileSize
+        : Number.MAX_SAFE_INTEGER  // fresh-attach: subscribe future-only
       log.session.info('attachToExisting: attach fromOffset chosen', {
         sessionId: record.claudeSessionId,
         isRemote,
@@ -1276,12 +1337,31 @@ export class ClaudeCodeSession {
     this.emitStatusChanged('IN_PROGRESS')
     // Persist running state to session tracker so API consumers (frontend tree, etc.)
     // see the updated status immediately — not just WebSocket subscribers.
+    //
+    // Carry pid + host with the 'running' write. Without them this created the
+    // orphan dead-pool: a 'running' record with pid==null && host==null is
+    // un-verifiable (isSessionProcessAlive returns false), so the health monitor
+    // flagged it dead and rewrote it every tick (the write-amp stall). With pid
+    // set, a local session is verifiable; with host set, a remote session routes
+    // to the daemon liveness check. This is the upstream fix that stops the pool
+    // from refilling after the batch drain cleans it.
     if (this.claudeSessionId) {
       import('../core/session-tracker.js').then(({ updateSessionRecord }) => {
         updateSessionRecord(this.claudeSessionId!, {
           process_status: 'running',
           activity: undefined,
           last_status_change: new Date().toISOString(),
+          ...(this.pid != null ? { pid: this.pid } : {}),
+          ...(this._host ? { host: this._host } : {}),
+          // Persist outputFile on every FIFO write, not just the resume path.
+          // A freshly-spawned local session sets _outputFile in memory (the
+          // remote://__local__/<sid> sentinel) but historically only the resume
+          // path wrote it to the DB, so a session that never resumed kept an empty
+          // output_file column forever. That empty column is what history/stream
+          // readers key off, and it was the latent footgun behind the false-zombie
+          // kill (the reconciler used to treat "no outputFile" as "dead"). Writing
+          // it on every turn keeps the column populated regardless of resume.
+          ...(this._outputFile ? { outputFile: this._outputFile } : {}),
         }).catch(() => {})
       }).catch(() => {})
     }
@@ -1378,6 +1458,17 @@ export class ClaudeCodeSession {
     this._activity = undefined
     this._pendingPermissionRequests.clear()
     this._clearAllPermissionReEmitTimers()
+    this._rejectAllSideQuestions('session stopped')
+  }
+
+  /** Reject + clear any in-flight side questions (e.g. on session teardown) so the
+   *  drawer's promise settles instead of hanging until its own timeout. */
+  private _rejectAllSideQuestions(reason: string): void {
+    for (const pending of this._pendingSideQuestions.values()) {
+      clearTimeout(pending.timer)
+      pending.reject(new Error(reason))
+    }
+    this._pendingSideQuestions.clear()
   }
 
   // ── Private ──
@@ -1680,12 +1771,16 @@ export class ClaudeCodeSession {
         usingTransport: !!this._transport,
       })
 
-      // Self-heal: if a remote session is alive but we haven't seen JSONL bytes,
-      // the daemon's session.subscribers set is probably missing our ws (e.g. a
+      // Self-heal: the process is alive but we haven't seen JSONL bytes, so the
+      // daemon's session.subscribers set is probably missing our ws (e.g. a
       // reconnect path that didn't call reattachWatcher). Try reattaching once —
       // the daemon will re-add this ws and catch-up push bytes from fromOffset.
       // Cheap and idempotent: _seenUuids dedup prevents any double-rendering.
-      if (pidAlive && !fileSizeGrew && this._transport?.isRemote) {
+      // Applies to BOTH local and remote sessions: both go through the daemon /
+      // RemoteSessionManager, and a local-daemon WS flap drops the subscriber
+      // exactly the same way. Gating this on isRemote left local sessions with
+      // no self-heal path — they stayed frozen until a manual refresh.
+      if (pidAlive && !fileSizeGrew && this._transport) {
         type Reattachable = { reattachWatcher?: () => Promise<boolean> }
         const reattachable = this._transport as unknown as Reattachable
         if (reattachable.reattachWatcher) {
@@ -2031,6 +2126,26 @@ export class ClaudeCodeSession {
             // 181 system blocks landing directly on a thinking block. Swallowing
             // the event here lets thinking-delta keep appending to one block.
           } else if (sys.subtype && sys.subtype !== 'init' && sys.subtype !== 'status') {
+            // ── Observability: structured status cards from the stream-json protocol ──
+            // post_turn_summary (per-turn status card: status_category / needs_action /
+            // title) and task_summary (mid-turn progress line) are emitted only by the
+            // CLI's bridge / remote-control / Kairos layer (fork src/server/
+            // directConnectManager.ts), which requires a claude.ai OAuth subscription —
+            // explicitly EXCLUDING Bedrock/Vertex (fork src/bridge/bridgeEnabled.ts).
+            // A vanilla `claude -p` (what Walnut spawns) never enters that path, so these
+            // currently never arrive. Verified absent via live probe on binary 2.1.170 in
+            // Walnut's exact multi-turn stream-json mode. We log explicitly here so that
+            // IF a future CLI version emits them on the plain print stream, we can confirm
+            // it directly in Walnut logs (grep "stream-json summary subtype"). The
+            // catch-all below already forwards the full payload to the UI as a system
+            // block — no extra wiring needed the day they start arriving.
+            if (sys.subtype === 'post_turn_summary' || sys.subtype === 'task_summary' || sys.subtype === 'session_state_changed') {
+              log.session.info('stream-json summary subtype received', {
+                sessionId: sid, taskId: this.taskId, subtype: sys.subtype,
+                statusCategory: sys.status_category, needsAction: sys.needs_action,
+                title: sys.title,
+              })
+            }
             // Catch-all: unknown future subtypes — forward full payload so we
             // don't lose diagnostic info to a bare subtype name.
             const payloadForDisplay = Object.fromEntries(
@@ -2626,6 +2741,28 @@ export class ClaudeCodeSession {
 
         this._turnResultEmitted = true
 
+        // ── Forensic observability: emit the per-turn wide event + run invariants. ──
+        // Single call covers both team + non-team branches (teamActive distinguishes).
+        // Fire-and-forget, never throws — must not affect turn completion. This is the
+        // hook that catches "silent success" (e.g. success + stopReason=null = truncation).
+        recordTurn({
+          sessionId: this.claudeSessionId ?? this.sessionId ?? '',
+          taskId: this.taskId ?? undefined,
+          host: this._host,
+          model: this._model,
+          hasPipe: this._transport?.hasPipe ?? false,
+          pid: this.pid ?? null,
+          isError: effectiveIsError ?? false,
+          subtype: (result as { subtype?: string }).subtype,
+          numTurns: result.num_turns,
+          stopReason: this._lastStopReason,
+          durationMs: result.duration_ms,
+          resultLen: resultText?.length ?? 0,
+          deliveryMs: this._lastDeliveryMs,
+          deliveryPath: this._lastDeliveryPath,
+          teamActive: this._teamActive,
+        })
+
         if (this._teamActive) {
           // Team subagents still working — this is an intermediate result from
           // the lead session (e.g. "Team is up. 5 reviewers working...").
@@ -2812,6 +2949,43 @@ export class ClaudeCodeSession {
         break
       }
 
+      // ── control_response: CLI's reply to a Walnut-initiated control_request ──
+      // The INBOUND direction of the stream-json control protocol (see
+      // _pendingSideQuestions above). The CLI emits this after handling one of OUR
+      // outbound control_requests (e.g. side_question). The permission flow does NOT
+      // use this branch — there Walnut is the responder, not the requester. We resolve
+      // the pending promise by request_id and DO NOT push anything into the transcript
+      // (that's what keeps a /btw answer out of the main conversation).
+      case 'control_response': {
+        const cr = event as unknown as {
+          type: 'control_response'
+          response?: {
+            subtype?: 'success' | 'error'
+            request_id?: string
+            // side_question nests the answer three levels: response.response.response
+            response?: { response?: string; synthetic?: boolean }
+            error?: string
+          }
+        }
+        const requestId = cr.response?.request_id
+        if (!requestId) break
+        const pending = this._pendingSideQuestions.get(requestId)
+        if (!pending) break // not ours (or a stale replay we already resolved)
+        this._pendingSideQuestions.delete(requestId)
+        clearTimeout(pending.timer)
+        if (cr.response?.subtype === 'error') {
+          pending.reject(new Error(cr.response.error || 'side question failed'))
+        } else {
+          const answer = cr.response?.response?.response ?? ''
+          log.session.info('side_question control_response resolved', {
+            sessionId: this.claudeSessionId, taskId: this.taskId, requestId,
+            answerLen: answer.length,
+          })
+          pending.resolve(answer)
+        }
+        break
+      }
+
       case 'stream_event': {
         // Anthropic SSE partial events (--include-partial-messages). Enables
         // token-level UI streaming. See claude-stream-event-map.ts for the
@@ -2842,7 +3016,13 @@ export class ClaudeCodeSession {
         }
 
         // ── message_delta: already handled for usage/stop_reason upstream ──
-        if (innerType === 'message_delta') break
+        // Capture stop_reason for the forensic per-turn wide event + the
+        // truncated-success invariant (success + stopReason=null = truncation).
+        if (innerType === 'message_delta') {
+          const sr = (inner?.delta as { stop_reason?: string | null } | undefined)?.stop_reason
+          if (sr !== undefined) this._lastStopReason = sr
+          break
+        }
 
         // ── content_block_delta: real content streams here ──
         if (innerType === 'content_block_delta') {
@@ -3003,6 +3183,64 @@ export class ClaudeCodeSession {
       }, ['main-ai'], { source: 'session-runner' })
     }
     return true
+  }
+
+  /**
+   * Ask a "side question" (the native Claude Code `/btw`) inside THIS live coding
+   * session, without polluting the main conversation.
+   *
+   * ── How it works (Claude Code stream-json control protocol, OUTBOUND) ──
+   * Writes a `{type:'control_request', request_id, request:{subtype:'side_question',
+   * question}}` envelope to the CLI's FIFO stdin via writeRaw (→ daemon sendRaw →
+   * FIFO) — the SAME transport the permission control_response uses. The fork's
+   * print mode handles it natively: it runs a forked agent that reuses THIS session's
+   * own last-turn prompt-cache prefix (byte-identical → cache hit), denies all tools,
+   * caps at 1 turn, and returns the answer ONLY in the matching `control_response`
+   * (subtype:success, response.response.response = answer string). The answer is
+   * never appended to the session transcript. Fire-and-forget on the CLI side: the
+   * main turn is NOT interrupted. See fork src/cli/print.ts:3815 (side_question
+   * dispatch) → src/utils/sideQuestion.ts (runSideQuestion). Full protocol catalog:
+   * memory note claude_code_stream_json_control_protocol.md.
+   *
+   * Live-verified against shipped binary 2.1.170 in Walnut's exact multi-turn
+   * stream-json mode (Bedrock, Opus 4.8): round-trips and recalls cross-turn context.
+   */
+  async askSideQuestion(question: string, timeoutMs = 60_000): Promise<string> {
+    if (!this._transport) throw new Error('session not started')
+    const requestId = `sq-${Date.now()}-${crypto.randomBytes(4).toString('hex')}`
+    const envelope = JSON.stringify({
+      type: 'control_request',
+      request_id: requestId,
+      request: { subtype: 'side_question', question },
+    })
+    log.session.info('side_question dispatching', {
+      sessionId: this.claudeSessionId, taskId: this.taskId, requestId,
+      questionLen: question.length,
+    })
+    return new Promise<string>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this._pendingSideQuestions.delete(requestId)
+        reject(new Error('side question timed out'))
+      }, timeoutMs)
+      this._pendingSideQuestions.set(requestId, { resolve, reject, timer })
+      Promise.resolve(this._transport!.writeRaw(envelope)).then((ok) => {
+        if (!ok) {
+          const pending = this._pendingSideQuestions.get(requestId)
+          if (pending) {
+            this._pendingSideQuestions.delete(requestId)
+            clearTimeout(pending.timer)
+            reject(new Error('failed to write side question to session'))
+          }
+        }
+      }).catch((err) => {
+        const pending = this._pendingSideQuestions.get(requestId)
+        if (pending) {
+          this._pendingSideQuestions.delete(requestId)
+          clearTimeout(pending.timer)
+          reject(err instanceof Error ? err : new Error(String(err)))
+        }
+      })
+    })
   }
 
   /**
@@ -3273,6 +3511,19 @@ export class SessionRunner {
       log.session.error('startup recovery failed', { error: err instanceof Error ? err.message : String(err) })
     })
 
+    // Event-driven redelivery: when a host's daemon (re)connects, drain any
+    // queue messages stranded in 'pending' by a delivery failure on that host.
+    // This replaces spin-retrying after SESSION_ERROR (the 2026-06-10 infinite
+    // loop) — messages wait quietly in the disk queue until the host is back,
+    // the user hits Retry, or the user sends another message.
+    import('./daemon-connection.js').then(({ setOnDaemonHostConnected }) => {
+      setOnDaemonHostConnected((hostKey) => {
+        this.redeliverPendingForHost(hostKey).catch((err) => {
+          log.session.warn('reconnect redelivery failed', { hostKey, error: err instanceof Error ? err.message : String(err) })
+        })
+      })
+    }).catch(() => {})
+
     bus.subscribe('session-runner', async (event) => {
       switch (event.name) {
         case EventNames.SESSION_START: {
@@ -3304,6 +3555,21 @@ export class SessionRunner {
         case EventNames.SESSION_ERROR: {
           const { sessionId } = eventData<'session:result'>(event)
           if (!sessionId) break
+
+          // delivery_failed = the batch never reached the CLI (SSH/daemon down).
+          // It is NOT a turn outcome. The emitter (settleResumeFailure / processNext
+          // catch) already reverted the batch to 'pending' and notified the UI via
+          // SESSION_BATCH_FAILED. Running the turn-completion logic below would:
+          //   - emit SESSION_BATCH_COMPLETED → frontend deletes the user's optimistic
+          //     messages (the "my message got lost" bug), and
+          //   - call processNext → re-deliver → fail → SESSION_ERROR → here again
+          //     (the infinite 2-req/s retry loop).
+          // Redelivery is event-driven instead: user Retry / next send / daemon reconnect.
+          if (event.name === EventNames.SESSION_ERROR
+            && (eventData<'session:error'>(event)).errorKind === 'delivery_failed') {
+            log.session.info('SESSION_ERROR delivery_failed — skipping turn-completion handling', { sessionId })
+            break
+          }
 
           // Persist process_status to sessions.json.
           // Trust the in-memory processStatus that handleStreamEvent() already computed
@@ -3397,10 +3663,13 @@ export class SessionRunner {
           const batchCount = this.batchCounts.get(resolvedSessionId) ?? 1
           this.clearActiveProcessing(resolvedSessionId)
 
-          // Remove completed messages from disk
-          removeProcessed(sessionId).catch((err) => {
-            log.session.warn('failed to remove processed queue messages', { sessionId, error: err instanceof Error ? err.message : String(err) })
-          })
+          // NO un-scoped removeProcessed here. Every delivery point already removes
+          // its own batch eagerly (FIFO write / mid-turn inject / settleResumeSuccess),
+          // so by turn-end there is nothing legitimately left in 'processing'. The only
+          // thing an un-scoped sweep could hit is a CONCURRENT in-flight batch (e.g. a
+          // --resume spawn settling seconds later) — deleting it silently lost the
+          // user's message. Worst case of not sweeping: a stuck 'processing' message
+          // survives until restart and gets redelivered (duplicate > loss).
 
           // Tell frontend how many optimistic messages to clear
           bus.emit(EventNames.SESSION_BATCH_COMPLETED, {
@@ -3488,6 +3757,53 @@ export class SessionRunner {
   }
 
   /**
+   * Resolve a live session, attaching to its still-running CLI process ON DEMAND
+   * if it isn't in the in-memory `this.sessions` map.
+   *
+   * Why this exists: `findByClaudeId` only iterates the in-memory map, which on a
+   * fresh process holds just the sessions the startup reconciler flagged as
+   * reconnectable. Many genuinely-alive sessions are NOT in that map, so a feature
+   * keyed off `findByClaudeId` (e.g. the `/btw` side-question control_request) would
+   * wrongly report "Live session not found" for a session the user can chat with
+   * normally. Normal send doesn't hit this because `processNext` rehydrates via
+   * `attachToExisting` (see ~line 4873). This helper extracts that same rehydration
+   * so control-protocol callers (side_question, set_model, get_context_usage, …)
+   * get the SAME attach-on-demand semantics as a normal turn.
+   */
+  async getOrAttachLiveSession(claudeSessionId: string): Promise<ClaudeCodeSession | undefined> {
+    const inMap = this.findByClaudeId(claudeSessionId)
+    if (inMap) return inMap
+
+    try {
+      const { getSessionByClaudeId } = await import('../core/session-tracker.js')
+      const record = await getSessionByClaudeId(claudeSessionId)
+      if (!record || !(await this.isSessionStillAlive(record))) return undefined
+
+      log.session.info('getOrAttachLiveSession: rehydrating via attachToExisting', {
+        sessionId: claudeSessionId, host: record.host, pid: record.pid, taskId: record.taskId,
+      })
+      const attached = await ClaudeCodeSession.attachToExisting(record, this.cliCommand, this._testDaemonUrl)
+
+      // Race guard mirrors processNext: a concurrent path may have populated the
+      // map while attachToExisting awaited — if so, discard ours so we don't
+      // overwrite the live transport's registry entry / orphan its tailer.
+      const collided = this.findByClaudeId(claudeSessionId)
+      if (collided) {
+        attached.detach()
+        return collided
+      }
+      const mapKey = record.taskId || `reconnected-${claudeSessionId}`
+      this.sessions.set(mapKey, attached)
+      return attached
+    } catch (err) {
+      log.session.warn('getOrAttachLiveSession: attach attempt failed', {
+        sessionId: claudeSessionId, error: err instanceof Error ? err.message : String(err),
+      })
+      return undefined
+    }
+  }
+
+  /**
    * Kill orphaned claude processes from stopped/terminal sessions.
    * Scans sessions.json for sessions with PIDs where process_status is 'stopped'
    * or in terminal state, but the OS process is still alive.
@@ -3509,6 +3825,31 @@ export class SessionRunner {
 
         const processName = s.host ? 'ssh' : 'claude'
         if (!await isProcessAliveAsync(s.pid, processName)) continue
+
+        // GROUND-TRUTH RECHECK before a destructive kill — veto on POSITIVE proof of life.
+        // This sweeper fires on every session start and trusts process_status==='stopped'
+        // (plus a live, binary-verified pid) as the kill signal — with NO grace period.
+        // That is exactly how the false-zombie incident killed a healthy CLI: the
+        // server-restart reconciler mis-marked a live local session 'stopped', and on the
+        // next session start this loop SIGTERM'd the real (still-streaming) process.
+        // The DB status flag is not authoritative; the JSONL mtime is (it's the same signal
+        // the daemon's reapSession uses). Only a fresh JSONL (process wrote output within the
+        // window) is positive proof the CLI is alive and working → veto the kill.
+        //
+        // We veto ONLY on `=== true`, NOT on 'unknown'. 'unknown' means "remote session" or
+        // "local file already cleaned/archived" — neither is evidence of life, and treating
+        // them as a veto would (a) leak remote orphans forever and (b) leak local PID-recycled
+        // orphans. The existing isProcessAliveAsync(pid,'claude') binary check above already
+        // guards PID reuse (a recycled non-claude pid returns false), so letting 'unknown'
+        // fall through to the kill restores exactly the prior, correct cleanup behavior while
+        // still blocking the one case that caused the incident.
+        const ORPHAN_FRESH_WINDOW_MS = 2 * 60 * 1000
+        if (isLocalJsonlFresh(s, ORPHAN_FRESH_WINDOW_MS) === true) {
+          log.session.warn('skipping orphan kill — JSONL recently written (process alive despite stopped flag)', {
+            sessionId: s.claudeSessionId, pid: s.pid, process_status: s.process_status,
+          })
+          continue
+        }
 
         // Process is alive but session is done — kill it
         log.session.warn('killing orphaned session process', {
@@ -4197,12 +4538,13 @@ export class SessionRunner {
         }
       }
 
-      // Clean up batch tracking for the interrupted turn
+      // Clean up batch tracking for the interrupted turn.
+      // No removeProcessed sweep: delivered batches were already removed eagerly
+      // at their delivery point; anything still 'processing' is an in-flight
+      // batch that must survive (sweeping it = silent message loss).
       if (this.activeProcessing.has(sessionId)) {
         const oldBatchCount = this.batchCounts.get(sessionId) ?? 1
         this.clearActiveProcessing(sessionId)
-
-        removeProcessed(sessionId).catch(() => {})
 
         bus.emit(EventNames.SESSION_BATCH_COMPLETED, {
           sessionId,
@@ -4223,11 +4565,11 @@ export class SessionRunner {
           break
         }
       }
-      // Clean up batch tracking for the interrupted turn
+      // Clean up batch tracking for the interrupted turn (no removeProcessed
+      // sweep — same in-flight-batch protection as the interrupt path above).
       if (this.activeProcessing.has(sessionId)) {
         const oldBatchCount = this.batchCounts.get(sessionId) ?? 1
         this.clearActiveProcessing(sessionId)
-        removeProcessed(sessionId).catch(() => {})
         bus.emit(EventNames.SESSION_BATCH_COMPLETED, {
           sessionId,
           count: oldBatchCount,
@@ -4389,8 +4731,9 @@ export class SessionRunner {
         if (msg.id) targetSession.writeSyntheticUserEvent(msg.message, msg.id)
       }
 
-      // Eagerly remove from disk queue — message written to FIFO, no re-delivery on crash
-      removeProcessed(sessionId).catch((err) => {
+      // Eagerly remove from disk queue — message written to FIFO, no re-delivery on crash.
+      // Scoped to THIS batch's ids so a concurrent in-flight batch is never swept.
+      removeProcessed(sessionId, newMsgs.map((m) => m.id)).catch((err) => {
         log.session.warn('eager removeProcessed failed after mid-turn injection', { sessionId, error: err instanceof Error ? err.message : String(err) })
       })
 
@@ -4406,6 +4749,11 @@ export class SessionRunner {
       // processNext owns the authoritative recovery path (rehydrate / attach /
       // --resume), so the message is delivered promptly instead of waiting out the
       // whole turn (the old behavior logged a warn and left it queued = 30–50s stall).
+      // NOTE: deliberately does NOT emit SESSION_ERROR errorKind:'delivery_failed'
+      // here. This is a delegation/retry, not a surrender: processNext owns the
+      // authoritative recovery path and is the one that emits the terminal
+      // delivery_failed (via settleResumeFailure) if the --resume also fails.
+      // Emitting here too would double-report the same failure.
       await revertToPending(newMsgs)
       log.session.info('injectMidTurn: stdin write failed — delegating to processNext', { sessionId, count: newMsgs.length })
       return this.processNext(sessionId)
@@ -4436,6 +4784,9 @@ export class SessionRunner {
       deliveryMs: maxMs,
       messageId: oldestId,
     })
+    // Stash for the next per-turn wide event (forensic observability).
+    this._lastDeliveryMs = maxMs
+    this._lastDeliveryPath = path
   }
 
   /**
@@ -4448,7 +4799,7 @@ export class SessionRunner {
     for (const m of msgs) {
       if (m.id) session.writeSyntheticUserEvent(m.message, m.id)
     }
-    removeProcessed(sessionId).catch((err) => {
+    removeProcessed(sessionId, msgs.map((m) => m.id)).catch((err) => {
       log.session.warn('eager removeProcessed failed after --resume spawn', { sessionId, error: err instanceof Error ? err.message : String(err) })
     })
     bus.emit(EventNames.SESSION_MESSAGES_DELIVERED, {
@@ -4474,10 +4825,50 @@ export class SessionRunner {
       messageIds: msgs.map((m) => m.id),
       error: err.message,
     }, ['main-ai'], { source: 'session-runner' })
+    // errorKind 'delivery_failed' = connectivity status, NOT a turn outcome.
+    // Consumers (server.ts chat persist, hook dispatcher, push notify, and the
+    // session-runner's own handler) all short-circuit on it: no batch-completed,
+    // no processNext re-trigger, no phase flip, deduped notification. The
+    // missing kind is what turned an SSH outage into the 2-req/s infinite
+    // retry loop + 150 red boxes on 2026-06-10.
     bus.emit(EventNames.SESSION_ERROR, {
       sessionId,
       error: err.message,
+      errorKind: 'delivery_failed' as const,
     }, ['main-ai'], { source: 'session-runner' })
+  }
+
+  /**
+   * Redeliver pending queue messages for sessions on a host that just
+   * (re)connected. Called from the daemon pool's host-connected callback.
+   * Local sessions (host=null → '__local__') are included when the local
+   * daemon reconnects.
+   */
+  private async redeliverPendingForHost(hostKey: string): Promise<void> {
+    const pendingSessions = await getAllSessionsWithPending()
+    if (pendingSessions.length === 0) return
+
+    const { getSessionByClaudeId } = await import('../core/session-tracker.js')
+    for (const sessionId of pendingSessions) {
+      // Skip sessions mid-delivery — their batch is already in flight.
+      if (this.activeProcessing.has(sessionId)) continue
+      try {
+        const record = await getSessionByClaudeId(sessionId)
+        if (!record) continue
+        // Don't resurrect an archived session on reconnect — it's been retired
+        // (plan executed / user closed); resuming it would spawn a CLI for a
+        // session no UI entry point points at. Leave its messages pending.
+        if (record.archived) continue
+        const recordHost = record.host ?? '__local__'
+        if (recordHost !== hostKey) continue
+        log.session.info('daemon reconnected — redelivering pending messages', { sessionId, hostKey })
+        await this.processNext(sessionId)
+      } catch (err) {
+        log.session.warn('reconnect redelivery failed for session', {
+          sessionId, hostKey, error: err instanceof Error ? err.message : String(err),
+        })
+      }
+    }
   }
 
   /**
@@ -4541,6 +4932,7 @@ export class SessionRunner {
             const lower = storedModel.toLowerCase()
             if (lower.includes('sonnet')) resolvedModel = 'sonnet[1m]'
             else if (lower.includes('haiku')) resolvedModel = 'haiku'  // haiku has no 1M variant
+            else if (lower.includes('fable')) resolvedModel = 'fable[1m]'  // fable defaults to 1M like opus
             else resolvedModel = undefined  // → send() defaults to 'opus[1m]'
           }
         }
@@ -4649,7 +5041,8 @@ export class SessionRunner {
           // persistent queue immediately so a server crash/restart won't re-deliver it.
           // This prevents the infinite loop where: session kills server → restart →
           // loadQueue() resets processing→pending → re-delivers same message → loop.
-          removeProcessed(sessionId).catch((err) => {
+          // Scoped to THIS batch's ids so a concurrent in-flight batch is never swept.
+          removeProcessed(sessionId, msgs.map((m) => m.id)).catch((err) => {
             log.session.warn('eager removeProcessed failed after FIFO write', { sessionId, error: err instanceof Error ? err.message : String(err) })
           })
 
@@ -4793,9 +5186,11 @@ export class SessionRunner {
         error: errorMsg,
       }, ['main-ai'], { source: 'session-runner' })
 
+      // delivery_failed: batch is back in 'pending' — see settleResumeFailure.
       bus.emit(EventNames.SESSION_ERROR, {
         sessionId,
         error: errorMsg,
+        errorKind: 'delivery_failed' as const,
       }, ['main-ai'], { source: 'session-runner' })
     }
   }

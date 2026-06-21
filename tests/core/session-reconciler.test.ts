@@ -208,14 +208,41 @@ describe('reconcileSessions', () => {
     expect(result.reconnectable).toEqual([])
   })
 
-  it('sessions with pid but no outputFile are treated as dead', async () => {
-    await createSessionRecord('pid-no-file', 'task-1', 'proj', undefined, {
-      pid: process.pid, // alive PID but no outputFile
+  it('REGRESSION (false-zombie kill): a live local session with an empty outputFile is NOT marked dead', async () => {
+    // This is the exact shape that caused the false-zombie incident: a local
+    // session (host null) whose process is genuinely alive (use this test
+    // runner's own pid) but whose outputFile column was never persisted.
+    // The old reconciler short-circuited `outputFile ? isAlive : false` and
+    // marked it stopped while the CLI was still streaming; the orphan sweeper
+    // then SIGTERM'd the real process. The fix removes that short-circuit, so
+    // the live pid is detected via process.kill(pid,0) and the session survives.
+    await createSessionRecord('live-no-file', 'task-1', 'proj', undefined, {
+      pid: process.pid, // alive PID, deliberately no outputFile
     })
 
     const result = await reconcileSessions()
-    // No outputFile → can't reconnect → mark stopped
+    expect(result.reconciled).toBe(0)
+    expect(result.reconnectable.map(s => s.claudeSessionId)).toEqual(['live-no-file'])
+
+    const sessions = await listSessions()
+    const rec = sessions.find(s => s.claudeSessionId === 'live-no-file')!
+    expect(rec.process_status).not.toBe('stopped')
+    // And the empty outputFile is backfilled with the canonical local sentinel
+    // so it can never trip a future caller that still keys off the column.
+    expect(rec.outputFile).toBe('remote://__local__/live-no-file')
+  })
+
+  it('a dead pid with no outputFile is still correctly marked stopped (pid==null path unaffected)', async () => {
+    await createSessionRecord('dead-no-file', 'task-1', 'proj', undefined, {
+      pid: 999999999, // dead PID, no outputFile
+    })
+
+    const result = await reconcileSessions()
+    // pid exists but process.kill throws → isSessionProcessAlive returns false → stopped
     expect(result.reconciled).toBe(1)
     expect(result.reconnectable).toEqual([])
+
+    const sessions = await listSessions()
+    expect(sessions.find(s => s.claudeSessionId === 'dead-no-file')!.process_status).toBe('stopped')
   })
 })

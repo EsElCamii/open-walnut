@@ -28,7 +28,42 @@
  *         new session is never killed as an orphan of the old one.
  *   Those two together — not binary verification — are the current defense.
  */
+import fs from 'node:fs'
+import path from 'node:path'
+import { SESSION_STREAMS_DIR } from '../constants.js'
 import type { SessionRecord } from '../core/types.js'
+
+/**
+ * Ground-truth freshness check for a LOCAL session's JSONL stream file — a veto
+ * that destructive callers (orphan sweepers) consult before killing.
+ *
+ * Returns:
+ *   true      — JSONL was written within `windowMs` → POSITIVE proof the process is
+ *               alive (actively producing output), regardless of the DB status flag.
+ *   false     — JSONL exists but is older than `windowMs` → consistent with a dead process.
+ *   'unknown' — can't stat the local file (cleaned/archived), or this isn't a local
+ *               session (remote → no local streams file) → NOT evidence either way.
+ *
+ * IMPORTANT — callers must veto a kill ONLY on `=== true`. `'unknown'` is not proof of
+ * life: treating it as a veto would leak remote orphans (always 'unknown') and local
+ * PID-recycled orphans whose JSONL was already archived. The kill paths that use this
+ * already have their own PID-reuse guards (binary-name `ps` check / activePids set), so
+ * only `=== true` should suppress a kill — that is exactly the one case (a still-streaming
+ * CLI mis-flagged 'stopped') that caused the false-zombie incident. Only call this to
+ * PREVENT a kill — never to trigger one.
+ */
+export function isLocalJsonlFresh(session: SessionRecord, windowMs: number): boolean | 'unknown' {
+  // Remote sessions have no local streams file (RemoteSessionManager.outputFile is
+  // null); their liveness is the daemon's concern, not a local mtime.
+  if (session.host) return 'unknown'
+  try {
+    const jsonlPath = path.join(SESSION_STREAMS_DIR, `${session.claudeSessionId}.jsonl`)
+    const st = fs.statSync(jsonlPath)
+    return (Date.now() - st.mtimeMs) < windowMs
+  } catch {
+    return 'unknown'
+  }
+}
 
 export async function isSessionProcessAlive(session: SessionRecord): Promise<boolean> {
   // Embedded/SDK: managed by their respective providers, not by PID

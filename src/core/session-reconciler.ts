@@ -70,9 +70,20 @@ export async function reconcileSessions(): Promise<ReconcileResult> {
     // Tasks unavailable — fall back to 'idle' for all process_status decisions
   }
 
-  // Parallel liveness checks — routes to local PID check or remote daemon check
+  // Parallel liveness checks — routes to local PID check or remote daemon check.
+  //
+  // ROBUSTNESS (do not re-add an outputFile gate here): isSessionProcessAlive() is
+  // the single authoritative liveness entry point — for a local session it calls
+  // process.kill(pid, 0) (existence syscall), for a remote session it asks the
+  // daemon. It does NOT need outputFile to verify anything. A prior version gated
+  // this call on `session.outputFile ? … : false`, which short-circuited a live
+  // local session to "dead" whenever its outputFile column was empty (fresh local
+  // sessions never persisted the sentinel) — the server-restart reconciler then
+  // marked the still-streaming CLI 'stopped', and the orphan sweeper later SIGTERM'd
+  // the real process off that false flag. The fix is to always go through the one
+  // authoritative check and let pid==null be the only "can't verify → dead" case.
   const results = await Promise.allSettled(zombieCandidates.map(async (session) => {
-    const alive = session.outputFile ? await isSessionProcessAlive(session) : false
+    const alive = await isSessionProcessAlive(session)
     return { session, alive }
   }))
 
@@ -91,8 +102,16 @@ export async function reconcileSessions(): Promise<ReconcileResult> {
       // Process survived server restart — reconnectable
       const taskPhase = session.taskId ? taskMap.get(session.taskId)?.phase : undefined
       const correctProcessStatus = taskPhase === 'IN_PROGRESS' ? 'running' : 'idle'
+      // One-time backfill: a local session (host null) whose outputFile column is
+      // empty is a leftover from before we persisted the sentinel on every FIFO
+      // write. Repopulate it with the canonical local sentinel so downstream
+      // readers (history/stream) and any future caller never see an empty value.
+      const needsOutputFileBackfill = session.host == null && !session.outputFile
       await updateSessionRecord(session.claudeSessionId, {
         process_status: correctProcessStatus,
+        ...(needsOutputFileBackfill
+          ? { outputFile: `remote://__local__/${session.claudeSessionId}` }
+          : {}),
       }).catch(() => {})
 
       log.session.info('session reconciler: session still alive', {

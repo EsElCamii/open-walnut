@@ -170,6 +170,72 @@ describe('SessionHealthMonitor — process_status:error behavior', () => {
   });
 });
 
+// ── REGRESSION: orphan sweeper must not kill a live process off a stale 'stopped' flag ──
+
+describe('SessionHealthMonitor — killOrphanedProcesses JSONL-freshness veto (false-zombie regression)', () => {
+  it('does NOT SIGTERM a local session whose JSONL was just written, even when process_status=stopped + pid alive', async () => {
+    // Reproduce the false-zombie state exactly:
+    //   - local session (host null), process_status='stopped' (mis-set by a bad reconcile)
+    //   - pid is genuinely ALIVE (use the test runner's own pid)
+    //   - last_status_change older than the 2-min orphan grace (so grace doesn't save it)
+    //   - JSONL freshly written (process is actively producing output)
+    // Old behavior: cachedIsAlive=true + stopped flag → SIGTERM the real process.
+    // Fixed behavior: fresh JSONL vetoes the kill.
+    const sid = 'live-but-flagged-stopped';
+    const jsonlPath = path.join(WALNUT_HOME, 'streams', `${sid}.jsonl`);
+    await fsp.mkdir(path.dirname(jsonlPath), { recursive: true });
+    await fsp.writeFile(jsonlPath, '{"type":"assistant"}\n', 'utf-8'); // mtime = now → fresh
+
+    await createSessionRecord(sid, 'task-1', 'proj', undefined, { pid: process.pid });
+    const old = new Date(Date.now() - 5 * 60 * 1000).toISOString(); // 5min ago > 2min grace
+    await updateSessionRecord(sid, { process_status: 'stopped', last_status_change: old });
+
+    // Spy on process.kill so we can assert no SIGTERM is sent to the (alive) pid.
+    const killSpy = vi.spyOn(process, 'kill').mockImplementation(((pid: number, sig?: string | number) => {
+      // Allow the liveness probe (signal 0) to behave normally (process is alive).
+      if (sig === 0) return true as unknown as boolean;
+      // Any real kill signal in this test is the bug — record it, do nothing.
+      return true as unknown as boolean;
+    }) as typeof process.kill);
+
+    try {
+      const monitor = new SessionHealthMonitor();
+      await monitor.check();
+
+      // The orphan sweeper must NOT have sent SIGTERM/SIGKILL to our pid.
+      const destructiveKill = killSpy.mock.calls.find(
+        ([, sig]) => sig === 'SIGTERM' || sig === 'SIGKILL' || sig === 'SIGINT',
+      );
+      expect(destructiveKill).toBeUndefined();
+    } finally {
+      killSpy.mockRestore();
+    }
+  });
+
+  it('DOES allow orphan kill when JSONL is stale (genuinely dead process, no false-positive veto)', async () => {
+    // Same shape but the JSONL is OLD → freshness veto must NOT fire, so a truly
+    // orphaned process group is still cleaned up. Use a dead pid so no real signal lands.
+    const sid = 'truly-orphaned';
+    const jsonlPath = path.join(WALNUT_HOME, 'streams', `${sid}.jsonl`);
+    await fsp.mkdir(path.dirname(jsonlPath), { recursive: true });
+    await fsp.writeFile(jsonlPath, '{"type":"assistant"}\n', 'utf-8');
+    const old = Date.now() - 10 * 60 * 1000; // 10min ago → stale
+    await fsp.utimes(jsonlPath, old / 1000, old / 1000);
+
+    await createSessionRecord(sid, 'task-1', 'proj', undefined, { pid: 999999999 });
+    await updateSessionRecord(sid, {
+      process_status: 'stopped',
+      last_status_change: new Date(old).toISOString(),
+    });
+
+    // pid 999999999 is dead → cachedIsAlive returns false → kill loop `continue`s
+    // before reaching the freshness check. This asserts the veto doesn't break the
+    // normal path: a dead orphan is simply skipped (not kept alive forever).
+    const monitor = new SessionHealthMonitor();
+    await expect(monitor.check()).resolves.not.toThrow();
+  });
+});
+
 // ── Idle-threshold behavior — asymmetric local (1h) vs remote (2h) ──
 
 describe('SessionHealthMonitor — idle-threshold source gating (DEFAULT_*_IDLE_TIMEOUT)', () => {

@@ -13,7 +13,7 @@
 import fsp from 'node:fs/promises'
 import { log } from '../logging/index.js'
 import { isProcessAliveAsync } from '../utils/process.js'
-import { isSessionProcessAlive } from '../utils/session-liveness.js'
+import { isSessionProcessAlive, isLocalJsonlFresh } from '../utils/session-liveness.js'
 import { bus, EventNames } from './event-bus.js'
 import type { SessionRecord, Task, TaskPhase } from './types.js'
 const HEALTH_CHECK_INTERVAL_MS = 30_000
@@ -50,6 +50,16 @@ export class SessionHealthMonitor {
   }
 
   async check(): Promise<void> {
+    const { markCriticalSection } = await import('./event-loop-monitor.js')
+    const endSection = markCriticalSection('health-monitor.check')
+    try {
+      await this.checkInner()
+    } finally {
+      endSection()
+    }
+  }
+
+  private async checkInner(): Promise<void> {
     const checkT0 = Date.now()
     const { listSessions, isTerminalSession, updateSessionRecord } = await import('./session-tracker.js')
 
@@ -97,7 +107,42 @@ export class SessionHealthMonitor {
     await this.recoverConnectionLostSessions(allSessions, updateSessionRecord)
     const tRecover = Date.now()
 
-    const sessions = allSessions.filter(s => !isTerminalSession(s) && !s.archived)
+    let sessions = allSessions.filter(s => !isTerminalSession(s) && !s.archived)
+
+    // ── Drain the orphan dead-pool in ONE batch write (event-loop fix) ───────
+    // A local session (host==null) with pid==null can never be alive:
+    // isSessionProcessAlive() returns false for it (no PID to probe, no daemon).
+    // Yet such records accumulate (server restarts, daemon resets) and each tick
+    // the per-session loop below would do a SEPARATE synchronous updateSessionRecord
+    // for every one of them — ~293 serial transactions/tick, the confirmed source
+    // of the 15s HTTP stalls. Collapse them into a single batch transition, then
+    // exclude them from the serial loop. Once 'stopped' they drop out of the
+    // non-terminal filter above on the next tick, so the pool drains for good.
+    //
+    // 2-min grace on last_status_change protects a record mid-spawn whose PID
+    // hasn't been persisted yet (mirrors killOrphanedProcesses' grace).
+    const ORPHAN_GRACE_MS = 2 * 60 * 1000
+    const nowMs = Date.now()
+    const orphanIds: string[] = []
+    sessions = sessions.filter((s) => {
+      const isOrphan =
+        s.host == null && s.pid == null &&
+        s.process_status !== 'stopped' && s.process_status !== 'error' &&
+        (nowMs - new Date(s.last_status_change ?? s.startedAt ?? 0).getTime()) > ORPHAN_GRACE_MS
+      if (isOrphan) { orphanIds.push(s.claudeSessionId); return false }
+      return true
+    })
+    if (orphanIds.length > 0) {
+      const { batchUpdateSessionRecords } = await import('./session-tracker.js')
+      const written = await batchUpdateSessionRecords(orphanIds, {
+        process_status: 'stopped',
+        activity: undefined,
+        last_status_change: new Date().toISOString(),
+        status_reason: 'orphan_no_pid',
+        status_changed_by: 'health-monitor',
+      })
+      log.session.info('health monitor: drained orphan dead-pool', { orphanCount: orphanIds.length, written: written.length })
+    }
 
     if (sessions.length === 0) {
       const total = Date.now() - checkT0
@@ -710,6 +755,23 @@ export class SessionHealthMonitor {
         }
 
         if (!await cachedIsAlive(s)) continue
+
+        // GROUND-TRUTH RECHECK before a destructive kill — veto on POSITIVE proof of life.
+        // We only reach here because the session is terminal/stopped AND the pid is still
+        // alive — exactly the state a WRONG 'stopped' flag produces (e.g. the server-restart
+        // reconciler mis-marking a live local session). Trusting that stale flag is what
+        // SIGTERM'd a healthy CLI in the false-zombie incident. The DB status flag is not
+        // authoritative; the JSONL mtime is (same signal the daemon's reapSession uses).
+        // Veto ONLY on `=== true` (a fresh JSONL = positive proof the CLI is still working).
+        // 'unknown' (remote session, or local file already cleaned/archived) is NOT evidence
+        // of life and must fall through — vetoing on it would leak orphans. PID-reuse here is
+        // already guarded by the activePids check above; remote cleanup is the daemon's job.
+        if (isLocalJsonlFresh(s, ORPHAN_GRACE_MS) === true) {
+          log.session.warn('health monitor: skipping orphan kill — JSONL recently written (process alive despite stopped flag)', {
+            sessionId: s.claudeSessionId, pid: s.pid, process_status: s.process_status,
+          })
+          continue
+        }
 
         log.session.warn('health monitor: killing orphaned process', {
           sessionId: s.claudeSessionId,
