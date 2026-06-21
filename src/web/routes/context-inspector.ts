@@ -4,7 +4,7 @@
  */
 
 import { Router, type Request, type Response, type NextFunction } from 'express'
-import { validateAgentId } from '../../constants.js'
+import { validateAgentId, validateConversationId } from '../../constants.js'
 import { getConfig } from '../../core/config-manager.js'
 import { DEFAULT_MODEL } from '../../agent/model.js'
 import { DEFAULT_MAX_TOKENS } from '../../agent/providers/defaults.js'
@@ -25,6 +25,15 @@ contextInspectorRouter.get('/', async (req: Request, res: Response, next: NextFu
   try {
     const rawAgentId = (req.query.agentId as string) || undefined
     const agentId = rawAgentId ? validateAgentId(rawAgentId) : undefined
+    const rawConvId = (req.query.conversationId as string) || undefined
+    // Resolve the conversation at the boundary: an explicit id wins, otherwise
+    // fall back to the agent's ACTIVE conversation. The inspector always reflects
+    // a real conversation's context — never the deprecated legacy ghost file.
+    let conversationId = rawConvId ? validateConversationId(rawConvId) : undefined
+    if (!conversationId) {
+      const { getActiveConversationId } = await import('../../core/conversations.js')
+      conversationId = await getActiveConversationId(agentId ?? 'general')
+    }
     const config = await getConfig()
 
     // Non-General console agent — simplified context view
@@ -42,8 +51,8 @@ contextInspectorRouter.get('/', async (req: Request, res: Response, next: NextFu
       const contextXml = await loadContextSources(agentDef, {})
       const fullSystem = contextXml ? systemPrompt + '\n\n' + contextXml : systemPrompt
       const agentTools = await buildSubagentToolSet(agentDef)
-      const apiMessages = await getModelContext(agentId)
-      const compactionContent = await getCompactionSummary(agentId).catch(() => null) ?? ''
+      const apiMessages = await getModelContext(agentId, conversationId)
+      const compactionContent = await getCompactionSummary(agentId, conversationId).catch(() => null) ?? ''
       // Separate memory/daily for agent vs main, shown as distinct sections
       const ownMemory = getMemoryFile(agentId)?.content ?? ''
       const mainMemory = getMemoryFile(undefined)?.content ?? ''
@@ -95,12 +104,12 @@ contextInspectorRouter.get('/', async (req: Request, res: Response, next: NextFu
     // Gather each section independently
     const roleContent = buildRoleSection(name)
     const skillsContent = await buildSkillsPrompt() ?? ''
-    const compactionContent = await getCompactionSummary().catch(() => null) ?? ''
+    const compactionContent = await getCompactionSummary(undefined, conversationId).catch(() => null) ?? ''
     const globalMemory = getMemoryFile()?.content ?? ''
     const projectSummaries = getAllProjectSummaries()
     const dailyLogs = getDailyLogsWithinBudget(Math.floor(20000 / 2))
     const toolSchemas = getToolSchemas()
-    const apiMessages = await getModelContext()
+    const apiMessages = await getModelContext(undefined, conversationId)
 
     // Task categories & projects overview
     const taskCategoriesText = await buildTaskCategoriesSection()
@@ -137,7 +146,7 @@ contextInspectorRouter.get('/', async (req: Request, res: Response, next: NextFu
     // Use the actual buildSystemPrompt() for the total, consistent with
     // needsCompaction() and /api/chat/stats. The per-section breakdowns above
     // are informational for the UI; the total must match the real payload.
-    const actualSystemPrompt = await buildSystemPrompt()
+    const actualSystemPrompt = await buildSystemPrompt(undefined, conversationId)
     const payloadEstimate = estimateFullPayload({ system: actualSystemPrompt, tools: toolSchemas, messages: apiMessages })
 
     // totalTokens uses the payload estimate for consistency, plus model config overhead

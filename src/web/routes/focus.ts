@@ -2,7 +2,7 @@
  * Focus Bar routes — manage pinned tasks via task-level fields.
  *
  * Pin state lives on each Task object (pinned + pin_order + focus_tier fields).
- * Three tiers: focus (current sprint), next (queued sprint), satellite (backlog).
+ * Three tiers: focus (current sprint), satellite (backlog), wait (parked).
  */
 
 import { Router, type Request, type Response, type NextFunction } from 'express'
@@ -18,8 +18,8 @@ focusRouter.get('/tasks', async (_req: Request, res: Response, next: NextFunctio
     res.json({
       pinned_tasks: pinned.map((t) => t.id),
       focus_tasks: pinned.filter((t) => t.focus_tier === 'focus').map((t) => t.id),
-      next_tasks: pinned.filter((t) => t.focus_tier === 'next').map((t) => t.id),
-      satellite_tasks: pinned.filter((t) => !t.focus_tier).map((t) => t.id),
+      // Satellite is the default: anything not focus and not wait (incl. legacy 'next').
+      satellite_tasks: pinned.filter((t) => t.focus_tier !== 'focus' && t.focus_tier !== 'wait').map((t) => t.id),
       wait_tasks: pinned.filter((t) => t.focus_tier === 'wait').map((t) => t.id),
     })
   } catch (err) {
@@ -81,9 +81,9 @@ focusRouter.put('/reorder', async (req: Request, res: Response, next: NextFuncti
   }
 })
 
-const VALID_TIERS = ['focus', 'next', 'satellite', 'wait'] as const
+const VALID_TIERS = ['focus', 'satellite', 'wait'] as const
 
-// PUT /api/focus/tasks/:id/tier — set tier (focus / next / satellite / wait)
+// PUT /api/focus/tasks/:id/tier — set tier (focus / satellite / wait)
 focusRouter.put('/tasks/:id/tier', async (req: Request, res: Response, next: NextFunction) => {
   try {
     const taskId = req.params.id as string

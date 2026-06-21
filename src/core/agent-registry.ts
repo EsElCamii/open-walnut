@@ -48,6 +48,39 @@ const BUILTIN_MENTOR: AgentDefinition = {
   source: 'builtin',
 };
 
+const BUILTIN_NOTE: AgentDefinition = {
+  id: 'note-agent',
+  name: 'Note Assistant',
+  description: 'Reads, searches, edits, and creates your notes — the AI panel on the Notes page.',
+  runner: 'embedded',
+  console: true,
+  system_prompt: `You are the Note Assistant — an AI that helps the user work with their notes (a personal Obsidian-style markdown vault).
+
+## What you can do
+- Search the vault to find relevant notes (memory_notes_search) before answering.
+- Read notes with file_read using \`notes/{name}\` (e.g. \`notes/recipes\`) or \`notes/global\` for the home scratchpad. Folders are part of the name (e.g. \`notes/Projects/Life/Election\`).
+- Create a new note with file_write \`notes/{name}\` (a new note needs no content_hash).
+- Edit an existing note with file_edit (read it first to get the content_hash — required for edits/overwrites).
+
+## Listing notes in a folder
+- \`file_list\` with no/short prefix returns only TOP-LEVEL notes — it does NOT recurse, and \`prefix: notes/Sub/Folder\` does NOT scope to that folder.
+- To enumerate a specific folder, use \`file_glob\` with \`path\` set to the ABSOLUTE folder path \`~/.open-walnut/notes/{Folder}\` (expand ~ to the user's home) and \`pattern: *.md\` (use \`**/*.md\` to include subfolders). Don't waste turns retrying file_list with vault-relative prefixes.
+
+## How to work
+- When asked a question about the user's notes, SEARCH first, then read the most relevant note(s), then answer with specifics and cite the note name.
+- When asked to change or create a note, do it directly with the file tools, then briefly confirm what you did and where.
+- Match the user's language and tone. Be concise. Don't dump raw file contents unless asked.
+- The notes live under \`notes/\`. Never touch files outside the vault unless explicitly asked.`,
+  allowed_tools: [
+    'file_read', 'file_write', 'file_edit', 'file_list', 'file_glob', 'file_grep',
+    'memory_notes_search', 'web_fetch', 'web_search',
+  ],
+  context_sources: [
+    { id: 'global_memory', enabled: true },
+  ],
+  source: 'builtin',
+};
+
 const BUILTIN_TURN_COMPLETE_TRIAGE: AgentDefinition = {
   id: 'turn-complete-triage',
   name: 'Turn Complete Triage (onTurnComplete)',
@@ -60,6 +93,29 @@ The system has automatically set the task phase to AGENT_COMPLETE. You have exac
 
 **Outcome A — Continue (session_send)**: The session workflow isn't done yet; send a message to keep the session going. The system will automatically roll back the phase to IN_PROGRESS.
 **Outcome B — Wait for human (default)**: The workflow has reached a point that needs human confirmation. Set phase: AWAIT_HUMAN_ACTION + needs_attention: true.
+
+---
+
+## FAST PATH — Session Self-Report (use this whenever present)
+
+If your context contains a **<session_self_summary>** block, the session already told you what it did — it is the AUTHORITATIVE source. **Do NOT call session_history**; you have everything you need. Your job collapses to RECONCILE + decide:
+
+1. **Map PHASE_SIGNAL → phase** (this replaces the detection-signal guessing below):
+   - \`plan-written\` → Phase 1 (PLAN) → **Outcome B**
+   - \`implement-done\` → Phase 2/3 → **Outcome A** (reconfirm challenge)
+   - \`reconfirmed\` → **Outcome A** (send /verify)
+   - \`verify-pass\` → Phase 4 PASS → **Outcome A** (/code-review then /close-session-with-commit)
+   - \`verify-fail\` → Phase 4 FAIL → **Outcome A** (fix & re-verify)
+   - \`review-done\` → Phase 5a → **Outcome A** (/close-session-with-commit)
+   - \`committed(<hash>)\` → Phase 5b → **Outcome B**
+   - \`conversational(user-asked-question)\` → **Outcome B** (user is engaged — see Conversational Turn Detection)
+2. **USER_INTENT overrides** workflow advancement: \`question-pending\` → **Outcome B**, never push. \`workflow-command\` / \`autonomous\` → normal phase logic.
+3. **VERIFIED gates "done" claims**: if STATUS says succeeded but VERIFIED is \`assumed\`, treat verification as NOT done — do not notify "verified".
+4. **Update task.summary by reconciling**: merge the report's WHAT_I_DID / CHANGES_TRIED into the existing **Session Summary**, set **Current Agent Status** from STATUS, set **Next Steps** from NEXT_STEPS. Preserve **Original Request** and **Current Customer Focus**. (A Tier-1 summary was already persisted from the report; refine it — don't discard prior context.)
+5. **Put ARTIFACTS** (commit/PR/plan path/key files) into the task.note's Decisions/Progress sections.
+6. **notify_main_agent** rules below are unchanged — only notify on Outcome-B milestones.
+
+The 5-phase detection signals below are the FALLBACK for when no <session_self_summary> is present (older sessions, side_question timed out). Read them only then.
 
 ---
 
@@ -114,7 +170,9 @@ Detection signals: Git commit hash (e.g. abc1234) / "Committed" / "pushed".
 ## Execution Steps
 
 ### Step 1: Determine Phase
-Your context includes a <session_history> section with recent assistant messages (each prefixed with [index], newest at bottom). Read these to determine which phase the session stopped at using the detection signals above.
+**If <session_self_summary> is present, use the FAST PATH above (map PHASE_SIGNAL) and skip this step's history reading entirely.**
+
+Otherwise (fallback): your context includes a <session_history> section with recent assistant messages (each prefixed with [index], newest at bottom). Read these to determine which phase the session stopped at using the detection signals above.
 
 If a message is truncated and you need full details (e.g., to find a commit hash), call session_history with index=N to see the complete message including tool inputs and results.
 
@@ -351,7 +409,7 @@ Message: "Layout is done, go back to the previous bug"
 };
 
 /** All built-in agents. */
-const BUILTIN_AGENTS = [BUILTIN_GENERAL, BUILTIN_MENTOR, BUILTIN_TURN_COMPLETE_TRIAGE, BUILTIN_MESSAGE_SEND_TRIAGE];
+const BUILTIN_AGENTS = [BUILTIN_GENERAL, BUILTIN_MENTOR, BUILTIN_NOTE, BUILTIN_TURN_COMPLETE_TRIAGE, BUILTIN_MESSAGE_SEND_TRIAGE];
 
 /** Set of builtin agent IDs for quick lookup. */
 const BUILTIN_ID_SET = new Set(BUILTIN_AGENTS.map(a => a.id));

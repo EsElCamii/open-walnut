@@ -8,6 +8,7 @@
 
 import { registerMethod } from '../ws/handler.js'
 import { bus, EventNames } from '../../core/event-bus.js'
+import { VALID_SESSION_MODEL_IDS } from '../../core/types.js'
 import { getSessionByClaudeId, updateSessionRecord } from '../../core/session-tracker.js'
 import { sendMessageToSession, editMessage, deleteMessage, getQueue } from '../../core/session-message-queue.js'
 import { sessionStreamBuffer } from '../session-stream-buffer.js'
@@ -114,9 +115,9 @@ export function registerSessionChatRpc(): void {
       return { messageId }
     }
 
-    // Validate and normalize model value (allowlist check)
-    const ALLOWED_MODELS = new Set(['opus', 'opus-1m', 'sonnet', 'sonnet-1m', 'haiku'])
-    const model = typeof data.model === 'string' && ALLOWED_MODELS.has(data.model) ? data.model : undefined
+    // Validate and normalize model value (allowlist check) against the
+    // SESSION_MODELS registry (single source of truth in core/types.ts).
+    const model = typeof data.model === 'string' && VALID_SESSION_MODEL_IDS.has(data.model) ? data.model : undefined
 
     // Save pendingModel/pendingMode to the session record BEFORE enqueuing the message.
     // This prevents a race where processNext (triggered by a prior turn's result handler)

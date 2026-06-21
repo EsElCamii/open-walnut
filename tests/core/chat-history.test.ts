@@ -11,32 +11,63 @@ let tmpDir: string;
 vi.mock('../../src/constants.js', () => createMockConstants());
 
 import {
-  getApiMessages,
-  getModelContext,
-  getDisplayHistory,
-  getDisplayEntries,
-  getCompactionSummary,
-  addTurn,
-  addAIMessages,
-  addNotification,
-  clear,
-  needsCompaction,
-  compact,
+  getApiMessages as _getApiMessages,
+  getModelContext as _getModelContext,
+  getDisplayHistory as _getDisplayHistory,
+  getDisplayEntries as _getDisplayEntries,
+  getCompactionSummary as _getCompactionSummary,
+  addTurn as _addTurn,
+  addAIMessages as _addAIMessages,
+  addNotification as _addNotification,
+  clear as _clear,
+  needsCompaction as _needsCompaction,
+  compact as _compact,
+  // Pure helpers — conversation-agnostic, used directly.
   findTurnBoundaryIndex,
   extractXmlTag,
   extractProjectMemories,
   serializeMessages,
   buildCompactionPrompt,
 } from '../../src/core/chat-history.js';
-import { WALNUT_HOME, CHAT_HISTORY_FILE } from '../../src/constants.js';
+import { WALNUT_HOME, conversationFile } from '../../src/constants.js';
+import { getActiveConversationId } from '../../src/core/conversations.js';
 import type { DisplayMessage } from '../../src/core/types.js';
 import type { MessageParam } from '../../src/agent/model.js';
 import fss from 'node:fs';
+
+// Chat storage is conversation-scoped: the store layer now REJECTS a bare
+// undefined conversationId (Phase-0 tripwire) instead of silently reading the
+// legacy ghost file. These thin wrappers inject the General agent's active
+// conversation so the ~60 existing call sites below stay unchanged — every read
+// and write targets one real conversation, exactly like the production routes.
+let convId: string;
+const CHAT_HISTORY_FILE = (): string => conversationFile('general', convId);
+
+const getApiMessages = () => _getApiMessages('general', convId);
+const getModelContext = () => _getModelContext('general', convId);
+const getDisplayHistory = () => _getDisplayHistory('general', convId);
+const getDisplayEntries = (page = 1, pageSize = 100) => _getDisplayEntries(page, pageSize, 'general', convId);
+const getCompactionSummary = () => _getCompactionSummary('general', convId);
+const addTurn = (apiMsgs: MessageParam[], displayMsgs: DisplayMessage[]) => _addTurn(apiMsgs, displayMsgs, 'general', convId);
+const addAIMessages = (
+  msgs: MessageParam[],
+  options?: Parameters<typeof _addAIMessages>[1],
+) => _addAIMessages(msgs, { ...options, agentId: 'general', conversationId: convId });
+const addNotification = (msg: Parameters<typeof _addNotification>[0]) =>
+  _addNotification({ ...msg, agentId: 'general', conversationId: convId });
+const clear = () => _clear('general', convId);
+const needsCompaction = () => _needsCompaction('general', convId);
+const compact = (
+  summarizer: Parameters<typeof _compact>[0],
+  memoryFlusher?: Parameters<typeof _compact>[1],
+) => _compact(summarizer, memoryFlusher, 'general', convId);
 
 beforeEach(async () => {
   tmpDir = WALNUT_HOME;
   await fsp.rm(tmpDir, { recursive: true, force: true });
   await fsp.mkdir(tmpDir, { recursive: true });
+  // Resolve (and lazily create) the active conversation for this fresh home.
+  convId = await getActiveConversationId('general');
 });
 
 afterEach(async () => {
@@ -900,7 +931,7 @@ describe('v1 → v2 migration', () => {
         { role: 'assistant', content: 'Session done', timestamp: '2025-01-01T00:01:00Z', source: 'session', notification: true },
       ],
     };
-    fss.writeFileSync(CHAT_HISTORY_FILE, JSON.stringify(v1Store));
+    fss.writeFileSync(CHAT_HISTORY_FILE(), JSON.stringify(v1Store));
 
     // Reading should trigger migration
     const entries = (await getDisplayEntries()).messages;
@@ -914,7 +945,7 @@ describe('v1 → v2 migration', () => {
     expect(uiEntries[0].source).toBe('session');
 
     // Verify file on disk is now v2
-    const raw = JSON.parse(fss.readFileSync(CHAT_HISTORY_FILE, 'utf-8'));
+    const raw = JSON.parse(fss.readFileSync(CHAT_HISTORY_FILE(), 'utf-8'));
     expect(raw.version).toBe(2);
     expect(raw.entries).toBeDefined();
     expect(raw.apiMessages).toBeUndefined();
@@ -930,7 +961,7 @@ describe('v1 → v2 migration', () => {
       apiMessages: [{ role: 'user', content: 'msg' }],
       displayMessages: [],
     };
-    fss.writeFileSync(CHAT_HISTORY_FILE, JSON.stringify(v1Store));
+    fss.writeFileSync(CHAT_HISTORY_FILE(), JSON.stringify(v1Store));
 
     const summary = await getCompactionSummary();
     expect(summary).toBe('Previous summary');

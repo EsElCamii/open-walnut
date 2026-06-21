@@ -1,5 +1,5 @@
 /**
- * Favorites routes — manage category/project favorites via config.
+ * Favorites routes — manage category/project/note favorites via config.
  */
 
 import { Router, type Request, type Response, type NextFunction } from 'express'
@@ -15,6 +15,7 @@ favoritesRouter.get('/', async (_req: Request, res: Response, next: NextFunction
     res.json({
       categories: config.favorites?.categories ?? [],
       projects: config.favorites?.projects ?? [],
+      notes: config.favorites?.notes ?? [],
     })
   } catch (err) {
     next(err)
@@ -82,6 +83,50 @@ favoritesRouter.delete('/projects/:name', async (req: Request, res: Response, ne
     await updateConfig({ favorites: config.favorites })
     bus.emit(EventNames.CONFIG_CHANGED, { key: 'favorites' }, ['web-ui'])
     res.json({ projects: config.favorites.projects })
+  } catch (err) {
+    next(err)
+  }
+})
+
+// Note favorites carry the vault-relative path (slashes + .md) in the request BODY
+// rather than a URL param, since path-encoding slash-bearing names is fragile.
+
+// POST /api/favorites/notes — add note favorite { path }
+favoritesRouter.post('/notes', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const path = req.body?.path
+    if (typeof path !== 'string' || !path) {
+      res.status(400).json({ error: 'path is required' })
+      return
+    }
+    const config = await getConfig()
+    if (!config.favorites) config.favorites = {}
+    if (!config.favorites.notes) config.favorites.notes = []
+    if (!config.favorites.notes.includes(path)) {
+      config.favorites.notes.push(path)
+    }
+    await updateConfig({ favorites: config.favorites })
+    bus.emit(EventNames.CONFIG_CHANGED, { key: 'favorites' }, ['web-ui'])
+    res.json({ notes: config.favorites.notes })
+  } catch (err) {
+    next(err)
+  }
+})
+
+// DELETE /api/favorites/notes — remove note favorite { path } (or ?path=)
+favoritesRouter.delete('/notes', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const path = (req.body?.path ?? req.query.path) as unknown
+    if (typeof path !== 'string' || !path) {
+      res.status(400).json({ error: 'path is required' })
+      return
+    }
+    const config = await getConfig()
+    if (!config.favorites) config.favorites = {}
+    config.favorites.notes = (config.favorites.notes ?? []).filter((p) => p !== path)
+    await updateConfig({ favorites: config.favorites })
+    bus.emit(EventNames.CONFIG_CHANGED, { key: 'favorites' }, ['web-ui'])
+    res.json({ notes: config.favorites.notes })
   } catch (err) {
     next(err)
   }

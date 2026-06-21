@@ -881,6 +881,8 @@ export function registerChatRpc(): void {
         }, {
           signal: abortController.signal,
           source: agentId === 'general' ? 'chat' : `chat:${agentId}`,
+          agentId,
+          conversationId,
           ...(agentSystem && { system: agentSystem }),
           ...(agentTools && { tools: agentTools }),
         })
@@ -988,7 +990,7 @@ export function registerChatRpc(): void {
         // Uses the token breakdown from the agent loop to check triggers.
         if (result.tokenBreakdown && agentId === 'general') {
           const currentTokens = result.tokenBreakdown.total
-          if (shouldUpdateWorkingMemory(currentTokens)) {
+          if (shouldUpdateWorkingMemory(currentTokens, agentId, conversationId)) {
             executeWorkingMemoryUpdate(
               async (prompt) => {
                 const { runAgentLoop } = await import('../../agent/loop.js')
@@ -1010,6 +1012,8 @@ export function registerChatRpc(): void {
                 })
               },
               currentTokens,
+              agentId,
+              conversationId,
             ).catch(() => { /* non-critical */ })
           }
         }

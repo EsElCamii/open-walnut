@@ -13,19 +13,39 @@ let tmpDir: string;
 vi.mock('../../src/constants.js', () => createMockConstants());
 
 import {
-  getApiMessages,
-  getDisplayEntries,
-  addAIMessages,
-  addUserMessage,
-  recoverOrphanedUserMessage,
+  getApiMessages as _getApiMessages,
+  getDisplayEntries as _getDisplayEntries,
+  addAIMessages as _addAIMessages,
+  addUserMessage as _addUserMessage,
+  recoverOrphanedUserMessage as _recoverOrphanedUserMessage,
 } from '../../src/core/chat-history.js';
-import { WALNUT_HOME, CHAT_HISTORY_FILE } from '../../src/constants.js';
+import { WALNUT_HOME, conversationFile } from '../../src/constants.js';
+import { getActiveConversationId } from '../../src/core/conversations.js';
 import type { MessageParam } from '../../src/agent/model.js';
+
+// Chat storage is conversation-scoped: inject the General agent's active
+// conversation so the store layer's Phase-0 tripwire (rejects bare undefined
+// conversationId) is satisfied while existing call sites stay unchanged.
+let convId: string;
+const CHAT_HISTORY_FILE = (): string => conversationFile('general', convId);
+
+const getApiMessages = () => _getApiMessages('general', convId);
+const getDisplayEntries = (page = 1, pageSize = 100) => _getDisplayEntries(page, pageSize, 'general', convId);
+const addAIMessages = (
+  msgs: MessageParam[],
+  options?: Parameters<typeof _addAIMessages>[1],
+) => _addAIMessages(msgs, { ...options, agentId: 'general', conversationId: convId });
+const addUserMessage = (
+  content: Parameters<typeof _addUserMessage>[0],
+  options?: Parameters<typeof _addUserMessage>[1],
+) => _addUserMessage(content, { ...options, agentId: 'general', conversationId: convId });
+const recoverOrphanedUserMessage = () => _recoverOrphanedUserMessage('general', convId);
 
 beforeEach(async () => {
   tmpDir = WALNUT_HOME;
   await fsp.rm(tmpDir, { recursive: true, force: true });
   await fsp.mkdir(tmpDir, { recursive: true });
+  convId = await getActiveConversationId('general');
 });
 
 afterEach(async () => {
@@ -44,7 +64,7 @@ describe('addUserMessage — eager persist', () => {
     expect(msg.content).toBe('Hello');
 
     // Raw JSON file must contain the turnId field
-    const raw = JSON.parse(await fsp.readFile(CHAT_HISTORY_FILE, 'utf-8'));
+    const raw = JSON.parse(await fsp.readFile(CHAT_HISTORY_FILE(), 'utf-8'));
     const entries: Array<Record<string, unknown>> = raw.entries ?? [];
     expect(entries).toHaveLength(1);
     expect(entries[0].turnId).toBe('test-turn-1');
@@ -78,7 +98,7 @@ describe('addAIMessages — dedup guard', () => {
     expect(assistantMsgs).toHaveLength(1);
 
     // Raw store: only 1 user entry and it must retain the turnId
-    const raw = JSON.parse(await fsp.readFile(CHAT_HISTORY_FILE, 'utf-8'));
+    const raw = JSON.parse(await fsp.readFile(CHAT_HISTORY_FILE(), 'utf-8'));
     const entries: Array<Record<string, unknown>> = raw.entries ?? [];
     const userEntries = entries.filter((e) => e.role === 'user' && e.tag === 'ai');
     expect(userEntries).toHaveLength(1);
@@ -178,7 +198,7 @@ describe('Full turn flow — eager persist + assistant-only addAIMessages', () =
     expect(assistantEntry.role).toBe('assistant');
 
     // User entry retains its turnId
-    const raw = JSON.parse(await fsp.readFile(CHAT_HISTORY_FILE, 'utf-8'));
+    const raw = JSON.parse(await fsp.readFile(CHAT_HISTORY_FILE(), 'utf-8'));
     const entries: Array<Record<string, unknown>> = raw.entries ?? [];
     const userRaw = entries.find((e) => e.role === 'user' && e.tag === 'ai');
     expect(userRaw).toBeDefined();
