@@ -1,6 +1,6 @@
 import { useEffect, useCallback } from 'react';
 import { createPortal } from 'react-dom';
-import { NotesEditor } from './NotesEditor';
+import { MarkdownEditorPanel } from './MarkdownEditorPanel';
 import type { Editor } from '@tiptap/core';
 import type { Task } from '@open-walnut/core';
 import { ICON_COLLAPSE } from '@/components/common/Icons';
@@ -41,11 +41,16 @@ export function GlobalNotesPopup({ content, onDirty, saving, onClose, tasks, foc
           </div>
         </div>
         <div className="notes-popup-body">
-          <NotesEditor
+          {/* saveStatus idle — the popup header already shows its own "Saving…"
+              next to the collapse button, so we don't duplicate it in the shell. */}
+          <MarkdownEditorPanel
             content={content}
-            onDirty={onDirty}
-            className="global-notes-editor-popup"
+            onEditorUpdate={onDirty}
+            saveStatus="idle"
+            docId="notes/global"
             autoFocus
+            enableBlockTools
+            showWidthToggle
             tasks={tasks}
             focusedTaskId={focusedTaskId}
             onTaskClick={onTaskClick}

@@ -4,6 +4,11 @@
  *
  * The extension tracks the range from the "/" to the cursor, allowing the
  * portal to replace the typed slash-query with the inserted content.
+ *
+ * Trigger-by-class (§3.3): we also report whether the "/" sits in an
+ * empty/whitespace block. The menu uses this to hide block-insert commands
+ * mid-sentence (a `/` after text only offers inline Reference entries), while
+ * a `/` on a blank line offers the full block catalog.
  */
 
 import { Extension } from '@tiptap/core';
@@ -11,7 +16,8 @@ import { Plugin, PluginKey } from '@tiptap/pm/state';
 import type { SlashCommandState } from './types';
 
 export interface SlashCommandOptions {
-  onStateChange: (state: SlashCommandState) => void;
+  /** Includes `atBlockStart` so the menu can split block vs inline commands. */
+  onStateChange: (state: SlashCommandState & { atBlockStart?: boolean }) => void;
 }
 
 const SLASH_COMMAND_KEY = new PluginKey('slashCommand');
@@ -82,11 +88,17 @@ export const SlashCommandExtension = Extension.create<SlashCommandOptions>({
               const absoluteSlashPos = pos.start() + slashIdx;
               const absoluteCursorPos = pos.start() + pos.parentOffset;
 
+              // Block-start = nothing but whitespace before the "/" in this block.
+              // Only then do we offer block-insert commands; mid-sentence "/" still
+              // fires (for inline Reference entries) but block commands are hidden.
+              const atBlockStart = textBefore.slice(0, slashIdx).trim().length === 0;
+
               active = true;
               onStateChange({
                 phase: 'commands',
                 range: { from: absoluteSlashPos, to: absoluteCursorPos },
                 query,
+                atBlockStart,
               });
             },
 

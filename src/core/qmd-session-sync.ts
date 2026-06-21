@@ -56,11 +56,14 @@ function serializeMetadata(session: SessionRecord, task?: Task): string {
  * failure (read timeout, parse error, missing file) so the caller can keep the
  * previous doc rather than overwrite it with metadata-only.
  *
- * For remote sessions, readSessionHistory() transparently goes through the
- * daemon (which reads on the remote host); we apply buildIndexedContent locally
- * to cap size defensively.
+ * LOCAL SESSIONS ONLY: remote sessions are skipped here because reading their
+ * JSONL means pulling the full (up to ~14MB) file over the SSH tunnel, which
+ * the corp proxy kills past ~5MB. Indexing remote conversation content requires
+ * a daemon-side filter RPC (filter on the remote host, ship back ~50KB) — that
+ * is a separate, larger change. Until then remote sessions stay metadata-only.
  */
 async function readConversationBody(session: SessionRecord): Promise<string | null> {
+  if (session.host) return null; // remote — see note above
   try {
     const messages = await Promise.race([
       readSessionHistory(session.claudeSessionId, session.cwd, session.host, session.outputFile, { skipSubagents: true }),

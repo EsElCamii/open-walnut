@@ -1,19 +1,101 @@
 /**
- * Notes v2 routes — multi-file notes with CRUD, search, backlinks.
- * Storage: ~/.open-walnut/notes/ (flat markdown files in folder hierarchy)
+ * Notes v2 routes — multi-file notes with CRUD, hybrid search, backlinks, tags.
+ * Storage: ~/.open-walnut/notes/ (flat markdown files in folder hierarchy).
+ *
+ * Structure (search / backlinks / list / tags) is served from a rebuildable
+ * structural sidecar (notes-index.sqlite) instead of O(n) full-vault file scans.
+ * The semantic leg of search comes from the existing QMD store (memory-search.ts).
+ * Files on disk stay the source of truth; the sidecar reconciles on change.
  */
 
 import fsp from 'node:fs/promises'
 import path from 'node:path'
 import { Router, type Request, type Response, type NextFunction } from 'express'
-import { NOTES_DIR, GLOBAL_NOTES_FILE } from '../../constants.js'
+import { NOTES_DIR } from '../../constants.js'
 import { computeContentHash } from '../../utils/file-ops.js'
 import { bus, EventNames } from '../../core/event-bus.js'
 import { log } from '../../logging/index.js'
+import { memoryNotesSearch } from '../../core/memory-search.js'
+import {
+  parseFrontmatter,
+  readId,
+  generateNoteId,
+  stampId,
+} from '../../core/parse-frontmatter.js'
+import { resolveAttachmentPath } from './notes-attachment.js'
+import {
+  scheduleNotesIndexUpdate,
+  reconcileNoteNow,
+  normalizeTag,
+  rebuildIndex,
+  isRebuilding,
+  stopNotesIndexer,
+  resetNotesIndexer,
+} from '../../core/notes-indexer.js'
+import {
+  stringSearch,
+  backlinksForId,
+  ambiguousBacklinksForId,
+  forwardLinksForId,
+  listNotes,
+  tagCounts,
+  notesForTag,
+  notePathsForTag,
+  getNoteIdByPath,
+  updateNotePath,
+  docCount,
+  dbSizeBytes,
+  getIndexMeta,
+  NOTES_INDEX_SCHEMA_VERSION,
+  type LinkStatus,
+} from '../../core/notes-index.js'
 
 const MAX_NOTE_SIZE = 2_000_000 // 2 MB
 
 export const notesV2Router = Router()
+
+// ── One-time structural index bootstrap + in-process reconcile subscription ──
+// Honors the DO-NOT-TOUCH on server.ts: we don't wire boot there. The index
+// initializes off-loop on first router use; the in-process fast path reconciles
+// via the existing NOTES_UPDATED bus event (the fs.watch catch-all lives in
+// qmd-watcher.ts). interest-filtered so we don't wake on unrelated events.
+let indexBootstrapped = false
+function ensureIndexBootstrap(): void {
+  if (indexBootstrapped) return
+  indexBootstrapped = true
+  resetNotesIndexer() // re-arm if a prior lifecycle stopped the reconciler
+  import('../../core/notes-indexer.js')
+    .then(({ initNotesIndex }) => initNotesIndex())
+    .catch((err) => {
+      log.memory.warn('notes-index bootstrap failed', {
+        error: err instanceof Error ? err.message : String(err),
+      })
+    })
+  bus.subscribe(
+    'notes-index-reconcile',
+    (event) => {
+      const data = event.data as { source?: string } | undefined
+      const source = data?.source
+      if (!source || !source.startsWith('notes/')) return
+      const relPath = source.slice('notes/'.length) + '.md'
+      scheduleNotesIndexUpdate(relPath)
+    },
+    { global: true, interest: [EventNames.NOTES_UPDATED] },
+  )
+}
+
+/**
+ * Tear down the in-process index bootstrap: stop the reconciler's debounce timer
+ * and unsubscribe the bus listener. Called by the ephemeral server on shutdown and
+ * by tests between cases so a stray debounced reconcile can't re-create the sidecar
+ * in a directory being removed. Idempotent.
+ */
+export function resetIndexBootstrap(): void {
+  if (!indexBootstrapped) return
+  indexBootstrapped = false
+  bus.unsubscribe('notes-index-reconcile')
+  stopNotesIndexer()
+}
 
 /** Ensure notes dir exists */
 async function ensureNotesDir(): Promise<void> {
@@ -32,6 +114,11 @@ function resolveSafePath(relativePath: string): string | null {
   return resolved
 }
 
+/** Vault-relative, forward-slash, .md-suffixed path from an absolute path. */
+function toRelPath(absPath: string): string {
+  return path.relative(NOTES_DIR, absPath).replace(/\\/g, '/')
+}
+
 /** Extract wildcard path param — Express 5 returns arrays for *name params */
 function getWildcardPath(req: Request): string | null {
   const raw = (req.params as any).path
@@ -40,15 +127,25 @@ function getWildcardPath(req: Request): string | null {
   return null
 }
 
-/** Wiki-link regex: matches [[target]] or [[target|label]] */
-const WIKI_LINK_RE = /\[\[([^\]|]+)(?:\|[^\]]+)?\]\]/g
-
 // ─── Tree ────────────────────────────────────────────────────────────────
+
+// Attachment file types surfaced in the tree (Obsidian _attachment folders hold
+// these). `kind: 'attachment'` lets the FE preview them via /attachment instead of
+// loading them as markdown. Match case-insensitively (real vaults have `.PDF`).
+const ATTACHMENT_EXTS = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp', 'pdf'])
+
+function isAttachmentFile(name: string): boolean {
+  const ext = name.slice(name.lastIndexOf('.') + 1).toLowerCase()
+  return name.includes('.') && ATTACHMENT_EXTS.has(ext)
+}
 
 interface TreeNode {
   name: string
   path: string       // relative to NOTES_DIR, forward slashes
   type: 'file' | 'folder'
+  // 'note' = markdown (default; open in editor). 'attachment' = image/pdf
+  // (preview via /attachment, never markdown-load). Absent on folders.
+  kind?: 'note' | 'attachment'
   children?: TreeNode[]
 }
 
@@ -70,9 +167,6 @@ async function scanDir(dirPath: string, relBase: string): Promise<TreeNode[]> {
     return a.name.localeCompare(b.name)
   })
 
-  // global-notes.md is a reserved file managed by the Global Notes widget; exclude from v2 tree
-  const globalBase = path.basename(GLOBAL_NOTES_FILE)
-
   for (const entry of entries) {
     if (entry.name.startsWith('.')) continue // skip hidden files
     const relPath = relBase ? `${relBase}/${entry.name}` : entry.name
@@ -80,8 +174,11 @@ async function scanDir(dirPath: string, relBase: string): Promise<TreeNode[]> {
     if (entry.isDirectory()) {
       const children = await scanDir(path.join(dirPath, entry.name), relPath)
       nodes.push({ name: entry.name, path: relPath, type: 'folder', children })
-    } else if (entry.name.endsWith('.md') && !(entry.name === globalBase && !relBase)) {
-      nodes.push({ name: entry.name, path: relPath, type: 'file' })
+    } else if (entry.name.endsWith('.md')) {
+      nodes.push({ name: entry.name, path: relPath, type: 'file', kind: 'note' })
+    } else if (isAttachmentFile(entry.name)) {
+      // Attachments (images/pdf) — shown with their own icon; clicking previews.
+      nodes.push({ name: entry.name, path: relPath, type: 'file', kind: 'attachment' })
     }
   }
 
@@ -91,6 +188,7 @@ async function scanDir(dirPath: string, relBase: string): Promise<TreeNode[]> {
 // GET /api/notes-v2 — file tree
 notesV2Router.get('/', async (_req: Request, res: Response, next: NextFunction) => {
   try {
+    ensureIndexBootstrap()
     await ensureNotesDir()
     const tree = await scanDir(NOTES_DIR, '')
     res.json({ tree })
@@ -99,11 +197,95 @@ notesV2Router.get('/', async (_req: Request, res: Response, next: NextFunction) 
   }
 })
 
+// ─── Attachment streaming ──────────────────────────────────────────────────
+// Single notes-owned endpoint that serves vault attachments (images + PDF) for
+// the tree preview AND ![[embed]] rendering. Deliberately does NOT touch
+// local-image.ts (owned elsewhere, no PDF). Local-only — the notes vault lives
+// under NOTES_DIR; no remote/daemon fan-out needed. SVG excluded (XSS).
+const ATTACHMENT_MIME: Record<string, string> = {
+  png: 'image/png',
+  jpg: 'image/jpeg',
+  jpeg: 'image/jpeg',
+  gif: 'image/gif',
+  webp: 'image/webp',
+  pdf: 'application/pdf',
+}
+
+const MAX_ATTACHMENT_SIZE = 50 * 1024 * 1024 // 50 MB (mirror local-image)
+
+// GET /api/notes-v2/attachment?path=<vault-relative path under NOTES_DIR>
+notesV2Router.get('/attachment', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const raw = req.query.path
+    if (!raw || typeof raw !== 'string') {
+      res.status(400).json({ error: 'path required' })
+      return
+    }
+
+    // Reject a disallowed extension up-front (before any fs touch). No SVG.
+    const reqExt = path.extname(raw).slice(1).toLowerCase()
+    if (!ATTACHMENT_MIME[reqExt]) {
+      res.status(400).json({ error: 'File type not allowed' })
+      return
+    }
+
+    // Resolution handles the three Obsidian `![[...]]` embed forms (see
+    // resolveAttachmentPath): a vault-relative path, a legacy `Notion/`-rooted
+    // path, or a bare shortest-unique attachment name searched across the vault.
+    // It also keeps the FE contract simple — the editor just sends the raw inner
+    // `![[...]]` text and never has to know where attachments physically live.
+    // resolveAttachmentPath enforces the same traversal/escape guard + NOTES_DIR
+    // containment as resolveSafePath, and only returns an existing regular file.
+    const fullPath = await resolveAttachmentPath(raw)
+    if (!fullPath) {
+      res.status(404).json({ error: 'Attachment not found' })
+      return
+    }
+
+    const ext = path.extname(fullPath).slice(1).toLowerCase()
+    const mime = ATTACHMENT_MIME[ext]
+    if (!mime) {
+      res.status(400).json({ error: 'File type not allowed' })
+      return
+    }
+
+    let stat: import('fs').Stats
+    try {
+      stat = await fsp.stat(fullPath)
+    } catch (err: any) {
+      if (err.code === 'ENOENT') {
+        res.status(404).json({ error: 'Attachment not found' })
+        return
+      }
+      throw err
+    }
+    if (!stat.isFile()) {
+      res.status(404).json({ error: 'Attachment not found' })
+      return
+    }
+    if (stat.size > MAX_ATTACHMENT_SIZE) {
+      res.status(400).json({ error: 'File too large' })
+      return
+    }
+
+    const buffer = await fsp.readFile(fullPath)
+    res.setHeader('Content-Type', mime)
+    res.setHeader('Content-Length', buffer.length)
+    res.setHeader('Cache-Control', 'public, max-age=3600')
+    // Inline so the browser renders the PDF/image in-page instead of downloading.
+    res.setHeader('Content-Disposition', 'inline')
+    res.send(buffer)
+  } catch (err) {
+    next(err)
+  }
+})
+
 // ─── Content CRUD ────────────────────────────────────────────────────────
 
-// GET /api/notes-v2/content/*path — read note
+// GET /api/notes-v2/content/*path — read note (now also returns id when known)
 notesV2Router.get('/content/*path', async (req: Request, res: Response, next: NextFunction) => {
   try {
+    ensureIndexBootstrap()
     const notePath = getWildcardPath(req)
     if (!notePath) { res.status(400).json({ error: 'path required' }); return }
 
@@ -128,15 +310,20 @@ notesV2Router.get('/content/*path', async (req: Request, res: Response, next: Ne
     }
 
     const contentHash = computeContentHash(content)
-    res.json({ content, updatedAt, contentHash })
+    // id from frontmatter (authoritative), falling back to the index if known.
+    const { data } = parseFrontmatter(content)
+    const relPath = toRelPath(filePath)
+    const id = readId(data) ?? getNoteIdByPath(relPath)
+    res.json({ content, updatedAt, contentHash, ...(id ? { id } : {}) })
   } catch (err) {
     next(err)
   }
 })
 
-// PUT /api/notes-v2/content/*path — create/update note
+// PUT /api/notes-v2/content/*path — create/update note. Stamps id at create time.
 notesV2Router.put('/content/*path', async (req: Request, res: Response, next: NextFunction) => {
   try {
+    ensureIndexBootstrap()
     const notePath = getWildcardPath(req)
     if (!notePath) { res.status(400).json({ error: 'path required' }); return }
 
@@ -175,24 +362,37 @@ notesV2Router.put('/content/*path', async (req: Request, res: Response, next: Ne
       }
     }
 
+    // IDENTITY: stamp an id into frontmatter at create time (not lazily) so the
+    // bytes written — and hence contentHash — reflect the stamped content. The
+    // FE refreshes its expected hash from the response id+hash without a spurious
+    // 409. Existing frontmatter is preserved byte-for-byte except the id: line.
+    const { data } = parseFrontmatter(content)
+    let id = readId(data)
+    let finalContent = content
+    if (!id) {
+      id = generateNoteId()
+      finalContent = stampId(content, id)
+    }
+
     await fsp.mkdir(path.dirname(filePath), { recursive: true })
-    await fsp.writeFile(filePath, content, 'utf-8')
+    await fsp.writeFile(filePath, finalContent, 'utf-8')
 
     const stat = await fsp.stat(filePath)
-    const contentHash = computeContentHash(content)
+    const contentHash = computeContentHash(finalContent)
     const normalizedPath = notePath.replace(/\.md$/, '')
-    log.memory.info('Note updated', { path: notePath, size: content.length })
+    log.memory.info('Note updated', { path: notePath, size: finalContent.length })
     // source format `notes/{path}` is a shared contract with files-tools.ts and useNoteContent.ts
     bus.emit(EventNames.NOTES_UPDATED, { source: `notes/${normalizedPath}`, contentHash }, ['web-ui'])
-    res.json({ ok: true, updatedAt: stat.mtime.toISOString(), contentHash })
+    res.json({ ok: true, updatedAt: stat.mtime.toISOString(), contentHash, id })
   } catch (err) {
     next(err)
   }
 })
 
-// DELETE /api/notes-v2/content/*path — delete note
+// DELETE /api/notes-v2/content/*path — delete note (fires reconcile)
 notesV2Router.delete('/content/*path', async (req: Request, res: Response, next: NextFunction) => {
   try {
+    ensureIndexBootstrap()
     const notePath = getWildcardPath(req)
     if (!notePath) { res.status(400).json({ error: 'path required' }); return }
 
@@ -200,6 +400,7 @@ notesV2Router.delete('/content/*path', async (req: Request, res: Response, next:
     if (!fullPath) { res.status(400).json({ error: 'invalid path' }); return }
 
     const filePath = fullPath.endsWith('.md') ? fullPath : fullPath + '.md'
+    const relPath = toRelPath(filePath)
 
     try {
       await fsp.unlink(filePath)
@@ -223,6 +424,8 @@ notesV2Router.delete('/content/*path', async (req: Request, res: Response, next:
     } catch { /* best-effort cleanup */ }
 
     log.memory.info('Note deleted', { path: notePath })
+    // Reconcile the deletion (removes the row, marks inbound links unresolved).
+    scheduleNotesIndexUpdate(relPath)
     res.json({ ok: true })
   } catch (err) {
     next(err)
@@ -231,9 +434,13 @@ notesV2Router.delete('/content/*path', async (req: Request, res: Response, next:
 
 // ─── Move / Rename ───────────────────────────────────────────────────────
 
-// POST /api/notes-v2/move — rename/move + update wiki links
+// POST /api/notes-v2/move — rename/move only. updateWikiLinksInAll REMOVED:
+// id-keyed links survive a rename because the edge keys on the target's
+// frontmatter id, not the basename. Move = file rename + one-row path update
+// in the index + one QMD virtual-path remap (handled by reconcile of both paths).
 notesV2Router.post('/move', async (req: Request, res: Response, next: NextFunction) => {
   try {
+    ensureIndexBootstrap()
     const { from, to } = req.body
     if (typeof from !== 'string' || typeof to !== 'string') {
       res.status(400).json({ error: 'from and to (strings) are required' })
@@ -261,7 +468,6 @@ notesV2Router.post('/move', async (req: Request, res: Response, next: NextFuncti
     // Check destination does not already exist — prevent silent overwrite
     try {
       await fsp.stat(toFile)
-      // stat succeeded → file exists → conflict
       res.status(409).json({ error: 'Destination note already exists' })
       return
     } catch (err: any) {
@@ -273,14 +479,14 @@ notesV2Router.post('/move', async (req: Request, res: Response, next: NextFuncti
     await fsp.mkdir(path.dirname(toFile), { recursive: true })
     await fsp.rename(fromFile, toFile)
 
-    // Update wiki links in all files that reference the old name.
-    // Guard: skip if either name is empty (e.g. a file literally named ".md")
-    // to prevent a wildcard regex from matching every [[]] pattern.
-    const oldName = path.basename(from, '.md')
-    const newName = path.basename(to, '.md')
-    if (oldName && newName && oldName !== newName) {
-      await updateWikiLinksInAll(oldName, newName)
-    }
+    const fromRel = toRelPath(fromFile)
+    const toRel = toRelPath(toFile)
+    // Fast path: a one-row path update keeps the id (and all edges) intact.
+    updateNotePath(fromRel, toRel)
+    // Then reconcile both paths: the old path's QMD doc deactivates (file gone),
+    // the new path indexes (and re-points the QMD virtual path).
+    scheduleNotesIndexUpdate(fromRel)
+    scheduleNotesIndexUpdate(toRel)
 
     log.memory.info('Note moved', { from, to })
     res.json({ ok: true })
@@ -289,102 +495,298 @@ notesV2Router.post('/move', async (req: Request, res: Response, next: NextFuncti
   }
 })
 
-/** Update [[oldName]] → [[newName]] in all markdown files */
-async function updateWikiLinksInAll(oldName: string, newName: string): Promise<void> {
-  const allFiles = await getAllMdFiles(NOTES_DIR)
-  const oldPattern = new RegExp(`\\[\\[${escapeRegExp(oldName)}(\\|[^\\]]*)?\\]\\]`, 'g')
+// ─── Search (hybrid) ───────────────────────────────────────────────────────
 
-  for (const filePath of allFiles) {
-    const content = await fsp.readFile(filePath, 'utf-8')
-    const updated = content.replace(oldPattern, (_, label) => {
-      return label ? `[[${newName}${label}]]` : `[[${newName}]]`
+type MatchType = 'exact' | 'semantic' | 'both'
+
+interface SearchResultRow {
+  id: string
+  path: string
+  title: string
+  snippet: string
+  matchType: MatchType
+  score: number
+  stringScore?: number
+  semanticScore?: number
+  matchedTags?: string[]
+}
+
+/**
+ * Strip markdown noise so snippets read as prose, not source. Embeds like
+ * `![[folder/img.png]]` → `[img]`, wikilinks `[[A/B/Title]]` → `Title`,
+ * md links `[text](url)` → `text`, headings/bullets/table pipes/emphasis
+ * markers collapsed, whitespace squeezed. Applied BEFORE highlight so <mark>
+ * offsets land on visible text.
+ */
+function cleanSnippetText(s: string): string {
+  return s
+    .replace(/!\[\[[^\]]*?\.(png|jpe?g|gif|webp|svg|pdf)\]\]/gi, '[img]')
+    .replace(/!\[\[[^\]]*?\]\]/g, '[embed]')
+    .replace(/\[\[([^\]]+?)\]\]/g, (_m, inner: string) => {
+      const s2 = inner.split('|')[0] // alias
+      return s2.split('/').pop() ?? s2
     })
-    if (updated !== content) {
-      await fsp.writeFile(filePath, updated, 'utf-8')
-    }
+    .replace(/!\[[^\]]*\]\([^)]*\)/g, '[img]') // standard md image
+    .replace(/\[([^\]]+)\]\([^)]*\)/g, '$1') // standard md link → text
+    .replace(/^[ \t]*#{1,6}[ \t]+/gm, '') // heading markers
+    .replace(/^[ \t]*[-*+][ \t]+/gm, '') // bullet markers
+    .replace(/^[ \t]*\|/gm, '') // leading table pipe
+    .replace(/\|/g, ' ') // remaining table pipes
+    .replace(/[*_`~]+/g, '') // emphasis / code ticks
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
+/** Wrap the first occurrence of the query in <mark>…</mark> for FE highlight. */
+function highlightSnippet(text: string, q: string): string {
+  if (!q) return text
+  const idx = text.toLowerCase().indexOf(q.toLowerCase())
+  if (idx < 0) return text
+  return (
+    text.slice(0, idx) +
+    '<mark>' +
+    text.slice(idx, idx + q.length) +
+    '</mark>' +
+    text.slice(idx + q.length)
+  )
+}
+
+/** Build a ±context snippet around the first match of q in body, cleaned + highlighted. */
+function makeSnippet(body: string, q: string): string {
+  const lower = body.toLowerCase()
+  const idx = lower.indexOf(q.toLowerCase())
+  if (idx < 0) {
+    return highlightSnippet(cleanSnippetText(body.slice(0, 240)).slice(0, 160), q)
   }
+  // Widen the raw window before cleaning, since cleaning removes characters.
+  const start = Math.max(0, idx - 80)
+  const end = Math.min(body.length, idx + q.length + 160)
+  const cleaned = cleanSnippetText(body.slice(start, end))
+  const raw = (start > 0 ? '…' : '') + cleaned + (end < body.length ? '…' : '')
+  return highlightSnippet(raw, q)
 }
 
-function escapeRegExp(s: string): string {
-  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+/**
+ * Convert a QMD absolute filepath → vault-relative → note id (case-insensitive).
+ * BLOCKING correctness: the semantic leg returns an ABSOLUTE filepath; the index
+ * stores vault-relative paths. Without this, every both-leg note double-lists.
+ * Falls back to the relPath as the dedupe key only if the note is unindexed.
+ */
+function idFromQmdPath(filepath: string): string {
+  let rel = path.relative(NOTES_DIR, filepath).replace(/\\/g, '/')
+  if (rel.startsWith('..')) rel = filepath.replace(/\\/g, '/') // not under vault
+  const id = findNoteIdByRelPath(rel)
+  return id ?? rel
 }
 
-// ─── Search ──────────────────────────────────────────────────────────────
+function findNoteIdByRelPath(rel: string): string | undefined {
+  return getNoteIdByPath(rel) ?? getNoteIdByPath(rel.replace(/\.md$/, '') + '.md')
+}
 
-// GET /api/notes-v2/search?q=... — full-text search
+const BIG = 1_000_000
+
+/**
+ * Semantic-only relevance floor + cap. QMD happily returns 0.3-score noise
+ * ("Shoping", "Post office" for query "dental") which made search feel broken.
+ * We keep semantic hits that either (a) ALSO matched as a string (matchType
+ * 'both', no floor) or (b) clear this cosine floor; and we cap how many
+ * semantic-ONLY rows survive so the list isn't flooded with weak matches.
+ */
+const SEMANTIC_FLOOR = 0.45
+const SEMANTIC_ONLY_CAP = 10
+
+// GET /api/notes-v2/search?q&mode&limit — hybrid string+semantic, deduped, labeled
 notesV2Router.get('/search', async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const q = (req.query.q as string || '').trim()
+    ensureIndexBootstrap()
+    const q = ((req.query.q as string) || '').trim()
     if (!q) { res.json({ results: [] }); return }
 
-    await ensureNotesDir()
-    const allFiles = await getAllMdFiles(NOTES_DIR)
-    const qLower = q.toLowerCase()
-    const results: Array<{ path: string; name: string; snippet: string }> = []
+    const limit = Math.max(1, Math.min(100, Number(req.query.limit) || 30))
+    const mode = ((req.query.mode as string) || 'hybrid') as 'hybrid' | 'string' | 'semantic'
 
-    const MAX_RESULTS = 50
-    for (const filePath of allFiles) {
-      if (results.length >= MAX_RESULTS) break
-      const content = await fsp.readFile(filePath, 'utf-8')
-      const idx = content.toLowerCase().indexOf(qLower)
-      if (idx >= 0) {
-        const relPath = path.relative(NOTES_DIR, filePath).replace(/\\/g, '/')
-        const start = Math.max(0, idx - 40)
-        const end = Math.min(content.length, idx + q.length + 60)
-        const snippet = (start > 0 ? '...' : '') + content.slice(start, end) + (end < content.length ? '...' : '')
-        results.push({ path: relPath, name: path.basename(relPath, '.md'), snippet })
+    await ensureNotesDir()
+
+    // Run both legs; allSettled so one failing never zeroes the other.
+    const wantString = mode === 'hybrid' || mode === 'string'
+    const wantSemantic = mode === 'hybrid' || mode === 'semantic'
+
+    const [stringSettled, semanticSettled] = await Promise.allSettled([
+      wantString ? Promise.resolve(stringSearch(q, limit * 2)) : Promise.resolve([]),
+      wantSemantic ? memoryNotesSearch(q, ['note_vault'], limit * 2) : Promise.resolve([]),
+    ])
+
+    const byId = new Map<string, SearchResultRow>()
+
+    if (stringSettled.status === 'fulfilled') {
+      for (const h of stringSettled.value) {
+        byId.set(h.id, {
+          id: h.id,
+          path: h.path,
+          title: h.title,
+          snippet: makeSnippet(h.body, q),
+          matchType: 'exact',
+          score: 0,
+          stringScore: h.stringScore, // real banded relevance (title > body > LIKE)
+        })
       }
     }
 
-    res.json({ results })
+    let degraded: 'semantic-unavailable' | undefined
+    if (semanticSettled.status === 'fulfilled') {
+      for (const h of semanticSettled.value) {
+        const id = idFromQmdPath(h.filepath)
+        const existing = byId.get(id)
+        if (existing) {
+          // Already a string hit → promote to 'both' (no floor — string match
+          // already proves relevance). Keep the highlighted string snippet.
+          existing.matchType = 'both'
+          existing.semanticScore = h.score
+          if (!existing.snippet.includes('<mark>') && h.snippet) {
+            existing.snippet = cleanSnippetText(h.snippet)
+          }
+        } else if (h.score >= SEMANTIC_FLOOR) {
+          // Semantic-only: keep only above the relevance floor (drops noise).
+          byId.set(id, {
+            id,
+            path: id.endsWith('.md') ? id : (getPathForId(id) ?? id),
+            title: h.title || path.basename(id, '.md'),
+            snippet: cleanSnippetText(h.snippet || ''),
+            matchType: 'semantic',
+            score: 0,
+            semanticScore: h.score,
+          })
+        }
+      }
+    } else if (wantSemantic) {
+      degraded = 'semantic-unavailable'
+    }
+
+    // FROZEN ranking: exact/both NEVER below purely-semantic.
+    //   tier1 {exact,both} ordered by max(stringScore, semanticScore)
+    //   tier2 semantic ordered by semanticScore
+    const results = [...byId.values()]
+    for (const r of results) {
+      const tier = r.matchType === 'semantic' ? 0 : 1
+      const base = Math.max(r.stringScore ?? 0, r.semanticScore ?? 0)
+      r.score = tier * BIG + base
+    }
+    results.sort((a, b) => b.score - a.score)
+
+    // Cap semantic-only rows so weak matches don't flood the list, while never
+    // touching exact/both hits (they're all kept, up to the overall limit).
+    const capped: SearchResultRow[] = []
+    let semanticOnly = 0
+    for (const r of results) {
+      if (r.matchType === 'semantic') {
+        if (semanticOnly >= SEMANTIC_ONLY_CAP) continue
+        semanticOnly++
+      }
+      capped.push(r)
+      if (capped.length >= limit) break
+    }
+
+    const payload: { results: SearchResultRow[]; degraded?: 'semantic-unavailable' } = {
+      results: capped,
+    }
+    if (degraded) payload.degraded = degraded
+    res.json(payload)
   } catch (err) {
     next(err)
   }
 })
 
+/** Best-effort path lookup for a semantic-only hit keyed by id. */
+function getPathForId(id: string): string | undefined {
+  const row = listNotes().find((n) => n.id === id)
+  return row?.path
+}
+
 // ─── Backlinks ───────────────────────────────────────────────────────────
 
-// GET /api/notes-v2/backlinks/*path — find notes that link to this note
+interface BacklinkResult {
+  id: string
+  path: string
+  title: string
+  name: string
+  snippet: string
+  status: LinkStatus
+  candidates?: string[]
+}
+
+// GET /api/notes-v2/backlinks/*path — index-backed, id-keyed, returns status
 notesV2Router.get('/backlinks/*path', async (req: Request, res: Response, next: NextFunction) => {
   try {
+    ensureIndexBootstrap()
     const notePath = getWildcardPath(req)
     if (!notePath) { res.status(400).json({ error: 'path required' }); return }
 
-    const targetName = path.basename(notePath, '.md')
-    await ensureNotesDir()
-    const allFiles = await getAllMdFiles(NOTES_DIR)
-    const backlinks: Array<{ path: string; name: string; snippet: string }> = []
+    const fullPath = resolveSafePath(notePath)
+    if (!fullPath) { res.status(400).json({ error: 'invalid path' }); return }
+    const relPath = toRelPath(fullPath.endsWith('.md') ? fullPath : fullPath + '.md')
 
-    for (const filePath of allFiles) {
-      const relPath = path.relative(NOTES_DIR, filePath).replace(/\\/g, '/')
-      // Don't include self
-      if (relPath === notePath || relPath === notePath + '.md') continue
+    let dstId = getNoteIdByPath(relPath)
+    if (!dstId) {
+      // Not yet indexed — reconcile now so backlinks are correct on first view.
+      await reconcileNoteNow(relPath).catch(() => {})
+      dstId = getNoteIdByPath(relPath)
+    }
 
-      const content = await fsp.readFile(filePath, 'utf-8')
-      let match: RegExpExecArray | null
-      // Reset lastIndex before every exec loop. WIKI_LINK_RE is a global regex
-      // (`/g` flag), so its lastIndex persists across calls. Without this reset
-      // the search would start mid-string on the second and subsequent files,
-      // silently missing backlinks at the beginning of each file.
-      WIKI_LINK_RE.lastIndex = 0
-
-      while ((match = WIKI_LINK_RE.exec(content)) !== null) {
-        const linkTarget = match[1].trim()
-        if (linkTarget === targetName || linkTarget === notePath || linkTarget === notePath.replace(/\.md$/, '')) {
-          const start = Math.max(0, match.index - 30)
-          const end = Math.min(content.length, match.index + match[0].length + 30)
-          const snippet = content.slice(start, end)
-          backlinks.push({
-            path: relPath,
-            name: path.basename(relPath, '.md'),
-            snippet,
-          })
-          break // one entry per file
-        }
+    const backlinks: BacklinkResult[] = []
+    if (dstId) {
+      for (const r of backlinksForId(dstId)) {
+        backlinks.push({
+          id: r.id,
+          path: r.path,
+          title: r.title,
+          name: path.basename(r.path, '.md'),
+          snippet: r.context,
+          status: r.status,
+        })
+      }
+      // Ambiguous inbound edges that list this id among candidates.
+      for (const r of ambiguousBacklinksForId(dstId)) {
+        let candidates: string[] | undefined
+        try { candidates = JSON.parse(r.candidates || '[]') } catch { candidates = undefined }
+        backlinks.push({
+          id: r.id,
+          path: r.path,
+          title: r.title,
+          name: path.basename(r.path, '.md'),
+          snippet: r.context,
+          status: 'ambiguous',
+          candidates,
+        })
       }
     }
 
     res.json({ backlinks })
+  } catch (err) {
+    next(err)
+  }
+})
+
+// GET /api/notes-v2/links/*path — forward links of a note (optional)
+notesV2Router.get('/links/*path', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    ensureIndexBootstrap()
+    const notePath = getWildcardPath(req)
+    if (!notePath) { res.status(400).json({ error: 'path required' }); return }
+    const fullPath = resolveSafePath(notePath)
+    if (!fullPath) { res.status(400).json({ error: 'invalid path' }); return }
+    const relPath = toRelPath(fullPath.endsWith('.md') ? fullPath : fullPath + '.md')
+
+    const srcId = getNoteIdByPath(relPath)
+    const links = srcId
+      ? forwardLinksForId(srcId).map((l) => ({
+          dstId: l.dst_id,
+          dstName: l.dst_name,
+          status: l.status,
+          ...(l.title ? { title: l.title } : {}),
+          ...(l.path ? { path: l.path } : {}),
+        }))
+      : []
+    res.json({ links })
   } catch (err) {
     next(err)
   }
@@ -411,10 +813,213 @@ notesV2Router.post('/folder', async (req: Request, res: Response, next: NextFunc
   }
 })
 
+// ─── List (for wiki-link autocomplete) ─────────────────────────────────────
+
+// GET /api/notes-v2/list — flat note list. Now returns id per note (feeds [[ authoring).
+notesV2Router.get('/list', async (_req: Request, res: Response, next: NextFunction) => {
+  try {
+    ensureIndexBootstrap()
+    await ensureNotesDir()
+    const rows = listNotes()
+    if (rows.length > 0) {
+      const notes = rows.map((r) => ({
+        id: r.id,
+        title: r.title,
+        path: r.path,
+        name: path.basename(r.path, '.md'),
+      }))
+      res.json({ notes })
+      return
+    }
+    // Index empty (cold start before first rebuild) — fall back to a file walk so
+    // [[ autocomplete works immediately; ids fill in once the index settles.
+    const allFiles = await getAllMdFilesFallback(NOTES_DIR)
+    const notes = allFiles.map((f) => {
+      const relPath = toRelPath(f)
+      const name = path.basename(relPath, '.md')
+      return { id: '', title: name, path: relPath, name }
+    })
+    res.json({ notes })
+  } catch (err) {
+    next(err)
+  }
+})
+
+// ─── Tags ──────────────────────────────────────────────────────────────────
+
+// GET /api/notes-v2/tags — all tags, frequency-ranked
+notesV2Router.get('/tags', async (_req: Request, res: Response, next: NextFunction) => {
+  try {
+    ensureIndexBootstrap()
+    res.json({ tags: tagCounts() })
+  } catch (err) {
+    next(err)
+  }
+})
+
+// GET /api/notes-v2/tags/:tag/notes — notes carrying a tag, newest first
+notesV2Router.get('/tags/:tag/notes', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    ensureIndexBootstrap()
+    const tag = normalizeTag(String(req.params.tag || ''))
+    if (!tag) { res.status(400).json({ error: 'tag required' }); return }
+    const notes = notesForTag(tag).map((r) => ({
+      id: r.id,
+      title: r.title,
+      path: r.path,
+      snippet: r.body.slice(0, 160).trim(),
+      modified: r.modified,
+    }))
+    res.json({ notes })
+  } catch (err) {
+    next(err)
+  }
+})
+
+// POST /api/notes-v2/tags/rename — targeted rewrite (carrying notes only)
+notesV2Router.post('/tags/rename', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    ensureIndexBootstrap()
+    const from = normalizeTag(String(req.body?.from || ''))
+    const to = normalizeTag(String(req.body?.to || ''))
+    if (!from || !to) { res.status(400).json({ error: 'from and to (strings) are required' }); return }
+    if (from === to) { res.json({ ok: true, updated: 0 }); return }
+
+    // Targeted by the tag index — NOT a vault scan.
+    const paths = notePathsForTag(from)
+    let updated = 0
+    const inlineRe = new RegExp(`(^|[\\s(])#${escapeRegExp(from)}\\b`, 'g')
+
+    for (const relPath of paths) {
+      const abs = resolveSafePath(relPath)
+      if (!abs) continue
+      const filePath = abs.endsWith('.md') ? abs : abs + '.md'
+      let content: string
+      try {
+        content = await fsp.readFile(filePath, 'utf-8')
+      } catch { continue }
+
+      const { data, body, raw } = parseFrontmatter(content)
+      let changed = false
+
+      // 1) frontmatter tags[]
+      let newRaw = raw
+      if (raw && Array.isArray(data.tags)) {
+        const replaced = (data.tags as unknown[]).map((t) =>
+          typeof t === 'string' && normalizeTag(t) === from ? to : t,
+        )
+        if (JSON.stringify(replaced) !== JSON.stringify(data.tags)) {
+          // Rewrite only the tag tokens in the raw block to stay byte-minimal.
+          newRaw = raw.replace(
+            new RegExp(`(^|[\\s,\\[])#?${escapeRegExp(from)}(?=$|[\\s,\\]])`, 'gm'),
+            (_m, pre) => `${pre}${to}`,
+          )
+          changed = changed || newRaw !== raw
+        }
+      }
+
+      // 2) inline #from → #to in body
+      const newBody = body.replace(inlineRe, (_m, pre) => `${pre}#${to}`)
+      if (newBody !== body) changed = true
+
+      if (changed) {
+        const next = (newRaw || raw) + newBody
+        await fsp.writeFile(filePath, next, 'utf-8')
+        updated++
+        scheduleNotesIndexUpdate(relPath)
+      }
+    }
+
+    res.json({ ok: true, updated })
+  } catch (err) {
+    next(err)
+  }
+})
+
+// ─── Index admin / observability ─────────────────────────────────────────
+
+// GET /api/notes-v2/index/status — index health/observability + test hook
+notesV2Router.get('/index/status', async (_req: Request, res: Response, next: NextFunction) => {
+  try {
+    ensureIndexBootstrap()
+    const lastRebuild = getIndexMeta('last_full_rebuild')
+    let embedState: 'idle' | 'embedding' | 'unavailable' = 'idle'
+    try {
+      const { getNotesStore } = await import('../../core/qmd-store.js')
+      const store = await getNotesStore()
+      const status = await store.getStatus()
+      embedState = status.needsEmbedding > 0 ? 'embedding' : 'idle'
+    } catch {
+      embedState = 'unavailable'
+    }
+    res.json({
+      docCount: docCount(),
+      lastRebuild: lastRebuild ?? null,
+      schemaVersion: NOTES_INDEX_SCHEMA_VERSION,
+      embedState,
+      dbSizeBytes: dbSizeBytes(),
+      rebuilding: isRebuilding(),
+      ...(embedState === 'unavailable' ? { degraded: 'semantic-unavailable' as const } : {}),
+    })
+  } catch (err) {
+    next(err)
+  }
+})
+
+// POST /api/notes-v2/index/rebuild — drop + rebuild structural sidecar (off-loop)
+notesV2Router.post('/index/rebuild', async (_req: Request, res: Response, next: NextFunction) => {
+  try {
+    ensureIndexBootstrap()
+    // Off-loop, bounded; respond immediately. Status endpoint reports progress.
+    void rebuildIndex().catch((err) => {
+      log.memory.warn('notes-index rebuild failed', {
+        error: err instanceof Error ? err.message : String(err),
+      })
+    })
+    res.json({ ok: true, rebuilding: true })
+  } catch (err) {
+    next(err)
+  }
+})
+
+// POST /api/notes-v2/index/stamp-ids — "stamp all ids now" admin action (§12.3).
+// Batches the id back-write across the whole vault so a user can reach full id
+// coverage immediately (instead of file-by-file as each note is next touched).
+// Awaits so the response carries the {scanned, stamped, skipped} summary.
+notesV2Router.post('/index/stamp-ids', async (_req: Request, res: Response, next: NextFunction) => {
+  try {
+    ensureIndexBootstrap()
+    const { stampAllIds } = await import('../../core/notes-identity.js')
+    const result = await stampAllIds()
+    res.json({ ok: true, ...result })
+  } catch (err) {
+    next(err)
+  }
+})
+
+// POST /api/notes-v2/index/merge-ids — earliest-created-wins merge (§8.3 layer 3).
+// Resolves divergent ids for the same logical note (two machines stamped one
+// id-less note, git merge left two copies): re-points inbound links to the
+// earliest-created winner. Awaits so the response carries the merge summary.
+notesV2Router.post('/index/merge-ids', async (_req: Request, res: Response, next: NextFunction) => {
+  try {
+    ensureIndexBootstrap()
+    const { mergeDivergentIds } = await import('../../core/notes-identity.js')
+    const result = await mergeDivergentIds()
+    res.json({ ok: true, ...result })
+  } catch (err) {
+    next(err)
+  }
+})
+
 // ─── Helpers ─────────────────────────────────────────────────────────────
 
-/** Recursively collect all .md files (excludes global-notes.md at NOTES_DIR root) */
-async function getAllMdFiles(dir: string): Promise<string[]> {
+function escapeRegExp(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
+/** Fallback file walk for /list before the index has built (cold start only). */
+async function getAllMdFilesFallback(dir: string): Promise<string[]> {
   const results: string[] = []
   let entries: import('fs').Dirent[]
   try {
@@ -422,32 +1027,14 @@ async function getAllMdFiles(dir: string): Promise<string[]> {
   } catch {
     return results
   }
-  const globalBase = path.basename(GLOBAL_NOTES_FILE)
   for (const entry of entries) {
     if (entry.name.startsWith('.')) continue
     const full = path.join(dir, entry.name)
     if (entry.isDirectory()) {
-      results.push(...await getAllMdFiles(full))
-    } else if (entry.name.endsWith('.md') && !(entry.name === globalBase && dir === NOTES_DIR)) {
+      results.push(...(await getAllMdFilesFallback(full)))
+    } else if (entry.name.endsWith('.md')) {
       results.push(full)
     }
   }
   return results
 }
-
-// ─── All notes list (for wiki-link autocomplete) ─────────────────────────
-
-// GET /api/notes-v2/list — flat list of all note names/paths
-notesV2Router.get('/list', async (_req: Request, res: Response, next: NextFunction) => {
-  try {
-    await ensureNotesDir()
-    const allFiles = await getAllMdFiles(NOTES_DIR)
-    const notes = allFiles.map(f => {
-      const relPath = path.relative(NOTES_DIR, f).replace(/\\/g, '/')
-      return { path: relPath, name: path.basename(relPath, '.md') }
-    })
-    res.json({ notes })
-  } catch (err) {
-    next(err)
-  }
-})

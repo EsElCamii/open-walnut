@@ -1,0 +1,94 @@
+/*
+ * Editor width control (Feature 1). A single global width preference applied as a
+ * class on the editor panel. Notion-style: TWO stops (Normal / Full), toggled by a
+ * single button. The direct children of `.notes-editor-content` (the rendered-editor
+ * wrap AND the raw source view) are the SINGLE max-width owner. The inner `.tiptap`
+ * cap from globals.css (800px, shared with other notes surfaces) is neutralized
+ * below so the stops are actually visible.
+ *
+ * Normal is a comfortable WIDE reading column (~880px, not a cramped 720); Full is
+ * edge-to-edge. (The old 3-tier normal/wide/full collapsed to 2 — Notion-style.)
+ */
+
+.notes-width-normal .notes-editor-content > *,
+.notes-width-full .notes-editor-content > * {
+  margin-left: auto;
+  margin-right: auto;
+  width: 100%;
+  /* Switching stops should feel deliberate, not jumpy. */
+  transition: max-width 0.2s ease;
+}
+
+.notes-width-normal .notes-editor-content > * {
+  max-width: 880px;
+}
+
+.notes-width-full .notes-editor-content > * {
+  max-width: none;
+}
+
+/* Single-owner rule: inside the width-managed pane, the wrapper above is the ONLY
+   element that caps width — undo the 800px `.tiptap` cap from globals.css. */
+.notes-width-normal .notes-editor-content .tiptap,
+.notes-width-full .notes-editor-content .tiptap {
+  max-width: none;
+}
+
+/* Full mode fills the pane — drop the prose gutter to a modest one. */
+.notes-width-full .notes-editor-content .tiptap {
+  padding-left: 30px;
+  padding-right: 30px;
+}
+
+/* ── Single Normal⇄Full width toggle button in the editor header ──
+   Reuses the bookmark/raw-toggle button footprint so the toolbar reads as one
+   consistent row of icon buttons (Notion-style). Active = currently Full. */
+.notes-width-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: none;
+  border-radius: var(--radius-sm, 6px);
+  background: transparent;
+  color: var(--fg-muted);
+  cursor: pointer;
+}
+
+.notes-width-btn:hover {
+  background: var(--bg-hover);
+  color: var(--fg);
+}
+
+.notes-width-btn.active {
+  background: var(--accent-subtle);
+  color: var(--accent);
+}
+
+/* ── Raw markdown source view (Feature 2) ──
+ * CodeMirror 6 mount point. As a direct child of .notes-editor-content it picks
+ * up the width-mode cap above (single owner); height fills the pane and the
+ * CM .cm-scroller scrolls internally. No border/box — chrome lives in the CM
+ * theme (RawMarkdownView.tsx) so the source surface reads as part of the pane. */
+.notes-raw-view {
+  height: 100%;
+  min-height: 0;
+  box-sizing: border-box;
+  padding: 0 18px;
+  background: transparent;
+}
+/* Match the rendered surface's modest full-mode gutter (see .tiptap rule above). */
+.notes-width-full .notes-editor-content .notes-raw-view {
+  padding: 0 30px;
+}
+.notes-raw-view .cm-editor {
+  height: 100%;
+}
+
+/* The </> raw-toggle button reuses the bookmark button footprint for visual parity. */
+.notes-raw-toggle-btn.active {
+  color: var(--accent);
+  background: var(--accent-subtle);
+}

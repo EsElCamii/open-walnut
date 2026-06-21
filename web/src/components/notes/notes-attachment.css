@@ -1,0 +1,64 @@
+/*
+ * Notes attachment styles (BUG 3): tree icon tint + the image/PDF preview pane.
+ * Notes-owned (NOT globals.css). Reuses the .notes-editor-panel/.notes-editor-header
+ * layout already defined in globals.css for the header/breadcrumb row.
+ */
+
+/* Tree: attachment rows get a slightly muted icon so they read as non-note. */
+.notes-tree-icon-attachment {
+  color: var(--accent, #6b8afd);
+  opacity: 0.85;
+}
+
+/* "Open in new tab" link in the preview header. */
+.notes-attachment-open {
+  font-size: 12px;
+  color: var(--text-muted, #8a8f98);
+  text-decoration: none;
+}
+.notes-attachment-open:hover {
+  color: var(--text, #e6e6e6);
+  text-decoration: underline;
+}
+
+/* Preview body — fills the editor pane, scrolls if the content overflows. */
+.notes-attachment-preview {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: auto;
+  padding: 24px;
+  background: var(--bg-secondary, #1a1b1e);
+}
+
+.notes-attachment-image {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+  border-radius: 6px;
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.3);
+}
+
+/* PDFs render in the browser-native viewer; stretch to fill the pane. */
+.notes-attachment-pdf {
+  width: 100%;
+  height: 100%;
+  border: none;
+  border-radius: 6px;
+  background: #fff;
+}
+
+/* Fallback card for any unexpected/unsupported attachment type. */
+.notes-attachment-card {
+  padding: 12px 18px;
+  border: 1px solid var(--border, #2a2c31);
+  border-radius: 8px;
+  color: var(--text, #e6e6e6);
+  text-decoration: none;
+  background: var(--bg, #121316);
+}
+.notes-attachment-card:hover {
+  border-color: var(--accent, #6b8afd);
+}

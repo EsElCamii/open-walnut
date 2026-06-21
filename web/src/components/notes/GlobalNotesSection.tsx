@@ -3,7 +3,8 @@ import { GlobalNotesPopup } from './GlobalNotesPopup';
 import { NotesEditor } from './NotesEditor';
 import type { UseGlobalNotesReturn } from '@/hooks/useGlobalNotes';
 import type { Task } from '@open-walnut/core';
-import { ICON_EXPAND } from '@/components/common/Icons';
+import { ICON_EXPAND, ICON_NEW_TAB } from '@/components/common/Icons';
+import { openPopout } from '@/popout/openPopout';
 
 const LS_NOTES_HEIGHT_KEY = 'open-walnut-global-notes-height';
 const DEFAULT_HEIGHT = 180;
@@ -87,11 +88,21 @@ export function GlobalNotesSection(props: GlobalNotesSectionProps) {
           <span className="global-notes-label">Notes</span>
           {saving && <span className="global-notes-saving">Saving...</span>}
           {saveError && <span className="global-notes-error" title={saveError}>Save failed</span>}
+          {/* Open in a new browser tab (standalone, lightweight) */}
+          <button
+            className="global-notes-expand-btn"
+            onClick={e => { e.stopPropagation(); openPopout('global-notes', {}); }}
+            aria-label="Open notes in a new tab"
+            title="Open in new tab"
+          >
+            {ICON_NEW_TAB}
+          </button>
+          {/* In-app fullscreen overlay (stays in this tab) */}
           <button
             className="global-notes-expand-btn"
             onClick={e => { e.stopPropagation(); openPopup(); }}
-            aria-label="Expand notes"
-            title="Expand notes"
+            aria-label="Expand notes to fullscreen"
+            title="Fullscreen"
           >
             {ICON_EXPAND}
           </button>

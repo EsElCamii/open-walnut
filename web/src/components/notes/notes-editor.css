@@ -1,0 +1,860 @@
+/*
+ * Notes editor — Notion-class block styling.
+ * ALL new notes-editor styling lives here (never globals.css). Imported by
+ * NotesEditor.tsx. Base slash-panel / wikilink styles already exist in
+ * globals.css; this file adds the NEW surfaces: prose typography, tables,
+ * #tag chip, callouts, bubble toolbar, drag-handle gutter, tag autocomplete,
+ * and the slash-menu group headers.
+ */
+
+/* ── Prose typography (full-page editor only) ──────────────────────────────
+ * Scope: `.notes-editor:not(.global-notes-editor-inline)`
+ * — only the compact home-page Global Notes inline widget keeps its own dense
+ * typography (globals.css) and must NOT inherit these rules. Fullscreen surfaces
+ * (pop-outs, the in-app popup) now use MarkdownEditorPanel and DO get this rich
+ * styling — they no longer carry a downgrade variant class.
+ *
+ * All values are em so changing the base font-size (globals.css
+ * `.notes-editor .tiptap { font-size: 15px }`) scales ALL content.
+ *
+ * Rhythm ownership: the lobotomized-owl rule (`> * + *`, zero specificity on
+ * the universal part) owns the DEFAULT top margin between top-level blocks;
+ * any element rule below that declares its own margin-top (headings, lists)
+ * deliberately opts out via higher specificity. Paragraph rules therefore
+ * never declare margin-top.
+ */
+.notes-editor {
+  /* Theme knobs (overridable). Headings use the brightest text var. */
+  --notes-heading-color: var(--fg);
+  --notes-code-text: #c2255c; /* readable code-pink, light theme */
+}
+:root[data-theme="dark"] .notes-editor { --notes-code-text: #ff7eb6; }
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme]) .notes-editor { --notes-code-text: #ff7eb6; }
+}
+
+.notes-editor:not(.global-notes-editor-inline) .tiptap > * + * {
+  margin-top: 0.75em;
+}
+.notes-editor:not(.global-notes-editor-inline) .tiptap p {
+  /* No margin-top — the owl rule above owns inter-block rhythm. */
+  margin-right: 0;
+  margin-bottom: 0.1em;
+  margin-left: 0;
+}
+
+.notes-editor:not(.global-notes-editor-inline) .tiptap h1,
+.notes-editor:not(.global-notes-editor-inline) .tiptap h2,
+.notes-editor:not(.global-notes-editor-inline) .tiptap h3,
+.notes-editor:not(.global-notes-editor-inline) .tiptap h4,
+.notes-editor:not(.global-notes-editor-inline) .tiptap h5 {
+  color: var(--notes-heading-color);
+}
+.notes-editor:not(.global-notes-editor-inline) .tiptap h1 {
+  font-size: 2.143em; font-weight: 700; line-height: 1.25; margin: 1.5em 0 0.25em;
+}
+.notes-editor:not(.global-notes-editor-inline) .tiptap h2 {
+  font-size: 1.714em; font-weight: 600; line-height: 1.3; margin: 1.4em 0 0.2em;
+}
+.notes-editor:not(.global-notes-editor-inline) .tiptap h3 {
+  font-size: 1.429em; font-weight: 600; line-height: 1.35; margin: 1.2em 0 0.15em;
+}
+.notes-editor:not(.global-notes-editor-inline) .tiptap h4 {
+  font-size: 1.2em; font-weight: 600; line-height: 1.4; margin: 1.1em 0 0.1em;
+}
+.notes-editor:not(.global-notes-editor-inline) .tiptap h5 {
+  font-size: 1.2em; font-weight: 400; line-height: 1.4; margin: 1.1em 0 0.1em;
+}
+
+.notes-editor:not(.global-notes-editor-inline) .tiptap ul,
+.notes-editor:not(.global-notes-editor-inline) .tiptap ol {
+  padding-left: 24px;
+  margin: 0.4em 0;
+}
+.notes-editor:not(.global-notes-editor-inline) .tiptap li {
+  margin: 0.15em 0;
+}
+.notes-editor:not(.global-notes-editor-inline) .tiptap li p {
+  margin: 0;
+}
+
+.notes-editor:not(.global-notes-editor-inline) .tiptap code {
+  font-size: 0.9em;
+  background: var(--bg-secondary);
+  color: var(--notes-code-text);
+  border: none;
+  border-radius: 3px;
+  padding: 2px 4px;
+}
+.notes-editor:not(.global-notes-editor-inline) .tiptap pre {
+  background: var(--bg-secondary);
+  border-radius: 4px;
+  padding: 16px;
+  margin: 0.75em 0;
+  overflow-x: auto;
+}
+.notes-editor:not(.global-notes-editor-inline) .tiptap pre code {
+  background: none;
+  color: var(--fg);
+  padding: 0;
+  font-size: 1em;
+  line-height: 1.5;
+}
+
+.notes-editor:not(.global-notes-editor-inline) .tiptap blockquote {
+  border-left: 3px solid var(--border);
+  padding: 0 0 0 16px;
+  margin: 0.75em 0;
+  color: var(--fg-secondary);
+}
+.notes-editor:not(.global-notes-editor-inline) .tiptap hr {
+  border: none;
+  border-top: 1px solid var(--border);
+  margin: 1.5em 0;
+}
+
+/* Bottom scroll padding: lets the last line scroll up to eye level instead of
+   pinning to the viewport bottom. ::after is not an element node, so the
+   drag-handle hover logic (block elements only) and the `> *:last-child`
+   margin reset are unaffected; clicks in the zone still land in the editor. */
+.notes-editor:not(.global-notes-editor-inline) .tiptap::after {
+  content: '';
+  display: block;
+  height: 40vh;
+}
+
+/* ── Slash menu: group headers (new) ───────────────────────────────────── */
+.notes-slash-group {
+  padding: 6px 12px 2px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--fg-muted, #8a8f98);
+  user-select: none;
+}
+
+/* ── Tables ────────────────────────────────────────────────────────────── */
+/* Notion-style sizing: `table-layout: fixed` is REQUIRED for prosemirror-tables
+   colwidth (column resize) to apply. `width: unset` + `min-width: 50%` lets a
+   resized/narrow table be narrower than the prose column without ever collapsing
+   comically small; wide tables grow past 100% and the wrapper scrolls them. */
+.notes-editor .tiptap table.notes-table,
+.notes-editor .tiptap table {
+  border-collapse: collapse;
+  table-layout: fixed;
+  width: unset;
+  min-width: 50%;
+  /* Spacing lives on .tableWrapper (the direct child the owl rule below sees),
+     so the table itself carries none — avoids double margins. */
+  margin: 0;
+  overflow: hidden;
+  font-size: 0.93em;
+}
+.notes-editor .tiptap table td,
+.notes-editor .tiptap table th {
+  border: 1px solid var(--border, #2a2d34);
+  padding: 4px 8px;
+  vertical-align: top;
+  text-align: left;
+  position: relative;
+  min-width: 80px;
+  /* Click anywhere in the cell drops a text caret (not the default arrow). */
+  cursor: text;
+}
+/* Uniform header treatment for EVERY th (not first-row-only). */
+.notes-editor .tiptap table th {
+  background: var(--bg-secondary, #1a1c20);
+  font-weight: 600;
+}
+/* Empty-cell caret fix: table cells are `content: inline*` (table-kit.ts) so an
+   EMPTY cell is a bare `<td>` with no line box — a click lands with no caret
+   anchor (selection rect {0,0} → the caret jumps to the top of the doc). Give
+   every cell a real min line-height and a visible caret so clicking an empty
+   cell places the cursor INSIDE it. The wrapper `> p` rule covers any future
+   block-content cell without harm. */
+.notes-editor .tiptap table td,
+.notes-editor .tiptap table th {
+  min-height: 1.6em;
+  caret-color: var(--fg, currentColor);
+}
+.notes-editor .tiptap table td > p,
+.notes-editor .tiptap table th > p {
+  margin: 0;
+  min-height: 1.4em;
+}
+/* Cell selection highlight (table extension marks selected cells). */
+.notes-editor .tiptap table .selectedCell::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: var(--accent-subtle, rgba(99, 102, 241, 0.18));
+  pointer-events: none;
+}
+/* Column-resize handle from @tiptap/extension-table — clearly visible on hover. */
+.notes-editor .tiptap table .column-resize-handle {
+  position: absolute;
+  right: -2px;
+  top: 0;
+  bottom: 0;
+  width: 3px;
+  background: var(--accent, #6366f1);
+  cursor: col-resize;
+  opacity: 0;
+}
+.notes-editor .tiptap table:hover .column-resize-handle { opacity: 0.6; }
+/* prosemirror-tables sets this class on the editor while hovering a column edge. */
+.notes-editor .tiptap.resize-cursor { cursor: col-resize; }
+/* Wide tables scroll horizontally inside the prose column instead of breaking
+   the page layout; max-content lets the table itself decide its width.
+   Vertical spacing lives HERE (the wrapper is the .tiptap child the block-rhythm
+   rules see), not on the table. */
+.notes-editor .tiptap .tableWrapper {
+  overflow-x: auto;
+  width: max-content;
+  min-width: 100%;
+  max-width: 100%;
+  margin: 12px 0;
+}
+
+/* ── #tag chip ─────────────────────────────────────────────────────────── */
+.notes-tag {
+  display: inline;
+  padding: 1px 6px;
+  margin: 0 1px;
+  border-radius: var(--radius-full, 999px);
+  background: var(--accent-subtle, rgba(99, 102, 241, 0.16));
+  color: var(--accent, #6366f1);
+  font-size: 0.88em;
+  font-weight: 500;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.notes-editor .tiptap .notes-tag.ProseMirror-selectednode {
+  outline: 2px solid var(--accent, #6366f1);
+  outline-offset: 1px;
+}
+
+/* ── Callouts ──────────────────────────────────────────────────────────── */
+.notes-callout {
+  border-left: 3px solid var(--border-strong, #3a3d44);
+  border-radius: var(--radius-sm, 6px);
+  background: var(--bg-secondary, #1a1c20);
+  padding: 10px 14px;
+  margin: 12px 0;
+}
+.notes-callout > *:first-child { margin-top: 0; }
+.notes-callout > *:last-child { margin-bottom: 0; }
+.notes-callout::before {
+  display: block;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  margin-bottom: 4px;
+  opacity: 0.85;
+}
+.notes-callout-note { border-left-color: var(--accent, #6366f1); }
+.notes-callout-note::before { content: 'Note'; color: var(--accent, #6366f1); }
+.notes-callout-tip { border-left-color: var(--success, #22c55e); }
+.notes-callout-tip::before { content: 'Tip'; color: var(--success, #22c55e); }
+.notes-callout-info { border-left-color: var(--accent, #3b82f6); }
+.notes-callout-info::before { content: 'Info'; color: var(--accent, #3b82f6); }
+.notes-callout-warning { border-left-color: var(--warning, #f59e0b); }
+.notes-callout-warning::before { content: 'Warning'; color: var(--warning, #f59e0b); }
+.notes-callout-danger { border-left-color: var(--error, #ef4444); }
+.notes-callout-danger::before { content: 'Danger'; color: var(--error, #ef4444); }
+
+/* ── Bubble (selection) toolbar ────────────────────────────────────────── */
+.notes-bubble-menu {
+  display: flex;
+  align-items: center;
+  gap: 1px;
+  padding: 3px;
+  background: var(--bg-elevated, #23262d);
+  border: 1px solid var(--border, #2a2d34);
+  border-radius: var(--radius-md, 8px);
+  box-shadow: var(--card-shadow, 0 4px 16px rgba(0, 0, 0, 0.3));
+  z-index: 10002;
+}
+.notes-bubble-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 28px;
+  height: 28px;
+  padding: 0 6px;
+  border: none;
+  border-radius: var(--radius-sm, 5px);
+  background: transparent;
+  color: var(--fg-secondary, #c4c7cc);
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+}
+.notes-bubble-btn:hover { background: var(--bg-hover, #2d3038); color: var(--fg, #e8eaed); }
+.notes-bubble-btn.active { background: var(--accent-subtle, rgba(99, 102, 241, 0.2)); color: var(--accent, #6366f1); }
+.notes-bubble-btn code { font-family: var(--font-mono, monospace); font-size: 11px; }
+.notes-bubble-sep {
+  width: 1px;
+  align-self: stretch;
+  margin: 2px 3px;
+  background: var(--border, #2a2d34);
+}
+
+/* ── Drag-handle gutter (⠿ grip + ＋ inserter + block actions) ──────────── */
+.notes-drag-handle {
+  z-index: 20;
+}
+.notes-drag-handle-inner {
+  display: flex;
+  align-items: center;
+  gap: 1px;
+}
+.notes-drag-add,
+.notes-drag-grip {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 22px;
+  border: none;
+  background: transparent;
+  color: var(--fg-muted, #8a8f98);
+  border-radius: var(--radius-sm, 4px);
+  cursor: pointer;
+  font-size: 15px;
+  line-height: 1;
+}
+/* Grip supports BOTH gestures: click → block-actions menu; press+move → a
+   custom pointer drag (NOT the extension's native HTML5 drag, which loses text
+   with our custom nodes — that path is killed in NotesDragHandle.tsx). The
+   pointer drag runs the same validated whole-node move transaction the menu
+   uses, so reorder is real and lossless. */
+.notes-drag-grip { cursor: grab; }
+.notes-drag-grip.is-dragging { cursor: grabbing; }
+.notes-drag-add:hover,
+.notes-drag-grip:hover { background: var(--bg-hover, #2d3038); color: var(--fg, #e8eaed); }
+
+/* Drop-indicator line shown while dragging a block to a new slot. */
+.notes-drop-indicator {
+  height: 2px;
+  background: var(--accent, #4c8bf5);
+  border-radius: 1px;
+  box-shadow: 0 0 0 1px var(--accent, #4c8bf5);
+}
+/* While a block drag is in flight, suppress text selection + show grabbing. */
+body.notes-block-dragging,
+body.notes-block-dragging * { cursor: grabbing !important; user-select: none !important; }
+
+.notes-block-actions {
+  position: absolute;
+  top: 24px;
+  left: 0;
+  display: flex;
+  flex-direction: column;
+  min-width: 150px;
+  padding: 4px;
+  background: var(--bg-elevated, #23262d);
+  border: 1px solid var(--border, #2a2d34);
+  border-radius: var(--radius-md, 8px);
+  box-shadow: var(--card-shadow, 0 4px 16px rgba(0, 0, 0, 0.3));
+  z-index: 10002;
+}
+.notes-block-actions button {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  border: none;
+  background: transparent;
+  color: var(--fg-secondary, #c4c7cc);
+  font-size: 13px;
+  text-align: left;
+  border-radius: var(--radius-sm, 5px);
+  cursor: pointer;
+}
+.notes-block-actions button:hover { background: var(--bg-hover, #2d3038); color: var(--fg, #e8eaed); }
+.notes-block-actions button.danger:hover { background: var(--error, #ef4444); color: #fff; }
+
+/* ── Tag autocomplete popup ────────────────────────────────────────────── */
+.notes-tag-panel {
+  min-width: 200px;
+  max-height: 280px;
+  overflow-y: auto;
+  padding: 4px;
+  background: var(--bg-elevated, #23262d);
+  border: 1px solid var(--border, #2a2d34);
+  border-radius: var(--radius-md, 8px);
+  box-shadow: var(--card-shadow, 0 4px 16px rgba(0, 0, 0, 0.3));
+}
+.notes-tag-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 10px;
+  border-radius: var(--radius-sm, 5px);
+  cursor: pointer;
+  font-size: 13px;
+  color: var(--fg-secondary, #c4c7cc);
+}
+.notes-tag-item.selected,
+.notes-tag-item:hover { background: var(--bg-hover, #2d3038); color: var(--fg, #e8eaed); }
+.notes-tag-item-name { font-weight: 500; }
+.notes-tag-item-count {
+  font-size: 11px;
+  color: var(--fg-muted, #8a8f98);
+  background: var(--bg-secondary, #1a1c20);
+  padding: 0 6px;
+  border-radius: var(--radius-full, 999px);
+}
+.notes-tag-create .notes-tag-item-name { color: var(--accent, #6366f1); }
+
+/* ── Cmd+K command palette (front door — §4.3 / §9.3) ──────────────────── */
+.notes-cmdk-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 10050;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding-top: 12vh;
+  background: rgba(0, 0, 0, 0.4);
+  backdrop-filter: blur(2px);
+}
+.notes-cmdk {
+  width: min(640px, 92vw);
+  max-height: 70vh;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-elevated, #23262d);
+  border: 1px solid var(--border, #2a2d34);
+  border-radius: var(--radius-lg, 12px);
+  box-shadow: var(--modal-shadow, 0 16px 48px rgba(0, 0, 0, 0.45));
+  overflow: hidden;
+}
+.notes-cmdk-input-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--border, #2a2d34);
+}
+.notes-cmdk-glyph {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--fg-muted, #8a8f98);
+  background: var(--bg-secondary, #1a1c20);
+  border-radius: var(--radius-sm, 5px);
+  padding: 2px 6px;
+  user-select: none;
+}
+.notes-cmdk-input {
+  flex: 1;
+  border: none;
+  outline: none;
+  background: transparent;
+  color: var(--fg, #e8eaed);
+  font-size: 15px;
+}
+.notes-cmdk-input::placeholder { color: var(--fg-muted, #8a8f98); }
+.notes-cmdk-spinner {
+  color: var(--fg-muted, #8a8f98);
+  font-size: 14px;
+  animation: notes-cmdk-spin 0.8s linear infinite;
+}
+@keyframes notes-cmdk-spin { to { transform: rotate(360deg); } }
+.notes-cmdk-degraded {
+  padding: 6px 14px;
+  font-size: 12px;
+  color: var(--warning, #f59e0b);
+  background: var(--warning-subtle, rgba(245, 158, 11, 0.1));
+  border-bottom: 1px solid var(--border, #2a2d34);
+}
+.notes-cmdk-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 6px;
+}
+.notes-cmdk-empty {
+  padding: 24px 14px;
+  text-align: center;
+  color: var(--fg-muted, #8a8f98);
+  font-size: 13px;
+}
+.notes-cmdk-item {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 8px 10px;
+  border-radius: var(--radius-md, 8px);
+  cursor: pointer;
+}
+.notes-cmdk-item.selected,
+.notes-cmdk-item:hover { background: var(--bg-hover, #2d3038); }
+.notes-cmdk-item-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.notes-cmdk-item-title {
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--fg, #e8eaed);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.notes-cmdk-item-path {
+  font-size: 11px;
+  color: var(--fg-muted, #8a8f98);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.notes-cmdk-item-snippet {
+  font-size: 12px;
+  color: var(--fg-secondary, #c4c7cc);
+  line-height: 1.4;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.notes-cmdk-item-snippet mark,
+.notes-cmdk-item-snippet .notes-search-mark {
+  background: var(--accent-subtle, rgba(99, 102, 241, 0.32));
+  color: inherit;
+  border-radius: 2px;
+  padding: 0 1px;
+}
+/* Shared search-match mark (tree results + palette titles): accent tint, not the
+   browser's default harsh yellow. Bold accent text keeps it readable on the
+   subtle background in both themes. */
+mark.notes-search-mark {
+  background: var(--accent-subtle, rgba(99, 102, 241, 0.18));
+  color: var(--accent, #6366f1);
+  font-weight: 600;
+  border-radius: 2px;
+  padding: 0 1px;
+}
+/* Searching… hint row while the palette has no previous results to keep showing. */
+.notes-cmdk-searching {
+  padding: 14px;
+  text-align: center;
+  color: var(--fg-muted, #8a8f98);
+  font-size: 13px;
+}
+/* Hybrid match badge: ● exact / ◐ both / ○ semantic (trust legend §9.2). */
+.notes-cmdk-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex: 0 0 auto;
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  padding: 1px 6px;
+  border-radius: var(--radius-full, 999px);
+}
+.notes-cmdk-badge-glyph { font-size: 9px; }
+.notes-cmdk-badge-exact { color: var(--success, #22c55e); background: rgba(34, 197, 94, 0.14); }
+.notes-cmdk-badge-both { color: var(--accent, #6366f1); background: rgba(99, 102, 241, 0.16); }
+.notes-cmdk-badge-semantic { color: var(--fg-muted, #8a8f98); background: var(--bg-secondary, #1a1c20); }
+.notes-cmdk-create .notes-cmdk-create-label {
+  font-size: 14px;
+  color: var(--accent, #6366f1);
+}
+.notes-cmdk-footer {
+  padding: 8px 14px;
+  border-top: 1px solid var(--border, #2a2d34);
+  font-size: 11px;
+  color: var(--fg-muted, #8a8f98);
+}
+.notes-cmdk-footer kbd {
+  font-family: var(--font-mono, monospace);
+  font-size: 10px;
+  background: var(--bg-secondary, #1a1c20);
+  border: 1px solid var(--border, #2a2d34);
+  border-radius: 4px;
+  padding: 1px 4px;
+}
+
+/* ── /notes empty state — newcomer on-ramp (§3.6½) ─────────────────────── */
+.notes-empty-state {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  padding: 24px;
+}
+.notes-empty-state-content {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  max-width: 360px;
+  text-align: center;
+}
+.notes-empty-state-title {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 600;
+  color: var(--fg, #e8eaed);
+}
+.notes-empty-state-hint {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--fg-muted, #8a8f98);
+}
+.notes-empty-state-hint kbd {
+  font-family: var(--font-mono, monospace);
+  font-size: 11px;
+  background: var(--bg-secondary, #1a1c20);
+  border: 1px solid var(--border, #2a2d34);
+  border-radius: 4px;
+  padding: 1px 5px;
+}
+.notes-empty-state-cta {
+  margin-top: 4px;
+  padding: 8px 16px;
+  border: none;
+  border-radius: var(--radius-md, 8px);
+  background: var(--accent, #6366f1);
+  color: #fff;
+  font-size: 14px;
+  font-weight: 500;
+  cursor: pointer;
+}
+.notes-empty-state-cta:hover { background: var(--accent-hover, #5457e0); }
+
+/* ── External/AI-write reload banner (§6.2 dirty-guard) ────────────────── */
+.notes-reload-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin: 8px 16px 0;
+  padding: 8px 12px;
+  border: 1px solid var(--accent, #6366f1);
+  border-radius: var(--radius-md, 8px);
+  background: var(--accent-subtle, rgba(99, 102, 241, 0.12));
+  font-size: 13px;
+  color: var(--fg, #e8eaed);
+}
+.notes-reload-banner.conflict {
+  border-color: var(--warning, #f59e0b);
+  background: var(--warning-subtle, rgba(245, 158, 11, 0.12));
+}
+.notes-reload-banner-text { flex: 1; min-width: 200px; }
+.notes-reload-banner-actions { display: flex; gap: 6px; }
+.notes-reload-banner-btn {
+  padding: 4px 10px;
+  border: 1px solid var(--border, #2a2d34);
+  border-radius: var(--radius-sm, 6px);
+  background: transparent;
+  color: var(--fg-secondary, #c4c7cc);
+  font-size: 12px;
+  cursor: pointer;
+}
+.notes-reload-banner-btn:hover { background: var(--bg-hover, #2d3038); color: var(--fg, #e8eaed); }
+.notes-reload-banner-btn.primary {
+  background: var(--accent, #6366f1);
+  border-color: var(--accent, #6366f1);
+  color: #fff;
+}
+.notes-reload-banner.conflict .notes-reload-banner-btn.primary {
+  background: var(--warning, #f59e0b);
+  border-color: var(--warning, #f59e0b);
+}
+
+/* ── Backlinks: ambiguous edge badge (§4.3 — shown, not hidden) ─────────── */
+.notes-backlink-item.ambiguous { border-left: 2px solid var(--warning, #f59e0b); }
+.notes-backlink-ambiguous {
+  display: inline-block;
+  margin-left: 6px;
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: var(--warning, #f59e0b);
+  background: var(--warning-subtle, rgba(245, 158, 11, 0.12));
+  border-radius: var(--radius-full, 999px);
+  padding: 0 6px;
+}
+
+/* ══ Multi-tab editing (#6) ════════════════════════════════════════════════
+ * The tab strip sits ABOVE the editor inside .notes-editor-pane (which is a
+ * column flex). The strip is a fixed-height row; .notes-editor-body flex-grows
+ * to fill the rest so the editor scrolls under a sticky strip.
+ */
+.notes-editor-body {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.notes-tab-strip {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: stretch;
+  gap: 2px;
+  padding: 4px 6px 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  border-bottom: 1px solid var(--border, #2a2d35);
+  background: var(--bg-secondary, #1a1c22);
+  scrollbar-width: thin;
+}
+/* Keep the strip slim — hide the horizontal scrollbar track visually. */
+.notes-tab-strip::-webkit-scrollbar { height: 4px; }
+.notes-tab-strip::-webkit-scrollbar-thumb { background: var(--border, #2a2d35); border-radius: 999px; }
+
+.notes-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 200px;
+  padding: 6px 8px 6px 12px;
+  border: 1px solid transparent;
+  border-bottom: none;
+  border-top-left-radius: var(--radius, 6px);
+  border-top-right-radius: var(--radius, 6px);
+  font-size: 13px;
+  color: var(--fg-secondary, #c4c7cc);
+  cursor: pointer;
+  user-select: none;
+  white-space: nowrap;
+  flex: 0 0 auto;
+}
+.notes-tab:hover { background: var(--bg-hover, #2d3038); color: var(--fg, #e8eaed); }
+.notes-tab.active {
+  background: var(--bg, #15171c);
+  color: var(--fg, #e8eaed);
+  border-color: var(--border, #2a2d35);
+  /* Visually bridge the strip's bottom border so the active tab "owns" the pane. */
+  margin-bottom: -1px;
+  padding-bottom: 7px;
+}
+
+.notes-tab-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.notes-tab-close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  border: none;
+  border-radius: var(--radius-sm, 4px);
+  background: transparent;
+  color: var(--fg-muted, #8a8f98);
+  cursor: pointer;
+  opacity: 0.6;
+  flex: 0 0 auto;
+}
+.notes-tab:hover .notes-tab-close,
+.notes-tab.active .notes-tab-close { opacity: 1; }
+.notes-tab-close:hover { background: var(--bg-tertiary, #3a3d45); color: var(--fg, #e8eaed); }
+
+.notes-tab-new {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  padding: 0;
+  margin: 0 2px;
+  border: none;
+  border-radius: var(--radius-sm, 4px);
+  background: transparent;
+  color: var(--fg-muted, #8a8f98);
+  cursor: pointer;
+  flex: 0 0 auto;
+}
+.notes-tab-new:hover { background: var(--bg-hover, #2d3038); color: var(--fg, #e8eaed); }
+
+/* ══ Note bookmarks (#5) ═══════════════════════════════════════════════════ */
+
+/* Title-bar bookmark toggle (in .notes-editor-meta). */
+.notes-bookmark-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: none;
+  border-radius: var(--radius-sm, 4px);
+  background: transparent;
+  color: var(--fg-muted, #8a8f98);
+  cursor: pointer;
+}
+.notes-bookmark-btn:hover { background: var(--bg-hover, #2d3038); color: var(--fg, #e8eaed); }
+.notes-bookmark-btn.active { color: var(--accent, #6366f1); }
+
+/* Bookmarks group at the top of the tree. */
+.notes-bookmarks-group {
+  border-bottom: 1px solid var(--border, #2a2d35);
+  padding-bottom: 4px;
+}
+.notes-bookmarks-header {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 8px 12px;
+  cursor: pointer;
+  font-weight: 600;
+  color: var(--fg-secondary, #c4c7cc);
+}
+.notes-bookmarks-header:hover { background: var(--bg-hover, #2d3038); }
+.notes-bookmarks-header .notes-tree-arrow {
+  display: inline-flex;
+  transition: transform 0.12s ease;
+}
+.notes-bookmarks-header .notes-tree-arrow.expanded { transform: rotate(90deg); }
+.notes-bookmarks-count {
+  margin-left: auto;
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--fg-muted, #8a8f98);
+}
+
+.notes-bookmark-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding-left: 28px !important;
+}
+.notes-bookmark-row .notes-tree-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.notes-bookmark-remove {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: none;
+  border-radius: var(--radius-sm, 4px);
+  background: transparent;
+  color: var(--fg-muted, #8a8f98);
+  cursor: pointer;
+  opacity: 0;
+  flex: 0 0 auto;
+}
+.notes-bookmark-row:hover .notes-bookmark-remove { opacity: 0.7; }
+.notes-bookmark-remove:hover { opacity: 1 !important; background: var(--bg-tertiary, #3a3d45); color: var(--fg, #e8eaed); }

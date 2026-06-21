@@ -1,26 +1,31 @@
 /**
  * React portal that renders the slash command floating panel at the cursor
- * position. Manages the state machine: commands -> task-search -> closed.
+ * position. Manages the state machine: commands -> (task-search | note-link) ->
+ * closed. Block-insert commands run inline via cmd.run() and close immediately.
  */
 
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { createPortal } from 'react-dom';
 import type { Editor } from '@tiptap/core';
 import type { Task } from '@open-walnut/core';
+import type { NoteListItem } from '@/api/notes-v2';
 import type { SlashCommandState, NoteSlashCommand, SlashRange } from './types';
 import { SlashCommandMenu } from './SlashCommandMenu';
 import { TaskSearchPanel } from './TaskSearchPanel';
+import { NoteLinkPanel } from './NoteLinkPanel';
 
 interface SlashCommandPortalProps {
   editor: Editor;
-  state: SlashCommandState;
+  state: SlashCommandState & { atBlockStart?: boolean };
   tasks: Task[];
   focusedTaskId?: string;
+  /** Notes for the "Link to note" sub-panel (Obsidian-native [[Title]] insert). */
+  wikiLinkNotes?: NoteListItem[];
   onClose: () => void;
 }
 
-export function SlashCommandPortal({ editor, state, tasks, focusedTaskId, onClose }: SlashCommandPortalProps) {
-  const [subPanel, setSubPanel] = useState<'task-search' | null>(null);
+export function SlashCommandPortal({ editor, state, tasks, focusedTaskId, wikiLinkNotes, onClose }: SlashCommandPortalProps) {
+  const [subPanel, setSubPanel] = useState<'task-search' | 'note-link' | null>(null);
   const panelRef = useRef<HTMLDivElement>(null);
   const [coords, setCoords] = useState<{ left: number; top: number } | null>(null);
   // Store the range when transitioning to sub-panels (range is lost from state)
@@ -51,15 +56,9 @@ export function SlashCommandPortal({ editor, state, tasks, focusedTaskId, onClos
 
     try {
       const c = editor.view.coordsAtPos(range.from);
-
-      // Measure actual panel height after render (fallback to estimate)
       const panelH = panelRef.current?.getBoundingClientRect().height || 120;
-
-      // Prefer above: anchor bottom of panel to top of "/" line
       const aboveTop = c.top - panelH - 4;
-      // Fallback below: anchor top of panel to bottom of "/" line
       const belowTop = c.bottom + 4;
-
       const top = aboveTop >= 0 ? aboveTop : belowTop;
       setCoords({ left: c.left, top });
     } catch {
@@ -81,17 +80,28 @@ export function SlashCommandPortal({ editor, state, tasks, focusedTaskId, onClos
   }, [state.phase, onClose]);
 
   const handleCommandSelect = useCallback((cmd: NoteSlashCommand) => {
-    if (cmd.action === 'task-search') {
-      setSubPanel('task-search');
+    // Block-insert commands run immediately as one transaction, then close.
+    if (cmd.run) {
+      const range = rangeRef.current;
+      if (range) {
+        const docSize = editor.state.doc.content.size;
+        if (range.from < docSize && range.to <= docSize) {
+          cmd.run(editor, range);
+        }
+      }
+      onClose();
+      return;
     }
-  }, []);
+    // Reference commands open a secondary panel.
+    if (cmd.subPanel === 'task-search') setSubPanel('task-search');
+    else if (cmd.subPanel === 'note-link') setSubPanel('note-link');
+  }, [editor, onClose]);
 
   // Handle task selection — validate range, insert link, close
   const handleTaskSelect = useCallback((task: Task) => {
     const range = rangeRef.current;
     if (!range) { onClose(); return; }
 
-    // Validate range is still within document bounds
     const docSize = editor.state.doc.content.size;
     if (range.from >= docSize || range.to > docSize) { onClose(); return; }
 
@@ -116,7 +126,24 @@ export function SlashCommandPortal({ editor, state, tasks, focusedTaskId, onClos
     onClose();
   }, [editor, onClose]);
 
-  // Back from task-search -> command list
+  // Handle note-link selection — insert Obsidian-native [[Title]] (plain text).
+  const handleNoteLinkSelect = useCallback((noteName: string) => {
+    const range = rangeRef.current;
+    if (!range) { onClose(); return; }
+    const docSize = editor.state.doc.content.size;
+    if (range.from >= docSize || range.to > docSize) { onClose(); return; }
+
+    editor
+      .chain()
+      .focus()
+      .deleteRange(range)
+      .insertContent(`[[${noteName}]] `)
+      .run();
+
+    onClose();
+  }, [editor, onClose]);
+
+  // Back from a sub-panel -> command list
   const handleBack = useCallback(() => {
     setSubPanel(null);
     editor.commands.focus();
@@ -124,20 +151,34 @@ export function SlashCommandPortal({ editor, state, tasks, focusedTaskId, onClos
 
   if (state.phase === 'closed' || !coords) return null;
 
-  const panel = subPanel === 'task-search' ? (
-    <TaskSearchPanel
-      tasks={tasks}
-      focusedTaskId={focusedTaskId}
-      onSelect={handleTaskSelect}
-      onBack={handleBack}
-    />
-  ) : state.phase === 'commands' ? (
-    <SlashCommandMenu
-      query={state.query}
-      onSelect={handleCommandSelect}
-      onClose={onClose}
-    />
-  ) : null;
+  let panel: React.ReactNode = null;
+  if (subPanel === 'task-search') {
+    panel = (
+      <TaskSearchPanel
+        tasks={tasks}
+        focusedTaskId={focusedTaskId}
+        onSelect={handleTaskSelect}
+        onBack={handleBack}
+      />
+    );
+  } else if (subPanel === 'note-link') {
+    panel = (
+      <NoteLinkPanel
+        notes={wikiLinkNotes ?? []}
+        onSelect={handleNoteLinkSelect}
+        onBack={handleBack}
+      />
+    );
+  } else if (state.phase === 'commands') {
+    panel = (
+      <SlashCommandMenu
+        query={state.query}
+        atBlockStart={state.atBlockStart ?? true}
+        onSelect={handleCommandSelect}
+        onClose={onClose}
+      />
+    );
+  }
 
   if (!panel) return null;
 

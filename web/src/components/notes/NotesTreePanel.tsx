@@ -1,40 +1,168 @@
-import { useState, useCallback, useRef, useEffect } from 'react';
+import { useState, useCallback, useRef, useEffect, useMemo, memo } from 'react';
 import { searchNotes, saveNoteContent } from '@/api/notes-v2';
-import type { NoteTreeNode } from '@/api/notes-v2';
+import type { NoteTreeNode, SearchResult } from '@/api/notes-v2';
+import { NotesBookmarksGroup } from './NotesBookmarksGroup';
+import { NotesRecentGroup, RECENT_GROUP_KEY } from './NotesRecentGroup';
+import { HighlightedText, HighlightedTitle } from './HighlightedText';
+import { useConfirm, useAlert } from '@/hooks/useConfirm';
+
+/**
+ * Folder expand/collapse persistence (Feature 3). The expanded-folders set is
+ * mirrored to localStorage on every toggle and hydrated on mount. Stale paths
+ * (folders that no longer exist) are kept verbatim — they simply never match a
+ * render, so they're harmless and survive a temporary move/rename.
+ *
+ * The same set doubles as the Recent group's collapse store via the RECENT_GROUP_KEY
+ * sentinel (Feature 4): present in the set ⇒ Recent group is COLLAPSED. Folders use
+ * the opposite convention (present ⇒ expanded), so the sentinel is treated specially.
+ */
+const LS_EXPANDED_KEY = 'open-walnut-notes-expanded';
+
+function readExpandedFolders(): Set<string> {
+  try {
+    const raw = localStorage.getItem(LS_EXPANDED_KEY);
+    if (raw) {
+      const arr = JSON.parse(raw);
+      if (Array.isArray(arr)) return new Set(arr.filter((x): x is string => typeof x === 'string'));
+    }
+  } catch { /* malformed / disabled storage — start fresh */ }
+  return new Set();
+}
+
+/** Collect every note (non-attachment file) path in the tree — used to skip stale recents. */
+function collectNotePaths(nodes: NoteTreeNode[], acc: Set<string> = new Set()): Set<string> {
+  for (const n of nodes) {
+    if (n.type === 'folder') {
+      if (n.children) collectNotePaths(n.children, acc);
+    } else if (n.kind !== 'attachment') {
+      acc.add(n.path);
+    }
+  }
+  return acc;
+}
 
 interface NotesTreePanelProps {
   tree: NoteTreeNode[];
   selectedPath: string | null;
-  onSelect: (path: string) => void;
+  /** Open a note. `opts.newTab` (⌘-click / context-menu) opens it in a new tab. */
+  onSelect: (path: string, opts?: { newTab?: boolean }) => void;
+  /** Preview an attachment (image/pdf) — distinct from onSelect, which markdown-loads. */
+  onPreviewAttachment: (path: string) => void;
   onCreateNote: (path: string) => void;
   onCreateFolder: (path: string) => void;
   onDeleteNote: (path: string) => void;
   onRenameNote: (from: string, to: string) => void;
   onRefresh: () => void;
+  /** Vault-relative paths (WITH .md) of bookmarked notes — drives the Bookmarks group. */
+  favoriteNotes: string[];
+  /** Toggle a note's bookmark (used by the inline un-bookmark affordance). */
+  onToggleFavorite: (path: string) => void;
+  /**
+   * Reveal-in-tree target (locate button / auto-locate on tab switch / breadcrumb
+   * click). When `revealNonce` changes, every ancestor folder of `revealPath` is
+   * expanded and the node is scrolled into view. The nonce lets the SAME path be
+   * re-revealed (a plain path-equality effect wouldn't re-fire).
+   */
+  revealPath?: string | null;
+  revealNonce?: number;
 }
 
-export function NotesTreePanel({
+/** Cumulative folder prefixes of a vault path: `a/b/c.md` → ['a', 'a/b', 'a/b/c.md']. */
+function ancestorFolderPaths(p: string): string[] {
+  const segs = p.split('/');
+  const out: string[] = [];
+  for (let i = 1; i <= segs.length; i++) out.push(segs.slice(0, i).join('/'));
+  return out;
+}
+
+/**
+ * memo()'d: NotesPage re-renders on every saveStatus tick while typing
+ * (saving→saved→idle). The tree's props are referentially stable across those
+ * ticks, so memoization keeps the whole left pane out of that render loop —
+ * part of the "page flashes while typing" fix.
+ */
+export const NotesTreePanel = memo(function NotesTreePanel({
   tree,
   selectedPath,
   onSelect,
+  onPreviewAttachment,
   onCreateNote,
   onCreateFolder,
   onDeleteNote,
   onRenameNote,
   onRefresh,
+  favoriteNotes,
+  onToggleFavorite,
+  revealPath,
+  revealNonce,
 }: NotesTreePanelProps) {
   const [searchQuery, setSearchQuery] = useState('');
-  const [searchResults, setSearchResults] = useState<Array<{ path: string; name: string; snippet: string }> | null>(null);
-  const [expandedFolders, setExpandedFolders] = useState<Set<string>>(() => new Set());
+  const [searchResults, setSearchResults] = useState<SearchResult[] | null>(null);
+  const [expandedFolders, setExpandedFolders] = useState<Set<string>>(readExpandedFolders);
   const [creatingIn, setCreatingIn] = useState<string | null>(null);
   const [newItemName, setNewItemName] = useState('');
   const [newItemType, setNewItemType] = useState<'file' | 'folder'>('file');
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; node: NoteTreeNode } | null>(null);
   const [renaming, setRenaming] = useState<string | null>(null);
   const [renameValue, setRenameValue] = useState('');
+  // Drag-to-move (#5): the path being dragged + the current drop-target folder
+  // ('' = vault root). Backend POST /api/notes-v2/move preserves id + backlinks.
+  const [draggingPath, setDraggingPath] = useState<string | null>(null);
+  const [dropTarget, setDropTarget] = useState<string | null>(null);
   const searchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const newItemInputRef = useRef<HTMLInputElement>(null);
   const renameInputRef = useRef<HTMLInputElement>(null);
+  const bodyRef = useRef<HTMLDivElement>(null);
+  const confirm = useConfirm();
+  const alert = useAlert();
+
+  // Reveal-in-tree: expand every ancestor folder of revealPath, then scroll the
+  // node into view. Re-fires whenever revealNonce changes (so the locate button
+  // works even on the already-selected note). `revealPath` may be a folder
+  // (breadcrumb click) or a note (locate button / tab switch).
+  useEffect(() => {
+    if (!revealPath) return;
+    setExpandedFolders((prev) => {
+      const next = new Set(prev);
+      // Expand all prefixes EXCEPT the leaf itself when it's a note (its parent
+      // folders must open, but a .md leaf isn't a folder). For a folder target we
+      // expand it too so its children show.
+      const prefixes = ancestorFolderPaths(revealPath);
+      const isNote = revealPath.endsWith('.md');
+      for (const p of prefixes) {
+        if (isNote && p === revealPath) continue;
+        next.add(p);
+      }
+      return next;
+    });
+    // Defer scroll until the newly-expanded rows have rendered.
+    const t = setTimeout(() => {
+      const el = bodyRef.current?.querySelector(
+        `[data-node-path="${(window as unknown as { CSS?: typeof CSS }).CSS?.escape ? CSS.escape(revealPath) : revealPath}"]`,
+      ) as HTMLElement | null;
+      el?.scrollIntoView({ block: 'nearest' });
+    }, 60);
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [revealPath, revealNonce]);
+
+  // Feature 3: persist the expanded-folders set (+ Recent collapse sentinel) on change.
+  useEffect(() => {
+    try { localStorage.setItem(LS_EXPANDED_KEY, JSON.stringify([...expandedFolders])); } catch { /* ignore */ }
+  }, [expandedFolders]);
+
+  // Feature 4: note paths present in the current tree (skip stale recents).
+  const existingNotePaths = useMemo(() => collectNotePaths(tree), [tree]);
+  // Recent group is COLLAPSED iff the sentinel is in the expanded-folders set.
+  const recentExpanded = !expandedFolders.has(RECENT_GROUP_KEY);
+  const toggleRecent = useCallback(() => {
+    setExpandedFolders((prev) => {
+      const next = new Set(prev);
+      if (next.has(RECENT_GROUP_KEY)) next.delete(RECENT_GROUP_KEY);
+      else next.add(RECENT_GROUP_KEY);
+      return next;
+    });
+  }, []);
 
   // Focus input when creating
   useEffect(() => {
@@ -65,22 +193,28 @@ export function NotesTreePanel({
     };
   }, []);
 
-  // Search handler with debounce
+  // Search handler with debounce. Previous results stay rendered during a
+  // refetch (we only setSearchResults on response) so typing never collapses the
+  // list to a flash of "No results"; the seq guard drops out-of-order responses
+  // so a slow older query can't overwrite a newer one.
+  const searchSeqRef = useRef(0);
   const handleSearchChange = useCallback((value: string) => {
     setSearchQuery(value);
     if (searchTimerRef.current) clearTimeout(searchTimerRef.current);
 
     if (!value.trim()) {
+      searchSeqRef.current++; // invalidate any in-flight search
       setSearchResults(null);
       return;
     }
 
+    const seq = ++searchSeqRef.current;
     searchTimerRef.current = setTimeout(async () => {
       try {
         const results = await searchNotes(value.trim());
-        setSearchResults(results);
+        if (seq === searchSeqRef.current) setSearchResults(results);
       } catch {
-        setSearchResults([]);
+        if (seq === searchSeqRef.current) setSearchResults([]);
       }
     }, 300);
   }, []);
@@ -151,14 +285,70 @@ export function NotesTreePanel({
     setRenaming(null);
   }, [renaming, renameValue, onRenameNote]);
 
-  const handleDeleteFromMenu = useCallback(() => {
+  const handleDeleteFromMenu = useCallback(async () => {
     if (!contextMenu) return;
     const { node } = contextMenu;
     setContextMenu(null);
-    if (confirm(`Delete "${node.name}"?`)) {
+    if (await confirm({ title: `Delete “${node.name}”?`, confirmLabel: 'Delete', danger: true })) {
       onDeleteNote(node.path);
     }
-  }, [contextMenu, onDeleteNote]);
+  }, [contextMenu, onDeleteNote, confirm]);
+
+  // ── Drag-to-move (#5) ──
+  // Source path is carried in component state (dataTransfer too, for completeness).
+  const handleDragStart = useCallback((e: React.DragEvent, path: string) => {
+    e.stopPropagation();
+    setDraggingPath(path);
+    e.dataTransfer.effectAllowed = 'move';
+    try { e.dataTransfer.setData('text/plain', path); } catch { /* some browsers restrict */ }
+  }, []);
+
+  const handleDragEnd = useCallback(() => {
+    setDraggingPath(null);
+    setDropTarget(null);
+  }, []);
+
+  // True if `dest` is the dragged node itself or one of its descendants (can't
+  // move a folder into its own subtree).
+  const isInvalidDrop = useCallback((src: string | null, destFolder: string): boolean => {
+    if (!src) return true;
+    const srcDir = src.includes('/') ? src.slice(0, src.lastIndexOf('/')) : '';
+    if (srcDir === destFolder) return true;                 // same dir — no-op
+    if (destFolder === src) return true;                    // onto itself
+    if (destFolder.startsWith(src + '/')) return true;      // into own descendant
+    return false;
+  }, []);
+
+  const handleFolderDragOver = useCallback((e: React.DragEvent, folderPath: string) => {
+    if (!draggingPath) return;
+    e.preventDefault();
+    e.stopPropagation();
+    e.dataTransfer.dropEffect = isInvalidDrop(draggingPath, folderPath) ? 'none' : 'move';
+    setDropTarget(folderPath);
+  }, [draggingPath, isInvalidDrop]);
+
+  const performMove = useCallback(async (src: string, destFolder: string) => {
+    const base = src.split('/').pop() as string;
+    const to = destFolder ? `${destFolder}/${base}` : base;
+    if (to === src) return;
+    // Guard a name collision before hitting the backend (move endpoint 4xx's on
+    // an existing destination, which would otherwise fail silently).
+    if (existingNotePaths.has(to)) {
+      await alert({ title: 'Already exists', message: `A note named “${base}” already exists in that folder.` });
+      return;
+    }
+    onRenameNote(src, to); // → NotesPage.handleRenameNote → moveNote (preserves id/backlinks)
+  }, [onRenameNote, existingNotePaths, alert]);
+
+  const handleDrop = useCallback((e: React.DragEvent, destFolder: string) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const src = draggingPath;
+    setDraggingPath(null);
+    setDropTarget(null);
+    if (!src || isInvalidDrop(src, destFolder)) return;
+    void performMove(src, destFolder);
+  }, [draggingPath, isInvalidDrop, performMove]);
 
   // Render tree node recursively
   const renderNode = (node: NoteTreeNode, depth: number = 0) => {
@@ -170,7 +360,12 @@ export function NotesTreePanel({
       return (
         <div key={node.path}>
           <div
-            className={`notes-tree-item notes-tree-folder depth-${depth}`}
+            className={`notes-tree-item notes-tree-folder depth-${depth}${dropTarget === node.path && !isInvalidDrop(draggingPath, node.path) ? ' notes-tree-drop-target' : ''}`}
+            data-node-path={node.path}
+            onDragEnd={handleDragEnd}
+            onDragOver={(e) => handleFolderDragOver(e, node.path)}
+            onDragLeave={(e) => { e.stopPropagation(); setDropTarget((t) => (t === node.path ? null : t)); }}
+            onDrop={(e) => handleDrop(e, node.path)}
             onClick={() => toggleFolder(node.path)}
             onContextMenu={(e) => handleContextMenu(e, node)}
             style={{ paddingLeft: `${12 + depth * 16}px` }}
@@ -191,11 +386,38 @@ export function NotesTreePanel({
       );
     }
 
+    // Attachments (image/pdf): preview on click, keep the extension in the label,
+    // distinct icon, and no inline markdown-rename input.
+    const isAttachment = node.kind === 'attachment';
+    if (isAttachment) {
+      return (
+        <div
+          key={node.path}
+          className={`notes-tree-item notes-tree-file notes-tree-attachment depth-${depth} ${isSelected ? 'selected' : ''}${draggingPath === node.path ? ' notes-tree-dragging' : ''}`}
+          data-node-path={node.path}
+          draggable
+          onDragStart={(e) => handleDragStart(e, node.path)}
+          onDragEnd={handleDragEnd}
+          onClick={() => onPreviewAttachment(node.path)}
+          onContextMenu={(e) => handleContextMenu(e, node)}
+          style={{ paddingLeft: `${12 + depth * 16}px` }}
+        >
+          <AttachmentIcon name={node.name} />
+          <span className="notes-tree-name">{node.name}</span>
+        </div>
+      );
+    }
+
     return (
       <div
         key={node.path}
-        className={`notes-tree-item notes-tree-file depth-${depth} ${isSelected ? 'selected' : ''}`}
-        onClick={() => !isRenaming && onSelect(node.path)}
+        className={`notes-tree-item notes-tree-file depth-${depth} ${isSelected ? 'selected' : ''}${draggingPath === node.path ? ' notes-tree-dragging' : ''}`}
+        data-node-path={node.path}
+        draggable={!isRenaming}
+        onDragStart={(e) => handleDragStart(e, node.path)}
+        onDragEnd={handleDragEnd}
+        // ⌘/Ctrl-click opens in a NEW tab (Obsidian/browser convention).
+        onClick={(e) => !isRenaming && onSelect(node.path, { newTab: e.metaKey || e.ctrlKey })}
         onContextMenu={(e) => handleContextMenu(e, node)}
         style={{ paddingLeft: `${12 + depth * 16}px` }}
       >
@@ -273,7 +495,37 @@ export function NotesTreePanel({
         />
       </div>
 
-      <div className="notes-tree-body">
+      {/* Bookmarks group (§2.6) — collapsible, at the TOP of the tree. Hidden while
+          searching (search owns the body) and when there are no favorited notes. */}
+      {!searchResults && (
+        <NotesBookmarksGroup
+          favoriteNotes={favoriteNotes}
+          selectedPath={selectedPath}
+          onSelect={onSelect}
+          onToggleFavorite={onToggleFavorite}
+        />
+      )}
+
+      {/* Recent group (Feature 4) — collapsible, directly UNDER Bookmarks. Reads the
+          shared Cmd+K recents store; hidden while searching and when empty. */}
+      {!searchResults && (
+        <NotesRecentGroup
+          existingPaths={existingNotePaths}
+          selectedPath={selectedPath}
+          onSelect={onSelect}
+          expanded={recentExpanded}
+          onToggle={toggleRecent}
+        />
+      )}
+
+      <div
+        className={`notes-tree-body${dropTarget === '' && draggingPath && !isInvalidDrop(draggingPath, '') ? ' notes-tree-drop-root' : ''}`}
+        ref={bodyRef}
+        // Drop onto blank tree area = move to vault root. Folder rows stopPropagation
+        // so this only fires for the empty space between/around them.
+        onDragOver={(e) => { if (draggingPath) { e.preventDefault(); e.dataTransfer.dropEffect = isInvalidDrop(draggingPath, '') ? 'none' : 'move'; setDropTarget(''); } }}
+        onDrop={(e) => handleDrop(e, '')}
+      >
         {searchResults ? (
           <div className="notes-search-results">
             {searchResults.length === 0 ? (
@@ -287,8 +539,17 @@ export function NotesTreePanel({
                 >
                   <FileIcon />
                   <div className="notes-search-result-content">
-                    <span className="notes-tree-name">{r.name}</span>
-                    <span className="notes-search-snippet">{r.snippet}</span>
+                    <span className="notes-tree-name">
+                      {/* Server highlights snippets only — titles get a client-side first-match mark. */}
+                      <HighlightedTitle
+                        text={r.title || r.name || r.path.split('/').pop()?.replace(/\.md$/, '') || ''}
+                        query={searchQuery}
+                      />
+                    </span>
+                    <span className="notes-search-snippet">
+                      {/* Snippet carries literal <mark> tags from the server — render real marks, never raw HTML. */}
+                      <HighlightedText text={r.snippet} />
+                    </span>
                   </div>
                 </div>
               ))
@@ -324,8 +585,17 @@ export function NotesTreePanel({
               </button>
             </>
           )}
-          {contextMenu.node.type === 'file' && (
+          {/* Notes get Open-in-new-tab + bookmark toggle + Rename + Delete. Attachments
+              are view-only in the tree today (rename/delete go through the .md-suffixing
+              note routes, which don't apply to binary files) — preview-only keeps it correct. */}
+          {contextMenu.node.type === 'file' && contextMenu.node.kind !== 'attachment' && (
             <>
+              <button onClick={() => { const p = contextMenu.node.path; setContextMenu(null); onSelect(p, { newTab: true }); }}>
+                Open in new tab
+              </button>
+              <button onClick={() => { const p = contextMenu.node.path; setContextMenu(null); onToggleFavorite(p); }}>
+                {favoriteNotes.includes(contextMenu.node.path) ? 'Remove bookmark' : 'Bookmark'}
+              </button>
               <button onClick={() => handleStartRename(contextMenu.node)}>Rename</button>
               <button className="danger" onClick={handleDeleteFromMenu}>Delete</button>
             </>
@@ -334,7 +604,7 @@ export function NotesTreePanel({
       )}
     </div>
   );
-}
+});
 
 // ─── Inline SVG Icons ────────────────────────────────────────────────────
 
@@ -359,6 +629,28 @@ function FileIcon() {
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" width="16" height="16" className="notes-tree-icon">
       <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
       <polyline points="14 2 14 8 20 8" />
+    </svg>
+  );
+}
+
+/** Icon for an attachment node — image glyph for pictures, document glyph for PDF. */
+function AttachmentIcon({ name }: { name: string }) {
+  const ext = name.slice(name.lastIndexOf('.') + 1).toLowerCase();
+  if (ext === 'pdf') {
+    return (
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" width="16" height="16" className="notes-tree-icon notes-tree-icon-attachment">
+        <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+        <polyline points="14 2 14 8 20 8" />
+        <path d="M9 15h1.5a1.5 1.5 0 0 0 0-3H9v4M14 12v4M14 12h2M14 14h1.5" strokeWidth="1.4" />
+      </svg>
+    );
+  }
+  // Image glyph (png/jpg/jpeg/gif/webp).
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" width="16" height="16" className="notes-tree-icon notes-tree-icon-attachment">
+      <rect x="3" y="3" width="18" height="18" rx="2" ry="2" />
+      <circle cx="8.5" cy="8.5" r="1.5" />
+      <polyline points="21 15 16 10 5 21" />
     </svg>
   );
 }

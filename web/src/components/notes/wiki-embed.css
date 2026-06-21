@@ -1,0 +1,97 @@
+/*
+ * `![[embed]]` inline render inside the notes editor (BUG 2). Notes-owned —
+ * NEVER globals.css. The tree-preview pane is styled separately in
+ * notes-attachment.css; this file is only the in-editor inline embed.
+ */
+
+/* The NodeView wrapper is an inline span (matches the inline atom node) but its
+ * media children render block-ish; inline-block lets an image/PDF/card sit on
+ * its own visual line while staying a single selectable inline unit. */
+.notes-wikiembed-view {
+  display: inline-block;
+  max-width: 100%;
+  vertical-align: top;
+  margin: 2px 0;
+}
+
+/* Selected (clicked) embed gets the same accent ring as other atom nodes. */
+.notes-wikiembed-view.ProseMirror-selectednode .notes-wikiembed-img,
+.notes-wikiembed-view.ProseMirror-selectednode .notes-wikiembed-card,
+.notes-wikiembed-view.ProseMirror-selectednode .notes-wikiembed-pdf {
+  outline: 2px solid var(--accent, #6366f1);
+  outline-offset: 2px;
+}
+
+/* ── Image ────────────────────────────────────────────────────────────── */
+.notes-wikiembed-imglink {
+  display: inline-block;
+  line-height: 0;
+}
+.notes-wikiembed-img {
+  max-width: 100%;
+  max-height: 480px;
+  object-fit: contain;
+  border-radius: var(--radius-sm, 6px);
+  border: 1px solid var(--border, #2a2d34);
+  background: var(--bg-secondary, #1a1c20);
+}
+
+/* ── PDF ──────────────────────────────────────────────────────────────── */
+.notes-wikiembed-pdf {
+  display: inline-block;
+  width: 100%;
+  max-width: 720px;
+}
+.notes-wikiembed-pdf-frame {
+  display: block;
+  width: 100%;
+  height: 520px;
+  border: 1px solid var(--border, #2a2d34);
+  border-radius: var(--radius-sm, 6px);
+  background: #fff;
+}
+.notes-wikiembed-open {
+  display: inline-block;
+  margin-top: 4px;
+  font-size: 12px;
+  color: var(--text-muted, #8a8f98);
+  text-decoration: none;
+}
+.notes-wikiembed-open:hover {
+  color: var(--text, #e6e6e6);
+  text-decoration: underline;
+}
+
+/* ── Click-to-open card (unknown type / failed image) ─────────────────── */
+.notes-wikiembed-card {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border: 1px solid var(--border, #2a2d34);
+  border-radius: var(--radius-sm, 6px);
+  background: var(--bg-secondary, #1a1c20);
+  color: var(--text, #e6e6e6);
+  text-decoration: none;
+  max-width: 100%;
+}
+.notes-wikiembed-card:hover {
+  border-color: var(--accent, #6366f1);
+}
+.notes-wikiembed-card-icon {
+  font-size: 16px;
+  line-height: 1;
+  flex: 0 0 auto;
+}
+.notes-wikiembed-card-name {
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.notes-wikiembed-card-raw {
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 11px;
+  color: var(--text-tertiary, #8a8f98);
+  opacity: 0.7;
+}

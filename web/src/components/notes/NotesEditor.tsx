@@ -9,9 +9,9 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 import { useEditor, EditorContent } from '@tiptap/react';
 import type { Editor } from '@tiptap/core';
 import { Selection } from '@tiptap/pm/state';
+import { canJoin } from '@tiptap/pm/transform';
 import StarterKit from '@tiptap/starter-kit';
 import TaskList from '@tiptap/extension-task-list';
-import TaskItem from '@tiptap/extension-task-item';
 import Placeholder from '@tiptap/extension-placeholder';
 import Image from '@tiptap/extension-image';
 import Link from '@tiptap/extension-link';
@@ -25,8 +25,24 @@ import type { SlashCommandState } from './slash-commands/types';
 import type { WikiLinkState } from './wiki-link/WikiLinkExtension';
 import { WikiLinkExtension } from './wiki-link/WikiLinkExtension';
 import { WikiLinkAutocomplete } from './wiki-link/WikiLinkAutocomplete';
+import { WikiLinkClickExtension } from './wiki-link/WikiLinkClickExtension';
+import { WikiLinkDisambiguation } from './wiki-link/WikiLinkDisambiguation';
+import { resolveWikiLinkTarget } from './wiki-link/resolve-wiki-link';
+import { tableExtensions } from './extensions/table-kit';
+import { EmptyAwareTaskItem } from './extensions/empty-task-item';
+import { normalizeForEditor } from './notes-content-preprocess';
+import { TagNode } from './extensions/tag-node';
+import { Callout } from './extensions/callout-node';
+import { WikiEmbedNode } from './extensions/wiki-embed-node';
+import { TagTrigger } from './extensions/tag-trigger';
+import type { TagTriggerState } from './extensions/tag-trigger';
+import { NotesBubbleMenu } from './NotesBubbleMenu';
+import { NotesDragHandle } from './NotesDragHandle';
+import { TagAutocomplete } from './TagAutocomplete';
+import type { TagSuggestion } from './TagAutocomplete';
 import type { NoteListItem } from '@/api/notes-v2';
 import type { Task } from '@open-walnut/core';
+import './notes-editor.css';
 
 interface NotesEditorProps {
   content: string;
@@ -47,6 +63,14 @@ interface NotesEditorProps {
   wikiLinkNotes?: NoteListItem[];
   /** Called when a wiki link is clicked */
   onWikiLinkClick?: (target: string) => void;
+  /**
+   * Enable the Notion block tools (bubble toolbar + hover drag-handle/＋).
+   * Off by default so the compact home-popup surface can opt out where the
+   * gutter is too narrow for a grip rail.
+   */
+  enableBlockTools?: boolean;
+  /** Frequency-ranked vault tags for #tag autocomplete (from GET /tags; empty = manual typing). */
+  tagSuggestions?: TagSuggestion[];
 }
 
 /**
@@ -92,7 +116,7 @@ const TaskAwareLink = Link.extend({
       return ['a', { ...HTMLAttributes, target: '_blank', rel: 'noopener noreferrer nofollow' }, 0];
     }
     // Normalize to relative path + strip target/rel — we handle navigation ourselves
-    const attrs = { ...HTMLAttributes, href: taskPath, class: 'task-link' };
+    const attrs: Record<string, unknown> = { ...HTMLAttributes, href: taskPath, class: 'task-link' };
     delete attrs.target;
     delete attrs.rel;
     return ['a', attrs, 0];
@@ -175,7 +199,8 @@ function tryJoinPreviousListAndSink(editor: Editor, listItemType: string): boole
 
   // Join the now-adjacent same-type lists
   const joinAt = tr.mapping.map(gapStart);
-  if (!tr.doc.canJoin(joinAt)) return false;
+  // canJoin is a free function in prosemirror-transform, not a Node method.
+  if (!canJoin(tr.doc, joinAt)) return false;
   tr.join(joinAt);
   editor.view.dispatch(tr);
 
@@ -267,7 +292,7 @@ function detachListItemChildren(editor: Editor): boolean {
   }
 }
 
-export function NotesEditor({ content, onDirty, placeholder, className, autoFocus, tasks, focusedTaskId, onTaskClick, enableWikiLinks, wikiLinkNotes, onWikiLinkClick }: NotesEditorProps) {
+export function NotesEditor({ content, onDirty, placeholder, className, autoFocus, tasks, focusedTaskId, onTaskClick, enableWikiLinks, wikiLinkNotes, onWikiLinkClick, enableBlockTools, tagSuggestions }: NotesEditorProps) {
   const isExternalUpdate = useRef(false);
   const editorRef = useRef<Editor | null>(null);
   /**
@@ -277,11 +302,44 @@ export function NotesEditor({ content, onDirty, placeholder, className, autoFocu
    * updates but setContent() is skipped since we already have correct content.
    */
   const isSourceRef = useRef(false);
-  const [slashState, setSlashState] = useState<SlashCommandState>({ phase: 'closed' });
+  const [slashState, setSlashState] = useState<SlashCommandState & { atBlockStart?: boolean }>({ phase: 'closed' });
   const [wikiLinkState, setWikiLinkState] = useState<WikiLinkState>({ phase: 'closed' });
+  const [tagState, setTagState] = useState<TagTriggerState>({ phase: 'closed' });
+  /**
+   * When a clicked bare `[[Title]]` resolves to MORE THAN ONE note, hold the
+   * candidates so the disambiguation picker can render (§2.2 ambiguous edge).
+   */
+  const [disambig, setDisambig] = useState<{ target: string; candidates: NoteListItem[] } | null>(null);
   // Ref so ProseMirror's handleClick closure always sees the latest callback
   const onTaskClickRef = useRef(onTaskClick);
   onTaskClickRef.current = onTaskClick;
+  // Refs so the wiki-link click plugin (built once) always sees the latest
+  // note list + navigate callback without rebuilding the editor.
+  const wikiLinkNotesRef = useRef(wikiLinkNotes);
+  wikiLinkNotesRef.current = wikiLinkNotes;
+  const onWikiLinkClickRef = useRef(onWikiLinkClick);
+  onWikiLinkClickRef.current = onWikiLinkClick;
+
+  /**
+   * Resolve a clicked wiki-link target → navigate, or open a disambiguation
+   * picker for the ambiguous (same-name) case. Mirrors the backend resolution
+   * order (path form first, then title/basename). The id is display-only here;
+   * navigation is by `path` and the id NEVER appears in link text (§2.2/§3.5).
+   */
+  const handleWikiLinkNavigate = useCallback((target: string) => {
+    const notes = wikiLinkNotesRef.current ?? [];
+    const navigate = onWikiLinkClickRef.current;
+    const res = resolveWikiLinkTarget(target, notes);
+    if (res.kind === 'resolved') {
+      navigate?.(res.note.path);
+    } else if (res.kind === 'ambiguous') {
+      setDisambig({ target, candidates: res.candidates });
+    } else {
+      // Unresolved — navigate by name so the editor can open/create it
+      // (the backend assigns an id on first save; never an id in link text).
+      navigate?.(target.includes('/') ? `${target}.md` : `${target}.md`);
+    }
+  }, []);
 
   /** Upload a File (image blob) to server, insert into editor */
   const handleImageUpload = useCallback(async (file: File, editor: Editor) => {
@@ -312,7 +370,9 @@ export function NotesEditor({ content, onDirty, placeholder, className, autoFocu
         link: false,
       }),
       TightTaskList,
-      TaskItem.configure({
+      // Empty-aware so a bare `- [ ]` orphan checkbox round-trips byte-clean
+      // (see empty-task-item.ts + notes-content-preprocess.ts).
+      EmptyAwareTaskItem.configure({
         nested: true,
       }),
       Placeholder.configure({
@@ -340,11 +400,31 @@ export function NotesEditor({ content, onDirty, placeholder, className, autoFocu
       SlashCommandExtension.configure({
         onStateChange: setSlashState,
       }),
-      ...(enableWikiLinks ? [WikiLinkExtension.configure({
-        onStateChange: setWikiLinkState,
-      })] : []),
+      // Notion block nodes — tables (owned GFM serializer), #tag chip, callout.
+      ...tableExtensions,
+      TagNode,
+      Callout,
+      TagTrigger.configure({
+        onStateChange: setTagState,
+      }),
+      ...(enableWikiLinks ? [
+        WikiLinkExtension.configure({
+          onStateChange: setWikiLinkState,
+        }),
+        // Render [[Title]] as a clickable inline link; click → id-keyed resolve
+        // + navigate (or disambiguation picker). No extra node — disk bytes stay
+        // plain [[Title]], so the byte-clean round-trip is untouched (§3.5).
+        WikiLinkClickExtension.configure({
+          onLinkClick: handleWikiLinkNavigate,
+        }),
+        // Render ![[attachment]] embeds inline (image / PDF / click-card). Atom
+        // inline node with a literal-write serialize + a parse rule registered
+        // before markdown-it's image rule, so disk bytes stay `![[...]]`
+        // (byte-clean round-trip — see wiki-embed-node.ts).
+        WikiEmbedNode,
+      ] : []),
     ],
-    content: entityRefsToMarkdownLinks(content),
+    content: normalizeForEditor(entityRefsToMarkdownLinks(content)),
     autofocus: autoFocus ? 'end' : false,
     onUpdate: ({ editor }) => {
       if (isExternalUpdate.current) return;
@@ -454,6 +534,13 @@ export function NotesEditor({ content, onDirty, placeholder, className, autoFocu
 
         if (event.key !== 'Tab') return false;
         const { $from } = _view.state.selection;
+        // Tab-precedence (§6): inside a table, let the table extension's keymap
+        // claim Tab/Shift+Tab for cell navigation. Outside a table, the existing
+        // list-indent logic below is untouched.
+        for (let d = $from.depth; d > 0; d--) {
+          const n = $from.node(d).type.name;
+          if (n === 'table' || n === 'tableCell' || n === 'tableHeader') return false;
+        }
         let listItemType: string | null = null;
         for (let d = $from.depth; d > 0; d--) {
           const name = $from.node(d).type.name;
@@ -462,7 +549,20 @@ export function NotesEditor({ content, onDirty, placeholder, className, autoFocu
             break;
           }
         }
-        if (!listItemType || !editorRef.current) return false;
+        if (!editorRef.current) return false;
+        if (!listItemType) {
+          // Tab trap outside lists: never move focus out of the editor.
+          // (Slash-menu / tag / wiki-link popups grab Tab at the document
+          // capture phase with stopPropagation, so they never reach here.)
+          event.preventDefault();
+          if (!event.shiftKey) {
+            // insertText via a raw transaction, NOT commands.insertContent('\t')
+            // — the latter parses its string arg as HTML, where '\t' is
+            // collapsible whitespace and gets dropped.
+            _view.dispatch(_view.state.tr.insertText('\t').scrollIntoView());
+          }
+          return true;
+        }
         event.preventDefault();
         if (event.shiftKey) {
           editorRef.current.commands.liftListItem(listItemType);
@@ -515,7 +615,11 @@ export function NotesEditor({ content, onDirty, placeholder, className, autoFocu
       // Save cursor position
       const { from, to } = editor.state.selection;
       isExternalUpdate.current = true;
-      editor.commands.setContent(preprocessed, false);
+      // TipTap 3.x: second arg is an options object (was a boolean emitUpdate in 2.x).
+      // Normalize on the way IN (orphan-checkbox ZWSP) so the editor parses it;
+      // the comparison above stays on the bare form so unchanged notes don't
+      // trigger a spurious re-render (the serializer emits the bare form).
+      editor.commands.setContent(normalizeForEditor(preprocessed), { emitUpdate: false });
       // Restore cursor, clamped to new doc size
       const maxPos = editor.state.doc.content.size;
       editor.commands.setTextSelection({
@@ -542,6 +646,46 @@ export function NotesEditor({ content, onDirty, placeholder, className, autoFocu
     setSlashState({ phase: 'closed' });
   }, []);
 
+  // Open the insert-block menu anchored at a document position (drag-handle ＋).
+  // Inserts a fresh paragraph containing a literal "/" and drops the caret right
+  // after it, so the SAME SlashCommandExtension trigger machinery opens the menu
+  // (one menu, two entry points — §3.3). This routes ＋ through the identical
+  // path as manual typing: range tracking + type-to-filter work, the chosen
+  // block's deleteRange removes the "/" cleanly (one transaction = one Cmd+Z),
+  // and a dismiss leaves only "/" exactly like an aborted manual slash — never
+  // a silent stray empty paragraph or a desynced menu state.
+  const handleInsertBelow = useCallback((pos: number) => {
+    if (!editor) return;
+    const safePos = Math.min(pos, editor.state.doc.content.size);
+    editor
+      .chain()
+      .focus()
+      .insertContentAt(safePos, { type: 'paragraph', content: [{ type: 'text', text: '/' }] })
+      // Caret lands just after the inserted "/" (safePos = paragraph open token).
+      .setTextSelection(safePos + 2)
+      .run();
+    // The extension's view.update detects the "/" and opens the menu itself.
+  }, [editor]);
+
+  const handleTagClose = useCallback(() => {
+    setTagState({ phase: 'closed' });
+  }, []);
+
+  // Insert a #tag atomic node, replacing the typed `#query` range.
+  const handleTagSelect = useCallback((slug: string) => {
+    if (!editor || tagState.phase !== 'searching') return;
+    const { range } = tagState;
+    const docSize = editor.state.doc.content.size;
+    if (range.from >= docSize || range.to > docSize) { handleTagClose(); return; }
+    editor
+      .chain()
+      .focus()
+      .deleteRange(range)
+      .insertContent([{ type: 'tag', attrs: { name: slug } }, { type: 'text', text: ' ' }])
+      .run();
+    handleTagClose();
+  }, [editor, tagState, handleTagClose]);
+
   const handleWikiLinkClose = useCallback(() => {
     setWikiLinkState({ phase: 'closed' });
   }, []);
@@ -552,12 +696,23 @@ export function NotesEditor({ content, onDirty, placeholder, className, autoFocu
     const docSize = editor.state.doc.content.size;
     if (range.from >= docSize || range.to > docSize) { handleWikiLinkClose(); return; }
 
-    // Replace [[query with [[target]] as plain text (preserved in markdown)
+    // Obsidian-native authoring (§2.2/§3.5): insert the bare [[Title]] form, but
+    // when the chosen note shares a basename with another note, insert the
+    // PATH form [[folder/Title]] so the link is unambiguous (still 100%
+    // Obsidian-portable). NEVER write an id into link text.
+    const notes = wikiLinkNotesRef.current ?? [];
+    const sameName = notes.filter(
+      (n) => n.name.toLowerCase() === note.name.toLowerCase(),
+    );
+    const linkText = sameName.length > 1
+      ? note.path.replace(/\.md$/i, '')   // path form disambiguates
+      : note.name;                        // bare title is unambiguous
+
     editor
       .chain()
       .focus()
       .deleteRange(range)
-      .insertContent(`[[${note.name}]] `)
+      .insertContent(`[[${linkText}]] `)
       .run();
     handleWikiLinkClose();
   }, [editor, wikiLinkState, handleWikiLinkClose]);
@@ -585,13 +740,28 @@ export function NotesEditor({ content, onDirty, placeholder, className, autoFocu
         editor={editor}
         className={`notes-editor ${className ?? ''}`}
       />
-      {editor && slashState.phase !== 'closed' && tasks && (
+      {/* Selection format toolbar + hover drag-handle (opt-in per surface). */}
+      {editor && enableBlockTools && <NotesBubbleMenu editor={editor} />}
+      {editor && enableBlockTools && (
+        <NotesDragHandle editor={editor} onInsertBelow={handleInsertBelow} />
+      )}
+      {editor && slashState.phase !== 'closed' && (
         <SlashCommandPortal
           editor={editor}
           state={slashState}
-          tasks={tasks}
+          tasks={tasks ?? []}
           focusedTaskId={focusedTaskId}
+          wikiLinkNotes={wikiLinkNotes}
           onClose={handleSlashClose}
+        />
+      )}
+      {editor && tagState.phase === 'searching' && (
+        <TagAutocomplete
+          editor={editor}
+          state={tagState}
+          tags={tagSuggestions ?? []}
+          onClose={handleTagClose}
+          onSelect={handleTagSelect}
         />
       )}
       {editor && wikiLinkState.phase === 'searching' && enableWikiLinks && wikiLinkNotes && (
@@ -602,6 +772,17 @@ export function NotesEditor({ content, onDirty, placeholder, className, autoFocu
           onClose={handleWikiLinkClose}
           onSelect={handleWikiLinkSelect}
           onCreateNew={handleWikiLinkCreate}
+        />
+      )}
+      {disambig && (
+        <WikiLinkDisambiguation
+          target={disambig.target}
+          candidates={disambig.candidates}
+          onPick={(note) => {
+            setDisambig(null);
+            onWikiLinkClickRef.current?.(note.path);
+          }}
+          onClose={() => setDisambig(null)}
         />
       )}
     </>

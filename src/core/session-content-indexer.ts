@@ -4,10 +4,10 @@
  *
  * WHY a separate module: the JSONL→text filtering is pure and noisy to get
  * right (code blocks, tool payloads, base64, size caps). Keeping it out of
- * qmd-session-sync.ts makes it unit-testable in isolation and reusable by the
- * remote daemon, which compiles this same logic to filter on the remote host
- * BEFORE shipping the (tiny) result back over the tunnel — a 14MB JSONL
- * filters down to ~50KB, so we never transfer raw conversation logs.
+ * qmd-session-sync.ts makes it unit-testable in isolation. (It is also the
+ * natural home for a future daemon-side filter that would let remote sessions
+ * be indexed without shipping their full multi-MB JSONL over the tunnel — a
+ * 14MB log filters down to ~50KB. For now only local sessions are indexed.)
  *
  * Output shape (one virtual doc per session, QMD chunks on `## ` headings):
  *

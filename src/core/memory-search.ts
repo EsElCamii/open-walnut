@@ -23,10 +23,13 @@ const SOURCE_WEIGHTS: Record<string, { weight: number; decays: boolean; halfLife
   memory_repo:       { weight: 1.1, decays: false },
   memory_compaction: { weight: 0.8, decays: true, halfLife: 30 },
   memory_session:    { weight: 0.8, decays: true, halfLife: 14 },
-  note_areas:        { weight: 1.0, decays: false },
-  note_projects:     { weight: 1.0, decays: false },
-  note_resources:    { weight: 0.9, decays: false },
-  note_archive:      { weight: 0.5, decays: false },
+  // ONE whole-vault collection (qmd-store.ts widened the notes store from 4 PARA
+  // folders to a single `vault` collection). Source name is `note_vault`.
+  // BEHAVIOR CHANGE (surfaced): the old per-folder bias (note_resources=0.9,
+  // note_archive=0.5) and the Archive includeByDefault:false exclusion are gone —
+  // archived/resource notes are now searched at full weight. If folder-prefix
+  // down-weighting is wanted later, derive it from the `path` prefix at rank time.
+  note_vault:        { weight: 1.0, decays: false },
   task:              { weight: 1.0, decays: false },
   session:           { weight: 0.9, decays: true, halfLife: 30 },
 };
