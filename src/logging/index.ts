@@ -24,12 +24,14 @@ export const log = {
   task: createSubsystemLogger('task'),
   memory: createSubsystemLogger('memory'),
   cron: createSubsystemLogger('cron'),
+  notif: createSubsystemLogger('notif'),
   usage: createSubsystemLogger('usage'),
   heartbeat: createSubsystemLogger('heartbeat'),
   git: createSubsystemLogger('git'),
   browser: createSubsystemLogger('browser'),
   audio: createSubsystemLogger('audio'),
   stt: createSubsystemLogger('stt'),
+  obs: createSubsystemLogger('obs'),
 };
 
 // ── Initialization ──

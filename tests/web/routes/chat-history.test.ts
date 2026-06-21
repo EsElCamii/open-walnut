@@ -14,6 +14,9 @@ import { WALNUT_HOME } from '../../../src/constants.js';
 import { chatHistoryRouter } from '../../../src/web/routes/chat-history.js';
 import { errorHandler } from '../../../src/web/middleware/error-handler.js';
 import * as chatHistory from '../../../src/core/chat-history.js';
+import { getActiveConversationId } from '../../../src/core/conversations.js';
+import type { MessageParam } from '../../../src/agent/model.js';
+import type { DisplayMessage } from '../../../src/core/types.js';
 
 function createApp() {
   const app = express();
@@ -23,9 +26,19 @@ function createApp() {
   return app;
 }
 
+// The REST endpoints resolve to the General agent's active conversation when no
+// conversationId is supplied. Direct seed helpers below target that same
+// conversation so what we write is what the endpoint reads back.
+let convId: string;
+const addTurn = (apiMsgs: MessageParam[], displayMsgs: DisplayMessage[]) =>
+  chatHistory.addTurn(apiMsgs, displayMsgs, 'general', convId);
+const addAIMessages = (msgs: MessageParam[]) =>
+  chatHistory.addAIMessages(msgs, { agentId: 'general', conversationId: convId });
+
 beforeEach(async () => {
   await fs.rm(WALNUT_HOME, { recursive: true, force: true });
   await fs.mkdir(WALNUT_HOME, { recursive: true });
+  convId = await getActiveConversationId('general');
 });
 
 afterEach(async () => {
@@ -50,11 +63,11 @@ describe('GET /api/chat/history', () => {
 
   it('returns persisted display messages', async () => {
     // Seed some history directly
-    await chatHistory.addTurn(
+    await addTurn(
       [{ role: 'user', content: 'hello' }],
       [{ role: 'user', content: 'hello', timestamp: '2025-01-01T00:00:00Z' }],
     );
-    await chatHistory.addTurn(
+    await addTurn(
       [{ role: 'assistant', content: 'hi there' }],
       [{ role: 'assistant', content: 'hi there', timestamp: '2025-01-01T00:00:01Z' }],
     );
@@ -73,7 +86,7 @@ describe('GET /api/chat/history', () => {
   it('supports page and pageSize query parameters', async () => {
     // Add 5 user+assistant turn pairs = 10 logical messages
     for (let i = 0; i < 5; i++) {
-      await chatHistory.addAIMessages([
+      await addAIMessages([
         { role: 'user', content: `msg-${i}` },
         { role: 'assistant', content: `reply-${i}` },
       ]);
@@ -107,7 +120,7 @@ describe('GET /api/chat/history', () => {
   });
 
   it('tool_result entries do not count toward pageSize', async () => {
-    await chatHistory.addAIMessages([
+    await addAIMessages([
       { role: 'user', content: 'search for something' },
       { role: 'assistant', content: [
         { type: 'text', text: 'Searching...' },
@@ -131,7 +144,7 @@ describe('GET /api/chat/history', () => {
 
 describe('POST /api/chat/clear', () => {
   it('clears all history', async () => {
-    await chatHistory.addTurn(
+    await addTurn(
       [{ role: 'user', content: 'hello' }],
       [{ role: 'user', content: 'hello', timestamp: '2025-01-01T00:00:00Z' }],
     );
@@ -154,7 +167,7 @@ describe('POST /api/chat/clear', () => {
   });
 
   it('persists the clear — subsequent reads see empty history', async () => {
-    await chatHistory.addTurn(
+    await addTurn(
       [{ role: 'user', content: 'data' }],
       [{ role: 'user', content: 'data', timestamp: '2025-01-01T00:00:00Z' }],
     );

@@ -15,6 +15,7 @@ import type {
   OnTurnErrorPayload,
   OnMessageSendPayload,
   OnToolUsePayload,
+  OnSessionEndPayload,
 } from './types.js';
 
 // ── Triage dedup state ──
@@ -23,6 +24,74 @@ import type {
 // Key: "sessionId:taskId", Value: last dispatch timestamp.
 const triageLastDispatch = new Map<string, number>();
 const TRIAGE_COOLDOWN_MS = 5_000; // 5 seconds — normal triage cycle takes 10-30s
+
+// ── Session self-report (side_question / "/btw") ──
+// Instead of the triage subagent reading the full session JSONL to GUESS what the
+// session did, we ask the SESSION ITSELF for a structured self-report via the
+// native Claude Code side_question control protocol (ClaudeCodeSession.askSideQuestion).
+// The session has its full context in-cache, so it's the authoritative source and
+// far cheaper than a 4000-token history read. The answer is NOT added to the
+// session transcript. Best-effort: on timeout/failure we fall back to the old
+// history-reading triage path, so triage never regresses.
+// Must stay comfortably under the dispatcher's DEFAULT_HANDLER_TIMEOUT_MS (30s in
+// dispatcher.ts) — the hook runs as an inline `handler`, so if the side_question
+// outlived that budget the dispatcher would abort the whole hook and triage would
+// never dispatch. 20s leaves ~10s headroom for updateSummary + the emit.
+const SELF_REPORT_TIMEOUT_MS = 20_000;
+const SELF_REPORT_PROMPT =
+`You just finished a turn. Give a structured self-report of THIS session so a supervisor can update the task WITHOUT re-reading your transcript. You have the full context — be the authoritative source. Use EXACTLY these labels, each 1-3 sentences, plain text, English only, self-contained (no "this bug"/"the feature"):
+
+WHAT_I_DID: Concrete changes this turn — which files/functions changed and WHY.
+STATUS: <succeeded|failed|blocked|waiting> — one human sentence on what works / what doesn't.
+CHANGES_TRIED: Approaches attempted, dead-ends, and why abandoned (so next turn won't repeat).
+PHASE_SIGNAL: one of — plan-written | implement-done | reconfirmed | verify-pass | verify-fail | review-done | committed(<hash>) | conversational(user-asked-question).
+NEXT_STEPS: What you'd do next, or what you need from the human to proceed.
+BLOCKERS: Anything blocking, or "none".
+USER_INTENT: <question-pending | workflow-command | autonomous> — gist of user's last message.
+VERIFIED: <ran-and-saw-pass | assumed | not-applicable> — what evidence you have.
+ARTIFACTS: commit hash / PR url / plan file path / key files / screenshot paths, or "none".`;
+
+/** The exact labels emitted by SELF_REPORT_PROMPT. Used to anchor extractField's
+ *  field terminator so a wrapped value containing an unrelated ALL-CAPS "WORD:"
+ *  line (e.g. "API:", "TODO:", "NOTE:") doesn't prematurely cut the field. */
+const SELF_REPORT_LABELS = [
+  'WHAT_I_DID', 'STATUS', 'CHANGES_TRIED', 'PHASE_SIGNAL', 'NEXT_STEPS',
+  'BLOCKERS', 'USER_INTENT', 'VERIFIED', 'ARTIFACTS',
+] as const;
+const NEXT_LABEL_LOOKAHEAD = `(?:${SELF_REPORT_LABELS.join('|')})`;
+
+/** Pull a single labeled field out of a self-report. Tolerant of leading bold
+ *  markers and missing fields. Returns '' if absent. Exported for unit tests. */
+export function extractField(report: string, label: string): string {
+  // Match "LABEL:" at line start (optionally **bold**), capture until the next
+  // KNOWN self-report label line or end of string. No 'm' flag — we want `$` to
+  // mean end-of-STRING so a multi-line field captures fully; the label start is
+  // anchored with (?:^|\n). Terminating only on the known label set (not any
+  // ALL-CAPS WORD:) preserves wrapped content like "...see API: notes" inside a
+  // field. `label` is escaped defensively though all call sites pass constants.
+  const safe = label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const re = new RegExp(
+    `(?:^|\\n)\\s*\\*{0,2}${safe}\\*{0,2}\\s*:\\s*([\\s\\S]*?)(?=\\n\\s*\\*{0,2}${NEXT_LABEL_LOOKAHEAD}\\*{0,2}\\s*:|$)`,
+  );
+  const m = report.match(re);
+  return m ? m[1].trim() : '';
+}
+
+/** Build the compact Tier-1 task.summary text from a session self-report. The
+ *  triage subagent may further refine this, but persisting it here guarantees a
+ *  stable summary even if the subagent is skipped/fails. Exported for unit tests. */
+export function summaryFromSelfReport(report: string): string {
+  const status = extractField(report, 'STATUS');
+  const did = extractField(report, 'WHAT_I_DID');
+  const tried = extractField(report, 'CHANGES_TRIED');
+  const next = extractField(report, 'NEXT_STEPS');
+  const sessionSummary = [did, tried].filter(Boolean).join(' ');
+  const lines: string[] = [];
+  if (sessionSummary) lines.push(`**Session Summary**: ${sessionSummary}`);
+  if (status) lines.push(`**Current Agent Status**: ${status}`);
+  if (next) lines.push(`**Next Steps**: ${next}`);
+  return lines.join('\n');
+}
 
 /**
  * turn-complete-triage: Dispatches a triage subagent on turn completion.
@@ -96,15 +165,74 @@ export const turnCompleteTriageHook: SessionHookDefinition = {
         });
       }
 
+      // ── Ask the session for a structured self-report (side_question) ──
+      // The session is the authoritative source for what it just did. When this
+      // succeeds we (a) persist a Tier-1 summary immediately and (b) inject the
+      // self-report so the triage subagent reconciles instead of reading the full
+      // JSONL. On any failure we leave selfReport='' → triage falls back to the
+      // history-reading path (its session_history context source still loads).
+      let selfReport = '';
+      try {
+        const { sessionRunner } = await import('../../providers/claude-code-session.js');
+        const session = sessionRunner.findByClaudeId(p.sessionId);
+        if (session) {
+          selfReport = (await session.askSideQuestion(SELF_REPORT_PROMPT, SELF_REPORT_TIMEOUT_MS)).trim();
+          if (selfReport) {
+            // (a) Persist an EARLY Tier-1 summary as a best-effort optimization so a
+            // usable summary exists even before the triage subagent runs. This can
+            // fail — updateSummary runs plugin content validation, and although the
+            // prompt asks for English, models drift to CJK (see CLAUDE.md Opus 4.8
+            // note) and externally-synced sources reject CJK. That's OK: we ALSO
+            // inject the self-report as triage context below, so the triage subagent
+            // still produces the authoritative summary via its own validated path.
+            // Hence a persist failure is logged at debug, not treated as data loss.
+            const summary = summaryFromSelfReport(selfReport);
+            if (summary) {
+              try {
+                const { updateSummary } = await import('../task-manager.js');
+                await updateSummary(p.taskId, summary);
+              } catch (err) {
+                log.session.debug('turn-complete-triage: early summary persist skipped (triage subagent will still summarize)', {
+                  taskId: p.taskId, error: err instanceof Error ? err.message : String(err),
+                });
+              }
+            }
+            log.session.info('turn-complete-triage: got session self-report', {
+              sessionId: p.sessionId, taskId: p.taskId, reportLen: selfReport.length,
+            });
+          }
+        }
+      } catch (err) {
+        // side_question unavailable (session dead / timeout / write fail) → fall back.
+        log.session.warn('turn-complete-triage: side_question self-report failed, falling back to history read', {
+          sessionId: p.sessionId, taskId: p.taskId, error: err instanceof Error ? err.message : String(err),
+        });
+      }
+
       const sessionType = p.isPlanSession ? 'plan-mode ' : '';
-      const triageTask = `A Claude Code ${sessionType}session just finished for task ${p.taskId}. Session ID: ${p.sessionId}. Turn index: ${p.turnIndex ?? 'unknown'}.\n\nThe <session_history> context below contains recent messages (User + Assistant) with [index] labels. Use these to determine the current phase. If you need full details of a specific message, call session_history with index=N.`;
+      // With a self-report, triage reconciles two inputs (prior summary + this
+      // report) and reads PHASE_SIGNAL directly — no JSONL guessing. Without one,
+      // it falls back to reading <session_history>.
+      const triageTask = selfReport
+        ? `A Claude Code ${sessionType}session just finished for task ${p.taskId}. Session ID: ${p.sessionId}. Turn index: ${p.turnIndex ?? 'unknown'}.\n\nThe session reported its own status below (<session_self_summary>). Use it as the authoritative source — do NOT call session_history (you already have what you need). Reconcile it with the existing task summary, then decide the outcome from its PHASE_SIGNAL and USER_INTENT fields.`
+        : `A Claude Code ${sessionType}session just finished for task ${p.taskId}. Session ID: ${p.sessionId}. Turn index: ${p.turnIndex ?? 'unknown'}.\n\nThe <session_history> context below contains recent messages (User + Assistant) with [index] labels. Use these to determine the current phase. If you need full details of a specific message, call session_history with index=N.`;
+
+      const selfReportContext = selfReport
+        ? `<session_self_summary>\nThe session produced this structured self-report of the turn it just finished. Treat it as authoritative; do not re-read the transcript.\n\n${selfReport}\n</session_self_summary>`
+        : '';
+      const combinedContext = [selfReportContext, notificationContext].filter(Boolean).join('\n\n');
 
       bus.emit('subagent:start', {
         agentId: triageAgentId,
         task: triageTask,
         taskId: p.taskId,
-        context_override: { taskId: p.taskId, sessionId: p.sessionId, cwd: p.session?.cwd, host: p.session?.host },
-        ...(notificationContext ? { context: notificationContext } : {}),
+        context_override: {
+          taskId: p.taskId, sessionId: p.sessionId, cwd: p.session?.cwd, host: p.session?.host,
+          // With a self-report in hand, skip the 4000-token session_history read
+          // it replaces — otherwise the loader runs regardless of the prompt.
+          ...(selfReport ? { suppressSources: ['session_history' as const] } : {}),
+        },
+        ...(combinedContext ? { context: combinedContext } : {}),
       }, ['subagent-runner'], { source: 'turn-complete-triage' });
 
       log.session.info('turn-complete-triage hook: dispatched', {
@@ -313,10 +441,80 @@ export const cwdRenameDetectorHook: SessionHookDefinition = {
   },
 };
 
+// ── Session summary gist dedup ──
+// onSessionEnd can fire more than once (reconnect/replay). Skip if a summary was
+// generated within this window.
+const SUMMARY_COOLDOWN_MS = 60 * 60 * 1000; // 1h
+
+/**
+ * session-summary-gist: on session end, generate a compact LLM gist and write it
+ * to SessionRecord.summary. The QMD session-sync subscriber re-indexes the
+ * session (the gist is prepended as a `# Session Gist` heading → highest-signal
+ * chunk). Conversation body itself is already indexed per-turn by serializer v2;
+ * this only adds the high-level summary.
+ *
+ * Skips embedded subagent sessions, trivial sessions (<2 messages), and sessions
+ * summarized within the cooldown.
+ */
+export const sessionSummaryGistHook: SessionHookDefinition = {
+  id: 'session-summary-gist',
+  name: 'Session Summary Gist (onSessionEnd)',
+  description: 'Generates an LLM gist on session end for high-signal search ranking.',
+  hooks: ['onSessionEnd'],
+  priority: 70,
+  source: 'builtin',
+  enabled: true,
+  handler: async (payload) => {
+    const p = payload as OnSessionEndPayload;
+    const session = p.session;
+    if (!session) return;
+    if (session.provider === 'embedded') return;        // subagent — skip
+    if ((session.messageCount ?? 0) < 2) return;         // trivial — skip
+
+    // Cooldown: avoid re-summarizing on repeated end events.
+    if (session.summaryGeneratedAt) {
+      const age = Date.now() - new Date(session.summaryGeneratedAt).getTime();
+      if (age < SUMMARY_COOLDOWN_MS) return;
+    }
+
+    try {
+      const { summarizeSession } = await import('../../agent/tools/session-summarizer.js');
+      const summary = await summarizeSession(session.claudeSessionId, session);
+      if (!summary || summary.startsWith('Error running session summarizer') || summary.startsWith('No history')) {
+        return; // failed/empty — leave existing doc (raw content) intact
+      }
+
+      const { updateSessionRecord } = await import('../session-tracker.js');
+      await updateSessionRecord(session.claudeSessionId, {
+        summary,
+        summaryGeneratedAt: new Date().toISOString(),
+      });
+
+      // Re-index immediately so the gist is searchable without waiting for the
+      // next turn (there won't be one — the session just ended).
+      const { syncSession, flushSessionEmbeddings } = await import('../qmd-session-sync.js');
+      const updated = { ...session, summary, summaryGeneratedAt: new Date().toISOString() };
+      await syncSession(updated, p.task);
+      await flushSessionEmbeddings();
+
+      log.session.info('session-summary-gist: generated + indexed', {
+        sessionId: session.claudeSessionId,
+        summaryLength: summary.length,
+      });
+    } catch (err) {
+      log.session.warn('session-summary-gist hook failed', {
+        sessionId: session.claudeSessionId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  },
+};
+
 /** All built-in hook definitions. */
 export const builtinHooks: SessionHookDefinition[] = [
   turnCompleteTriageHook,
   messageSendTriageHook,
   sessionErrorNotifyHook,
   cwdRenameDetectorHook,
+  sessionSummaryGistHook,
 ];

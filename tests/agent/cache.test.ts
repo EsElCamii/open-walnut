@@ -14,17 +14,17 @@ describe('toSystemBlocks', () => {
     expect(result).toHaveLength(1);
     expect(result[0].type).toBe('text');
     expect(result[0].text).toBe('You are a helpful assistant.');
-    expect(result[0].cache_control).toEqual({ type: 'ephemeral', ttl: '5m' });
-  });
-
-  it('uses custom TTL when specified', () => {
-    const result = toSystemBlocks('System prompt.', { ttl: '1h' });
     expect(result[0].cache_control).toEqual({ type: 'ephemeral', ttl: '1h' });
   });
 
-  it('defaults to 5m TTL', () => {
+  it('uses custom TTL when specified', () => {
+    const result = toSystemBlocks('System prompt.', { ttl: '5m' });
+    expect(result[0].cache_control).toEqual({ type: 'ephemeral', ttl: '5m' });
+  });
+
+  it('defaults to 1h TTL', () => {
     const result = toSystemBlocks('Text');
-    expect(result[0].cache_control!.ttl).toBe('5m');
+    expect(result[0].cache_control!.ttl).toBe('1h');
   });
 
   it('handles empty string', () => {
@@ -50,7 +50,7 @@ describe('addToolCacheMarker', () => {
     expect(result).toHaveLength(3);
     expect(result[0].cache_control).toBeUndefined();
     expect(result[1].cache_control).toBeUndefined();
-    expect(result[2].cache_control).toEqual({ type: 'ephemeral', ttl: '5m' });
+    expect(result[2].cache_control).toEqual({ type: 'ephemeral', ttl: '1h' });
   });
 
   it('does not mutate the original array', () => {
@@ -65,7 +65,7 @@ describe('addToolCacheMarker', () => {
     const tools = makeTools(1);
     const result = addToolCacheMarker(tools);
 
-    expect(result[0].cache_control).toEqual({ type: 'ephemeral', ttl: '5m' });
+    expect(result[0].cache_control).toEqual({ type: 'ephemeral', ttl: '1h' });
   });
 
   it('returns empty array for empty input', () => {
@@ -97,7 +97,7 @@ describe('injectMessageCacheMarkers', () => {
     const blocks = lastUser.content as Array<{ type: string; text: string; cache_control?: unknown }>;
     expect(blocks).toHaveLength(1);
     expect(blocks[0].text).toBe('How are you?');
-    expect(blocks[0].cache_control).toEqual({ type: 'ephemeral', ttl: '5m' });
+    expect(blocks[0].cache_control).toEqual({ type: 'ephemeral', ttl: '1h' });
 
     // Earlier user message should be untouched
     expect(result[0].content).toBe('Hello');
@@ -119,7 +119,7 @@ describe('injectMessageCacheMarkers', () => {
     expect(blocks).toHaveLength(2);
     // Only last block gets the marker
     expect(blocks[0].cache_control).toBeUndefined();
-    expect(blocks[1].cache_control).toEqual({ type: 'ephemeral', ttl: '5m' });
+    expect(blocks[1].cache_control).toEqual({ type: 'ephemeral', ttl: '1h' });
   });
 
   it('does not mutate original messages', () => {
@@ -378,9 +378,14 @@ describe('CacheTTLTracker', () => {
     expect(tracker.isWithinTTL()).toBe(false);
   });
 
-  it('uses 5 minute default TTL', () => {
+  it('uses 1 hour default TTL', () => {
     tracker.touch();
-    // Just touched, so 5 minutes hasn't elapsed
+    // Just touched, so the default window hasn't elapsed
+    expect(tracker.isWithinTTL()).toBe(true);
+    // Default window is 1h: a point 50 min in the past is still warm,
+    // but the old 5m default would have reported stale here.
+    (tracker as unknown as { lastCallTimestamp: number }).lastCallTimestamp =
+      Date.now() - 50 * 60 * 1000;
     expect(tracker.isWithinTTL()).toBe(true);
   });
 });

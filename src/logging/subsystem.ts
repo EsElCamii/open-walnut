@@ -13,6 +13,7 @@
 
 import chalk from 'chalk';
 import type { LogLevel } from './levels.js';
+import { shouldLog } from './levels.js';
 import { writeLogEntry } from './logger.js';
 import { redactSensitiveText } from './redact.js';
 
@@ -71,6 +72,13 @@ function emit(
   message: string,
   meta?: Record<string, unknown>,
 ): void {
+  // Level gate — FIRST thing, before any work. On the streaming hot path a
+  // single live session emits tens of thousands of `debug` text-delta lines;
+  // below the configured threshold we must do ZERO work (no JSON.stringify, no
+  // synchronous stderr write, no redaction regex) or the event loop starves and
+  // unrelated HTTP requests stall for 15 s. Default threshold is `info`.
+  if (!shouldLog(level)) return;
+
   const now = new Date();
 
   // 1. File — structured JSON line (redaction happens inside writeLogEntry)

@@ -37,12 +37,18 @@ function createTestPng(): Buffer {
   return Buffer.from(pngBase64, 'base64');
 }
 
+// Chat storage is conversation-scoped: target the General agent's active
+// conversation for the history hydration tests.
+let convId: string;
+
 beforeAll(async () => {
   await fs.rm(WALNUT_HOME, { recursive: true, force: true });
   await fs.mkdir(WALNUT_HOME, { recursive: true });
   server = await startServer({ port: 0, dev: true });
   const addr = server.address();
   port = typeof addr === 'object' && addr ? addr.port : 0;
+  const { getActiveConversationId } = await import('../../src/core/conversations.js');
+  convId = await getActiveConversationId('general');
 }, 15_000);
 
 afterAll(async () => {
@@ -186,10 +192,10 @@ describe('Chat history image hydration', () => {
         role: 'assistant',
         content: [{ type: 'text', text: 'It is a red pixel.' }],
       } as any,
-    ]);
+    ], { agentId: 'general', conversationId: convId });
 
     // getModelContext returns path-based blocks (lightweight for token counting)
-    const context = await chatHistory.getModelContext();
+    const context = await chatHistory.getModelContext('general', convId);
     const userMsgWithImage = context.find((m: any) => {
       if (m.role !== 'user' || !Array.isArray(m.content)) return false;
       return (m.content as any[]).some((b: any) => b.type === 'image' && b.path);
@@ -229,10 +235,10 @@ describe('Chat history image hydration', () => {
         role: 'assistant',
         content: [{ type: 'text', text: 'OK' }],
       } as any,
-    ]);
+    ], { agentId: 'general', conversationId: convId });
 
     // Get raw context then hydrate
-    const context = await chatHistory.getModelContext();
+    const context = await chatHistory.getModelContext('general', convId);
     const hydrated = await chatHistory.hydrateImagePaths(context);
 
     // Missing files become text placeholders — should not throw

@@ -48,6 +48,8 @@ import { getQueueStatus } from '../../src/web/agent-turn-queue.js';
 
 let server: HttpServer;
 let port: number;
+// The General agent's active conversation — what chat/cron turns target.
+let convId: string;
 
 function connectWs(): Promise<WebSocket> {
   return new Promise((resolve, reject) => {
@@ -106,6 +108,10 @@ beforeAll(async () => {
   const addr = server.address();
   port = typeof addr === 'object' && addr ? addr.port : 0;
   expect(port).toBeGreaterThan(0);
+  // Chat (WS RPC) and cron main-agent turns both write to the General agent's
+  // active conversation (chat.ts / agent-turn-queue). Read back from the same one.
+  const { getActiveConversationId } = await import('../../src/core/conversations.js');
+  convId = await getActiveConversationId('general');
 }, 30_000);
 
 afterAll(async () => {
@@ -128,7 +134,7 @@ describe('Turn Queue E2E: chat + cron serialize through same queue', () => {
     expect(response.data?.text).toContain('Model response');
 
     // Verify chat history was persisted to disk (real I/O, not mocked)
-    const msgs = await chatHistory.getModelContext();
+    const msgs = await chatHistory.getModelContext('general', convId);
     expect(msgs.length).toBeGreaterThanOrEqual(2); // user + assistant
 
     // Model was called at least once
@@ -138,7 +144,7 @@ describe('Turn Queue E2E: chat + cron serialize through same queue', () => {
   });
 
   it('cron main-agent turn goes through the same queue and persists', async () => {
-    const beforeMsgs = await chatHistory.getModelContext();
+    const beforeMsgs = await chatHistory.getModelContext('general', convId);
     const beforeCount = beforeMsgs.length;
     modelCallCount = 0;
 
@@ -147,16 +153,16 @@ describe('Turn Queue E2E: chat + cron serialize through same queue', () => {
     const { runAgentLoop } = await import('../../src/agent/loop.js');
 
     await enqueueMainAgentTurn('cron:test-e2e', async () => {
-      const history = await chatHistory.getApiMessages();
+      const history = await chatHistory.getApiMessages('general', convId);
       const result = await runAgentLoop('[Scheduled Job "test-e2e"] Check status', history, {
         onTextDelta: () => {},
       }, { source: 'cron' });
       const newMsgs = result.messages.slice(history.length);
-      await chatHistory.addAIMessages(newMsgs);
+      await chatHistory.addAIMessages(newMsgs, { agentId: 'general', conversationId: convId });
     });
 
     // Verify cron turn persisted to chat history (shares same file as chat)
-    const afterMsgs = await chatHistory.getModelContext();
+    const afterMsgs = await chatHistory.getModelContext('general', convId);
     expect(afterMsgs.length).toBeGreaterThan(beforeCount);
     expect(modelCallCount).toBeGreaterThanOrEqual(1);
   });
@@ -211,12 +217,12 @@ describe('Turn Queue E2E: chat + cron serialize through same queue', () => {
       const { runAgentLoop } = await import('../../src/agent/loop.js');
       await enqueueMainAgentTurn('cron:blocked-test', async () => {
         cronOrder.push('cron-dequeued');
-        const history = await chatHistory.getApiMessages();
+        const history = await chatHistory.getApiMessages('general', convId);
         const result = await runAgentLoop('[Cron] Test', history, {
           onTextDelta: () => {},
         }, { source: 'cron' });
         const newMsgs = result.messages.slice(history.length);
-        await chatHistory.addAIMessages(newMsgs);
+        await chatHistory.addAIMessages(newMsgs, { agentId: 'general', conversationId: convId });
         cronOrder.push('cron-done');
       });
     })();

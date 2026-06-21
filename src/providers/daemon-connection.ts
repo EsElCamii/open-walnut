@@ -29,6 +29,7 @@ import path from 'node:path'
 import crypto from 'node:crypto'
 import { log } from '../logging/index.js'
 import { getDaemonSource } from './daemon-source.js'
+import { computeExpectedDaemonVersion } from './daemon-version-check.js'
 import { REQUIRED_DAEMON_CAPABILITIES } from './daemon-capabilities.js'
 import { DAEMON_BINARIES_DIR, IS_EPHEMERAL } from '../constants.js'
 import { buildRemotePreamble } from './session-io.js'
@@ -69,6 +70,12 @@ interface PendingCommand {
   resolve: (result: DaemonCommandResult) => void
   reject: (error: Error) => void
   timer: ReturnType<typeof setTimeout>
+  /** Command name + dispatch time, used to log the round-trip RTT when the
+   *  daemon's response resolves this command. Lets `debug` logs surface
+   *  SSH-tunnel/daemon latency that the enqueue→delivered `deliveryMs` misses. */
+  cmd?: string
+  startedAt?: number
+  traceId?: string
 }
 
 // ── DaemonConnection ──
@@ -105,8 +112,17 @@ export class DaemonConnection {
   /** Daemon start timestamp from the most recent successful `hello`. */
   private _daemonStartedAt: number | null = null
 
+  /**
+   * Last upgrade attempt (expected version + timestamp). Circuit breaker for
+   * shouldUpgradeDaemon: if a just-upgraded daemon still reports a mismatch,
+   * the stamping/deploy pipeline is broken and killing it again won't help.
+   */
+  private _lastUpgradeAttempt: { expected: string, at: number } | null = null
+
   /** Command timeout in ms. Generous for initial deploy operations. */
   private static COMMAND_TIMEOUT_MS = 30_000
+  /** Within this window, refuse a second upgrade toward the same expected version. */
+  private static UPGRADE_RETRY_COOLDOWN_MS = 10 * 60_000
   /** Initial reconnect delay after connection loss (doubles each attempt, caps at MAX). */
   private static RECONNECT_DELAY_MS = 2_000
   /** Maximum reconnect delay — retries forever at this interval. */
@@ -222,6 +238,8 @@ export class DaemonConnection {
         }
       } catch {}
     }
+    // Host (re)connected — let SessionRunner redeliver stranded pending messages.
+    if (changed && value) notifyHostConnected(this.hostKey)
   }
 
   // ── Event subscription ──
@@ -395,13 +413,14 @@ export class DaemonConnection {
       })
     }
 
+    const startedAt = Date.now()
     return new Promise<DaemonCommandResult>((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pendingCommands.delete(id)
         reject(new Error(`daemon command timeout: ${cmd} (${DaemonConnection.COMMAND_TIMEOUT_MS}ms) [traceId=${traceId}]`))
       }, DaemonConnection.COMMAND_TIMEOUT_MS)
 
-      this.pendingCommands.set(id, { resolve, reject, timer })
+      this.pendingCommands.set(id, { resolve, reject, timer, cmd, startedAt, traceId })
       this.ws!.send(message)
     })
   }
@@ -680,6 +699,14 @@ export class DaemonConnection {
       if (result) {
         const status = JSON.parse(result)
         if (status.running && status.port) {
+          // Same staleness check as the binary arm — a source/bun daemon can
+          // be outdated too (it writes daemon.version at startup just like the
+          // binary). Without this, hosts where the binary probe fails would
+          // keep an old source daemon alive forever.
+          const remotePath = await this.getRemoteDaemonPath()
+          if (await this.shouldUpgradeDaemon(remotePath)) {
+            return null
+          }
           log.session.info('DaemonConnection: daemon already running (source/bun)', {
             host: this.hostKey, port: status.port, pid: status.pid,
           })
@@ -703,8 +730,19 @@ export class DaemonConnection {
   }
 
   /**
-   * Compare local binary .version sidecar with remote daemon --version.
-   * If they differ, stop the remote daemon and return true (caller should redeploy).
+   * Decide whether the RUNNING remote daemon is stale and must be replaced.
+   * If stale, stop it and return true (caller should redeploy).
+   *
+   * Probes /tmp/open-walnut/daemon.version — written at startup by whichever
+   * daemon is actually running (compiled binary or source daemon.cjs).
+   *
+   * MUST NOT probe by executing the on-disk binary's --version: deployDaemon
+   * prefers source deploys (bun + daemon.cjs) and never refreshes the binary
+   * file, so the binary on disk can be permanently stale while the running
+   * daemon is current. Probing the binary made the mismatch unresolvable —
+   * every reconnect cycle --stop'ed the healthy daemon, redeployed source,
+   * and 30s later found the same stale binary again (infinite kill loop,
+   * surfaced as ECONNRESET on every in-flight session).
    */
   private async shouldUpgradeDaemon(remotePath: string): Promise<boolean> {
     // Ephemeral attach-only: never upgrade (which would --stop the production
@@ -712,26 +750,73 @@ export class DaemonConnection {
     // expected and must not trigger a restart of the shared singleton.
     if (this.isReadOnlyRemote) return false
     try {
-      const localBinary = await this.getLocalBinaryPath()
-      if (!localBinary) return false
+      const expected = this.getExpectedDaemonVersion()
+      if (!expected) return false
 
-      const versionFile = localBinary + '.version'
-      const localVersion = fs.readFileSync(versionFile, 'utf-8').trim()
-      if (!localVersion) return false
+      const remoteVersion = (await this.sshExec(
+        'cat /tmp/open-walnut/daemon.version 2>/dev/null || true', 5_000,
+      )).trim()
 
-      const remoteVersion = await this.sshExec(`${remotePath} --version 2>/dev/null`, 5_000)
-      if (!remoteVersion) return false
+      if (remoteVersion === expected) {
+        this._lastUpgradeAttempt = null
+        return false
+      }
 
-      if (localVersion === remoteVersion.trim()) return false
+      // Circuit breaker: if we already upgraded toward this same expected
+      // version moments ago and the daemon STILL reports a mismatch, the
+      // upgrade pipeline itself is broken (e.g. version stamping regressed).
+      // Killing the daemon again won't converge — keep the running daemon
+      // alive and scream instead of looping.
+      if (
+        this._lastUpgradeAttempt
+        && this._lastUpgradeAttempt.expected === expected
+        && Date.now() - this._lastUpgradeAttempt.at < DaemonConnection.UPGRADE_RETRY_COOLDOWN_MS
+      ) {
+        log.session.error('DaemonConnection: daemon version still mismatched after recent upgrade — refusing to loop', {
+          host: this.hostKey, expected, remoteVersion: remoteVersion || '(missing)',
+          lastAttemptAgoMs: Date.now() - this._lastUpgradeAttempt.at,
+        })
+        return false
+      }
 
+      // Mismatch (or legacy daemon that predates daemon.version) → upgrade.
       log.session.info('DaemonConnection: daemon version mismatch — stopping for upgrade', {
-        host: this.hostKey, localVersion, remoteVersion: remoteVersion.trim(),
+        host: this.hostKey, expected, remoteVersion: remoteVersion || '(missing)',
       })
-      await this.sshExec(`${remotePath} --stop 2>/dev/null`, 5_000)
+      this._lastUpgradeAttempt = { expected, at: Date.now() }
+      // Stop both runtimes: binary --stop kills via pid file; the explicit
+      // pid-file kill covers hosts where the binary was never deployed.
+      try { await this.sshExec(`${remotePath} --stop 2>/dev/null || true`, 5_000) } catch {}
+      try {
+        await this.sshExec(
+          'PID=$(cat /tmp/open-walnut/daemon.pid 2>/dev/null); ' +
+          '[ -n "$PID" ] && kill "$PID" 2>/dev/null; ' +
+          'rm -f /tmp/open-walnut/daemon.pid /tmp/open-walnut/daemon.port /tmp/open-walnut/daemon.version; true',
+          5_000,
+        )
+      } catch {}
       return true
     } catch {
       // Version check failed — don't block, just reuse existing daemon
       return false
+    }
+  }
+
+  /**
+   * The daemon version this server expects on the remote host.
+   * Source-of-truth: hash of the daemon source tree (identical to what
+   * build-daemon.sh bakes into binaries AND what getDaemonSource() stamps
+   * into source deploys). Sidecar fallback covers installs without src/.
+   */
+  private getExpectedDaemonVersion(): string | null {
+    const computed = computeExpectedDaemonVersion()
+    if (computed) return computed
+    try {
+      const localBinary = path.join(DAEMON_BINARIES_DIR, 'daemon-linux-x64')
+      const v = fs.readFileSync(localBinary + '.version', 'utf-8').trim()
+      return v || null
+    } catch {
+      return null
     }
   }
 
@@ -1538,6 +1623,22 @@ export class DaemonConnection {
       if (pending) {
         clearTimeout(pending.timer)
         this.pendingCommands.delete(msg.id)
+        // Per-command round-trip RTT — paired with the `DaemonConnection: send`
+        // dispatch log by traceId. This is the SSH-tunnel/daemon hop that the
+        // enqueue→delivered `deliveryMs` field omits; on a slow tunnel a `send`
+        // RTT spike here is the smoking gun for "message send is slow". Skip
+        // `ping` (fires every 15s, adds noise). Gated at debug (zero overhead by
+        // default); enable with WALNUT_LOG_LEVEL=debug.
+        if (pending.cmd && pending.cmd !== 'ping' && pending.startedAt != null) {
+          log.session.debug('DaemonConnection: recv (rtt)', {
+            host: this.hostKey,
+            cmd: pending.cmd,
+            id: msg.id,
+            traceId: pending.traceId,
+            rttMs: Date.now() - pending.startedAt,
+            ok: (msg as { ok?: boolean }).ok ?? null,
+          })
+        }
         pending.resolve(msg as unknown as DaemonCommandResult)
       }
       return
@@ -1749,7 +1850,16 @@ export class DaemonConnection {
       const sessions = await listSessions()
 
       for (const s of sessions) {
-        if (s.host !== this.hostKey) continue
+        // Normalize host before comparing: local sessions persist no `host`
+        // field (host=null/undefined), but the local connection's hostKey is
+        // '__local__'. A raw `s.host !== this.hostKey` is therefore ALWAYS true
+        // for local sessions, so every local session was silently skipped here
+        // — after any local-daemon WS flap their daemon-side subscriber was
+        // never re-added, the JSONL watcher fan'd new output to a dead
+        // subscriber set, and the UI froze ("running, no output") until a manual
+        // refresh re-subscribed. Mirror the canonical `host ?? '__local__'`
+        // normalization used elsewhere (e.g. frequent-dirs.ts).
+        if ((s.host ?? '__local__') !== this.hostKey) continue
         if (s.archived) continue
 
         // Reattach any non-terminal session. Both `running` (mid-turn) and
@@ -1889,6 +1999,36 @@ let onPoolStatusChange: (() => void) | null = null
  */
 export function setOnDaemonStatusChange(cb: () => void): void {
   onPoolStatusChange = cb
+}
+
+// ── Pool-level reconnect callback (event-driven message redelivery) ──
+
+let onHostConnected: ((hostKey: string) => void) | null = null
+
+/**
+ * Register a callback fired when a host's daemon connection transitions to
+ * connected. SessionRunner uses this to redeliver queue messages that were
+ * stranded in 'pending' by a delivery failure (SSH outage) — the event-driven
+ * replacement for the old behavior of spin-retrying after every SESSION_ERROR.
+ *
+ * Single-subscriber by design: a second registration silently clobbers the
+ * previous callback. Registering anything other than SessionRunner's
+ * redelivery hook would strand pending messages on reconnect, reintroducing
+ * the 2026-06-10 message-loss bug.
+ */
+export function setOnDaemonHostConnected(cb: (hostKey: string) => void): void {
+  onHostConnected = cb
+}
+
+/** Internal: invoked by DaemonConnection.setConnected(true) transitions. */
+function notifyHostConnected(hostKey: string): void {
+  // The host is provably reachable — drop any stale failure-cache entry NOW.
+  // setConnected(true) fires inside connect(), BEFORE getDaemonConnection's
+  // .then() clears the cache; without this, an immediate redelivery would
+  // fast-fail against the stale entry.
+  failureCache.delete(hostKey)
+  if (!onHostConnected) return
+  try { onHostConnected(hostKey) } catch { /* redelivery must never break connect */ }
 }
 
 // ── Connection Pool ──

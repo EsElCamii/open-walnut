@@ -33,7 +33,7 @@ import { ClaudeCodeSession, SessionRunner, shellQuote, buildRemoteCommand, outpu
 import { bus, EventNames } from '../../src/core/event-bus.js';
 import type { BusEvent } from '../../src/core/event-bus.js';
 import { WALNUT_HOME, SESSION_STREAMS_DIR } from '../../src/constants.js';
-import { enqueueMessage, resetCache as resetQueueCache } from '../../src/core/session-message-queue.js';
+import { enqueueMessage, getQueue, markProcessing, resetCache as resetQueueCache } from '../../src/core/session-message-queue.js';
 import fs from 'node:fs';
 
 // Retrieve the actual tmpBase from the mocked module (single source of truth)
@@ -432,6 +432,157 @@ describe('ClaudeCodeSession', () => {
     expect(result.name).toBe(EventNames.SESSION_RESULT);
     expect((result.data as { result: string }).result).toContain('stdin test');
   });
+});
+
+// ═══════════════════════════════════════════════════════════════════
+//  Regression: delivery failure must not loop, must not lose the message
+//  (2026-06-10 incident: SSH down → settleResumeFailure emitted a plain
+//  SESSION_ERROR → session-runner treated it as turn-end → batch-completed
+//  + processNext → re-deliver → fail → … at 2 cycles/sec, while the UI
+//  deleted the optimistic message on each spurious batch-completed.)
+// ═══════════════════════════════════════════════════════════════════
+
+describe('delivery failure: no retry loop, no message loss', () => {
+  let runner: SessionRunner;
+
+  // COVERAGE NOTE: with no local daemon running in the test env, the delivery
+  // failure surfaces inside processNext (createSessionManager throws "Local
+  // daemon not running") and is caught by processNext's own catch block — that
+  // is the path these unit tests exercise. The sibling async path
+  // (send()'s onSpawnSettled(false) → settleResumeFailure, where the SSH deploy
+  // rejects AFTER send() returns) is the one that historically double-emitted
+  // SESSION_ERROR; it is covered end-to-end by the ephemeral attach-only E2E
+  // (log proof: "resume spawn failed — reverting batch to pending"). Both paths
+  // now emit errorKind:'delivery_failed' and revert-to-pending identically.
+  beforeEach(() => {
+    runner = new SessionRunner('/nonexistent/claude-binary-for-loop-test');
+    runner.init();
+  });
+
+  afterEach(() => {
+    runner.destroyAndKill();
+  });
+
+  it('failed delivery: one batch-failed, no batch-completed, message stays pending, no loop', async () => {
+    const sessionId = 'loop-test-session';
+
+    // Session record so processNext's --resume path resolves it (local host)
+    const { createSessionRecord } = await import('../../src/core/session-tracker.js');
+    await createSessionRecord(sessionId, 'loop-test-task', 'test');
+
+    const batchFailed: BusEvent[] = [];
+    const batchCompleted: BusEvent[] = [];
+    const sessionErrors: BusEvent[] = [];
+    bus.subscribe('main-ai', (event: BusEvent) => {
+      if (event.name === EventNames.SESSION_BATCH_FAILED) batchFailed.push(event);
+      if (event.name === EventNames.SESSION_BATCH_COMPLETED) batchCompleted.push(event);
+      if (event.name === EventNames.SESSION_ERROR) sessionErrors.push(event);
+    });
+
+    await enqueueMessage(sessionId, 'precious message — do not lose');
+    bus.emit(EventNames.SESSION_SEND, {
+      sessionId,
+      message: 'precious message — do not lose',
+    }, ['session-runner'], { source: 'test' });
+
+    // Give the failure path time to settle — and time for a loop to manifest
+    // if the regression came back (the old loop cycled every ~500ms).
+    await new Promise((r) => setTimeout(r, 3000));
+
+    // Exactly one delivery attempt failed — NOT a loop (old bug: 5-6 cycles in 3s)
+    expect(batchFailed.length).toBe(1);
+    // No spurious turn-completion (old bug: one per cycle → UI deleted the message)
+    expect(batchCompleted.length).toBe(0);
+    // SESSION_ERROR carries the structured kind, exactly once
+    expect(sessionErrors.length).toBe(1);
+    expect((sessionErrors[0].data as { errorKind?: string }).errorKind).toBe('delivery_failed');
+
+    // The message SURVIVES on disk as pending (recoverable: Retry / restart / reconnect)
+    const queue = await getQueue(sessionId);
+    expect(queue).toHaveLength(1);
+    expect(queue[0].status).toBe('pending');
+    expect(queue[0].message).toBe('precious message — do not lose');
+  }, 20_000);
+
+  it('user retry after failure re-attempts delivery (no permanent stranding)', async () => {
+    const sessionId = 'retry-test-session';
+    const { createSessionRecord } = await import('../../src/core/session-tracker.js');
+    await createSessionRecord(sessionId, 'retry-test-task', 'test');
+
+    const batchFailed: BusEvent[] = [];
+    bus.subscribe('main-ai', (event: BusEvent) => {
+      if (event.name === EventNames.SESSION_BATCH_FAILED) batchFailed.push(event);
+    });
+
+    await enqueueMessage(sessionId, 'first try');
+    bus.emit(EventNames.SESSION_SEND, { sessionId, message: 'first try' }, ['session-runner'], { source: 'test' });
+    await new Promise((r) => setTimeout(r, 1500));
+    expect(batchFailed.length).toBe(1);
+
+    // User-initiated retry = a NEW session:send → another single attempt
+    bus.emit(EventNames.SESSION_SEND, { sessionId, message: 'first try' }, ['session-runner'], { source: 'test' });
+    await new Promise((r) => setTimeout(r, 1500));
+    expect(batchFailed.length).toBe(2);
+
+    // Still exactly one pending message — no duplication, no loss
+    const queue = await getQueue(sessionId);
+    expect(queue).toHaveLength(1);
+    expect(queue[0].status).toBe('pending');
+  }, 20_000);
+
+  // The ASYNC spawn-settle failure path (send() returns, then the spawn rejects
+  // later → onSpawnSettled(false) → settleResumeFailure) is the one that
+  // regressed on 2026-06-10 (double SESSION_ERROR emit + stopped-status leak).
+  // It can't be reached in this unit env: send() throws SYNCHRONOUSLY at
+  // createSessionManager ("Local daemon not running") before any spawn is
+  // attempted, so onSpawnSettled never fires. The path is covered end-to-end by
+  // the ephemeral attach-only E2E (log proof: a single "resume spawn failed —
+  // reverting batch to pending" per send, message stays 'pending', one chat
+  // notification). The invariants it guards are asserted structurally here
+  // instead: settleResumeFailure emits exactly one SESSION_ERROR with
+  // errorKind:'delivery_failed' to ['main-ai'] (no 'session-runner' re-entry →
+  // no loop), and the send()-catch's terminal status/second-emit are gated on
+  // `!onSpawnSettled` (verified by reading the source — see the
+  // `if (!onSpawnSettled)` block in send()).
+  it('settleResumeFailure emits one delivery_failed and reverts the batch (no loop, no loss)', async () => {
+    const sessionId = 'settle-direct-sid';
+    await enqueueMessage(sessionId, 'owned by settle callback');
+    const batch = await markProcessing(sessionId);
+    expect(batch).toHaveLength(1);
+
+    const sessionErrors: BusEvent[] = [];
+    const batchFailed: BusEvent[] = [];
+    const reEntrant: BusEvent[] = [];
+    bus.subscribe('main-ai', (event: BusEvent) => {
+      if (event.name === EventNames.SESSION_ERROR) sessionErrors.push(event);
+      if (event.name === EventNames.SESSION_BATCH_FAILED) batchFailed.push(event);
+    });
+    // If SESSION_ERROR were (re-)delivered to 'session-runner', its handler would
+    // run turn-completion logic → the loop. Assert it is NOT routed there.
+    bus.subscribe('session-runner', (event: BusEvent) => {
+      if (event.name === EventNames.SESSION_ERROR) reEntrant.push(event);
+    });
+
+    // Invoke the exact private method the async settle callback calls.
+    (runner as unknown as {
+      settleResumeFailure: (sid: string, msgs: typeof batch, err: Error) => void;
+    }).settleResumeFailure(sessionId, batch, new Error('publickey denied (simulated SSH failure)'));
+
+    await new Promise((r) => setTimeout(r, 300));
+
+    // Exactly one SESSION_ERROR, tagged delivery_failed, and one batch-failed.
+    expect(sessionErrors.length).toBe(1);
+    expect((sessionErrors[0].data as { errorKind?: string }).errorKind).toBe('delivery_failed');
+    expect(batchFailed.length).toBe(1);
+    // Not routed back into session-runner → the turn-completion loop can't start.
+    expect(reEntrant.length).toBe(0);
+
+    // The message is reverted to 'pending' — recoverable, never lost.
+    const queue = await getQueue(sessionId);
+    expect(queue).toHaveLength(1);
+    expect(queue[0].status).toBe('pending');
+    expect(queue[0].message).toBe('owned by settle callback');
+  }, 15_000);
 });
 
 // ═══════════════════════════════════════════════════════════════════
@@ -1381,5 +1532,111 @@ describe('Category C: Streaming event dedup regression', () => {
     expect(session.fullText).toBe(expectedText);
     // Double-check: no duplication
     expect(session.fullText).not.toBe(expectedText + expectedText);
+  });
+});
+
+// ── Side question ("/btw") control protocol round-trip ──
+// Verifies the OUTBOUND direction of the stream-json control protocol: Walnut
+// writes a control_request{subtype:side_question} to the CLI FIFO and resolves the
+// answer when the matching control_response arrives — WITHOUT touching the transcript.
+// We stub the transport's writeRaw to capture the envelope, then feed the CLI's
+// reply through the private handleStreamLine (same path the live JSONL tailer uses).
+describe('ClaudeCodeSession.askSideQuestion', () => {
+  /** Minimal transport stub that captures writeRaw payloads. */
+  function makeSessionWithStubTransport() {
+    const session = new ClaudeCodeSession('task-btw', 'proj', MOCK_CLI);
+    const writes: string[] = [];
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (session as any)._transport = {
+      writeRaw: (json: string) => { writes.push(json); return Promise.resolve(true); },
+    };
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (session as any)._active = true;
+    return { session, writes };
+  }
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const feed = (session: ClaudeCodeSession, obj: unknown) => (session as any).handleStreamLine(JSON.stringify(obj));
+
+  it('sends a side_question control_request with a unique request_id', async () => {
+    const { session, writes } = makeSessionWithStubTransport();
+    void session.askSideQuestion('what did I ask?');
+    // Give the microtask that calls writeRaw a tick to run.
+    await new Promise((r) => setTimeout(r, 5));
+
+    expect(writes.length).toBe(1);
+    const env = JSON.parse(writes[0]!);
+    expect(env.type).toBe('control_request');
+    expect(env.request.subtype).toBe('side_question');
+    expect(env.request.question).toBe('what did I ask?');
+    expect(typeof env.request_id).toBe('string');
+    expect(env.request_id.startsWith('sq-')).toBe(true);
+  });
+
+  it('resolves with the answer when the matching control_response arrives', async () => {
+    const { session, writes } = makeSessionWithStubTransport();
+    const promise = session.askSideQuestion('recall');
+    await new Promise((r) => setTimeout(r, 5));
+    const requestId = JSON.parse(writes[0]!).request_id as string;
+
+    // Simulate the CLI replying (answer nested 3 levels, per the protocol).
+    feed(session, {
+      type: 'control_response',
+      response: { subtype: 'success', request_id: requestId, response: { response: 'You asked X', synthetic: false } },
+    });
+
+    await expect(promise).resolves.toBe('You asked X');
+  });
+
+  it('does NOT add the side-question answer to the transcript', async () => {
+    const { session, writes } = makeSessionWithStubTransport();
+    const promise = session.askSideQuestion('q');
+    await new Promise((r) => setTimeout(r, 5));
+    const requestId = JSON.parse(writes[0]!).request_id as string;
+    const before = session.fullText;
+
+    feed(session, {
+      type: 'control_response',
+      response: { subtype: 'success', request_id: requestId, response: { response: 'a side answer' } },
+    });
+    await promise;
+
+    // The main conversation text must be untouched by the side answer.
+    expect(session.fullText).toBe(before);
+    expect(session.fullText).not.toContain('a side answer');
+  });
+
+  it('rejects on an error control_response', async () => {
+    const { session, writes } = makeSessionWithStubTransport();
+    const promise = session.askSideQuestion('q');
+    await new Promise((r) => setTimeout(r, 5));
+    const requestId = JSON.parse(writes[0]!).request_id as string;
+
+    feed(session, {
+      type: 'control_response',
+      response: { subtype: 'error', request_id: requestId, error: 'no cache yet' },
+    });
+
+    await expect(promise).rejects.toThrow('no cache yet');
+  });
+
+  it('ignores a control_response with an unknown request_id (stale replay)', async () => {
+    const { session, writes } = makeSessionWithStubTransport();
+    const promise = session.askSideQuestion('q');
+    await new Promise((r) => setTimeout(r, 5));
+    const realId = JSON.parse(writes[0]!).request_id as string;
+
+    // A replayed/foreign response must not resolve our pending promise.
+    feed(session, {
+      type: 'control_response',
+      response: { subtype: 'success', request_id: 'sq-someone-else', response: { response: 'wrong' } },
+    });
+    // The real one still resolves correctly afterwards.
+    feed(session, {
+      type: 'control_response',
+      response: { subtype: 'success', request_id: realId, response: { response: 'right' } },
+    });
+
+    await expect(promise).resolves.toBe('right');
   });
 });

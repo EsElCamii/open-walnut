@@ -34,6 +34,7 @@ import {
   getSessionByClaudeId,
   getSessionsForTask,
   updateSessionRecord,
+  batchUpdateSessionRecords,
   linkSessionToTask,
   getRecentSessions,
   getActiveSessionsByHost,
@@ -709,51 +710,103 @@ describe('listNonTerminalSessions', () => {
   });
 });
 
-// ── Fix 3: hot-cache verification (mtime+size keyed) ─────────────────────────
+// ── Whole-store read cache (write-invalidated) ───────────────────────────────
 
-describe('session store hot cache', () => {
-  it('avoids re-reading sessions.json when mtime is unchanged', async () => {
-    // Seed the store so the first listSessions() primes the cache.
+describe('session store read cache', () => {
+  it('serves repeated reads from cache — only ONE SELECT * scan for N reads', async () => {
     await createSessionRecord('cache-seed', 'task-1', 'proj', undefined, { pid: 1001 });
 
-    const { SESSIONS_FILE } = await import('../../src/constants.js');
+    // Spy on the SQLite handle's prepare() and count whole-table scans.
+    const { getDb } = await import('../../src/core/session-db.js');
+    const db = getDb()!;
+    const prepareSpy = vi.spyOn(db, 'prepare');
 
-    // Now spy on fs.readFile and count calls that target sessions.json.
-    const readFileSpy = vi.spyOn(fsp, 'readFile');
-
-    // 50 consecutive reads should hit the cache — zero actual readFile calls
-    // against SESSIONS_FILE because mtime+size haven't changed.
+    // 50 consecutive reads should trigger AT MOST one `SELECT * FROM sessions`
+    // (the cache priming) — the rest are served from the cached array.
     for (let i = 0; i < 50; i++) {
       await listSessions();
     }
 
-    const sessionFileReads = readFileSpy.mock.calls.filter(call =>
-      String(call[0]) === SESSIONS_FILE
+    const fullScans = prepareSpy.mock.calls.filter(
+      (call) => String(call[0]).replace(/\s+/g, ' ').includes('SELECT * FROM sessions'),
     );
-    expect(sessionFileReads.length).toBe(0);
+    expect(fullScans.length).toBeLessThanOrEqual(1);
 
-    readFileSpy.mockRestore();
+    prepareSpy.mockRestore();
   });
 
-  it('refreshes cache after writeStore so next read is still a cache hit', async () => {
+  it('invalidates the cache on write so the next read reflects the mutation', async () => {
     await createSessionRecord('write-1', 'task-1', 'proj', undefined, { pid: 1001 });
+    // Prime the cache.
+    expect((await listSessions())[0].process_status).toBe('running');
 
-    // Mutation goes through writeStore — it should refresh the cache, not invalidate it.
+    // Mutate — withWriteLock.finally must drop the cache.
     await updateSessionRecord('write-1', { process_status: 'stopped' });
 
-    const { SESSIONS_FILE } = await import('../../src/constants.js');
-    const readFileSpy = vi.spyOn(fsp, 'readFile');
-
-    // First post-write read — should be a cache hit (no readFile on sessions.json).
+    // Next read MUST reflect the new value (not the stale cached 'running').
     const sessions = await listSessions();
     expect(sessions).toHaveLength(1);
     expect(sessions[0].process_status).toBe('stopped');
+  });
 
-    const sessionFileReads = readFileSpy.mock.calls.filter(call =>
-      String(call[0]) === SESSIONS_FILE
+  it('hands out isolated clones — mutating a read result never poisons the cache', async () => {
+    await createSessionRecord('clone-1', 'task-1', 'proj', undefined, { pid: 1001 });
+
+    const first = await listSessions();
+    // Simulate what the /api/sessions route does (enrichWithLiveStatus mutates
+    // process_status in place on the returned objects).
+    first[0].process_status = 'stopped';
+    (first[0] as { activity?: string }).activity = 'mutated-in-place';
+
+    // A fresh read must NOT see the in-place mutation — it returns the
+    // canonical cached value, not the caller-mutated object.
+    const second = await listSessions();
+    expect(second[0].process_status).toBe('running');
+    expect((second[0] as { activity?: string }).activity).toBeUndefined();
+    expect(second[0]).not.toBe(first[0]); // distinct object instances
+  });
+});
+
+describe('batchUpdateSessionRecords', () => {
+  it('applies the same patch to many sessions and returns written ids', async () => {
+    for (let i = 0; i < 5; i++) {
+      await createSessionRecord(`batch-${i}`, `task-${i}`, 'walnut', undefined, { pid: 1000 + i });
+      await updateSessionRecord(`batch-${i}`, { process_status: 'running' });
+    }
+    const ids = ['batch-0', 'batch-1', 'batch-2', 'batch-3', 'batch-4'];
+    const written = await batchUpdateSessionRecords(ids, {
+      process_status: 'stopped',
+      status_reason: 'orphan_no_pid',
+      status_changed_by: 'health-monitor',
+    });
+    expect(written.sort()).toEqual(ids.sort());
+    for (const id of ids) {
+      const s = await getSessionByClaudeId(id);
+      expect(s?.process_status).toBe('stopped');
+    }
+  });
+
+  it('skips no-op updates (already in target state)', async () => {
+    await createSessionRecord('batch-noop', 'task-noop', 'walnut');
+    // createSessionRecord makes it 'running'; first mark it stopped.
+    await updateSessionRecord('batch-noop', { process_status: 'stopped' });
+    // Re-applying stopped is a no-op → not written.
+    const written = await batchUpdateSessionRecords(['batch-noop'], { process_status: 'stopped' });
+    expect(written).toEqual([]);
+  });
+
+  it('skips missing rows without throwing', async () => {
+    await createSessionRecord('batch-real', 'task-real', 'walnut', undefined, { pid: 9999 });
+    await updateSessionRecord('batch-real', { process_status: 'running' });
+    const written = await batchUpdateSessionRecords(
+      ['batch-real', 'does-not-exist-1', 'does-not-exist-2'],
+      { process_status: 'stopped', status_reason: 'orphan_no_pid' },
     );
-    expect(sessionFileReads.length).toBe(0);
+    expect(written).toEqual(['batch-real']);
+  });
 
-    readFileSpy.mockRestore();
+  it('returns empty array for empty input', async () => {
+    const written = await batchUpdateSessionRecords([], { process_status: 'stopped' });
+    expect(written).toEqual([]);
   });
 });

@@ -190,20 +190,32 @@ export async function markProcessing(sessionId: string): Promise<QueuedMessage[]
 }
 
 /**
- * Remove all 'processing' messages for a session (they are now in JSONL history).
+ * Remove 'processing' messages for a session (they are now in JSONL history).
+ *
+ * @param ids - when provided, remove ONLY these message IDs. Delivery points
+ *   (FIFO write / mid-turn inject / confirmed --resume spawn) pass the exact
+ *   batch they delivered, so a concurrent in-flight batch for the same session
+ *   can never be swept away by a stale SESSION_RESULT cleanup (that race
+ *   silently lost messages: cleanup removed the in-flight batch, the write
+ *   then failed, and revertToPending mutated orphaned objects).
+ *   This scoping is also what makes revertToPending's blind re-insert safe —
+ *   reverting to un-scoped removal would make that re-insert resurrect
+ *   already-delivered messages as duplicates. (See revertToPending.)
  */
-export async function removeProcessed(sessionId: string): Promise<void> {
+export async function removeProcessed(sessionId: string, ids?: string[]): Promise<void> {
   const s = await getStore();
   const queue = s.queues[sessionId];
   if (!queue) return;
 
-  s.queues[sessionId] = queue.filter((m) => m.status !== 'processing');
+  const idSet = ids ? new Set(ids) : null;
+  s.queues[sessionId] = queue.filter((m) =>
+    m.status !== 'processing' || (idSet !== null && !idSet.has(m.id)));
   // Clean up empty queues
   if (s.queues[sessionId].length === 0) {
     delete s.queues[sessionId];
   }
   await persist();
-  log.session.debug('message queue drained', { sessionId });
+  log.session.debug('message queue drained', { sessionId, scoped: !!ids });
 }
 
 /**
@@ -246,14 +258,36 @@ export async function deleteMessage(sessionId: string, messageId: string): Promi
 
 /**
  * Revert specific messages from 'processing' back to 'pending'.
- * Used when mid-turn FIFO injection fails after markProcessing().
- * Messages must be references returned by markProcessing (same objects in the store).
+ * Used when delivery fails after markProcessing().
+ *
+ * NO-LOSS GUARANTEE: if a message is no longer in the store (e.g. a concurrent
+ * un-scoped cleanup removed it while this batch was in flight), it is
+ * RE-INSERTED, not just mutated. Mutating an orphaned object and persisting
+ * would silently drop the message — that was a real loss path.
+ *
+ * SAFE ONLY BECAUSE removeProcessed is scoped to batch ids: the blind
+ * re-insert below trusts that a missing message means delivery genuinely
+ * failed. If removeProcessed were reverted to un-scoped (sweeping ALL
+ * 'processing'), this re-insert would resurrect messages the CLI already
+ * received — duplicates. The two invariants are paired; keep both. (See
+ * removeProcessed's @param ids doc for the other direction.)
  */
 export async function revertToPending(messages: QueuedMessage[]): Promise<void> {
+  if (messages.length === 0) return;
+  const s = await getStore();
   for (const m of messages) {
-    if (m.status === 'processing') m.status = 'pending'
+    if (m.status === 'processing') m.status = 'pending';
+    const queue = s.queues[m.sessionId] ?? (s.queues[m.sessionId] = []);
+    if (!queue.some((q) => q.id === m.id)) {
+      log.session.warn('revertToPending: message missing from store — re-inserting (loss averted)', {
+        sessionId: m.sessionId, messageId: m.id,
+      });
+      queue.push(m);
+      // Keep queue ordered by enqueue time so redelivery preserves user order
+      queue.sort((a, b) => a.enqueuedAt.localeCompare(b.enqueuedAt));
+    }
   }
-  await persist()
+  await persist();
 }
 
 /**

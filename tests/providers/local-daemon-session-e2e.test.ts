@@ -19,10 +19,23 @@ import { execSync } from 'node:child_process'
 import { WebSocket } from 'ws'
 import { LocalDaemon } from '../../src/providers/local-daemon.js'
 
-const DAEMON_DIR = '/tmp/open-walnut'
+// ISOLATION: this suite spawns a REAL daemon binary. It must never touch the
+// production daemon dir (/tmp/open-walnut) — doing so kills the production
+// daemon's pid/port files and, worse, the old `pkill -9 -f daemon-darwin-arm64`
+// cleanup SIGKILLed the production daemon itself on every beforeEach. Each new
+// daemon generation then re-adopted all sessions and replayed history to the
+// UI. Everything here lives in a per-run temp dir; cleanup kills ONLY the pid
+// recorded in our own pid file.
+const DAEMON_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'walnut-daemon-e2e-'))
 const PORT_FILE = path.join(DAEMON_DIR, 'daemon.port')
 const PID_FILE = path.join(DAEMON_DIR, 'daemon.pid')
-const STREAMS_DIR = '/tmp/open-walnut-streams'
+// daemon-standalone.ts derives streams dir as `${WALNUT_DAEMON_DIR}-streams`
+const STREAMS_DIR = `${DAEMON_DIR}-streams`
+
+const PROD_DAEMON_DIR = '/tmp/open-walnut'
+if (path.resolve(DAEMON_DIR) === path.resolve(PROD_DAEMON_DIR)) {
+  throw new Error(`Refusing to run real-binary E2E against production daemon dir ${PROD_DAEMON_DIR}`)
+}
 
 function binaryExists(): boolean {
   const projectRoot = path.resolve(__dirname, '../..')
@@ -31,6 +44,8 @@ function binaryExists(): boolean {
 }
 
 function killExistingDaemon(): void {
+  // Kill only the daemon whose pid is recorded in OUR isolated pid file.
+  // Never pkill by binary name — that murders the production daemon too.
   try {
     const pid = parseInt(fs.readFileSync(PID_FILE, 'utf-8').trim(), 10)
     if (pid > 0) {
@@ -42,8 +57,6 @@ function killExistingDaemon(): void {
       try { process.kill(pid, 'SIGKILL') } catch {}
     }
   } catch {}
-  // Also kill any stray daemon processes — prevents leaks across test files
-  try { execSync('pkill -9 -f daemon-darwin-arm64 2>/dev/null; true') } catch {}
   try { fs.unlinkSync(PORT_FILE) } catch {}
   try { fs.unlinkSync(PID_FILE) } catch {}
 }
@@ -123,7 +136,7 @@ describe.skipIf(!binaryExists())('Local daemon session E2E', () => {
   })
 
   it('starts session through local daemon and streams JSONL', async () => {
-    const daemon = new LocalDaemon()
+    const daemon = new LocalDaemon({ daemonDir: DAEMON_DIR })
     const port = await daemon.ensureRunning()
 
     const ws = new WebSocket(`ws://localhost:${port}`)
@@ -167,7 +180,7 @@ describe.skipIf(!binaryExists())('Local daemon session E2E', () => {
   }, 20000)
 
   it('bypass mode auto-allows control_request — walnut never sees it', async () => {
-    const daemon = new LocalDaemon()
+    const daemon = new LocalDaemon({ daemonDir: DAEMON_DIR })
     const port = await daemon.ensureRunning()
 
     const ws = new WebSocket(`ws://localhost:${port}`)
@@ -212,7 +225,7 @@ describe.skipIf(!binaryExists())('Local daemon session E2E', () => {
   }, 20000)
 
   it('default mode forwards control_request to walnut (pendingCtrl set)', async () => {
-    const daemon = new LocalDaemon()
+    const daemon = new LocalDaemon({ daemonDir: DAEMON_DIR })
     const port = await daemon.ensureRunning()
 
     const ws = new WebSocket(`ws://localhost:${port}`)
@@ -264,7 +277,7 @@ exit 0
   }, 20000)
 
   it('plan mode auto-allows tool but forwards ExitPlanMode', async () => {
-    const daemon = new LocalDaemon()
+    const daemon = new LocalDaemon({ daemonDir: DAEMON_DIR })
     const port = await daemon.ensureRunning()
 
     const ws = new WebSocket(`ws://localhost:${port}`)
@@ -317,7 +330,7 @@ exit 0
   }, 20000)
 
   it('setMode clears pending ExitPlanMode when switching plan → bypass', async () => {
-    const daemon = new LocalDaemon()
+    const daemon = new LocalDaemon({ daemonDir: DAEMON_DIR })
     const port = await daemon.ensureRunning()
 
     const ws = new WebSocket(`ws://localhost:${port}`)
@@ -364,7 +377,7 @@ exit 0
   }, 20000)
 
   it('session survives daemon client disconnect (no kill)', async () => {
-    const daemon = new LocalDaemon()
+    const daemon = new LocalDaemon({ daemonDir: DAEMON_DIR })
     const port = await daemon.ensureRunning()
 
     let ws1 = new WebSocket(`ws://localhost:${port}`)

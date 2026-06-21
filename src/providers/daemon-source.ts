@@ -38,6 +38,7 @@
  * - Never auto-exits; kills idle sessions after 2hr with no watchers
  */
 import { REQUIRED_DAEMON_CAPABILITIES } from './daemon-capabilities.js'
+import { computeExpectedDaemonVersion } from './daemon-version-check.js'
 
 export function getDaemonSource(): string {
   // Inject capability list so the fallback node daemon answers `hello` with
@@ -60,7 +61,27 @@ export function getDaemonSource(): string {
       `daemon-source: expected exactly 1 '${placeholder}' placeholder in DAEMON_SOURCE, found ${matches}`,
     )
   }
-  return DAEMON_SOURCE.replaceAll(placeholder, capsLiteral)
+
+  // Stamp the real version at string-build time. The old code left
+  // `process.env.DAEMON_VERSION || 'dev-source'` to be evaluated at RUNTIME on
+  // the remote host, where the env var is never set — so every source deploy
+  // reported 'dev-source' and could never match the binary sidecar version,
+  // feeding the shouldUpgradeDaemon stop/redeploy loop. The hash here is the
+  // same sha256-of-daemon-sources that scripts/build-daemon.sh bakes into the
+  // binaries, so a source deploy and a binary built from the same tree report
+  // the SAME version.
+  const versionPlaceholder = '__DAEMON_VERSION__'
+  const versionMatches = DAEMON_SOURCE.split(versionPlaceholder).length - 1
+  if (versionMatches !== 1) {
+    throw new Error(
+      `daemon-source: expected exactly 1 '${versionPlaceholder}' placeholder in DAEMON_SOURCE, found ${versionMatches}`,
+    )
+  }
+  const version = computeExpectedDaemonVersion() || process.env.DAEMON_VERSION || 'dev-source'
+
+  return DAEMON_SOURCE
+    .replaceAll(placeholder, capsLiteral)
+    .replaceAll(versionPlaceholder, version)
 }
 
 // ── Daemon source code ──
@@ -98,13 +119,16 @@ const crypto = require('crypto');
 // Without this, cmdStart's spawn('claude', ...) fails ENOENT on most hosts.
 (function() {
   const home = process.env.HOME || '/root';
+  // toolbox FIRST: it may ship a logged-in claude that must win over a
+  // separate ~/.local/bin/claude install (which may be NOT logged in). These
+  // are only a fallback for when RC sourcing fails to provide claude.
   const extraPaths = [
+    home + '/.toolbox/bin',
     home + '/.local/bin',
     home + '/.npm-global/bin',
     home + '/.cargo/bin',
     home + '/.pyenv/shims',
     home + '/.bun/bin',
-    home + '/.toolbox/bin',
     '/usr/local/bin', '/usr/bin', '/bin',
     '/usr/local/sbin', '/usr/sbin', '/sbin',
   ];
@@ -146,10 +170,25 @@ const crypto = require('crypto');
 // ── Constants ──
 // DAEMON_DIR default is /tmp/open-walnut; tests override via env var.
 const DAEMON_DIR = process.env.WALNUT_DAEMON_DIR || '/tmp/open-walnut';
-const STREAMS_DIR = '/tmp/open-walnut-streams';
+// Sibling dir so an isolated daemon dir yields an isolated streams dir; production
+// default stays /tmp/open-walnut-streams. Must mirror daemon-standalone.ts.
+// NOTE: string concat (not template literal) because this code lives inside a
+// template literal string in the outer TypeScript file.
+const STREAMS_DIR = process.env.WALNUT_STREAMS_DIR || (DAEMON_DIR + '-streams');
 const PORT_FILE = path.join(DAEMON_DIR, 'daemon.port');
 const PID_FILE = path.join(DAEMON_DIR, 'daemon.pid');
 const INSTANCE_ID_FILE = path.join(DAEMON_DIR, 'daemon.instance');
+// Source of truth for upgrade decisions — written at startup, read by
+// DaemonConnection.shouldUpgradeDaemon via cat. Must mirror daemon-standalone.ts.
+const VERSION_FILE = path.join(DAEMON_DIR, 'daemon.version');
+
+// ── Version ──
+// Substituted by getDaemonSource() at deploy time with the sha256-of-sources
+// hash (same value scripts/build-daemon.sh bakes into the compiled binaries).
+// MUST NOT be left as a runtime env lookup: the env var is never set on the
+// remote host, and a literal 'dev-source' can never match the binary sidecar
+// version — that mismatch fed an infinite stop/redeploy loop.
+const DAEMON_VERSION = '__DAEMON_VERSION__';
 const AGENT_POLL_INTERVAL_MS = 2000;
 const AGENT_REDISCOVER_INTERVAL_MS = 10000;
 const PING_INTERVAL_MS = 15000;
@@ -427,13 +466,18 @@ function reconcileRegistry() {
     // repeated reconcile calls).
     if (sessions.has(sid)) continue;
 
+    // Adopt at the CURRENT end of the stream file, not 0 — a new daemon
+    // generation must never replay history it didn't stream itself.
+    // Keep in sync with daemon-standalone.ts createAdoptedSession (CLAUDE.md).
+    let adoptOffset = 0;
+    try { adoptOffset = fs.statSync(entry.jsonlPath).size; } catch {}
     const session = {
       proc: null,
       pipePath: entry.pipePath,
       jsonlPath: entry.jsonlPath,
       pgidPath: entry.pgidPath,
       pid,
-      offset: 0,
+      offset: adoptOffset,
       watcher: null,
       subscribers: new Set(),
       exitCode: null,
@@ -730,7 +774,7 @@ function handleCommand(ws, msg) {
     case 'list': return cmdList(ws, id);
     case 'ping': return sendOk(ws, id, { pong: true });
     case 'hello': return sendOk(ws, id, {
-      version: process.env.DAEMON_VERSION || 'dev-source',
+      version: DAEMON_VERSION,
       capabilities: __DAEMON_CAPABILITIES__,
       instanceId: DAEMON_INSTANCE_ID,
       startedAt: DAEMON_START_TS,
@@ -815,7 +859,21 @@ function cmdStart(ws, id, cmd) {
     // up to 5s waiting for MCP servers (they keep connecting in background). Cuts
     // time-to-init ~6.9s → ~2.9s with no loss of MCP functionality. Keep in sync
     // with daemon-standalone.ts.
-    env: { ...process.env, CLAUDE_CODE_DISABLE_BACKGROUND_TASKS: '1', MCP_CONNECTION_NONBLOCKING: '1' },
+    // CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS=1: opt into the CLI's authoritative
+    // session_state_changed{running|idle|requires_action} stream events. 'idle'
+    // is the only reliable turn-over signal (a single dynamic-workflow turn emits
+    // MANY `result` events as background subagents finish — `result` is NOT a
+    // turn boundary). Verified by live capture: idle fires exactly once, strictly
+    // after the last result + all task_notifications. Walnut keys turn-completion
+    // off this instead of `result`. NOTE: this disables NOTHING — dynamic workflows
+    // (CLAUDE_CODE_DISABLE_WORKFLOWS) are orthogonal to CLAUDE_CODE_DISABLE_BACKGROUND_TASKS
+    // (which only gates Bash run_in_background / Ctrl+B, not the Workflow tool).
+    env: {
+      ...process.env,
+      CLAUDE_CODE_DISABLE_BACKGROUND_TASKS: '1',
+      MCP_CONNECTION_NONBLOCKING: '1',
+      CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS: '1',
+    },
   });
 
   // Write initial message to FIFO
@@ -1130,13 +1188,21 @@ function cmdAttach(ws, id, cmd) {
       alive = true;
     } catch { pid = null; alive = false; }
 
+    // Watcher starts at the CURRENT end of the stream file — same rule as
+    // adopt. Catch-up for [fromOffset, end) is addSubscriber's job. Using the
+    // client's fromOffset is wrong both ways: 0 re-fans the whole file;
+    // MAX_SAFE_INTEGER (future-only sentinel) freezes the watcher forever.
+    // Keep in sync with daemon-standalone.ts (CLAUDE.md).
+    let discoveredOffset = 0;
+    try { discoveredOffset = fs.statSync(jsonlPath).size; } catch {}
+
     session = {
       proc: null,
       pipePath,
       jsonlPath,
       pgidPath,
       pid,
-      offset: fromOffset || 0,
+      offset: discoveredOffset,
       watcher: null,
       subscribers: new Set(),
       exitCode: alive ? null : 0,
@@ -1905,9 +1971,19 @@ function cleanup() {
   // Remove port/pid/instance files (so new daemon knows to start fresh).
   // IMPORTANT: Do NOT remove .pgid files here — cleanupOrphanedProcessGroups()
   // on the next daemon needs them to adopt running sessions. See that function above.
-  try { fs.unlinkSync(PORT_FILE); } catch {}
-  try { fs.unlinkSync(PID_FILE); } catch {}
-  try { fs.unlinkSync(INSTANCE_ID_FILE); } catch {}
+  // ONLY if we still own the dir — a zombie exiting via the heartbeat
+  // self-check must not delete the successor daemon's live files.
+  let ownsFiles = true;
+  try {
+    const ownerPid = parseInt(fs.readFileSync(PID_FILE, 'utf-8').trim(), 10);
+    if (ownerPid > 0 && ownerPid !== process.pid) ownsFiles = false;
+  } catch {}
+  if (ownsFiles) {
+    try { fs.unlinkSync(PORT_FILE); } catch {}
+    try { fs.unlinkSync(PID_FILE); } catch {}
+    try { fs.unlinkSync(INSTANCE_ID_FILE); } catch {}
+    try { fs.unlinkSync(VERSION_FILE); } catch {}
+  }
   logMsg('info', 'daemon cleanup complete', { uptimeSec: Math.floor((Date.now() - DAEMON_START_TS) / 1000) });
 }
 
@@ -2024,6 +2100,7 @@ if (action === '--start') {
     fs.writeFileSync(PORT_FILE, String(port));
     fs.writeFileSync(PID_FILE, String(process.pid));
     fs.writeFileSync(INSTANCE_ID_FILE, DAEMON_INSTANCE_ID);
+    fs.writeFileSync(VERSION_FILE, DAEMON_VERSION);
     console.log(port); // Print port for parent to capture
     logMsg('info', 'daemon started', { port, pid: process.pid, startedAt: DAEMON_START_TS });
 
@@ -2041,6 +2118,19 @@ if (action === '--start') {
         rssMb: Math.round(mem.rss / 1024 / 1024),
         heapMb: Math.round(mem.heapUsed / 1024 / 1024),
       });
+      // Single-instance self-check — if daemon.pid names a different live pid,
+      // a newer daemon owns this dir and we are a zombie; exit gracefully.
+      // Keep in sync with daemon-standalone.ts heartbeat (CLAUDE.md).
+      try {
+        const ownerPid = parseInt(fs.readFileSync(PID_FILE, 'utf-8').trim(), 10);
+        if (ownerPid > 0 && ownerPid !== process.pid) {
+          logMsg('warn', 'self-check: daemon.pid taken over by another instance — exiting', {
+            ourPid: process.pid, ownerPid,
+          });
+          cleanup();
+          process.exit(0);
+        }
+      } catch {}
     }, HEARTBEAT_INTERVAL_MS);
   });
 

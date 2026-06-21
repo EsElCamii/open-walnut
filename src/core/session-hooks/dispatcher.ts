@@ -348,6 +348,10 @@ export class SessionHookDispatcher {
       }
 
       case EventNames.SESSION_ERROR: {
+        // delivery_failed = message never reached the CLI (SSH/daemon down) —
+        // no turn ran, so onTurnError hooks (triage, notify, …) must not fire.
+        // The batch is back in 'pending'; the UI was told via SESSION_BATCH_FAILED.
+        if (data.errorKind === 'delivery_failed') break;
         results.push({
           hookPoint: 'onTurnError',
           extraPayload: {

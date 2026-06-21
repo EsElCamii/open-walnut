@@ -83,12 +83,18 @@ function delay(ms: number): Promise<void> {
 
 // ── Setup / Teardown ──
 
+// Cron writes background turns to the MAIN conversation (server.ts), so the
+// test reads chat history from that same conversation.
+let mainConvId: string;
+
 beforeAll(async () => {
   await fs.rm(WALNUT_HOME, { recursive: true, force: true });
   await fs.mkdir(WALNUT_HOME, { recursive: true });
   server = await startServer({ port: 0, dev: true });
   const addr = server.address();
   port = typeof addr === 'object' && addr ? addr.port : 0;
+  const { getMainConversationId } = await import('../../src/core/conversations.js');
+  mainConvId = await getMainConversationId('general');
 });
 
 afterAll(async () => {
@@ -164,7 +170,7 @@ describe('Cron agent response delivery (wakeMode=now)', () => {
     // Step 7: Verify chat history was updated (not empty)
     // Give a moment for persistence
     await delay(500);
-    const display = await chatHistory.getDisplayHistory();
+    const display = await chatHistory.getDisplayHistory('general', mainConvId);
     // Should have at least the cron notification message
     expect(display.length).toBeGreaterThan(0);
   });
@@ -209,7 +215,7 @@ describe('Cron agent response delivery (wakeMode=now)', () => {
 
   it('cron notification appears in chat history display messages', async () => {
     // Clear chat first
-    await chatHistory.clear();
+    await chatHistory.clear('general', mainConvId);
 
     // Create a next-cycle job (fast, no agent call)
     const createRes = await fetch(apiUrl('/api/cron'), {
@@ -234,7 +240,7 @@ describe('Cron agent response delivery (wakeMode=now)', () => {
     await delay(500);
 
     // Verify the notification was persisted to display messages
-    const display = await chatHistory.getDisplayHistory();
+    const display = await chatHistory.getDisplayHistory('general', mainConvId);
     const cronMsg = display.find(
       (m) => typeof m.content === 'string' && m.content.includes('Chat history persistence test'),
     );

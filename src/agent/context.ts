@@ -269,7 +269,16 @@ async function buildSyncSection(): Promise<string> {
   return '\n\n## Task sync\n' + parts.join('\n');
 }
 
-export async function buildSystemPrompt(): Promise<string> {
+/**
+ * Build the main agent's system prompt for a specific conversation.
+ *
+ * The conversation identity (agentId + conversationId) is REQUIRED to inject the
+ * correct "Earlier conversation context" — the compaction summary + working memory
+ * belong to one conversation. Omitting it used to silently read the legacy ghost
+ * file, so a compacted conversation's agent would lose its own summary (C1). The
+ * agent loop always knows which conversation it runs for, so it always passes these.
+ */
+export async function buildSystemPrompt(agentId?: string, conversationId?: string): Promise<string> {
   const config = await getConfig();
   const name = config.user.name ?? 'the user';
 
@@ -284,10 +293,10 @@ export async function buildSystemPrompt(): Promise<string> {
   // Working memory replaces the compaction summary when available.
   let contextSection = '';
   try {
-    const summary = await getCompactionSummary();
+    const summary = await getCompactionSummary(agentId, conversationId);
     if (summary) {
       // Compaction has occurred — prefer working memory over the LLM summary
-      const workingMemory = getWorkingMemory();
+      const workingMemory = getWorkingMemory(agentId, conversationId);
       if (workingMemory && !isWorkingMemoryEmpty(workingMemory)) {
         contextSection = `\n\n## Earlier conversation context (working memory)\n${workingMemory}`;
       } else {

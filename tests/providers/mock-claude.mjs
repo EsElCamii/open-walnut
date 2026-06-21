@@ -167,6 +167,34 @@ if (outputFormat === 'stream-json') {
 
   // Emit remaining events (optionally delayed for "slow:N" messages)
   function emitRemainingEvents() {
+    // 2a.0. "truncated-success" — reproduce the 2026-06-04 session 1fc886da bug:
+    //        the stream cuts off mid-message (message_delta carries
+    //        stop_reason:null) yet the CLI still reports result subtype=success.
+    //        This is the headline forensic-observability fingerprint: the
+    //        truncated-success invariant must auto-open an incident for it.
+    if (effectiveMessage === 'truncated-success') {
+      const msgId = 'msg_mock_trunc_' + outputSessionId.slice(0, 6);
+      function emitTrunc(line) { process.stdout.write(JSON.stringify(line) + '\n'); }
+      function wrapTrunc(ev) { return { type: 'stream_event', event: ev, session_id: outputSessionId, parent_tool_use_id: null }; }
+
+      // Some real text streams in, then the stream is cut.
+      emitTrunc(wrapTrunc({ type: 'message_start', message: { id: msgId, role: 'assistant', content: [], model: modelFlag || 'mock-model', usage: { input_tokens: 10, output_tokens: 0 } } }));
+      emitTrunc(wrapTrunc({ type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } }));
+      emitTrunc(wrapTrunc({ type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'Working on it' } }));
+      // The cut: message_delta with stop_reason:null (NOT 'end_turn') — sets _lastStopReason=null.
+      emitTrunc(wrapTrunc({ type: 'message_delta', delta: { stop_reason: null }, usage: { output_tokens: 3 } }));
+
+      // …yet the CLI reports a clean success. This is the silent-success bug.
+      const resultEvent = {
+        type: 'result', subtype: 'success', is_error: false,
+        duration_ms: 50, num_turns: 1, result: 'Working on it',
+        session_id: outputSessionId, total_cost_usd: 0.001,
+        usage: { input_tokens: 10, output_tokens: 3 },
+      };
+      process.stdout.write(JSON.stringify(resultEvent) + '\n', () => process.exit(0));
+      return;
+    }
+
     // 2a. For "plan-test" messages, emit Write (to plans/) + ExitPlanMode tool_use
     if (effectiveMessage === 'plan-test' || effectiveMessage.startsWith('plan-test:')) {
       // Extract optional plan file path from "plan-test:/path/to/plan.md"

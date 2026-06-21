@@ -13,7 +13,7 @@ import type { Server as HttpServer } from 'node:http';
 import { createMockConstants } from '../helpers/mock-constants.js';
 vi.mock('../../src/constants.js', () => createMockConstants('walnut-e2e-chat'));
 
-import { WALNUT_HOME, CHAT_HISTORY_FILE } from '../../src/constants.js';
+import { WALNUT_HOME, conversationFile } from '../../src/constants.js';
 import { startServer, stopServer } from '../../src/web/server.js';
 import * as chatHistory from '../../src/core/chat-history.js';
 
@@ -22,6 +22,13 @@ let port: number;
 
 function apiUrl(p: string): string {
   return `http://localhost:${port}${p}`;
+}
+
+// Chat storage is conversation-scoped: target the General agent's active
+// conversation (what the REST endpoints resolve to with no conversationId).
+let convId: string;
+function convFile(): string {
+  return conversationFile('general', convId);
 }
 
 async function startFresh(): Promise<void> {
@@ -36,6 +43,8 @@ beforeAll(async () => {
   await fs.rm(WALNUT_HOME, { recursive: true, force: true });
   await fs.mkdir(WALNUT_HOME, { recursive: true });
   await startFresh();
+  const { getActiveConversationId } = await import('../../src/core/conversations.js');
+  convId = await getActiveConversationId('general');
 });
 
 afterAll(async () => {
@@ -61,6 +70,8 @@ describe('Chat history persistence (E2E)', () => {
         { role: 'user', content: 'Hello Walnut', timestamp: new Date().toISOString() },
         { role: 'assistant', content: 'Hi! How can I help?', timestamp: new Date().toISOString() },
       ],
+      'general',
+      convId,
     );
 
     const res = await fetch(apiUrl('/api/chat/history'));
@@ -75,7 +86,7 @@ describe('Chat history persistence (E2E)', () => {
   });
 
   it('chat-history.json exists on disk after addTurn', async () => {
-    const content = await fs.readFile(CHAT_HISTORY_FILE, 'utf-8');
+    const content = await fs.readFile(convFile(), 'utf-8');
     const store = JSON.parse(content);
     expect(store.version).toBe(2);
     expect(store.entries.length).toBeGreaterThanOrEqual(2);
@@ -86,10 +97,12 @@ describe('Chat history persistence (E2E)', () => {
     await chatHistory.addTurn(
       [{ role: 'user', content: 'Remember this' }],
       [{ role: 'user', content: 'Remember this', timestamp: new Date().toISOString() }],
+      'general',
+      convId,
     );
 
     // Verify file is on disk
-    const beforeRestart = await fs.readFile(CHAT_HISTORY_FILE, 'utf-8');
+    const beforeRestart = await fs.readFile(convFile(), 'utf-8');
     const storeBefore = JSON.parse(beforeRestart);
     const countBefore = storeBefore.entries.length;
     expect(countBefore).toBeGreaterThanOrEqual(3);
@@ -122,6 +135,8 @@ describe('Chat history persistence (E2E)', () => {
     await chatHistory.addTurn(
       [{ role: 'user', content: 'will be cleared' }],
       [{ role: 'user', content: 'will be cleared', timestamp: new Date().toISOString() }],
+      'general',
+      convId,
     );
 
     // Clear via API
@@ -143,6 +158,8 @@ describe('Chat history persistence (E2E)', () => {
       await chatHistory.addTurn(
         [{ role: 'user', content: `msg-${i}` }],
         [{ role: 'user', content: `msg-${i}`, timestamp: new Date(Date.now() + i * 1000).toISOString() }],
+        'general',
+        convId,
       );
     }
 
@@ -185,10 +202,12 @@ describe('Chat history persistence (E2E)', () => {
         { role: 'user', content: 'list my tasks', timestamp: new Date().toISOString() },
         { role: 'assistant', content: 'You have no tasks.', timestamp: new Date().toISOString() },
       ],
+      'general',
+      convId,
     );
 
     // Read back from disk and verify tool blocks survive serialization
-    const apiMsgs = await chatHistory.getApiMessages();
+    const apiMsgs = await chatHistory.getApiMessages('general', convId);
     expect(apiMsgs).toHaveLength(4);
 
     const assistantMsg = apiMsgs[1] as { role: string; content: Array<{ type: string; id?: string; name?: string }> };

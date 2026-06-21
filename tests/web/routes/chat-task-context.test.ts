@@ -472,12 +472,17 @@ function sendChatRpc(
 }
 
 describe('Chat RPC task context integration', () => {
+  // Chat (WS RPC) writes to the General agent's active conversation; read back there.
+  let convId: string;
+
   beforeEach(async () => {
     await fs.rm(WALNUT_HOME, { recursive: true, force: true });
     await fs.mkdir(WALNUT_HOME, { recursive: true });
     server = await startServer({ port: 0, dev: true });
     const addr = server.address();
     port = typeof addr === 'object' && addr ? addr.port : 0;
+    const { getActiveConversationId } = await import('../../../src/core/conversations.js');
+    convId = await getActiveConversationId('general');
   });
 
   afterEach(async () => {
@@ -504,7 +509,7 @@ describe('Chat RPC task context integration', () => {
       });
 
       // Read persisted API messages
-      const apiMsgs = await chatHistory.getApiMessages();
+      const apiMsgs = await chatHistory.getApiMessages('general', convId);
       expect(apiMsgs.length).toBeGreaterThanOrEqual(2); // user + assistant
 
       // The first message should be the user message with prefix
@@ -535,7 +540,7 @@ describe('Chat RPC task context integration', () => {
     try {
       await sendChatRpc(ws, { message: 'hello' });
 
-      const apiMsgs = await chatHistory.getApiMessages();
+      const apiMsgs = await chatHistory.getApiMessages('general', convId);
       const userMsg = apiMsgs[0];
       expect(userMsg.role).toBe('user');
       expect(userMsg.content).toBe('hello');

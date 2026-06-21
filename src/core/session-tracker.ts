@@ -17,9 +17,34 @@ async function ensureSessionInit(): Promise<void> {
   await runSessionMigrationIfNeeded();
 }
 
+// ── Whole-store read cache ────────────────────────────────────────────────
+// readStore() runs `SELECT * FROM sessions` + rows.map(rowToSession) over the
+// WHOLE table (5000+ rows) on EVERY call. The single scan is ~30-45ms, but it
+// is re-run uncached on every concurrent request AND multiple times per page
+// render (e.g. /api/tasks calls listSessions() a second time to enrich). On a
+// single event loop each scan is an uninterruptible synchronous span, so N
+// concurrent reads serialize head-of-line — the root cause of the simultaneous
+// 15s HTTP timeouts under load.
+//
+// Fix: cache the mapped SessionRecord[] and serve it until the next write.
+// Invalidation is a single hook in withWriteLock's finally (below) — EVERY
+// mutation funnels through that lock, so we never enumerate writers. This is a
+// cache of the LOCAL sqlite (in-process source of truth), NOT remote daemon
+// state, so it does not reintroduce the "cache remote truth" anti-pattern;
+// live PID/daemon liveness is computed OUTSIDE this cache by callers
+// (enrichWithLiveStatus) and stays fresh. Env-gated for instant prod revert.
+const STORE_CACHE_ENABLED = process.env.WALNUT_STORE_CACHE !== '0';
+let sessionStoreCache: SessionRecord[] | null = null;
+
+/** Drop the cached whole-store snapshot. Called from withWriteLock.finally. */
+function invalidateSessionStoreCache(): void {
+  sessionStoreCache = null;
+}
+
 /** Reset module-level state for test isolation. */
 export function _resetSessionTrackerForTesting(): void {
   sessionInitialized = false;
+  sessionStoreCache = null;
 }
 
 const MAX_STATUS_HISTORY = 10;
@@ -69,14 +94,54 @@ export function isEnvironmentSession(s: SessionRecord): boolean {
   return isTriageSession(s); // legacy fallback for untyped records
 }
 
+/**
+ * Read the whole session store. Served from an in-process cache that survives
+ * until the next write (invalidated in withWriteLock.finally).
+ *
+ * Returns per-call ISOLATED shallow clones, never the canonical cached objects.
+ * This is deliberate and systemic rather than per-caller: several readers either
+ * sort the array in place (getRecentSessions) or mutate record fields in place
+ * (the /api/sessions route's enrichWithLiveStatus flips process_status), and
+ * handing out shared references would poison the cache for every later reader.
+ * Cloning the whole table is ~0.5-1ms — it still skips the expensive part the
+ * cache exists to avoid: the `SELECT *` + rowToSession per-row JSON.parse of
+ * spill columns (~30-45ms). One clone site = zero per-caller mutation audits.
+ *
+ * ⚠️ DESIGN DEBT — `SELECT *` over the WHOLE table is itself the wrong shape.
+ * It's a leftover from when this store was a sessions.json file (read whole
+ * file → JSON.parse → filter in JS). After the SQLite migration the access
+ * pattern was kept verbatim, so callers still pull all ~5000+ rows and filter
+ * in JS — e.g. getActiveSessionsByHost() scans the full table to return the
+ * ~4 'running' rows (99.9% of the work is thrown away). The CORRECT fix is to
+ * push predicates into SQL with indexes (`WHERE process_status='running'`,
+ * `WHERE task_id=?`, GROUP BY host) per call site instead of materializing the
+ * whole table. This cache is a deliberate, low-risk STOPGAP: it kills the
+ * acute pain (every concurrent request re-running the scan and head-of-line
+ * blocking the event loop) without touching dozens of JS-filter call sites on
+ * a live, multi-agent-edited server. The residual cold-miss cost (~45ms first
+ * scan, ~189ms for tasks) is the unfixed root design showing through. Tracked
+ * for a proper storage-access rewrite — see the approved SQLite-migration plan
+ * in project memory (task_storage_root_cause_and_sqlite_plan).
+ */
 async function readStore(): Promise<{ sessions: SessionRecord[] }> {
   await ensureSessionInit();
-  const db = getDb();
-  if (!db) {
-    throw new Error('readStore: SQLite handle is null');
+  if (!STORE_CACHE_ENABLED) {
+    const db = getDb();
+    if (!db) {
+      throw new Error('readStore: SQLite handle is null');
+    }
+    const rows = db.prepare('SELECT * FROM sessions').all() as Record<string, any>[];
+    return { sessions: rows.map(rowToSession) };
   }
-  const rows = db.prepare('SELECT * FROM sessions').all() as Record<string, any>[];
-  return { sessions: rows.map(rowToSession) };
+  if (sessionStoreCache === null) {
+    const db = getDb();
+    if (!db) {
+      throw new Error('readStore: SQLite handle is null');
+    }
+    const rows = db.prepare('SELECT * FROM sessions').all() as Record<string, any>[];
+    sessionStoreCache = rows.map(rowToSession);
+  }
+  return { sessions: sessionStoreCache.map((s) => ({ ...s })) };
 }
 
 // ── Write lock: serializes read-modify-write operations in-process ────────
@@ -89,7 +154,17 @@ function withWriteLock<T>(fn: () => Promise<T>): Promise<T> {
   const prev = writeLock;
   let resolve: () => void;
   writeLock = new Promise<void>((r) => { resolve = r; });
-  return prev.then(fn).finally(() => resolve!());
+  // Invalidate the whole-store read cache after EVERY locked mutation. Every
+  // writer (create/update/batch/conditional/rename/complete/delete/link)
+  // funnels through this lock, so this single hook keeps the cache correct
+  // without enumerating writers. Drop BEFORE releasing the lock so the next
+  // reader rebuilds from fresh rows.
+  return prev
+    .then(fn)
+    .finally(() => {
+      invalidateSessionStoreCache();
+      resolve!();
+    });
 }
 
 /**
@@ -122,7 +197,8 @@ function isNoOpUpdate(
 }
 
 /**
- * List all tracked sessions.
+ * List all tracked sessions. readStore() already returns isolated shallow
+ * clones, so callers may freely sort/mutate the result.
  */
 export async function listSessions(): Promise<SessionRecord[]> {
   const store = await readStore();
@@ -162,6 +238,11 @@ const DEFAULT_REMOTE_IDLE_LIMIT = 40;
  * are asynchronously corrected to prevent future ghost-slot accumulation.
  */
 export async function getActiveSessionsByHost(): Promise<Record<string, SessionRecord[]>> {
+  // ⚠️ DESIGN DEBT (see readStore): this materializes ALL ~5000+ rows then keeps
+  // only the ~4 'running' ones — 99.9% wasted. Correct shape is
+  // `SELECT * FROM sessions WHERE process_status='running'` (indexed) + a
+  // narrowed liveness check. Left as a full scan for now; the readStore cache
+  // makes the repetition cheap but not free.
   const store = await readStore();
   const result: Record<string, SessionRecord[]> = {};
   const staleIds: string[] = [];
@@ -640,6 +721,72 @@ export async function updateSessionRecord(
 }
 
 /**
+ * Apply the SAME `updates` patch to many sessions in ONE write-lock + ONE
+ * SQLite transaction. This is the primitive that collapses the health monitor's
+ * ~293 serial `updateSessionRecord` calls per 30s tick (each its own
+ * BEGIN/COMMIT behind the in-process write lock — the confirmed event-loop
+ * starvation source) into a single transaction.
+ *
+ * Per-row work reuses the exact same helpers as updateSessionRecord
+ * (rowToSession → applyUpdateToSession no-op guard + status_history ring buffer
+ * → sessionToRow), so behaviour is identical; only the lock/transaction
+ * batching differs. Per-row errors and no-ops are caught and skipped INSIDE the
+ * loop so one bad/missing row never rolls back the rest of the batch.
+ *
+ * Returns the claudeSessionIds that were actually written (no-ops/missing rows
+ * are excluded).
+ */
+export async function batchUpdateSessionRecords(
+  claudeSessionIds: string[],
+  updates: Partial<Omit<SessionRecord, 'claudeSessionId'>>,
+): Promise<string[]> {
+  if (claudeSessionIds.length === 0) return [];
+  await ensureSessionInit();
+  return withWriteLock(async () => {
+    const db = getDb();
+    if (!db) {
+      throw new Error('batchUpdateSessionRecords: SQLite handle is null');
+    }
+    const selectStmt = db.prepare('SELECT * FROM sessions WHERE claude_session_id = ?');
+    const insertCols = [...SESSION_COLUMNS, 'payload'];
+    const insertSql =
+      'INSERT OR REPLACE INTO sessions (' + insertCols.join(', ') + ') VALUES (' +
+      insertCols.map((c) => '@' + c).join(', ') + ')';
+
+    const written: string[] = [];
+    // Single transaction for the whole batch — one BEGIN/COMMIT instead of N.
+    sessionDbTx((handle) => {
+      const insertStmt = handle.prepare(insertSql);
+      for (const id of claudeSessionIds) {
+        try {
+          const row = selectStmt.get(id) as Record<string, any> | undefined;
+          if (!row) continue; // missing row — skip, don't abort the batch
+          const session = rowToSession(row);
+          // Reuse the shared no-op guard + status_history + terminal PID clear.
+          if (!applyUpdateToSession(session, updates, 'clearing stale PID on batch terminal transition')) {
+            continue; // no material change — skip write
+          }
+          const partial = sessionToRow(session);
+          const bound: Record<string, unknown> = {};
+          for (const col of insertCols) bound[col] = partial[col] === undefined ? null : partial[col];
+          insertStmt.run(bound);
+          written.push(id);
+        } catch (err) {
+          // One poisoned row must not roll back the other ~292.
+          log.session.warn('batchUpdateSessionRecords: row failed (skipped)', {
+            sessionId: id, error: err instanceof Error ? err.message : String(err),
+          });
+        }
+      }
+    });
+    if (written.length > 0) {
+      log.session.info('session records batch-updated', { count: written.length, fields: Object.keys(updates) });
+    }
+    return written;
+  });
+}
+
+/**
  * Conditionally update an existing session's fields.
  * Re-reads the record inside the write lock and calls `shouldUpdate(current)` before writing.
  * Returns the updated record, or null if the predicate returned false (update skipped).
@@ -766,6 +913,12 @@ export async function completeTaskSessions(sessionIds: string[]): Promise<number
         if (!row) continue;
         const session = rowToSession(row);
         if (isTerminalSession(session)) continue;
+        // Already-converged record: stopped with no PID — rewriting it is pure
+        // churn. 'stopped' is not terminal per isTerminalSession (only 'error'
+        // is), so without this skip every server boot re-wrote the same ~1000
+        // rows in one synchronous transaction (~6s event-loop stall right after
+        // listen, queueing the browser's first requests behind it).
+        if (session.process_status === 'stopped' && session.pid == null) continue;
         if (session.pid != null && session.provider !== 'embedded' && session.provider !== 'sdk') {
           pidsToKill.push(session.pid);
         }

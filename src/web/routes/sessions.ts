@@ -6,7 +6,7 @@ import { Router, type Request, type Response, type NextFunction } from 'express'
 import { log } from '../../logging/index.js'
 import { listSessions, getRecentSessions, getSessionSummaries, getSessionsForTask, getSessionByClaudeId, updateSessionRecord, isTriageSession, isEnvironmentSession } from '../../core/session-tracker.js'
 import { readSessionHistory, readSingleSubagentHistory, extractPlanContent, rewriteHistoryRemoteImages } from '../../core/session-history.js'
-import { listTasks, getTask, addTask, updateTask, togglePin, setFocusTier } from '../../core/task-manager.js'
+import { listTasks, getTask, addTask, updateTask, togglePin, setFocusTier, linkSession } from '../../core/task-manager.js'
 import { getConfig } from '../../core/config-manager.js'
 import { bus, EventNames, eventData } from '../../core/event-bus.js'
 import fsp from 'node:fs/promises'
@@ -17,9 +17,11 @@ import { injectCompactBoundary, buildCompactSummary } from '../../utils/compact-
 import { findLocalJsonlPath } from '../../core/session-file-reader.js'
 import { getFrequentDirs, compileFromSessions } from '../../core/frequent-dirs.js'
 import type { SessionRecord, Task } from '../../core/types.js'
+import { VALID_SESSION_MODEL_IDS } from '../../core/types.js'
 import type { SessionHistoryMessage } from '../../core/session-history.js'
 import { processAndSaveImages, buildSessionImageContext } from './images.js'
 import { sessionRunner } from '../../providers/claude-code-session.js'
+import { listSideQuestions, addSideQuestion, getSideQuestion, markPromoted, deleteSideQuestion } from '../../core/side-questions.js'
 import type { ImagePayload } from './images.js'
 import { spillLargePromptToFile } from './quick-start-spill.js'
 import { QUICK_START_MESSAGE_HARD_LIMIT } from '../../constants.js'
@@ -334,7 +336,7 @@ sessionsRouter.get('/list-dirs', async (req: Request, res: Response, next: NextF
 sessionsRouter.post('/quick-start', async (req: Request, res: Response, next: NextFunction) => {
   const requestTs = Date.now()
   try {
-    const { cwd, host, message, model, mode, images, taskId: existingTaskId, taskMeta } = req.body as {
+    const { cwd, host, message, model: rawModel, mode, images, taskId: existingTaskId, taskMeta } = req.body as {
       cwd: string
       host?: string
       message: string
@@ -346,7 +348,7 @@ sessionsRouter.post('/quick-start', async (req: Request, res: Response, next: Ne
         starred?: boolean
         needs_attention?: boolean
         priority?: 'immediate' | 'important' | 'backlog' | 'none'
-        pinTier?: 'focus' | 'next' | 'satellite' | 'wait'
+        pinTier?: 'focus' | 'satellite' | 'wait'
       }
     }
 
@@ -358,6 +360,10 @@ sessionsRouter.post('/quick-start', async (req: Request, res: Response, next: Ne
       res.status(400).json({ error: 'message is required' })
       return
     }
+
+    // Normalize model against the SESSION_MODELS allowlist (same as the session:start
+    // RPC). Unknown/absent → undefined = Auto: send() falls back to config/CLI default.
+    const model = typeof rawModel === 'string' && VALID_SESSION_MODEL_IDS.has(rawModel) ? rawModel : undefined
 
     if (mode) {
       const validModes = ['bypass', 'accept', 'default', 'plan']
@@ -377,7 +383,7 @@ sessionsRouter.post('/quick-start', async (req: Request, res: Response, next: Ne
       }
     }
     if (taskMeta?.pinTier !== undefined && taskMeta.pinTier !== null) {
-      const validTiers = ['focus', 'next', 'satellite', 'wait']
+      const validTiers = ['focus', 'satellite', 'wait']
       if (!validTiers.includes(taskMeta.pinTier)) {
         res.status(400).json({ error: `Invalid taskMeta.pinTier: ${taskMeta.pinTier}. Must be one of: ${validTiers.join(', ')}` })
         return
@@ -887,29 +893,44 @@ sessionsRouter.get('/:sessionId/history', async (req: Request, res: Response, ne
     if (record?.forkedFromSessionId) {
       forkedFromSessionId = record.forkedFromSessionId
       try {
-        const forkChainMessages: typeof messages[] = []
+        // Two-phase to avoid serializing SSH round-trips:
+        //  1) Walk the fork pointers (getSessionByClaudeId — a LOCAL, now-cached
+        //     SQLite lookup) to collect ancestor records in chain order. The
+        //     next id depends on the current record, so this walk stays serial
+        //     but is cheap.
+        //  2) Fetch + image-rewrite every ancestor's history in PARALLEL (the
+        //     expensive SSH/JSONL part). Previously this was a serial
+        //     await-per-ancestor loop, so a 3-deep remote chain meant 3
+        //     sequential SSH pulls (~24s); parallel collapses that to ~1 pull.
+        const MAX_FORK_DEPTH = 5 // backstop against pathological/cyclic chains
+        const ancestors: import('../../core/types.js').SessionRecord[] = []
         const visited = new Set<string>([sessionId])
         let currentForkId: string | undefined = record.forkedFromSessionId
-
-        while (currentForkId && !visited.has(currentForkId)) {
+        while (currentForkId && !visited.has(currentForkId) && ancestors.length < MAX_FORK_DEPTH) {
           visited.add(currentForkId)
           const sourceRecord = await getSessionByClaudeId(currentForkId)
           if (!sourceRecord) break
-
-          let sourceMessages = await readSessionHistory(
-            currentForkId, sourceRecord.cwd, sourceRecord.host, sourceRecord.outputFile, { skipSubagents: true },
-          )
-          if (sourceRecord.host) {
-            sourceMessages = await rewriteHistoryRemoteImages(sourceMessages, sourceRecord.host, currentForkId, sourceRecord.cwd)
-          }
-          if (sourceMessages.length > 0) {
-            forkChainMessages.unshift(sourceMessages)
-          }
+          ancestors.push(sourceRecord)
           currentForkId = sourceRecord.forkedFromSessionId
         }
 
-        if (forkChainMessages.length > 0) {
-          const allSourceMessages = forkChainMessages.flat()
+        // ancestors[0] is the immediate parent … ancestors[n-1] the root.
+        // History order must be root-first (oldest → newest), so reverse.
+        const ordered = [...ancestors].reverse()
+        const fetched = await Promise.all(
+          ordered.map(async (sourceRecord) => {
+            let sourceMessages = await readSessionHistory(
+              sourceRecord.claudeSessionId, sourceRecord.cwd, sourceRecord.host, sourceRecord.outputFile, { skipSubagents: true },
+            )
+            if (sourceRecord.host) {
+              sourceMessages = await rewriteHistoryRemoteImages(sourceMessages, sourceRecord.host, sourceRecord.claudeSessionId, sourceRecord.cwd)
+            }
+            return sourceMessages
+          }),
+        )
+
+        const allSourceMessages = fetched.flat()
+        if (allSourceMessages.length > 0) {
           messages = [...allSourceMessages, ...messages]
           forkBoundaryIndex = allSourceMessages.length
         }
@@ -1080,6 +1101,98 @@ sessionsRouter.post('/:sessionId/permission', async (req: Request, res: Response
       return
     }
     res.json({ status: 'resolved', requestId, allow })
+  } catch (err) {
+    next(err)
+  }
+})
+
+// ── Side questions ("/btw") ─────────────────────────────────────────────────
+// The native Claude Code side_question control_request, run INSIDE the live coding
+// session (reuses its own prompt-cache prefix), answer kept OUT of the main
+// transcript. See ClaudeCodeSession.askSideQuestion + side-questions.ts store.
+
+// GET /api/sessions/:sessionId/side-questions — history list for the drawer
+sessionsRouter.get('/:sessionId/side-questions', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const list = await listSideQuestions(req.params.sessionId as string)
+    res.json({ sideQuestions: list })
+  } catch (err) {
+    next(err)
+  }
+})
+
+// POST /api/sessions/:sessionId/side-question — ask + persist + broadcast
+sessionsRouter.post('/:sessionId/side-question', async (req: Request, res: Response, next: NextFunction) => {
+  const sessionId = req.params.sessionId as string
+  const { question } = req.body as { question?: string }
+  try {
+    if (!question || typeof question !== 'string' || !question.trim()) {
+      res.status(400).json({ error: 'question (non-empty string) is required' })
+      return
+    }
+    // Attach-on-demand: findByClaudeId only sees the in-memory map (≈ the sessions
+    // the startup reconciler flagged), so a genuinely-alive session the user can
+    // chat with would falsely 404 here. getOrAttachLiveSession rehydrates via
+    // attachToExisting — same resolution a normal send turn gets in processNext.
+    const session = await sessionRunner.getOrAttachLiveSession(sessionId)
+    if (!session) {
+      res.status(404).json({ error: 'Live session not found' })
+      return
+    }
+    const answer = await session.askSideQuestion(question.trim())
+    const entry = await addSideQuestion(sessionId, question.trim(), answer)
+    bus.emit(EventNames.SESSION_SIDE_QUESTION_DONE, {
+      sessionId, id: entry.id, question: entry.question, answer: entry.answer, createdAt: entry.createdAt,
+    }, ['*'], { source: 'session-runner' })
+    res.json({ sideQuestion: entry })
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    log.web.warn('side question failed', { sessionId, error: msg })
+    bus.emit(EventNames.SESSION_SIDE_QUESTION_ERROR, {
+      sessionId, question: question ?? '', error: msg,
+    }, ['*'], { source: 'session-runner' })
+    res.status(502).json({ error: msg })
+  }
+})
+
+// POST /api/sessions/:sessionId/side-question/:id/promote — turn a Q&A into a task
+sessionsRouter.post('/:sessionId/side-question/:id/promote', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const sessionId = req.params.sessionId as string
+    const id = req.params.id as string
+    const entry = await getSideQuestion(sessionId, id)
+    if (!entry) {
+      res.status(404).json({ error: 'Side question not found' })
+      return
+    }
+    // If this session is working on a task, file the promoted Q&A as a SUBTASK of
+    // it (addTask inherits the parent's category/project/source). Ad-hoc sessions
+    // with no originating task fall back to a top-level task.
+    const sessionRecord = await getSessionByClaudeId(sessionId)
+    const parentTaskId = sessionRecord?.taskId?.trim() || undefined
+    const { task } = await addTask({
+      title: entry.question,
+      description: entry.answer,
+      ...(parentTaskId ? { parent_task_id: parentTaskId } : {}),
+    })
+    // Link the task back to the session so it shows under that session's history.
+    await linkSession(task.id, sessionId)
+    await markPromoted(sessionId, id, task.id)
+    res.json({ taskId: task.id, parentTaskId: task.parent_task_id })
+  } catch (err) {
+    next(err)
+  }
+})
+
+// DELETE /api/sessions/:sessionId/side-question/:id — remove a Q&A from history
+sessionsRouter.delete('/:sessionId/side-question/:id', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const ok = await deleteSideQuestion(req.params.sessionId as string, req.params.id as string)
+    if (!ok) {
+      res.status(404).json({ error: 'Side question not found' })
+      return
+    }
+    res.json({ status: 'deleted' })
   } catch (err) {
     next(err)
   }
@@ -1653,7 +1766,13 @@ sessionsRouter.post('/:sessionId/fork', async (req: Request, res: Response, next
         res.status(404).json({ error: `Parent task "${sourceRecord.taskId}" not found` })
         return
       }
-      const newTitle = child_title ?? `Fork of ${parentTask.title}`
+      // When the caller didn't supply an explicit child_title, we use a plain
+      // `Fork of <parent>` placeholder now and (below, after addTask) refine it
+      // asynchronously into `<2-4 word summary of the fork prompt> - fork of <parent>`.
+      // Use `||` (not `??`) so an empty-string child_title also falls back to the
+      // placeholder — consistent with `autoTitle = !child_title` below.
+      const autoTitle = !child_title
+      const newTitle = child_title || `Fork of ${parentTask.title}`
       // No _skipPluginOps: a forked child inherits the parent's source (e.g.
       // an external sync plugin) and must pass the same content validation + push
       // as any other task. Skipping it previously let CJK titles inherited from a
@@ -1665,9 +1784,61 @@ sessionsRouter.post('/:sessionId/fork', async (req: Request, res: Response, next
         parent_task_id: parentTask.id,
         source: parentTask.source,
       })
+      // Inherit the parent's pin/tier so a fork of a Focus task lands in Focus
+      // too — addTask() never sets focus_tier, so without this the child always
+      // defaults to satellite regardless of where the parent lived. Mirrors the
+      // quick-start pin/tier block above; best-effort, non-fatal on failure.
+      if (parentTask.pinned && parentTask.focus_tier) {
+        try {
+          await togglePin(newChild.id)
+          await setFocusTier(newChild.id, parentTask.focus_tier)
+        } catch (err) {
+          log.web.warn('fork: failed to inherit pin/tier from parent', {
+            taskId: newChild.id,
+            parentTaskId: parentTask.id,
+            tier: parentTask.focus_tier,
+            error: err instanceof Error ? err.message : String(err),
+          })
+        }
+      }
       bus.emit(EventNames.TASK_CREATED, { task: newChild }, ['web-ui', 'main-agent'], { source: 'fork' })
       task = newChild
       childTaskCreated = true
+
+      // Refine the auto-generated title in the background: summarize the fork's new
+      // prompt into a few English words → `<words> - fork of <parent>`. Fire-and-forget
+      // so the fork response is not blocked; failures keep the `Fork of <parent>`
+      // placeholder. Only runs when the title was auto-generated AND a custom fork
+      // message was provided (no point summarizing the "Continue working on:" default).
+      if (autoTitle && message?.trim()) {
+        const childId = newChild.id
+        const parentTitle = parentTask.title
+        const placeholderTitle = newTitle
+        void (async () => {
+          try {
+            const { summarizeForkPrompt } = await import('../../core/fork-title.js')
+            const label = await summarizeForkPrompt(message)
+            if (!label) return
+            // Don't clobber a concurrent user rename: only refine if the title is
+            // still the `Fork of <parent>` placeholder we created moments ago.
+            const current = await getTask(childId)
+            if (current.title !== placeholderTitle) {
+              log.web.info('fork title refine skipped — title changed since fork', { taskId: childId })
+              return
+            }
+            const refinedTitle = `${label} - fork of ${parentTitle}`
+            const { task: updated } = await updateTask(childId, { title: refinedTitle }, { source: 'fork-title' })
+            bus.emit(EventNames.TASK_UPDATED, { task: updated }, ['web-ui', 'main-agent'], { source: 'fork-title' })
+            log.web.info('fork title refined', { taskId: childId, title: refinedTitle })
+          } catch (err) {
+            // Best-effort: a failed refine just leaves the `Fork of <parent>` title.
+            log.web.warn('fork title refine failed', {
+              taskId: childId,
+              error: err instanceof Error ? err.message : String(err),
+            })
+          }
+        })()
+      }
     } else {
       // Look up target task by provided task_id
       task = await getTask(task_id!)

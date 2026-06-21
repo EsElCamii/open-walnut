@@ -668,7 +668,7 @@ For categories (type='category'): rename a category across all tasks (requires o
         cwd: { type: 'string', description: 'Task-level working directory override. Takes precedence over project default_cwd when starting sessions. Empty string clears.' },
         // Pin / Focus tier
         pinned: { type: 'boolean', description: 'Pin or unpin the task. Pinned tasks appear in the Focus Bar sidebar.' },
-        focus_tier: { type: 'string', enum: ['focus', 'next', 'satellite', 'wait'], description: 'Set focus tier (task must be pinned). focus=current sprint (max 3), next=queued, satellite=backlog, wait=parked/blocked.' },
+        focus_tier: { type: 'string', enum: ['focus', 'satellite', 'wait'], description: 'Set focus tier (task must be pinned). focus=current sprint (max 3), satellite=backlog, wait=parked/blocked.' },
         // Project fields
         default_host: { type: 'string', description: 'SSH host alias for remote sessions (type=project).' },
         default_cwd: { type: 'string', description: 'Default working directory (type=project).' },
@@ -797,14 +797,14 @@ For categories (type='category'): rename a category across all tasks (requires o
           if (wantPinned && !task.pinned) {
             await togglePin(task.id);
             const tier = (params.focus_tier as string) || 'satellite';
-            await setFocusTier(task.id, tier as 'focus' | 'next' | 'satellite' | 'wait');
+            await setFocusTier(task.id, tier as 'focus' | 'satellite' | 'wait');
             results.push(`pinned → ${tier} tier`);
           } else if (!wantPinned && task.pinned) {
             await togglePin(task.id);
             results.push('unpinned');
           } else if (wantPinned && task.pinned && params.focus_tier) {
             // Already pinned, just change tier
-            await setFocusTier(task.id, params.focus_tier as 'focus' | 'next' | 'satellite' | 'wait');
+            await setFocusTier(task.id, params.focus_tier as 'focus' | 'satellite' | 'wait');
             results.push(`tier → ${params.focus_tier}`);
           } else if (wantPinned && task.pinned) {
             // Already pinned, no tier change requested
@@ -817,7 +817,7 @@ For categories (type='category'): rename a category across all tasks (requires o
           if (!task.pinned) {
             results.push('Error: task is not pinned — pin it first with pinned=true');
           } else {
-            await setFocusTier(task.id, params.focus_tier as 'focus' | 'next' | 'satellite' | 'wait');
+            await setFocusTier(task.id, params.focus_tier as 'focus' | 'satellite' | 'wait');
             results.push(`tier → ${params.focus_tier}`);
           }
         }

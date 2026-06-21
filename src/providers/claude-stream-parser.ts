@@ -9,7 +9,7 @@
  *   {"type":"system","subtype":"init","model":"...","session_id":"..."}
  *   {"type":"assistant","message":{"role":"assistant","content":[...]}}
  *   {"type":"tool","tool_use_id":"...","content":"..."}
- *   {"type":"result","subtype":"success","result":"...","cost_usd":0.003}
+ *   {"type":"result","subtype":"success","result":"...","total_cost_usd":0.003}
  */
 
 /** Streaming block types — mirrors the frontend StreamingBlock union in useSessionStream.ts.
@@ -167,7 +167,9 @@ export function parseClaudeJsonlLine(
     const isError = parsed.subtype === 'error';
     callbacks?.onResult?.({
       result,
-      costUsd: parsed.cost_usd as number | undefined,
+      // Claude Code's result event uses `total_cost_usd` (matches SDKResultMessage);
+      // fall back to the legacy `cost_usd` for older CLI output.
+      costUsd: (parsed.total_cost_usd ?? parsed.cost_usd) as number | undefined,
       durationMs: parsed.duration_ms as number | undefined,
       durationApiMs: parsed.duration_api_ms as number | undefined,
       isError,

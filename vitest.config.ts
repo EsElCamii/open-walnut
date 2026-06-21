@@ -6,7 +6,10 @@ export default defineConfig({
     environment: 'node',
     globalSetup: ['tests/setup/global-setup.ts'],
     include: ['tests/**/*.test.ts'],
-    exclude: ['tests/e2e/**/*.test.ts', 'tests/commands/**/*.test.ts', '**/*.live.test.ts'],
+    // notes-roundtrip runs under its own DOM-shimmed config (its deps live in
+    // web/node_modules); exclude it from the node-env base/coverage runs so it
+    // can't fail to resolve @tiptap/* here.
+    exclude: ['tests/e2e/**/*.test.ts', 'tests/commands/**/*.test.ts', 'tests/web/notes-roundtrip/**', '**/*.live.test.ts'],
     pool: 'forks',
     testTimeout: 30_000,
     hookTimeout: 30_000,

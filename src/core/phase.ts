@@ -5,10 +5,11 @@
  * Two-layer phase management (K8s-style push + reconcile):
  *
  * Layer 1: Push (ms-level, reliable with retry)
- *   session:result  → AGENT_COMPLETE      unconditional
- *   session:input   → IN_PROGRESS         unconditional
- *   session:error   → AWAIT_HUMAN_ACTION  unconditional
- *   triage-sync     → AWAIT_HUMAN_ACTION  only when === AGENT_COMPLETE
+ *   session:result    → AGENT_COMPLETE      unconditional
+ *   session:input     → IN_PROGRESS         unconditional
+ *   session:error     → AWAIT_HUMAN_ACTION  unconditional
+ *   session:streaming → IN_PROGRESS         only when === AWAIT_HUMAN_ACTION
+ *   triage-sync       → AWAIT_HUMAN_ACTION  only when === AGENT_COMPLETE
  *
  *   All go through applySessionPhase() — unified retry + logging + error handling.
  *
@@ -139,12 +140,29 @@ export function sessionErrorPhase(current: TaskPhase): TaskPhase | null {
   return 'AWAIT_HUMAN_ACTION'
 }
 
+/**
+ * Session is actively streaming again → undo a stale AWAIT_HUMAN_ACTION.
+ *
+ * Invariant: a session that is streaming output (or that just produced a
+ * result) cannot logically be "waiting for human action". This corrects the
+ * race where a transient/late session:error flipped the task to
+ * AWAIT_HUMAN_ACTION while the session had already recovered (e.g. remote CLI
+ * exited cleanly at a turn boundary and was resumed via --resume in the same
+ * send). ONLY acts on AWAIT_HUMAN_ACTION — never disturbs any other phase, so
+ * a genuinely-stuck session a human paused stays put unless output resumes.
+ */
+export function sessionStreamingPhase(current: TaskPhase): TaskPhase | null {
+  if (current === 'AWAIT_HUMAN_ACTION') return 'IN_PROGRESS'
+  return null
+}
+
 // ── applySessionPhase() — single entry point for all session → phase updates ──
 
 export type PhaseTransitionTrigger =
   | 'session:result'
   | 'session:input'
   | 'session:error'
+  | 'session:streaming'
   | 'triage-sync'
   | 'reconciler'
 
@@ -182,6 +200,7 @@ export async function applySessionPhase(
     case 'session:result':  newPhase = sessionResultPhase(task.phase); break
     case 'session:input':   newPhase = sessionInputPhase(task.phase); break
     case 'session:error':   newPhase = sessionErrorPhase(task.phase); break
+    case 'session:streaming': newPhase = sessionStreamingPhase(task.phase); break
     case 'triage-sync':     newPhase = task.phase === 'AGENT_COMPLETE' ? 'AWAIT_HUMAN_ACTION' : null; break
     case 'reconciler':      newPhase = opts?.newPhase ?? null; break
   }

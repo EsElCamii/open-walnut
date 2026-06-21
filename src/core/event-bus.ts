@@ -56,9 +56,15 @@ export const EventNames = {
   SESSION_BATCH_FAILED: 'session:batch-failed',
   SESSION_MESSAGE_QUEUED: 'session:message-queued',
   SESSION_SYSTEM_EVENT: 'session:system-event',
+  SESSION_BACKGROUND_TASKS: 'session:background-tasks',
   SESSION_USAGE_UPDATE: 'session:usage-update',
   SESSION_PERMISSION_REQUEST: 'session:permission-request',
   SESSION_PERMISSION_RESOLVED: 'session:permission-resolved',
+
+  // Side question ("/btw") — native Claude Code side_question round-trip results.
+  // The drawer subscribes to these to update without polling.
+  SESSION_SIDE_QUESTION_DONE: 'session:side-question-done',
+  SESSION_SIDE_QUESTION_ERROR: 'session:side-question-error',
 
   // Team events (Claude Code Teams — parallel agents)
   SESSION_TEAM_INFO: 'session:team-info',

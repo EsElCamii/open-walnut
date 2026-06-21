@@ -19,7 +19,7 @@ vi.mock('../../src/constants.js', () => createMockConstants('walnut-e2e-turn-bou
 
 import {
   WALNUT_HOME,
-  CHAT_HISTORY_FILE,
+  conversationFile,
 } from '../../src/constants.js';
 import { startServer, stopServer } from '../../src/web/server.js';
 import * as chatHistory from '../../src/core/chat-history.js';
@@ -32,6 +32,10 @@ function apiUrl(p: string): string {
   return `http://localhost:${port}${p}`;
 }
 
+// Chat storage is conversation-scoped: target the General agent's active
+// conversation (what the REST endpoints resolve to with no conversationId).
+let convId: string;
+
 // ── Setup / Teardown ──
 
 beforeAll(async () => {
@@ -40,6 +44,8 @@ beforeAll(async () => {
   server = await startServer({ port: 0, dev: true });
   const addr = server.address();
   port = typeof addr === 'object' && addr ? addr.port : 3456;
+  const { getActiveConversationId } = await import('../../src/core/conversations.js');
+  convId = await getActiveConversationId('general');
 });
 
 afterAll(async () => {
@@ -48,7 +54,7 @@ afterAll(async () => {
 });
 
 beforeEach(async () => {
-  await chatHistory.clear();
+  await chatHistory.clear('general', convId);
 });
 
 // ── Helpers ──
@@ -116,13 +122,13 @@ describe('Turn-boundary compaction E2E', () => {
       }
     }
 
-    await chatHistory.addAIMessages(allMsgs);
+    await chatHistory.addAIMessages(allMsgs, { agentId: 'general', conversationId: convId });
 
     // Compact
-    await chatHistory.compact(async () => 'Turn-boundary test summary');
+    await chatHistory.compact(async () => 'Turn-boundary test summary', undefined, 'general', convId);
 
     // ── Verify 1: Model context has no orphan tool_results ──
-    const ctx = await chatHistory.getModelContext();
+    const ctx = await chatHistory.getModelContext('general', convId);
     expect(ctx.length).toBeGreaterThan(0);
 
     // First message must be a user text message (not tool_result)
@@ -155,7 +161,7 @@ describe('Turn-boundary compaction E2E', () => {
     }
 
     // ── Verify 2: Compaction summary is stored ──
-    const summary = await chatHistory.getCompactionSummary();
+    const summary = await chatHistory.getCompactionSummary('general', convId);
     expect(summary).toBe('Turn-boundary test summary');
   });
 
@@ -178,11 +184,11 @@ describe('Turn-boundary compaction E2E', () => {
       );
     }
 
-    await chatHistory.addAIMessages(allMsgs);
-    await chatHistory.compact(async () => 'Slim test summary');
+    await chatHistory.addAIMessages(allMsgs, { agentId: 'general', conversationId: convId });
+    await chatHistory.compact(async () => 'Slim test summary', undefined, 'general', convId);
 
     // ── Verify: pre-boundary entries are deleted; kept entries are slimmed ──
-    const entries = (await chatHistory.getDisplayEntries()).messages;
+    const entries = (await chatHistory.getDisplayEntries(1, 100, 'general', convId)).messages;
 
     // Fresh compaction never produces compacted=true entries — they're deleted.
     expect(entries.filter((e) => e.compacted)).toHaveLength(0);
@@ -272,10 +278,10 @@ describe('Turn-boundary compaction E2E', () => {
         },
       ],
     };
-    fs.writeFileSync(CHAT_HISTORY_FILE, JSON.stringify(corruptedStore));
+    fs.writeFileSync(conversationFile('general', convId), JSON.stringify(corruptedStore));
 
     // Reading model context should trigger migration and clean the orphan
-    const ctx = await chatHistory.getModelContext();
+    const ctx = await chatHistory.getModelContext('general', convId);
 
     // The orphan should have been compacted away — only clean messages remain
     expect(ctx).toHaveLength(2);
@@ -283,7 +289,7 @@ describe('Turn-boundary compaction E2E', () => {
     expect((ctx[1] as { content: string }).content).toBe('clean reply');
 
     // Verify the orphan is now marked as compacted in the store
-    const entries = (await chatHistory.getDisplayEntries()).messages;
+    const entries = (await chatHistory.getDisplayEntries(1, 100, 'general', convId)).messages;
     const orphan = entries.find(
       (e) =>
         Array.isArray(e.content)
@@ -310,10 +316,10 @@ describe('Turn-boundary compaction E2E', () => {
     for (let i = 0; i < 15; i++) {
       allMsgs.push(...simpleTurn(`user msg ${i}`, `reply ${i}`));
     }
-    await chatHistory.addAIMessages(allMsgs);
+    await chatHistory.addAIMessages(allMsgs, { agentId: 'general', conversationId: convId });
 
     // Compact
-    await chatHistory.compact(async () => 'REST test summary');
+    await chatHistory.compact(async () => 'REST test summary', undefined, 'general', convId);
 
     // Verify REST GET /api/chat/history
     const res = await fetch(apiUrl('/api/chat/history'));
@@ -345,10 +351,10 @@ describe('Turn-boundary compaction E2E', () => {
         allMsgs.push(...simpleTurn(`msg ${i}`, `reply ${i}`));
       }
     }
-    await chatHistory.addAIMessages(allMsgs);
-    await chatHistory.compact(async () => 'Alternation test');
+    await chatHistory.addAIMessages(allMsgs, { agentId: 'general', conversationId: convId });
+    await chatHistory.compact(async () => 'Alternation test', undefined, 'general', convId);
 
-    const ctx = await chatHistory.getModelContext();
+    const ctx = await chatHistory.getModelContext('general', convId);
 
     // Verify strict alternation: user, assistant, user, assistant, ...
     for (let i = 1; i < ctx.length; i++) {

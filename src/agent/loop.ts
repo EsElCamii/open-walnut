@@ -50,6 +50,11 @@ export interface AgentLoopOptions {
   signal?: AbortSignal;
   /** Caller identity for logging (e.g. 'chat', 'cron', 'triage', 'cli'). */
   source?: string;
+  /** Conversation this turn runs for. Used to build the system prompt's
+   *  "Earlier conversation context" from the RIGHT conversation's compaction
+   *  summary + working memory. Omit only when `system` is supplied explicitly. */
+  agentId?: string;
+  conversationId?: string;
 }
 
 const MAX_TOOL_ROUNDS = 300;
@@ -133,8 +138,10 @@ export async function runAgentLoop(
 ): Promise<{ messages: MessageParam[]; response: string; aborted?: boolean; tokenBreakdown?: { system: number; tools: number; messages: number; total: number } }> {
   const config = await getConfig();
 
-  // Use custom system/tools/model if provided (subagent mode), else defaults
-  const system = options?.system ?? await buildSystemPrompt();
+  // Use custom system/tools/model if provided (subagent mode), else defaults.
+  // buildSystemPrompt is conversation-scoped so the injected "Earlier conversation
+  // context" comes from THIS conversation, not the legacy ghost file.
+  const system = options?.system ?? await buildSystemPrompt(options?.agentId, options?.conversationId);
   const customTools = options?.tools;
   const toolSchemas = customTools
     ? customTools.map((t) => ({ name: t.name, description: t.description, input_schema: t.input_schema })) as Tool[]

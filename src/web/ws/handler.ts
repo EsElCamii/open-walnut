@@ -13,10 +13,24 @@ import { log } from '../../logging/index.js'
 
 export type RpcHandler = (payload: unknown, client: WebSocket) => unknown | Promise<unknown>
 
+/**
+ * Per-connection delivery mode.
+ * - "global"      (default): receives EVERY broadcast event — the original firehose
+ *                  behavior. The main app window relies on this.
+ * - "lightweight": receives only events whose `data.sessionId` / `data.taskId` is in
+ *                  this connection's `interest` set (plus entity-less essential events).
+ *                  Used by pop-out windows that only care about a single entity.
+ */
+type ClientMode = 'global' | 'lightweight'
+
 interface Client {
   ws: WebSocket
   seq: number
   alive: boolean
+  /** Delivery mode. Defaults to "global" so existing clients are unchanged. */
+  mode: ClientMode
+  /** Entity ids (sessionId / taskId) this connection cares about in lightweight mode. */
+  interest: Set<string>
 }
 
 let wss: WebSocketServer | null = null
@@ -51,12 +65,13 @@ export function registerMethod(name: string, handler: RpcHandler): void {
  * Broadcast a bus event to all connected WebSocket clients.
  */
 export function broadcastEvent(name: string, data: unknown): void {
-  // DUP-DEBUG: for tool_use / tool_result include toolUseId so each broadcast
-  // can be traced. If two `broadcast session:tool-use` lines share the same
-  // toolUseId, the duplication is upstream of the WS layer.
+  // DUP-DEBUG (debug-level): for tool_use / tool_result include toolUseId so each
+  // broadcast can be traced. If two `broadcast session:tool-use` lines share the
+  // same toolUseId, the duplication is upstream of the WS layer. Kept at debug —
+  // these fire on the streaming hot path; surface via WALNUT_LOG_LEVEL=debug.
   if (name === 'session:tool-use' || name === 'session:tool-result') {
     const d = data as { toolUseId?: string; sessionId?: string; toolName?: string }
-    log.ws.info(`broadcast ${name}`, {
+    log.ws.debug(`broadcast ${name}`, {
       clientCount: clients.size,
       sessionId: d?.sessionId,
       toolUseId: d?.toolUseId,
@@ -65,12 +80,37 @@ export function broadcastEvent(name: string, data: unknown): void {
   } else {
     log.ws.debug(`broadcast ${name}`, { clientCount: clients.size })
   }
+  // Extract entity ids once (shared across all clients) for lightweight filtering.
+  const entity = data as { sessionId?: string; taskId?: string } | null | undefined
+  const sessionId = entity?.sessionId
+  const taskId = entity?.taskId
+
   for (const client of clients) {
     if (client.ws.readyState !== WebSocket.OPEN) continue
+    // Lightweight clients (pop-out windows) only want events for entities they
+    // opted into. Default "global" clients are never filtered — unchanged firehose.
+    if (client.mode === 'lightweight' && !clientWantsEvent(client, sessionId, taskId)) continue
     client.seq++
     const frame: WsFrame = { type: 'event', name, data, seq: client.seq }
     client.ws.send(JSON.stringify(frame))
   }
+}
+
+/**
+ * Decide whether a lightweight client should receive an event.
+ *
+ * Rule (intentionally permissive — "when unsure, send"):
+ * - If the event carries a sessionId/taskId in the client's interest set → send.
+ * - If the event carries NO entity id at all (sessionId AND taskId both absent),
+ *   it's an essential/lifecycle event (e.g. system:health, cron:*, _ws:*) → send.
+ * - Otherwise the event is *about some other entity* the client didn't opt into → skip.
+ */
+function clientWantsEvent(client: Client, sessionId?: string, taskId?: string): boolean {
+  if (sessionId && client.interest.has(sessionId)) return true
+  if (taskId && client.interest.has(taskId)) return true
+  // No entity id => not addressed to a specific entity => keep it (safe default).
+  if (!sessionId && !taskId) return true
+  return false
 }
 
 /**
@@ -137,11 +177,48 @@ async function handleMessage(client: Client, raw: string): Promise<void> {
   }
 }
 
+/** Find the Client wrapper for a raw WebSocket (RPC handlers only get the socket). */
+function findClient(ws: WebSocket): Client | undefined {
+  for (const client of clients) {
+    if (client.ws === ws) return client
+  }
+  return undefined
+}
+
+/**
+ * Built-in "set-interest" RPC. Lets a client opt into lightweight delivery so it
+ * only receives events for the entities it lists (used by pop-out windows to avoid
+ * the full event firehose). Sending `{ mode: "global" }` (or omitting mode) restores
+ * the default firehose. Idempotent — safe to call repeatedly (e.g. after reconnect).
+ *
+ * Payload: { mode?: "global" | "lightweight", ids?: string[] }
+ *   - mode "lightweight" + ids [sessionId/taskId, ...] → filtered delivery
+ *   - mode "global" (default) → full firehose, interest cleared
+ * Returns: { mode, ids } reflecting the applied state.
+ */
+function registerSetInterest(): void {
+  registerMethod('set-interest', (payload: unknown, ws: WebSocket) => {
+    const client = findClient(ws)
+    if (!client) throw new Error('set-interest: client not found')
+
+    const p = (payload ?? {}) as { mode?: unknown; ids?: unknown }
+    const mode: ClientMode = p.mode === 'lightweight' ? 'lightweight' : 'global'
+    const ids = Array.isArray(p.ids) ? p.ids.filter((id): id is string => typeof id === 'string' && id.length > 0) : []
+
+    client.mode = mode
+    client.interest = new Set(mode === 'lightweight' ? ids : []) // clear interest when going global
+
+    log.ws.info('set-interest', { mode, idCount: client.interest.size })
+    return { mode, ids: [...client.interest] }
+  })
+}
+
 /**
  * Attach the WebSocket server to an existing HTTP server via upgrade.
  */
 export function attachWss(server: HttpServer): WebSocketServer {
   wss = new WebSocketServer({ noServer: true })
+  registerSetInterest()
 
   server.on('upgrade', (request: IncomingMessage, socket, head) => {
     // Only upgrade requests to /ws (or all if no path check needed)
@@ -157,7 +234,8 @@ export function attachWss(server: HttpServer): WebSocketServer {
   })
 
   wss.on('connection', (ws: WebSocket) => {
-    const client: Client = { ws, seq: 0, alive: true }
+    // New connections default to "global" mode (full firehose) — unchanged behavior.
+    const client: Client = { ws, seq: 0, alive: true, mode: 'global', interest: new Set() }
     clients.add(client)
     log.ws.info('client connected', { clientCount: clients.size })
 

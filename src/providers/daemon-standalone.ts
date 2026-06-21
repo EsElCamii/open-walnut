@@ -37,9 +37,12 @@ import {
 } from './daemon-core.js'
 import { REQUIRED_DAEMON_CAPABILITIES } from './daemon-capabilities.js'
 
-// ── Version flag ──
+// ── Version ──
+// Baked in at compile time via `bun build --define` (see scripts/build-daemon.sh).
+const DAEMON_VERSION = process.env.DAEMON_VERSION || 'dev'
+
 if (process.argv.includes('--version')) {
-  console.log(process.env.DAEMON_VERSION || 'dev')
+  console.log(DAEMON_VERSION)
   process.exit(0)
 }
 
@@ -47,10 +50,20 @@ if (process.argv.includes('--version')) {
 // DAEMON_DIR default is /tmp/open-walnut; tests override via env var.
 // Must mirror daemon-source.ts (the JS fallback) — keep in sync.
 const DAEMON_DIR = process.env.WALNUT_DAEMON_DIR || '/tmp/open-walnut'
-const STREAMS_DIR = '/tmp/open-walnut-streams'
+// Streams live in a sibling dir so an isolated demo daemon (WALNUT_DAEMON_DIR=
+// /tmp/open-walnut-demo) gets /tmp/open-walnut-demo-streams automatically, while
+// production stays at /tmp/open-walnut-streams (byte-identical default).
+const STREAMS_DIR = process.env.WALNUT_STREAMS_DIR || `${DAEMON_DIR}-streams`
 const PORT_FILE = path.join(DAEMON_DIR, 'daemon.port')
 const PID_FILE = path.join(DAEMON_DIR, 'daemon.pid')
 const INSTANCE_ID_FILE = path.join(DAEMON_DIR, 'daemon.instance')
+// Written by the RUNNING daemon at startup. This is the source of truth for
+// upgrade decisions: DaemonConnection.shouldUpgradeDaemon `cat`s this file
+// instead of executing the on-disk binary's --version, because the on-disk
+// binary can be stale while a source-deployed (daemon.cjs) daemon is what's
+// actually running — probing the binary then caused an infinite
+// stop/redeploy loop that killed the live daemon every cycle.
+const VERSION_FILE = path.join(DAEMON_DIR, 'daemon.version')
 const AGENT_POLL_INTERVAL_MS = 2000
 const AGENT_REDISCOVER_INTERVAL_MS = 10000
 const HEARTBEAT_INTERVAL_MS = 30_000
@@ -74,12 +87,15 @@ const LOG_FILE = path.join(DAEMON_DIR, `daemon-${DAEMON_INSTANCE_ID}.log`)
 ;(() => {
   const home = process.env.HOME || '/root'
   const extraPaths = [
+    // toolbox FIRST: on some hosts it ships a logged-in `claude` that must win
+    // over a separate ~/.local/bin/claude install (which may be NOT logged in).
+    // These are only a fallback for when RC sourcing fails to provide claude.
+    `${home}/.toolbox/bin`,           // toolbox
     `${home}/.local/bin`,              // Claude CLI default install location
     `${home}/.npm-global/bin`,         // npm global
     `${home}/.cargo/bin`,              // Rust tools
     `${home}/.pyenv/shims`,           // pyenv (node via pyenv)
     `${home}/.bun/bin`,               // bun
-    `${home}/.toolbox/bin`,           // toolbox
     // Standard system paths as safety net. Primary source is the user's RC files
     // (.zshrc / .bashrc), which typically include system dirs and are sourced in the
     // extraPaths retrieval above. These fallback paths ensure basic commands work
@@ -316,7 +332,13 @@ function buildSpawnPreamble(): string {
       + ' */zsh) [ -f "$HOME/.zshrc" ] && . "$HOME/.zshrc" >/dev/null ;;'
       + ' */bash) [ -f "$HOME/.bashrc" ] && . "$HOME/.bashrc" >/dev/null ;;'
       + ' esac',
-    'export PATH="$HOME/.local/bin:$HOME/.npm-global/bin:$PATH"',
+    // APPEND (not prepend) common tool dirs as a fallback. Prepending used to
+    // shadow a user's RC-ordered `claude` (e.g. ~/.toolbox/bin/claude, which is
+    // logged in) with ~/.local/bin/claude (a separate, NOT-logged-in install),
+    // causing "Not logged in · Please run /login". The sourced RC above already
+    // sets the user's intended PATH order; these dirs only fill gaps when claude
+    // /node aren't on the RC PATH at all.
+    'export PATH="$PATH:$HOME/.toolbox/bin:$HOME/.local/bin:$HOME/.npm-global/bin"',
     'node -v >/dev/null 2>&1 || {'
       + ' if [ -s "$HOME/.nvm/nvm.sh" ]; then'
       + '   . "$HOME/.nvm/nvm.sh" >/dev/null 2>&1;'
@@ -396,6 +418,13 @@ type RegistryEntry = CoreRegistryEntry
 // ── Agent subscriptions ──
 const agentSubs = new Map<string, AgentSub>()
 
+// Current byte size of a stream file, 0 if missing. Used as the adopt-time
+// watcher offset so a new daemon generation never replays history it didn't
+// stream itself. Keep in sync with daemon-source.ts (CLAUDE.md).
+function statSizeOrZero(p: string): number {
+  try { return fs.statSync(p).size } catch { return 0 }
+}
+
 // ── daemon-core wiring ──
 // SessionData already extends CoreSessionData (same field names). Core reaps,
 // persists, and reconciles in pure functions; we inject the Bun-specific
@@ -430,7 +459,12 @@ const core = createDaemonCore<SessionData>({
     jsonlPath: entry.jsonlPath,
     pgidPath: entry.pgidPath,
     pid: entry.pid,
-    offset: 0,
+    // Adopt at the CURRENT end of the stream file, not 0. The previous daemon
+    // generation already fanned out everything before this point; starting the
+    // watcher at 0 made it re-emit the entire file to every subscriber (UI
+    // symptom: whole conversation replays after a daemon restart). Subscribers
+    // that genuinely need history request it via attach fromOffset.
+    offset: statSizeOrZero(entry.jsonlPath),
     watcher: null,
     subscribers: new Set(),
     exitCode: null,
@@ -506,7 +540,7 @@ function handleCommand(ws: ServerWebSocket<WsData>, msg: string) {
     case 'list': return cmdList(ws, id as number)
     case 'ping': return sendOk(ws, id as number, { pong: true })
     case 'hello': return sendOk(ws, id as number, {
-      version: process.env.DAEMON_VERSION || 'dev',
+      version: DAEMON_VERSION,
       capabilities: REQUIRED_DAEMON_CAPABILITIES,
       instanceId: DAEMON_INSTANCE_ID,
       startedAt: DAEMON_START_TS,
@@ -624,7 +658,17 @@ function cmdStart(ws: ServerWebSocket<WsData>, id: number, cmd: Record<string, u
     // in the background). This is the dominant time-to-init cost for Walnut sessions:
     // measured ~6.9s → ~2.9s with no loss of MCP functionality. The CLI only honors
     // this via env (no CLI flag); the daemon's spawn env is the single inject point.
-    env: { ...process.env, CLAUDE_CODE_DISABLE_BACKGROUND_TASKS: '1', MCP_CONNECTION_NONBLOCKING: '1' },
+    // CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS=1: opt into the authoritative
+    // session_state_changed{running|idle|requires_action} stream events. 'idle' is
+    // the only reliable turn-over signal — a dynamic-workflow turn emits MANY
+    // `result` events (one per background subagent finishing), so `result` is NOT a
+    // turn boundary. Keep in sync with daemon-source.ts.
+    env: {
+      ...process.env,
+      CLAUDE_CODE_DISABLE_BACKGROUND_TASKS: '1',
+      MCP_CONNECTION_NONBLOCKING: '1',
+      CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS: '1',
+    },
   })
 
   // Detect spawn failure immediately — proc.pid is undefined when posix_spawn fails.
@@ -968,7 +1012,12 @@ function cmdAttach(ws: ServerWebSocket<WsData>, id: number, cmd: Record<string, 
       jsonlPath,
       pgidPath,
       pid,
-      offset: fromOffset || 0,
+      // Watcher starts at the CURRENT end of the stream file — same rule as
+      // adopt. Catch-up for [fromOffset, end) is addSubscriber's job (it reads
+      // the file directly). Using the client's fromOffset here is wrong both
+      // ways: 0 re-fans the whole file; MAX_SAFE_INTEGER (future-only
+      // sentinel) freezes the watcher forever (stat.size <= offset).
+      offset: statSizeOrZero(jsonlPath),
       watcher: null,
       subscribers: new Set(),
       exitCode: alive ? null : 0,
@@ -1745,9 +1794,20 @@ function cleanup() {
   }
   // Remove port/pid/instance files (but NOT the sessions registry — successor needs it).
   // Instance file gets replaced by the successor's own id on the next --start.
-  try { fs.unlinkSync(PORT_FILE) } catch {}
-  try { fs.unlinkSync(PID_FILE) } catch {}
-  try { fs.unlinkSync(INSTANCE_ID_FILE) } catch {}
+  // ONLY if we still own the dir: when a zombie daemon exits via the heartbeat
+  // self-check, daemon.pid already names the successor — unlinking would
+  // destroy the live daemon's files and knock IT offline too.
+  let ownsFiles = true
+  try {
+    const ownerPid = parseInt(fs.readFileSync(PID_FILE, 'utf-8').trim(), 10)
+    if (ownerPid > 0 && ownerPid !== process.pid) ownsFiles = false
+  } catch {}
+  if (ownsFiles) {
+    try { fs.unlinkSync(PORT_FILE) } catch {}
+    try { fs.unlinkSync(PID_FILE) } catch {}
+    try { fs.unlinkSync(INSTANCE_ID_FILE) } catch {}
+    try { fs.unlinkSync(VERSION_FILE) } catch {}
+  }
   logMsg('info', 'daemon cleanup complete', { uptimeSec: Math.floor((Date.now() - DAEMON_START_TS) / 1000) })
 }
 
@@ -1891,6 +1951,7 @@ if (action === '--start') {
   const port = server.port
   fs.writeFileSync(PORT_FILE, String(port))
   fs.writeFileSync(PID_FILE, String(process.pid))
+  fs.writeFileSync(VERSION_FILE, DAEMON_VERSION)
   // Instance ID file — lets clients detect PID recycling / daemon swap by
   // comparing the on-disk value against what `hello` returns. Stable for the
   // lifetime of this daemon; removed on graceful cleanup().
@@ -1919,6 +1980,24 @@ if (action === '--start') {
       rssMb: Math.round(mem.rss / 1024 / 1024),
       heapMb: Math.round(mem.heapUsed / 1024 / 1024),
     })
+    // Single-instance self-check: if daemon.pid no longer names US, a newer
+    // daemon has taken over this dir and we are a zombie — two daemons sharing
+    // one registry/streams dir corrupt each other (the loser keeps running
+    // idle-kill timers against sessions it no longer owns; observed as a
+    // 9-day-old parallel daemon). The PID file is authoritative: exit
+    // gracefully and leave CLI processes alive for the winner to adopt.
+    // Missing/unreadable file is NOT a takeover (could be transient fs error
+    // or manual cleanup) — only a DIFFERENT live pid means we lost the dir.
+    try {
+      const ownerPid = parseInt(fs.readFileSync(PID_FILE, 'utf-8').trim(), 10)
+      if (ownerPid > 0 && ownerPid !== process.pid) {
+        logMsg('warn', 'self-check: daemon.pid taken over by another instance — exiting', {
+          ourPid: process.pid, ownerPid,
+        })
+        cleanup()
+        process.exit(0)
+      }
+    } catch {}
   }, HEARTBEAT_INTERVAL_MS)
 
   // Handle signals

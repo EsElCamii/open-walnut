@@ -50,7 +50,7 @@ describe('Context Inspector E2E', () => {
     expect(body.totalTokens).toBeGreaterThan(0);
   });
 
-  it('returns all 9 sections', async () => {
+  it('returns all general-agent sections', async () => {
     const res = await fetch(apiUrl('/api/context'));
     const body = await res.json();
     const sectionNames = Object.keys(body.sections);
@@ -59,12 +59,14 @@ describe('Context Inspector E2E', () => {
     expect(sectionNames).toContain('roleAndRules');
     expect(sectionNames).toContain('skills');
     expect(sectionNames).toContain('compactionSummary');
+    expect(sectionNames).toContain('taskCategories');
     expect(sectionNames).toContain('globalMemory');
     expect(sectionNames).toContain('projectSummaries');
+    expect(sectionNames).toContain('notesContext');
     expect(sectionNames).toContain('dailyLogs');
     expect(sectionNames).toContain('tools');
     expect(sectionNames).toContain('apiMessages');
-    expect(sectionNames).toHaveLength(9);
+    expect(sectionNames).toHaveLength(11);
   });
 
   it('tools section contains known tools', async () => {
@@ -76,18 +78,17 @@ describe('Context Inspector E2E', () => {
     expect(names).toContain('task_query');
     expect(names).toContain('task_create');
     expect(names).toContain('task_search');
-    expect(names).toContain('memory');
+    expect(names).toContain('memory_notes_search');
     expect(names).toContain('session_start');
   });
 
-  it('roleAndRules section mentions current date', async () => {
+  it('roleAndRules section is non-empty and describes Walnut', async () => {
     const res = await fetch(apiUrl('/api/context'));
     const body = await res.json();
     const role = body.sections.roleAndRules.content as string;
 
-    // Should contain current year
-    const year = new Date().getFullYear().toString();
-    expect(role).toContain(year);
+    expect(role.length).toBeGreaterThan(0);
+    expect(role).toContain('Walnut');
   });
 
   it('totalTokens is close to the sum of all section tokens', async () => {

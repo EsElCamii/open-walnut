@@ -16,6 +16,7 @@ import fs from 'node:fs/promises'
 import path from 'node:path'
 import type { Server as HttpServer } from 'node:http'
 import { WebSocket } from 'ws'
+import { spawn, type ChildProcess } from 'node:child_process'
 import { createMockConstants } from '../helpers/mock-constants.js'
 
 // Mock constants to isolate from real data
@@ -26,11 +27,19 @@ import { sessionRunner } from '../../src/providers/claude-code-session.js'
 import { startServer, stopServer } from '../../src/web/server.js'
 
 const MOCK_CLI = path.resolve(import.meta.dirname, '../providers/mock-claude.mjs')
+const MOCK_DAEMON_SCRIPT = path.resolve(import.meta.dirname, '../helpers/mock-daemon-process.mjs')
 
 // ── Helpers ──
 
 let server: HttpServer
 let port: number
+// Standalone MockDaemon process. Post daemon-migration, sessions spawn the CLI
+// via a daemon, not directly — so setCliCommand() alone no longer mocks `claude`.
+// Routing the server at a MockDaemon (which spawns mock-claude.mjs) is what makes
+// the "server can still start a new session" case use the mock instead of the
+// real CLI. The seeded zombies are reconciled by PID-liveness regardless of this.
+let daemonProc: ChildProcess | null = null
+let daemonPort: number
 
 function apiUrl(p: string): string {
   return `http://localhost:${port}${p}`
@@ -186,8 +195,25 @@ beforeAll(async () => {
     }),
   )
 
-  // Wire mock CLI
+  // Start MockDaemon as a child process. New sessions route through it and it
+  // spawns mock-claude.mjs — without this, the real local daemon would spawn the
+  // real `claude` binary and the post-reconcile new-session case would time out.
+  daemonPort = await new Promise<number>((resolve, reject) => {
+    daemonProc = spawn(process.execPath, [MOCK_DAEMON_SCRIPT], { stdio: ['pipe', 'pipe', 'inherit'] })
+    let buf = ''
+    daemonProc.stdout!.on('data', (chunk: Buffer) => {
+      buf += chunk.toString()
+      const m = buf.match(/PORT=(\d+)/)
+      if (m) resolve(parseInt(m[1], 10))
+    })
+    daemonProc.on('error', reject)
+    daemonProc.on('exit', (code) => { if (!buf.includes('PORT=')) reject(new Error(`MockDaemon exit ${code}`)) })
+    setTimeout(() => reject(new Error('MockDaemon startup timeout')), 10000)
+  })
+
+  // Wire mock CLI + route sessions at the MockDaemon
   sessionRunner.setCliCommand(MOCK_CLI)
+  sessionRunner.setTestDaemonUrl(`ws://127.0.0.1:${daemonPort}`)
 
   // Start server — this triggers reconcileSessions()
   server = await startServer({ port: 0, dev: true })
@@ -196,7 +222,9 @@ beforeAll(async () => {
 })
 
 afterAll(async () => {
+  sessionRunner.setTestDaemonUrl(undefined)
   await stopServer()
+  if (daemonProc) { daemonProc.kill('SIGTERM'); daemonProc = null }
   await fs.rm(WALNUT_HOME, { recursive: true, force: true }).catch(() => {})
 })
 
@@ -341,8 +369,14 @@ describe('Zombie session reconciliation on startup', () => {
     // The bus.emit call in reconcileSessions ensures any WS client connected
     // at startup time would receive the events.
 
-    // Read sessions.json directly to verify the reconciled state persisted
-    const raw = JSON.parse(await fs.readFile(SESSIONS_FILE, 'utf-8')) as {
+    // Read persisted reconciled state via the SQLite-backed API. Session persistence
+    // moved from sessions.json to SQLite; sessions.json is only consumed once by the
+    // startup migration and is never written back, so reading the file would observe
+    // the stale seed values rather than the reconciler's output. /api/sessions is the
+    // real persistence layer (session-tracker reads/writes SQLite exclusively).
+    const res = await fetch(apiUrl('/api/sessions'))
+    expect(res.status).toBe(200)
+    const raw = (await res.json()) as {
       sessions: Array<{
         claudeSessionId: string
         process_status: string

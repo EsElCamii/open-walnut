@@ -97,8 +97,14 @@ export interface SessionErrorEvent {
    * - 'conversation_lost': Claude CLI could not find the session JSONL on disk
    *   (typically the remote host's conversation store was wiped). The session
    *   record has already been auto-archived; caller should start a fresh session.
+   * - 'delivery_failed': the message batch could NOT be delivered to the CLI
+   *   (SSH/daemon down, spawn failure). The batch was reverted to 'pending' in
+   *   the disk queue — it is NOT lost. This is a connectivity status, not a turn
+   *   outcome: handlers must NOT emit SESSION_BATCH_COMPLETED, must NOT call
+   *   removeProcessed, and must NOT re-trigger processNext (that combination
+   *   caused the 2-req/s infinite retry loop of 2026-06-10).
    */
-  errorKind?: 'conversation_lost';
+  errorKind?: 'conversation_lost' | 'delivery_failed';
 }
 
 // ── Session streaming events ──
@@ -188,6 +194,45 @@ export interface SessionSystemEventPayload {
   variant: 'compact' | 'error' | 'info';
   message: string;
   detail?: string;
+}
+
+/** A single background task / dynamic-workflow subagent for the progress UI. */
+export interface BackgroundTaskInfo {
+  taskId: string;
+  description?: string;
+  subagentType?: string;
+  status: string; // running | completed | failed | stopped | paused
+  tokens?: number;
+  lastTool?: string;
+  summary?: string;
+  workflowName?: string;
+}
+
+/** Snapshot of a session's in-flight background tasks (dynamic workflows / subagents).
+ *  Emitted whenever a task_started/progress/updated/notification event mutates the set,
+ *  so the UI can render a live workflow-progress panel. */
+export interface SessionBackgroundTasksPayload {
+  sessionId: string;
+  taskId?: string;
+  workflowName?: string;
+  inFlight: number;
+  tasks: BackgroundTaskInfo[];
+}
+
+/** Native Claude Code side_question ("/btw") result, broadcast when the CLI's
+ *  control_response arrives. Mirrors the persisted SideQuestion entry. */
+export interface SessionSideQuestionDoneEvent {
+  sessionId: string;
+  id: string;
+  question: string;
+  answer: string;
+  createdAt: string;
+}
+
+export interface SessionSideQuestionErrorEvent {
+  sessionId: string;
+  question: string;
+  error: string;
 }
 
 export interface SessionUsageUpdateEvent {
@@ -435,7 +480,10 @@ export interface EventPayloadMap {
   'session:batch-failed': SessionBatchFailedEvent;
   'session:message-queued': SessionMessageQueuedEvent;
   'session:system-event': SessionSystemEventPayload;
+  'session:background-tasks': SessionBackgroundTasksPayload;
   'session:usage-update': SessionUsageUpdateEvent;
+  'session:side-question-done': SessionSideQuestionDoneEvent;
+  'session:side-question-error': SessionSideQuestionErrorEvent;
 
   'session:team-info': SessionTeamInfoEvent;
   'session:team-agent-delta': SessionTeamAgentDeltaEvent;

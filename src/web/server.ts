@@ -74,6 +74,8 @@ import { authMiddleware } from './middleware/auth.js'
 import { pushRouter } from './routes/push.js'
 import { authRouter } from './routes/auth.js'
 import { incidentsRouter } from './routes/incidents.js'
+import { notificationsRouter } from './routes/notifications.js'
+import { addNotification as addFeedNotification } from '../core/notifications/store.js'
 import { registerAuthRpc } from './routes/auth-rpc.js'
 import { initPushNotifications } from '../core/push-notification.js'
 import { enqueueMainAgentTurn, getQueueStatus, recordLastTurnTokens, getLastTurnTokens } from './agent-turn-queue.js'
@@ -261,8 +263,16 @@ export async function startServer(options: ServerOptions = {}): Promise<HttpServ
   // Migrate global-notes.md → notes/global.md (one-time, idempotent)
   await migrateGlobalNotes()
 
-  // Recover orphaned user messages from a previous crash
-  await chatHistory.recoverOrphanedUserMessage()
+  // Recover orphaned user messages from a previous crash. Orphans land in an
+  // agent's MAIN conversation (where interrupted/background turns persist), so
+  // recover there explicitly instead of the retired legacy file.
+  try {
+    const { getMainConversationId } = await import('../core/conversations.js')
+    const mainConvId = await getMainConversationId('general')
+    await chatHistory.recoverOrphanedUserMessage('general', mainConvId)
+  } catch (err) {
+    log.web.warn('orphan recovery skipped', { error: err instanceof Error ? err.message : String(err) })
+  }
 
   // Start local daemon for session management. All sessions (local + remote)
   // go through a daemon — local uses the daemon on this machine, remote uses
@@ -308,6 +318,12 @@ export async function startServer(options: ServerOptions = {}): Promise<HttpServ
     log: log.cron,
     broadcastCronNotification: async (text, jobName, opts) => {
       const timestamp = new Date().toISOString()
+      // Numeric epoch ms shared by the WS event AND the feed dedupKey below. The
+      // frontend builds its dedupKey from this same numeric value, so the live
+      // toast and the server-persisted feed record collapse to ONE entry on
+      // refresh. Do NOT key off the ISO `timestamp` here — the two representations
+      // would differ and the feed would show the cron notification twice.
+      const eventTs = Date.now()
       // Background events have no UI "tab" — they target the agent's stable MAIN
       // conversation (NOT activeConversationId, which is whatever the user last
       // clicked). This is the bug fix: previously these wrote the orphaned legacy
@@ -315,7 +331,14 @@ export async function startServer(options: ServerOptions = {}): Promise<HttpServ
       const { getMainConversationId } = await import('../core/conversations.js')
       const conversationId = await getMainConversationId('general')
       // Toast notification
-      broadcastEvent('cron:notification', { text, jobName, timestamp: Date.now() })
+      broadcastEvent('cron:notification', { text, jobName, timestamp: eventTs })
+      // Persist to the durable notification feed (survives refresh). Fire-and-forget:
+      // a slow disk must never block the cron callback. dedupKey + timestamp use
+      // eventTs so they match the frontend's live event (see comment above).
+      void addFeedNotification({
+        kind: 'cron', severity: 'info', title: jobName, body: text, timestamp: eventTs,
+        dedupKey: `cron:${jobName}:${eventTs}`,
+      }).catch(err => log.cron.warn('failed to persist cron notification', { jobName, error: err instanceof Error ? err.message : String(err) }))
       // Chat message (for inline display)
       broadcastEvent('cron:chat-message', { content: text, jobName, timestamp, agentWillRespond: opts?.agentWillRespond ?? false, conversationId })
       // Persist notification to chat history (survives refresh)
@@ -359,7 +382,7 @@ export async function startServer(options: ServerOptions = {}): Promise<HttpServ
             onUsage: (usage) => {
               try { usageTracker.record({ source: 'cron', model: usage.model ?? 'unknown', input_tokens: usage.input_tokens, output_tokens: usage.output_tokens, cache_creation_input_tokens: usage.cache_creation_input_tokens, cache_read_input_tokens: usage.cache_read_input_tokens }) } catch {}
             },
-          }, { source: 'cron' })
+          }, { source: 'cron', agentId: 'general', conversationId })
           // Fire agent:response exactly once after loop completes
           if (result.response) {
             broadcastEvent('agent:response', { text: result.response, source: 'cron' })
@@ -544,6 +567,7 @@ export async function startServer(options: ServerOptions = {}): Promise<HttpServ
   app.use('/api/audio', audioRouter)
   app.use('/api/stt', sttRouter)
   app.use('/api/incidents', incidentsRouter)
+  app.use('/api/notifications', notificationsRouter)
   app.get('/api/task-phase-hooks', async (_req, res) => {
     const { getHookInfoList } = await import('../core/task-phase-hooks/index.js')
     res.json(getHookInfoList())
@@ -726,15 +750,9 @@ export async function startServer(options: ServerOptions = {}): Promise<HttpServ
   // -- Prune old usage records --
   try { usageTracker.prune() } catch (e) { log.usage.warn('usage prune failed', { error: String(e) }) }
 
-  // -- Ensure working memory file exists --
-  try {
-    const { ensureWorkingMemory } = await import('../core/working-memory.js')
-    ensureWorkingMemory()
-  } catch (err) {
-    log.memory.warn('working memory init failed', {
-      error: err instanceof Error ? err.message : String(err),
-    })
-  }
+  // Working memory is now per-conversation and created lazily on first use
+  // (see resolveWorkingMemoryPath). No global file is pre-created at startup —
+  // doing so would resurrect the deprecated global file that migration retires.
 
   // -- Ensure dream directories + memory index exist --
   try {
@@ -1087,6 +1105,46 @@ export async function startServer(options: ServerOptions = {}): Promise<HttpServ
   // session-tracker.ts persisting status changes asynchronously.
   const MARK_DONE_DEDUP_MS = 500
 
+  // Dedup window for delivery-failure chat notifications. During an SSH outage
+  // each send fast-fails (~400ms against the connection failure cache); without
+  // dedup every failure persisted a permanent red box to the main chat
+  // (150+ during the 2026-06-10 incident). One notification per session per
+  // window is enough — the per-message state lives on the optimistic messages
+  // (failed + Retry) in the session panel.
+  const deliveryFailureNotifiedAt = new Map<string, number>()
+  const DELIVERY_FAILURE_NOTIFY_WINDOW_MS = 5 * 60_000
+
+  // Sessions already checked for the "streaming ⇒ not awaiting human" invariant in
+  // the CURRENT streaming run. Throttles the per-delta phase check to ONE getTask
+  // per turn (deltas are high-frequency). Cleared when the run ends (markDone /
+  // session:result / session:error) so the next turn re-checks. See the
+  // session:text-delta handler below for why this lives on the delta path.
+  const streamingPhaseChecked = new Set<string>()
+
+  // Enforce the invariant "a session producing real output cannot be
+  // AWAIT_HUMAN_ACTION" at the SOLE point every streaming turn must pass through:
+  // the text/thinking delta. The discrete session:status-changed{running} signal
+  // MISSES pure-text turns — claude-code-session.ts emits text-delta WITHOUT an
+  // accompanying emitStatusChanged('IN_PROGRESS') (only init / ExitPlanMode / mode
+  // changes emit that), so a task left stuck at AWAIT_HUMAN_ACTION by a transient
+  // session:error never gets corrected while the agent visibly streams text. A
+  // real delta is ground truth that the CLI is producing output right now (replay
+  // is deduped upstream via _emittedStreamKeys, so this only fires on live output).
+  // sessionStreamingPhase() only touches AWAIT_HUMAN_ACTION → a genuinely
+  // human-paused task is never disturbed unless output actually resumes.
+  const enforceStreamingPhase = (sessionId: string, taskId?: string): void => {
+    if (!taskId || streamingPhaseChecked.has(sessionId)) return
+    streamingPhaseChecked.add(sessionId)
+    void (async () => {
+      try {
+        const { applySessionPhase } = await import('../core/phase.js')
+        await applySessionPhase(taskId, 'session:streaming', 'server.ts:stream-delta', { sessionId })
+      } catch (err) {
+        log.web.warn('failed to apply session:streaming phase from delta', { taskId, sessionId, error: String(err) })
+      }
+    })()
+  }
+
   // deferredMarkDoneTimers lives at module scope (above) so stopServer() can
   // cancel it during teardown. No per-startServer reset needed: entries
   // always self-remove in their own callback (line in handler below).
@@ -1102,10 +1160,11 @@ export async function startServer(options: ServerOptions = {}): Promise<HttpServ
   bus.subscribe('main-ai', async (event) => {
     // ── Streaming events: buffer server-side + broadcast to all clients (filtered client-side) ──
     if (event.name === 'session:text-delta') {
-      const { sessionId, delta } = eventData<'session:text-delta'>(event)
+      const { sessionId, taskId, delta } = eventData<'session:text-delta'>(event)
       if (sessionId) {
         sessionStreamBuffer.appendTextDelta(sessionId, delta)
         sendStreamEvent(sessionId, event.name, event.data)
+        enforceStreamingPhase(sessionId, taskId)
       }
     } else if (event.name === 'session:tool-use') {
       const { sessionId, toolName, toolUseId, input, planContent, parentToolUseId } = eventData<'session:tool-use'>(event)
@@ -1120,6 +1179,7 @@ export async function startServer(options: ServerOptions = {}): Promise<HttpServ
         })
         sessionStreamBuffer.appendToolUse(sessionId, toolUseId, toolName, input, planContent, parentToolUseId)
         sendStreamEvent(sessionId, event.name, event.data)
+        enforceStreamingPhase(sessionId, eventData<'session:tool-use'>(event).taskId)
       }
     } else if (event.name === 'session:tool-result') {
       const { sessionId, toolUseId, result } = eventData<'session:tool-result'>(event)
@@ -1137,10 +1197,11 @@ export async function startServer(options: ServerOptions = {}): Promise<HttpServ
         sendStreamEvent(sessionId, event.name, event.data)
       }
     } else if (event.name === 'session:thinking-delta') {
-      const { sessionId, delta } = eventData<'session:thinking-delta'>(event)
+      const { sessionId, taskId, delta } = eventData<'session:thinking-delta'>(event)
       if (sessionId) {
         sessionStreamBuffer.appendThinkingDelta(sessionId, delta)
         sendStreamEvent(sessionId, event.name, event.data)
+        enforceStreamingPhase(sessionId, taskId)
       }
     } else if (event.name === 'session:unknown-event') {
       const { sessionId, scope, eventType, snippet } = eventData<'session:unknown-event'>(event)
@@ -1164,6 +1225,15 @@ export async function startServer(options: ServerOptions = {}): Promise<HttpServ
           sessionStreamBuffer.appendPermission(sessionId, requestId, toolName, input, reason)
         }
         sendStreamEvent(sessionId, event.name, event.data)
+        // Persist to the durable notification feed (survives refresh). Fire-and-forget;
+        // de-duped by requestId so the 60s permission re-ask never doubles the feed.
+        if (requestId && toolName) {
+          void addFeedNotification({
+            kind: 'permission', severity: 'warning', title: toolName,
+            body: 'Session needs permission approval', sessionId,
+            dedupKey: `perm:${requestId}`,
+          }).catch(err => log.web.warn('failed to persist permission notification', { sessionId, error: err instanceof Error ? err.message : String(err) }))
+        }
       }
     } else if (event.name === 'session:permission-resolved') {
       const { sessionId, requestId, allowed } = event.data as {
@@ -1211,8 +1281,12 @@ export async function startServer(options: ServerOptions = {}): Promise<HttpServ
       }
       bus.emit(event.name, enrichedData, ['web-ui'], { source: event.source, urgency: event.urgency, reemit: true })
 
-      // Clear stream buffer + team pollers after session ends
-      if (event.name === 'session:result' || event.name === 'session:error') {
+      // Clear stream buffer + team pollers after session ends.
+      // Skip delivery_failed: no turn ran or ended — clearing would wipe the
+      // previous turn's blocks the user may be viewing, and the session stays valid.
+      const isDeliveryFailedEvt = event.name === 'session:error'
+        && (event.data as { errorKind?: string }).errorKind === 'delivery_failed'
+      if ((event.name === 'session:result' || event.name === 'session:error') && !isDeliveryFailedEvt) {
         const sid = eventData<'session:result'>(event).sessionId
         if (sid) {
           sessionStreamBuffer.markDone(sid)
@@ -1222,6 +1296,8 @@ export async function startServer(options: ServerOptions = {}): Promise<HttpServ
           // the primary end-of-turn signal and fires even when the session
           // stays 'running' for a subsequent turn.)
           lastMarkStreamingAt.delete(sid)
+          // Turn ended → re-arm the streaming-phase check for the NEXT turn.
+          streamingPhaseChecked.delete(sid)
           setTimeout(() => sessionStreamBuffer.clear(sid), 2000)
           // Cleanup team poller for this session
           import('./routes/session-chat.js').then(({ cleanupTeamPoller }) => {
@@ -1249,8 +1325,13 @@ export async function startServer(options: ServerOptions = {}): Promise<HttpServ
     // 'stopped'/'error' = process terminated → markDone + clear.
     // markDone + clear are idempotent → safe even if result path already cleaned up.
     if (event.name === 'session:status-changed') {
-      const { sessionId: sid, process_status: ps } = event.data as { sessionId?: string; process_status?: string }
+      const { sessionId: sid, process_status: ps, taskId: statusTaskId } = event.data as { sessionId?: string; process_status?: string; taskId?: string }
       if (sid) {
+        // Turn boundary → re-arm the per-turn streaming-phase check. 'running'
+        // means a (new) turn is starting, anything else means it ended; either
+        // way the next real delta should re-verify the invariant. (Mirrors the
+        // session:result/error re-arm above for the status-changed cleanup path.)
+        streamingPhaseChecked.delete(sid)
         // This handler is the single authority for the streaming flag:
         //   - running  → markStreaming  (sole "on"-path; see session-stream-buffer.ts
         //                for Root Cause 5 explanation of why data events never flip it)
@@ -1269,6 +1350,28 @@ export async function startServer(options: ServerOptions = {}): Promise<HttpServ
         if (ps === 'running') {
           sessionStreamBuffer.markStreaming(sid)
           lastMarkStreamingAt.set(sid, Date.now())
+          // Invariant: a streaming session can't be "awaiting human action".
+          // Undo a stale AWAIT_HUMAN_ACTION left by a transient/late session:error
+          // that lost the race against recovery (e.g. clean turn-end at send-time
+          // → --resume recovered the session, but the bogus error flipped phase).
+          // sessionStreamingPhase() only touches AWAIT_HUMAN_ACTION, so a session
+          // a human genuinely paused is unaffected until output actually resumes.
+          //
+          // Only correct on a genuine session-runner streaming signal —
+          // daemon-reconnect also emits process_status:'running' for non-idle
+          // sessions on tunnel flap, which is a reconciliation artifact, not real
+          // output; correcting there would wrongly clear an await_human a human is
+          // waiting on.
+          if (statusTaskId && event.source === 'session-runner') {
+            void (async () => {
+              try {
+                const { applySessionPhase } = await import('../core/phase.js')
+                await applySessionPhase(statusTaskId, 'session:streaming', 'server.ts:session-streaming', { sessionId: sid })
+              } catch (err) {
+                log.web.warn('failed to apply session:streaming phase', { taskId: statusTaskId, sessionId: sid, error: String(err) })
+              }
+            })()
+          }
         } else if (ps === 'stopped' || ps === 'error') {
           const lastRun = lastMarkStreamingAt.get(sid)
           const ageMs = lastRun != null ? Date.now() - lastRun : Infinity
@@ -1454,8 +1557,34 @@ export async function startServer(options: ServerOptions = {}): Promise<HttpServ
 
     // Persist session:error to chat history
     if (event.name === 'session:error') {
-      // Git pull: fetch data pushed by remote hooks (best-effort)
-      if (!isEphemeral) {
+      const { error, taskId, sessionId, errorKind } = eventData<'session:error'>(event)
+      const isDeliveryFailure = errorKind === 'delivery_failed'
+
+      // delivery_failed = connectivity status, not a turn outcome. The session is
+      // still valid and the message batch is safely back in 'pending'. Dedup the
+      // chat notification (one per session per window) — during an SSH outage every
+      // send fails fast against the failure cache, and persisting each occurrence
+      // flooded the main chat with 150+ permanent red boxes (2026-06-10 incident).
+      if (isDeliveryFailure) {
+        const key = `${sessionId ?? taskId ?? 'unknown'}`
+        const now = Date.now()
+        const lastAt = deliveryFailureNotifiedAt.get(key) ?? 0
+        if (now - lastAt < DELIVERY_FAILURE_NOTIFY_WINDOW_MS) {
+          log.web.info('session delivery failure suppressed (deduped)', { sessionId, taskId })
+          return
+        }
+        deliveryFailureNotifiedAt.set(key, now)
+        // Opportunistic sweep so the map can't grow unbounded
+        if (deliveryFailureNotifiedAt.size > 200) {
+          for (const [k, t] of deliveryFailureNotifiedAt) {
+            if (now - t > DELIVERY_FAILURE_NOTIFY_WINDOW_MS) deliveryFailureNotifiedAt.delete(k)
+          }
+        }
+      }
+
+      // Git pull: fetch data pushed by remote hooks (best-effort).
+      // Skip for delivery failures — nothing remote ran, and the host may be down.
+      if (!isEphemeral && !isDeliveryFailure) {
         try {
           await gitPullWalnut()
           log.web.info('git pull completed for session error')
@@ -1464,10 +1593,11 @@ export async function startServer(options: ServerOptions = {}): Promise<HttpServ
         }
       }
 
-      const { error, taskId, sessionId } = eventData<'session:error'>(event)
-      log.web.info('session error received', { sessionId, taskId, error: error?.slice(0, 200) })
+      log.web.info('session error received', { sessionId, taskId, error: error?.slice(0, 200), errorKind })
       const errorTaskRef = taskId ? await resolveTaskRef(taskId) : null
-      const content = `**Session Error**${errorTaskRef ? ` (${errorTaskRef})` : ''}: ${error}`
+      const content = isDeliveryFailure
+        ? `**Session Delivery Failed**${errorTaskRef ? ` (${errorTaskRef})` : ''}: ${error}\n\n_Your message was NOT lost — it stays queued and will be re-sent when you press Retry, send another message, or the connection recovers._`
+        : `**Session Error**${errorTaskRef ? ` (${errorTaskRef})` : ''}: ${error}`
       // Background notification → general's stable MAIN conversation.
       const { getMainConversationId } = await import('../core/conversations.js')
       const conversationId = await getMainConversationId('general')
@@ -1476,6 +1606,10 @@ export async function startServer(options: ServerOptions = {}): Promise<HttpServ
         source: 'session-error', notification: true, taskId,
         agentId: 'general', conversationId,
       })
+
+      // Delivery failure: session is intact (batch back in pending) — do NOT clear
+      // the task slot, do NOT flip the phase, do NOT announce session:ended.
+      if (isDeliveryFailure) return
       // Clear active session from task on error
       if (taskId && sessionId) {
         try {
@@ -1621,7 +1755,7 @@ export async function startServer(options: ServerOptions = {}): Promise<HttpServ
               const TRIAGE_BAIL_PERCENT = 0.92 // bail if estimated > 92% of context window
               let estimatedTotal = historyTokens
               try {
-                const system = await buildSystemPrompt()
+                const system = await buildSystemPrompt('general', conversationId)
                 // Estimate against the SAME (read-only) tool set we actually send below.
                 const tools = getReadOnlyToolSchemas()
                 const full = estimateFullPayload({ system, tools, messages: history })
@@ -1692,7 +1826,7 @@ export async function startServer(options: ServerOptions = {}): Promise<HttpServ
                   // triage turn's bail pre-check can reason in real-token space.
                   try { recordLastTurnTokens(conversationId, (u.input_tokens ?? 0) + (u.cache_read_input_tokens ?? 0) + (u.cache_creation_input_tokens ?? 0)) } catch {}
                 },
-              }, { source: 'triage', tools: readOnlyTools })
+              }, { source: 'triage', tools: readOnlyTools, agentId: 'general', conversationId })
 
               if (agentResult.response) {
                 broadcastEvent('agent:response', { text: agentResult.response, source: 'triage', conversationId })
@@ -2080,7 +2214,7 @@ async function startHeartbeatIfConfigured(): Promise<void> {
                 })
               } catch { /* non-critical */ }
             },
-          }, { source: 'heartbeat' })
+          }, { source: 'heartbeat', agentId: 'general', conversationId })
 
           // Fire agent:response exactly once after loop completes
           const responseText = result.response ?? ''

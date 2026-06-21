@@ -56,6 +56,8 @@ export function createMockConstants(prefix = 'walnut-test', overrides: Record<st
     conversationIndexFile: (agentId: string) => path.join(tmpBase, 'conversations', agentId, '_index.json'),
     conversationFile: (agentId: string, conversationId: string) =>
       path.join(tmpBase, 'conversations', agentId, `${conversationId}.json`),
+    workingMemoryFile: (agentId: string, conversationId: string) =>
+      path.join(tmpBase, 'conversations', agentId, `${conversationId}.working-memory.md`),
     validateConversationId: (id: string) => {
       if (!id || !/^conv-[A-Za-z0-9-]+$/.test(id)) throw new Error(`Invalid conversation id: ${id}`);
       return id;
@@ -94,6 +96,11 @@ export function createMockConstants(prefix = 'walnut-test', overrides: Record<st
     MEMORY_INDEX_FILE: path.join(tmpBase, 'memory', 'index.md'),
     WORKING_MEMORY_FILE: path.join(tmpBase, 'memory', 'working-memory.md'),
     RECORDINGS_DIR: path.join(tmpBase, 'recordings'),
+    // Non-path scalar constants — must be mirrored here too, otherwise any
+    // module under test that imports them sees `undefined` (vitest throws on
+    // unmocked named exports of a mocked module).
+    QUICK_START_MESSAGE_SPILL_LIMIT: 25_000,
+    QUICK_START_MESSAGE_HARD_LIMIT: 2_000_000,
     ...overrides,
   };
 }

@@ -29,6 +29,11 @@ function apiUrl(p: string): string {
   return `http://localhost:${port}${p}`;
 }
 
+// Chat storage is conversation-scoped: resolve the General agent's active
+// conversation once and target it everywhere — matching what the REST endpoints
+// resolve to when no conversationId is supplied.
+let convId: string;
+
 // ── Setup / Teardown ──
 
 beforeAll(async () => {
@@ -37,6 +42,8 @@ beforeAll(async () => {
   server = await startServer({ port: 0, dev: true });
   const addr = server.address();
   port = typeof addr === 'object' && addr ? addr.port : 3456;
+  const { getActiveConversationId } = await import('../../src/core/conversations.js');
+  convId = await getActiveConversationId('general');
 });
 
 afterAll(async () => {
@@ -65,7 +72,7 @@ describe('Two-step compaction E2E', () => {
         timestamp: `2025-06-01T00:${String(i).padStart(2, '0')}:01Z`,
       });
     }
-    await chatHistory.addTurn(apiMsgs, displayMsgs);
+    await chatHistory.addTurn(apiMsgs, displayMsgs, 'general', convId);
 
     // Compact with a structured summary (no XML — direct storage)
     const structuredSummary = `## Goal
@@ -82,22 +89,22 @@ Discussed 20 tasks with the user.
 ## Key Decisions
 - **Two-step compaction**: Separate memory flush from summarization`;
 
-    await chatHistory.compact(async () => structuredSummary);
+    await chatHistory.compact(async () => structuredSummary, undefined, 'general', convId);
 
     // 1. Verify compactionSummary stores the response directly
-    const summary = await chatHistory.getCompactionSummary();
+    const summary = await chatHistory.getCompactionSummary('general', convId);
     expect(summary).toBe(structuredSummary);
 
     // 2. Daily log: not written by compact() itself — only by memoryFlusher (tested separately).
     // Verify compact() without a memoryFlusher doesn't crash on missing daily dir.
 
     // 3. Verify API messages were trimmed to recent only
-    const remaining = await chatHistory.getApiMessages();
+    const remaining = await chatHistory.getApiMessages('general', convId);
     expect(remaining.length).toBe(20); // 10 turns * 2
 
     // 4. Pre-boundary entries are deleted (not marked compacted).
     //    20 turns → keep last 10 turns × 2 entries each = 20 entries remain.
-    const display = await chatHistory.getDisplayHistory();
+    const display = await chatHistory.getDisplayHistory('general', convId);
     expect(display).toHaveLength(20);
 
     // 5. Verify the REST API returns correct compaction state
@@ -109,7 +116,7 @@ Discussed 20 tasks with the user.
   });
 
   it('step 1 memoryFlusher is called with conversation history', async () => {
-    await chatHistory.clear();
+    await chatHistory.clear('general', convId);
 
     const apiMsgs: Array<{ role: string; content: string }> = [];
     const displayMsgs: DisplayMessage[] = [];
@@ -127,7 +134,7 @@ Discussed 20 tasks with the user.
         timestamp: `2025-06-02T00:${String(i).padStart(2, '0')}:01Z`,
       });
     }
-    await chatHistory.addTurn(apiMsgs, displayMsgs);
+    await chatHistory.addTurn(apiMsgs, displayMsgs, 'general', convId);
 
     let flushedMsgCount = 0;
     const memoryFlusher = async (msgs: MessageParam[]) => {
@@ -137,15 +144,17 @@ Discussed 20 tasks with the user.
     await chatHistory.compact(
       async () => 'Summary after flush',
       memoryFlusher,
+      'general',
+      convId,
     );
 
     // Memory flusher should have received the full conversation
     expect(flushedMsgCount).toBe(40);
 
-    const summary = await chatHistory.getCompactionSummary();
+    const summary = await chatHistory.getCompactionSummary('general', convId);
     expect(summary).toBe('Summary after flush');
 
-    const remaining = await chatHistory.getApiMessages();
+    const remaining = await chatHistory.getApiMessages('general', convId);
     expect(remaining.length).toBe(20); // 10 turns * 2
   });
 });

@@ -186,10 +186,23 @@ async function loadJournalRecent(budget: number): Promise<string> {
 
 // ── XML tag names for each source ──
 
-/** Load current working memory (real-time scratchpad). */
+/**
+ * Load current working memory (real-time scratchpad) for injection into a subagent.
+ * A subagent sees the General agent's MAIN conversation scratchpad — the butler's
+ * current working state. Resolving main explicitly keeps this working after the
+ * global single-file working memory is migrated to per-conversation files.
+ */
 async function loadWorkingMemory(budget: number): Promise<string> {
   const { getWorkingMemory, isWorkingMemoryEmpty } = await import('../core/working-memory.js');
-  const content = getWorkingMemory();
+  let content: string | null = null;
+  try {
+    const { getMainConversationId } = await import('../core/conversations.js');
+    const mainConvId = await getMainConversationId('general');
+    content = getWorkingMemory('general', mainConvId);
+  } catch {
+    // Fall back to the legacy global file if conversation resolution isn't available.
+    content = getWorkingMemory();
+  }
   if (!content || isWorkingMemoryEmpty(content)) return '(no working memory yet)';
   return truncateToTokenBudget(content, budget);
 }
@@ -235,6 +248,11 @@ export interface ContextSourcesInput {
   cwd?: string;
   /** Remote host — needed for session_history source on remote sessions. */
   host?: string;
+  /** Source ids to skip loading even if the agent definition enables them.
+   *  Used e.g. by turn-complete triage: when the session already provided a
+   *  side_question self-report, suppress `session_history` so we don't pay the
+   *  4000-token history read the report replaces. */
+  suppressSources?: ContextSourceId[];
 }
 
 /**
@@ -250,6 +268,7 @@ export async function loadContextSources(
   input: ContextSourcesInput,
 ): Promise<string> {
   const { taskId, sessionId, cwd, host } = input;
+  const suppress = new Set(input.suppressSources ?? []);
 
   // Console agents may have context_sources without a taskId (e.g. global_memory, daily_log).
   // Only skip if there's no taskId AND no agent-level context sources configured.
@@ -288,6 +307,10 @@ export async function loadContextSources(
       }
     }
   }
+
+  // Caller-requested suppressions (e.g. triage with a self-report skips
+  // session_history). Applied last so it wins over both auto + agent config.
+  for (const id of suppress) enabledSources.delete(id);
 
   // Load all sources in parallel
   const loaders: Array<{ id: ContextSourceId; promise: Promise<string> }> = [];

@@ -48,7 +48,15 @@ export class RemoteSessionManager implements SessionManager {
   private _pid: number | null = null
   private _remoteOutputFile: string | null = null
   private _hasPipe = false
+  // Byte cursor into the daemon's STREAM file (/tmp/open-walnut-streams/<sid>.jsonl).
+  // Only an ABSOLUTE position is a valid fromOffset for daemon attach. It is
+  // absolute only after start()/attach() adopted the daemon-reported offset —
+  // _cursorValid tracks that. A fresh RSM (e.g. created by attachToExisting
+  // after a walnut restart) has _fileSize=0 which is NOT "replay everything",
+  // it's "I have no cursor": sending it as fromOffset replayed multi-MB of
+  // history into the UI (the "whole conversation replays" bug, path #4).
   private _fileSize = 0
+  private _cursorValid = false
   private _imageCache = new Map<string, string>()
   private unsubscribeEvent: (() => void) | null = null
   private _onOutput: ((event: { line: string }) => void) | null = null
@@ -68,7 +76,13 @@ export class RemoteSessionManager implements SessionManager {
   // output; collisions across different sources are intentional (same
   // logical event). No uuid (e.g. `system.init` synthesized by daemon or
   // walnut) means always deliver.
+  // Bounded FIFO (insertion-ordered Set): dedup only needs to cover replay /
+  // catch-up bursts that arrive close together, NOT a session's entire
+  // multi-hour history. An unbounded Set here was a dominant driver of RSS
+  // growth (a 10h session sees tens of thousands of uuids). Cap at the last
+  // SEEN_UUID_CAP; when full, evict the oldest (Set preserves insertion order).
   private _seenUuids: Set<string> = new Set()
+  private static readonly SEEN_UUID_CAP = 5000
 
   get isRemote(): boolean { return this.hostKey !== '__local__' }
   readonly processName = 'daemon'
@@ -114,6 +128,16 @@ export class RemoteSessionManager implements SessionManager {
       throw new Error(`RemoteSessionManager: no directWsUrl and no sshTarget for host "${this.hostKey}"`)
     }
     return this.conn
+  }
+
+  /**
+   * fromOffset to send on daemon attach. A valid absolute cursor resumes the
+   * exact gap; without one, MAX_SAFE_INTEGER subscribes future-only (the
+   * daemon's `start < currentOffset` replay check fails) — history is served
+   * by the history API, never by stream replay.
+   */
+  private attachFromOffset(): number {
+    return this._cursorValid ? this._fileSize : Number.MAX_SAFE_INTEGER
   }
 
   // ── Startup ──
@@ -178,9 +202,12 @@ export class RemoteSessionManager implements SessionManager {
     this._remoteOutputFile = result.outputFile as string ?? null
     this._hasPipe = true
 
-    // Capture initial file size (for resume offset tracking)
+    // Capture initial file size (for resume offset tracking). The daemon's
+    // cmdStart reply `offset` is the absolute stream-file position at spawn
+    // (0 for fresh, statSync size for resume) — a valid cursor.
     const fileSize = (result.offset as number) ?? 0
     this._fileSize = fileSize
+    this._cursorValid = true
 
     log.session.info('RemoteSessionManager: session started', {
       // DUP-DEBUG
@@ -225,12 +252,18 @@ export class RemoteSessionManager implements SessionManager {
           host: this.hostKey, sid, pid: status.pid,
         })
         // Session was started by the lost command — attach instead of re-starting.
-        // Use tracked _fileSize so we skip already-processed bytes and avoid replaying
-        // the entire JSONL (which causes duplicate content blocks → repeated text in UI).
-        // _fileSize === 0 means no bytes were delivered yet, so fromOffset 0 replays all — correct.
-        const attachResult = await this.conn!.send('attach', { sid, fromOffset: this._fileSize || 0 })
+        // Use the tracked absolute cursor so we skip already-processed bytes and
+        // avoid replaying the entire JSONL (duplicate content blocks in UI).
+        // No valid cursor → subscribe future-only; we adopt the daemon's
+        // currentOffset from the attach reply below.
+        const attachResult = await this.conn!.send('attach', { sid, fromOffset: this.attachFromOffset() })
+        // Dead session → no watcher → currentOffset 0 is meaningless; skip.
+        if (attachResult.alive && typeof attachResult.currentOffset === 'number') {
+          this._fileSize = attachResult.currentOffset
+          this._cursorValid = true
+        }
         // Merge pid from status into attach result for consistent return shape
-        return { ...attachResult, pid: status.pid, outputFile: status.outputFile, offset: this._fileSize || 0 }
+        return { ...attachResult, pid: status.pid, outputFile: status.outputFile, offset: this._fileSize }
       }
     } catch {
       // Status probe failed — daemon may not know this session, safe to retry start
@@ -255,7 +288,9 @@ export class RemoteSessionManager implements SessionManager {
 
     const attachPayload = {
       sid: opts.sessionId,
-      fromOffset: opts.fromOffset ?? 0,
+      // No explicit offset from the caller → use our cursor (future-only when
+      // invalid). Defaulting to 0 here means "replay the whole stream file".
+      fromOffset: opts.fromOffset ?? this.attachFromOffset(),
       mode: opts.mode,
     }
 
@@ -288,6 +323,21 @@ export class RemoteSessionManager implements SessionManager {
     this._pid = (result.pid as number) ?? null
     const alive = (result.alive as boolean) ?? false
 
+    // Adopt the daemon's ABSOLUTE stream-file cursor. _fileSize previously
+    // started at 0 on every fresh RSM and only grew via `+=` on received
+    // events — a RELATIVE count. Any later attach that sent it as fromOffset
+    // (reattachWatcher, retryStartAfterReconnect) made the daemon replay
+    // [0..currentOffset) — the "whole conversation replays in UI" bug after a
+    // walnut restart. The attach reply's currentOffset is the watcher's
+    // absolute position; assign it so all subsequent `+=` stays absolute.
+    // (Replayed catch-up bytes arrive BEFORE this reply on the same ws, so
+    // assignment here also corrects any double-count from the replay itself.)
+    // Dead session → no watcher → currentOffset 0 is meaningless; skip.
+    if (alive && typeof result.currentOffset === 'number') {
+      this._fileSize = result.currentOffset
+      this._cursorValid = true
+    }
+
     log.session.info('RemoteSessionManager: attached to session', {
       // DUP-DEBUG: rsmId helps pair attach calls with the RSM instance that
       // later emits jsonl/stderr_tail logs.
@@ -296,6 +346,7 @@ export class RemoteSessionManager implements SessionManager {
       sid: opts.sessionId,
       pid: this._pid,
       alive,
+      streamCursor: this._fileSize,
     })
 
     const pendingCtrl = result.pendingCtrl as { reqId: string; toolName: string; request: Record<string, unknown>; receivedAt: number } | null | undefined
@@ -331,17 +382,27 @@ export class RemoteSessionManager implements SessionManager {
 
       // Resume from the last byte walnut has processed — avoids replaying
       // content the UI has already rendered (would cause duplicate blocks).
+      // Without a valid cursor (fresh RSM after walnut restart), subscribe
+      // future-only — sending 0 here replayed the entire multi-MB stream file
+      // into the UI ("whole conversation replays" bug, path #4).
+      const fromOffset = this.attachFromOffset()
       const result = await this.conn!.send('attach', {
         sid: this._sid,
-        fromOffset: this._fileSize || 0,
+        fromOffset,
       })
       if (result.ok) {
+        // Dead session → no watcher → currentOffset 0 is meaningless; skip.
+        if (result.alive && typeof result.currentOffset === 'number') {
+          this._fileSize = result.currentOffset
+          this._cursorValid = true
+        }
         log.session.info('RemoteSessionManager: reattached watcher after reconnect', {
           // DUP-DEBUG: every reattach re-subscribes onEvent. If logs show
           // multiple reattaches without a matching detach in between, walnut
           // may be accumulating event handlers on the conn.
           rsmId: this._rsmId,
-          host: this.hostKey, sid: this._sid, fromOffset: this._fileSize || 0,
+          host: this.hostKey, sid: this._sid,
+          fromOffset: fromOffset === Number.MAX_SAFE_INTEGER ? 'MAX_SAFE_INTEGER (skip replay)' : fromOffset,
         })
         return true
       }
@@ -415,7 +476,17 @@ export class RemoteSessionManager implements SessionManager {
       if (remoteDied) {
         if (this._hasPipe) {
           this._hasPipe = false
-          this._onExit?.(1)
+          // Pass the daemon's REAL exit code, not a hardcoded 1. When the CLI
+          // exited cleanly at a turn boundary (daemon normalizes to exitCode 0
+          // via isTurnCompleteExit), this lets the onExit handler's `code !== 0`
+          // gate short-circuit — _hasPipe cleanup still runs, but no bogus
+          // session:error is emitted. The send still returns false so the
+          // caller falls back to --resume and recovers the session. Hardcoding
+          // 1 here turned every clean turn-end-at-send-time into a fake crash.
+          // Note: only session_dead/ENXIO deaths carry a normalized exitCode
+          // (incl. 0 for clean turn-end); EAGAIN/partial_write deaths have no
+          // exitCode, so they still fall back to 1.
+          this._onExit?.((result.exitCode as number | undefined) ?? 1)
         }
       }
       return false
@@ -454,7 +525,9 @@ export class RemoteSessionManager implements SessionManager {
       if (remoteDied) {
         if (this._hasPipe) {
           this._hasPipe = false
-          this._onExit?.(1)
+          // Real exit code, not hardcoded 1 — see note in send(). A clean
+          // turn-end (exitCode 0) must not be reported as a crash.
+          this._onExit?.((result.exitCode as number | undefined) ?? 1)
         }
       }
       return false
@@ -618,6 +691,13 @@ export class RemoteSessionManager implements SessionManager {
 
   async cleanup(): Promise<void> {
     this.detach()
+    // Session ended — free the per-session caches that live for its whole
+    // (possibly multi-hour) lifetime. Done in cleanup(), NOT detach(): detach()
+    // is also the temporary-disconnect path, and the daemon may replay cached
+    // events after a detach but before re-attach, so clearing there would drop
+    // dedup state mid-reconnect. cleanup() = real teardown, safe to clear.
+    this._imageCache.clear()
+    this._seenUuids.clear()
   }
 
   deletePipe(): void {
@@ -784,7 +864,9 @@ export class RemoteSessionManager implements SessionManager {
             if (uuid) {
               const dup = this._seenUuids.has(uuid)
               if (lineKind) {
-                log.session.info('RSM jsonl received', {
+                // debug: fires per remote JSONL line (tool_use/result/text) — a
+                // streaming hot path. Surface via WALNUT_LOG_LEVEL=debug.
+                log.session.debug('RSM jsonl received', {
                   rsmId: this._rsmId,
                   sid: this._sid,
                   uuid,
@@ -795,8 +877,13 @@ export class RemoteSessionManager implements SessionManager {
               }
               if (dup) return
               this._seenUuids.add(uuid)
+              // Bounded FIFO: evict oldest once over cap (Set keeps insertion order).
+              if (this._seenUuids.size > RemoteSessionManager.SEEN_UUID_CAP) {
+                const oldest = this._seenUuids.values().next().value
+                if (oldest !== undefined) this._seenUuids.delete(oldest)
+              }
             } else if (lineKind) {
-              log.session.info('RSM jsonl received (no uuid)', {
+              log.session.debug('RSM jsonl received (no uuid)', {
                 rsmId: this._rsmId, sid: this._sid, lineKind,
               })
             }

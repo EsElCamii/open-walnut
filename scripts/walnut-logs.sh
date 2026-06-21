@@ -22,6 +22,7 @@
 #   scripts/walnut-logs.sh task <taskId>        every log line for a task
 #   scripts/walnut-logs.sh daemon <sid>         which daemon log serves a sid + its lines
 #   scripts/walnut-logs.sh jsonl <sid>          locate + tail a session's CLI .jsonl stream
+#   scripts/walnut-logs.sh bundle <sid> [mins]  freeze an all-layer evidence bundle for a sid (mirrors the in-process captureBundle)
 #   scripts/walnut-logs.sh errors [n]           last n ERR/WARN lines (default 40)
 #   scripts/walnut-logs.sh grep <pattern>       raw grep across today's JSON log
 #   scripts/walnut-logs.sh tail [n]             follow the live JSON log (n lines back, default 40)
@@ -336,6 +337,93 @@ PY
     echo "── $f ($(wc -l < "$f") lines, $(du -h "$f" | cut -f1)) — last 20 ──"
     tail -20 "$f"
     [[ -s "$STREAMS_DIR/$sid.jsonl.err" ]] && { echo "── stderr ($sid.jsonl.err) ──"; tail -20 "$STREAMS_DIR/$sid.jsonl.err"; }
+    ;;
+
+  bundle)
+    # Freeze an all-layer evidence bundle for a sid. Mirrors the in-process
+    # captureBundle (src/core/observability/bundle.ts): same dir layout + same
+    # six artifacts, so a bundle made here is interchangeable with an auto-made
+    # one. We replicate with grep/tail rather than importing dist/ because the
+    # observability module is inlined into the big cli.js/server.js bundles —
+    # there's no standalone dist/core/observability/bundle.js to import.
+    sid="${1:?usage: bundle <sid> [mins]}"; mins="${2:-60}"
+    home="${OPEN_WALNUT_HOME:-$HOME/.open-walnut}"
+    ts="$(date +%s)000"   # epoch ms (matches Date.now() in the in-process version)
+    dir="$home/incidents/$sid-$ts"
+    mkdir -p "$dir"
+    cutoff_ms=$(( ($(date +%s) - mins * 60) * 1000 ))
+    included=(); missing=()
+
+    # 1. server.log.txt — sid lines from the 2 most-recent dated logs, windowed.
+    #    UTC time field vs local filename: scan both recent files (recent_logs).
+    : > "$dir/server.log.txt"
+    for f in $(recent_logs); do
+      # Keep lines newer than cutoff. jq's fromdateiso8601 only accepts whole-second
+      # ISO ('…40Z'), so strip the '.222' millis first. A line whose time we can't
+      # parse is KEPT (don't drop evidence over a parse miss) by defaulting to $c.
+      grep -aF "$sid" "$f" 2>/dev/null | jq -rc --argjson c "$cutoff_ms" \
+        'select((try ((.time | sub("\\.[0-9]+";"")) | fromdateiso8601 * 1000) catch $c) >= $c)' \
+        2>/dev/null >> "$dir/server.log.txt" || true
+    done
+    if [[ -s "$dir/server.log.txt" ]]; then included+=("server.log.txt"); else
+      rm -f "$dir/server.log.txt"; missing+=("server.log.txt: no $sid lines in last ${mins}min"); fi
+
+    # 2. cli.jsonl.tail.txt — last 200 lines of the CLI stream (+ .err), probing
+    #    both stream dirs (local embedded vs remote daemon write to different ones).
+    jsonl=""
+    for d in "$STREAMS_DIR" "$LOG_DIR/streams"; do
+      [[ -f "$d/$sid.jsonl" ]] && { jsonl="$d/$sid.jsonl"; break; }
+    done
+    if [[ -n "$jsonl" ]]; then
+      { echo "### $jsonl (last 200 lines)"; tail -200 "$jsonl"; } > "$dir/cli.jsonl.tail.txt"
+      if [[ -s "$jsonl.err" ]]; then
+        { echo; echo "### $jsonl.err (stderr, last 200 lines)"; tail -200 "$jsonl.err"; } >> "$dir/cli.jsonl.tail.txt"
+      fi
+      included+=("cli.jsonl.tail.txt")
+    else
+      missing+=("cli.jsonl.tail.txt: no .jsonl stream for $sid")
+    fi
+
+    # 3. cli-debug.txt — the CLI's own --debug log (local host only).
+    dbg="$HOME/.claude/debug/$sid.txt"
+    if [[ -f "$dbg" ]]; then
+      tail -200 "$dbg" > "$dir/cli-debug.txt"; included+=("cli-debug.txt")
+    else
+      missing+=("cli-debug.txt: no $dbg (remote sessions write it on the remote host)")
+    fi
+
+    # 4. daemon.log.txt — sid lines across every daemon-d-*.log, labelled by file.
+    : > "$dir/daemon.log.txt"
+    for f in "$LOG_DIR"/daemon-d-*.log; do
+      [[ -f "$f" ]] || continue
+      if grep -aqF "$sid" "$f"; then
+        { echo "### $f"; grep -aF "$sid" "$f"; } >> "$dir/daemon.log.txt"
+      fi
+    done
+    if [[ -s "$dir/daemon.log.txt" ]]; then included+=("daemon.log.txt"); else
+      rm -f "$dir/daemon.log.txt"; missing+=("daemon.log.txt: no daemon-d-*.log mentions $sid"); fi
+
+    # 5. turn-events.txt — the wide obs "turn" records for this sid.
+    : > "$dir/turn-events.txt"
+    for f in $(recent_logs); do
+      grep -aF "$sid" "$f" 2>/dev/null | grep -aF '"subsystem":"obs"' | grep -aF '"message":"turn"' \
+        >> "$dir/turn-events.txt" || true
+    done
+    if [[ -s "$dir/turn-events.txt" ]]; then included+=("turn-events.txt"); else
+      rm -f "$dir/turn-events.txt"; missing+=("turn-events.txt: no obs turn events for $sid in last ${mins}min"); fi
+
+    # 6. meta.json — same shape as the in-process bundle.
+    inc_json=$(printf '%s\n' "${included[@]:-}" | jq -R . | jq -sc 'map(select(.!=""))')
+    mis_json=$(printf '%s\n' "${missing[@]:-}" | jq -R . | jq -sc 'map(select(.!=""))')
+    jq -n --arg sid "$sid" --arg at "$(date -u +%Y-%m-%dT%H:%M:%S.000Z)" \
+      --argjson w "$mins" --argjson inc "$inc_json" --argjson mis "$mis_json" \
+      '{sessionId:$sid, capturedAt:$at, windowMins:$w, filesIncluded:$inc, notesIfMissing:$mis}' \
+      > "$dir/meta.json"
+
+    echo "── evidence bundle for $sid (window ${mins}min) ──"
+    echo "  dir:     $dir"
+    echo "  files:   ${included[*]:-(none)}"
+    [[ ${#missing[@]} -gt 0 ]] && printf '  missing: %s\n' "${missing[@]}"
     ;;
 
   errors)

@@ -131,4 +131,28 @@ describe('L2.1 RemoteSessionManager session_state wire-level contract', () => {
     // legacy exit path passes (code, stderr); we only assert on the first arg.
     expect(onExit.mock.calls[0][0]).toBe(11)
   })
+
+  // M9 (Bug 1+2 regression) — writeMessage hits session_dead with a CLEAN
+  // exitCode 0 (daemon normalized a turn-end). onExit MUST receive the real 0,
+  // not a hardcoded 1. Downstream handleRemoteProcessExit gates on `code !== 0`,
+  // so 0 short-circuits the bogus session:error while _hasPipe cleanup still
+  // runs and writeMessage returns false (→ caller --resume recovers).
+  it('M9: writeMessage on clean-exit session_dead passes REAL exitCode 0 to onExit (no fake crash)', async () => {
+    daemon.simulateDeath('sid-test', 0)
+    const ok = await mgr.writeMessage('next turn')
+    await new Promise((r) => setTimeout(r, 20))
+    expect(ok).toBe(false)                 // send failed → caller falls back to --resume
+    expect(onExit).toHaveBeenCalledWith(0) // real code, NOT hardcoded 1
+    expect(mgr.hasPipe).toBe(false)        // cleanup still ran
+  })
+
+  // M10 (Bug 1+2 regression) — a genuine non-zero crash exitCode is still
+  // forwarded faithfully (we didn't break the real-error path).
+  it('M10: writeMessage on crash session_dead forwards the real non-zero exitCode', async () => {
+    daemon.simulateDeath('sid-test', 137)
+    const ok = await mgr.writeMessage('next turn')
+    await new Promise((r) => setTimeout(r, 20))
+    expect(ok).toBe(false)
+    expect(onExit).toHaveBeenCalledWith(137)
+  })
 })

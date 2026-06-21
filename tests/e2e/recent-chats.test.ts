@@ -262,30 +262,30 @@ describe('touchLastSessionUpdate bumps a pinned task within its tier', () => {
     expect(tierRes.status).toBe(200);
   }
 
-  async function tierOrder(tier: 'focus' | 'next' | 'satellite' | 'wait', ids: string[]): Promise<string[]> {
+  async function tierOrder(tier: 'focus' | 'satellite' | 'wait', ids: string[]): Promise<string[]> {
     const res = await fetch(apiUrl('/api/focus/tasks'));
     const body = (await res.json()) as Record<string, string[]>;
     return (body[`${tier}_tasks`] ?? []).filter((id) => ids.includes(id));
   }
 
-  it('chatting with a NEXT task (default-on tier) moves it to the front, preserving the rest', async () => {
-    const t1 = await createTask('Bump next — t1');
-    const t2 = await createTask('Bump next — t2');
-    const t3 = await createTask('Bump next — t3');
+  it('chatting with a SATELLITE task (default-on tier) moves it to the front, preserving the rest', async () => {
+    const t1 = await createTask('Bump satellite — t1');
+    const t2 = await createTask('Bump satellite — t2');
+    const t3 = await createTask('Bump satellite — t3');
 
-    await pinToTier(t1.id, 'next');
-    await pinToTier(t2.id, 'next');
-    await pinToTier(t3.id, 'next');
+    await pinToTier(t1.id, 'satellite');
+    await pinToTier(t2.id, 'satellite');
+    await pinToTier(t3.id, 'satellite');
 
     const ids = [t1.id, t2.id, t3.id];
-    const before = await tierOrder('next', ids);
+    const before = await tierOrder('satellite', ids);
     expect(before.length).toBe(3);
 
     // Chat with whichever task is currently last among our three.
     const last = before[2];
     await touchLastSessionUpdate(last);
 
-    const after = await tierOrder('next', ids);
+    const after = await tierOrder('satellite', ids);
     // Touched task jumps to the front; the other two keep their relative order.
     expect(after[0]).toBe(last);
     expect(after.slice(1)).toEqual(before.slice(0, 2));
@@ -317,27 +317,27 @@ describe('touchLastSessionUpdate bumps a pinned task within its tier', () => {
   it('only reorders within the same tier, leaving other tiers untouched', async () => {
     const s1 = await createTask('Tier isolation — sat 1');
     const s2 = await createTask('Tier isolation — sat 2');
-    const n1 = await createTask('Tier isolation — next A');
-    const n2 = await createTask('Tier isolation — next B');
+    const w1 = await createTask('Tier isolation — wait A');
+    const w2 = await createTask('Tier isolation — wait B');
 
     await pinToTier(s1.id, 'satellite');
     await pinToTier(s2.id, 'satellite');
-    await pinToTier(n1.id, 'next');
-    await pinToTier(n2.id, 'next');
+    await pinToTier(w1.id, 'wait');
+    await pinToTier(w2.id, 'wait');
 
     const satIds = [s1.id, s2.id];
     const satBefore = await tierOrder('satellite', satIds);
 
-    // Chat with the second NEXT task — it should jump to the front of NEXT only.
-    await touchLastSessionUpdate(n2.id);
+    // Chat with the second WAIT task — it should jump to the front of WAIT only.
+    await touchLastSessionUpdate(w2.id);
 
     // SATELLITE tier (a different default-on tier) must keep its relative order.
     const satAfter = await tierOrder('satellite', satIds);
     expect(satAfter).toEqual(satBefore);
 
-    // NEXT tier: n2 bubbled to the front.
-    const nextAfter = await tierOrder('next', [n1.id, n2.id]);
-    expect(nextAfter[0]).toBe(n2.id);
+    // WAIT tier: w2 bubbled to the front.
+    const waitAfter = await tierOrder('wait', [w1.id, w2.id]);
+    expect(waitAfter[0]).toBe(w2.id);
   });
 
   it('respects per-tier config: disabling a tier stops its bump', async () => {

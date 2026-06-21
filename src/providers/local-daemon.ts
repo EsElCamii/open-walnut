@@ -28,7 +28,10 @@ import { WebSocket } from 'ws'
 import { log } from '../logging/index.js'
 import { DAEMON_BINARIES_DIR } from '../constants.js'
 
-const DEFAULT_DAEMON_DIR = '/tmp/open-walnut'
+// Env-aware default so the singleton (exported below) isolates a demo server's
+// daemon when WALNUT_DAEMON_DIR is set. Tests pass `daemonDir` explicitly and are
+// unaffected. Production sets nothing → /tmp/open-walnut.
+const DEFAULT_DAEMON_DIR = process.env.WALNUT_DAEMON_DIR || '/tmp/open-walnut'
 
 // ESM-safe __dirname equivalent
 const __filename = fileURLToPath(import.meta.url)
@@ -46,6 +49,7 @@ export class LocalDaemon {
   private _wsUrl: string | null = null
   private _spawnedPid: number | null = null
   private _instanceId: string | null = null
+  private _ensureInFlight: Promise<number> | null = null
   private readonly daemonDir: string
   private readonly portFile: string
   private readonly pidFile: string
@@ -68,6 +72,19 @@ export class LocalDaemon {
   get instanceId(): string | null { return this._instanceId ?? this.readInstanceIdFile() }
 
   async ensureRunning(): Promise<number> {
+    // In-flight guard: server startup, session-manager lazy init, and
+    // reconnect callbacks all call this concurrently. Without it each caller
+    // independently saw "no daemon" and spawned its own (observed: ~20 spawns
+    // in 35s during one cold start). Concurrent callers share one attempt;
+    // the promise clears on settle so a later call can retry after failure.
+    if (this._ensureInFlight) return this._ensureInFlight
+    this._ensureInFlight = this.ensureRunningInner().finally(() => {
+      this._ensureInFlight = null
+    })
+    return this._ensureInFlight
+  }
+
+  private async ensureRunningInner(): Promise<number> {
     const binaryPath = this.findDaemonBinary()
     const expectedVersion = this.readBinaryVersion(binaryPath)
 
@@ -226,7 +243,11 @@ export class LocalDaemon {
     const proc = spawn(binaryPath, ['--start'], {
       detached: true,
       stdio: 'ignore',
-      env: { ...process.env },
+      // Pass our daemonDir to the spawned binary so it writes its port/pid/streams
+      // into the SAME dir this LocalDaemon instance watches. Without this the
+      // daemonDir override is inert (binary defaults to /tmp/open-walnut). For
+      // production daemonDir === '/tmp/open-walnut' so this is a no-op.
+      env: { ...process.env, WALNUT_DAEMON_DIR: this.daemonDir },
     })
     this._spawnedPid = proc.pid ?? null
     proc.unref()

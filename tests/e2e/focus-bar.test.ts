@@ -141,13 +141,13 @@ describe('Focus Bar API', () => {
     const r = await api('PUT', `/api/focus/tasks/${taskIds[1]}/tier`, { tier: 'focus' });
     expect(r.status).toBe(200);
     expect(r.data.focus_tasks).toContain(taskIds[1]);
-    expect(r.data.next_tasks).not.toContain(taskIds[1]);
+    expect(r.data.satellite_tasks).not.toContain(taskIds[1]);
   });
 
-  it('PUT /api/focus/tasks/:id/tier moves to next tier', async () => {
-    const r = await api('PUT', `/api/focus/tasks/${taskIds[1]}/tier`, { tier: 'next' });
+  it('PUT /api/focus/tasks/:id/tier moves to wait tier', async () => {
+    const r = await api('PUT', `/api/focus/tasks/${taskIds[1]}/tier`, { tier: 'wait' });
     expect(r.status).toBe(200);
-    expect(r.data.next_tasks).toContain(taskIds[1]);
+    expect(r.data.wait_tasks).toContain(taskIds[1]);
     expect(r.data.focus_tasks).not.toContain(taskIds[1]);
   });
 
@@ -155,8 +155,13 @@ describe('Focus Bar API', () => {
     const r = await api('PUT', `/api/focus/tasks/${taskIds[1]}/tier`, { tier: 'satellite' });
     expect(r.status).toBe(200);
     expect(r.data.satellite_tasks).toContain(taskIds[1]);
-    expect(r.data.next_tasks).not.toContain(taskIds[1]);
+    expect(r.data.wait_tasks).not.toContain(taskIds[1]);
     expect(r.data.focus_tasks).not.toContain(taskIds[1]);
+  });
+
+  it('the retired "next" tier is now rejected', async () => {
+    const r = await api('PUT', `/api/focus/tasks/${taskIds[1]}/tier`, { tier: 'next' });
+    expect(r.status).toBe(400);
   });
 
   it('tier change persists across GET', async () => {
@@ -177,14 +182,14 @@ describe('Focus Bar API', () => {
 
   it('rapid tier toggling does not corrupt state (simulates drag oscillation)', async () => {
     // This test simulates the oscillation pattern that caused React #185:
-    // rapidly toggling a task between focus and next tiers.
+    // rapidly toggling a task between focus and satellite tiers.
     const id = taskIds[3];
     for (let i = 0; i < 10; i++) {
-      await api('PUT', `/api/focus/tasks/${id}/tier`, { tier: i % 2 === 0 ? 'focus' : 'next' });
+      await api('PUT', `/api/focus/tasks/${id}/tier`, { tier: i % 2 === 0 ? 'focus' : 'satellite' });
     }
-    // Final state should be 'next' (last iteration i=9, 9%2=1 → 'next')
+    // Final state should be 'satellite' (last iteration i=9, 9%2=1 → 'satellite')
     const r = await api('GET', '/api/focus/tasks');
-    expect(r.data.next_tasks).toContain(id);
+    expect(r.data.satellite_tasks).toContain(id);
     expect(r.data.focus_tasks).not.toContain(id);
     // All pinned tasks should still be present
     expect(r.data.pinned_tasks).toHaveLength(3);

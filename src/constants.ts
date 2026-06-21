@@ -251,7 +251,19 @@ export const REPOS_MEMORY_DIR = path.join(MEMORY_DIR, 'repos');
 export const TOPICS_DIR = path.join(MEMORY_DIR, 'topics');
 export const COMPACTION_DIR = path.join(MEMORY_DIR, 'compaction');
 export const MEMORY_INDEX_FILE = path.join(MEMORY_DIR, 'index.md');
+/** @deprecated global single-file working memory — pre-multi-conversation. Kept as
+ *  the lazy-migration SOURCE for an agent's main conversation. New reads/writes use
+ *  workingMemoryFile(agentId, conversationId). */
 export const WORKING_MEMORY_FILE = path.join(MEMORY_DIR, 'working-memory.md');
+
+/**
+ * Per-conversation working memory (real-time scratchpad). Lives beside the
+ * conversation's chat file so each conversation has its own scratchpad and they
+ * never cross-talk. Mirrors conversationFile()'s layout.
+ */
+export function workingMemoryFile(agentId: string, conversationId: string): string {
+  return path.join(conversationDir(agentId), `${validateConversationId(conversationId)}.working-memory.md`);
+}
 export const TIMELINE_DIR = path.join(WALNUT_HOME, 'timeline');
 export const RECORDINGS_DIR = path.join(WALNUT_HOME, 'recordings');
 export const LOG_PREFIX = 'open-walnut-';

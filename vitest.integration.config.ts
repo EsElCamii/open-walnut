@@ -18,7 +18,10 @@ export default mergeConfig(
         'tests/web/**/*.test.ts',
         'tests/session-server/**/*.test.ts',
       ],
-      exclude: ['**/*.live.test.ts'],
+      // notes-roundtrip drives the FRONTEND editor serializer; its deps live in
+      // web/node_modules and it needs a DOM shim, so it runs under its own
+      // vitest.notes-roundtrip.config.ts — never the node-env integration tier.
+      exclude: ['**/*.live.test.ts', 'tests/web/notes-roundtrip/**'],
       testTimeout: 60_000,
     },
   }),

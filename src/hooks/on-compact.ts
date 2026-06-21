@@ -35,8 +35,8 @@ function main(): void {
       appendDailyLog(entry, 'compact');
     } catch (err) { log.hook.warn('on-compact: daily log failed', { error: String(err) }); }
 
-    // Update the session store to mark last active time
-    updateSessionLastActive();
+    // Update the session store to mark last active time — scoped to THIS session.
+    updateSessionLastActive(summary.id);
 
     // Git versioning: commits are now handled centrally by GitVersioningService
     // in the server process. Hooks only write data files.
@@ -45,8 +45,9 @@ function main(): void {
   }
 }
 
-function updateSessionLastActive(): void {
+function updateSessionLastActive(sessionId: string): void {
   try {
+    if (!sessionId) return;
     if (!fs.existsSync(SESSION_DB_PATH)) return;
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const Database = require('better-sqlite3') as typeof import('better-sqlite3');
@@ -56,10 +57,17 @@ function updateSessionLastActive(): void {
       db.pragma('busy_timeout = 5000');
 
       const now = new Date().toISOString();
+      // Scoped to THIS session only. The previous unscoped
+      // `WHERE process_status = 'running'` rewrote ALL ~295 running rows on
+      // every compact (seen 103×), from a separate process handle — contending
+      // for the WAL write lock with the main process and refreshing the
+      // orphan dead-pool's timestamps so it never aged out. last_active_at is a
+      // TEXT/ISO column everywhere (session-db schema), so keep ISO — the bug
+      // was the unscoped WHERE, not the format.
       const stmt = db.prepare(
-        `UPDATE sessions SET last_active_at = ? WHERE process_status = 'running'`,
+        `UPDATE sessions SET last_active_at = ? WHERE claude_session_id = ?`,
       );
-      db.transaction(() => { stmt.run(now); })();
+      db.transaction(() => { stmt.run(now, sessionId); })();
     } finally {
       try { db.close(); } catch { /* ignore */ }
     }

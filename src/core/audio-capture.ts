@@ -115,6 +115,17 @@ class AudioCaptureService {
   private channels: 1 | 2 = DEFAULT_CHANNELS
   private chunkMinutes = DEFAULT_CHUNK_MINUTES
   private available: boolean | null = null // null = not checked yet
+  // Cache verifyPermissions() — the native ScreenCaptureKit call is a
+  // SYNCHRONOUS bridge into macOS TCC that has been observed to block the event
+  // loop for up to 150s (server log: GET /api/audio/available → 200 (151821ms)).
+  // /api/audio/available is polled by the frontend, so an uncached native call
+  // per request stalls EVERY HTTP request behind it. Permissions change rarely;
+  // cache the result with a short TTL and never call the native bridge twice in
+  // that window.
+  private permissionsCache: { granted: boolean; message: string } | null = null
+  private permissionsCheckedAt = 0
+  private permissionsRefreshing = false
+  private static readonly PERMISSIONS_TTL_MS = 5 * 60 * 1000
 
   /**
    * Check if audio capture is available on this platform.
@@ -142,13 +153,42 @@ class AudioCaptureService {
     if (!this.isAvailable()) {
       return { granted: false, message: 'Audio capture not available on this platform' }
     }
-    try {
-      const { AudioCapture } = require('screencapturekit-audio-capture')
-      const status = AudioCapture.verifyPermissions()
-      return { granted: status.granted, message: status.message }
-    } catch (err) {
-      return { granted: false, message: (err as Error).message }
-    }
+    // NEVER call the native bridge synchronously on the request path. The
+    // ScreenCaptureKit verifyPermissions() call is a synchronous hop into macOS
+    // TCC that has been observed (via the event-loop monitor) to block the loop
+    // for ~20s on a cold call and up to 150s under contention — freezing EVERY
+    // HTTP request behind it. Instead: serve the cached value immediately and
+    // refresh in the background when stale. Worst case a caller sees a
+    // one-TTL-stale (or initial "checking") value; correctness of a poll never
+    // justifies a 20s event-loop stall.
+    const now = Date.now()
+    const isStale = !this.permissionsCache || (now - this.permissionsCheckedAt) >= AudioCaptureService.PERMISSIONS_TTL_MS
+    if (isStale) this.refreshPermissionsInBackground()
+    return this.permissionsCache ?? { granted: false, message: 'Checking screen-recording permission…' }
+  }
+
+  /**
+   * Refresh the permissions cache off the request path. The native call runs on
+   * a later tick (setImmediate) so the current request returns instantly; it
+   * still blocks the loop for the duration of the native call, but only once
+   * per TTL instead of once per poll, and never inside a user's request/response.
+   * Guarded against concurrent refreshes.
+   */
+  private refreshPermissionsInBackground(): void {
+    if (this.permissionsRefreshing) return
+    this.permissionsRefreshing = true
+    setImmediate(() => {
+      try {
+        const { AudioCapture } = require('screencapturekit-audio-capture')
+        const status = AudioCapture.verifyPermissions()
+        this.permissionsCache = { granted: status.granted, message: status.message }
+      } catch (err) {
+        this.permissionsCache = { granted: false, message: (err as Error).message }
+      } finally {
+        this.permissionsCheckedAt = Date.now()
+        this.permissionsRefreshing = false
+      }
+    })
   }
 
   /**

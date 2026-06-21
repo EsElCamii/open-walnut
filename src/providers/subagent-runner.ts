@@ -28,7 +28,7 @@ import { getConfig } from '../core/config-manager.js';
 import { buildSubagentSystemPrompt, buildSubagentToolSet } from '../agent/subagent-context.js';
 import { buildStatefulMemorySection } from '../agent/stateful-memory.js';
 import { buildFilteredSkillsPrompt } from '../core/skill-loader.js';
-import { loadContextSources } from '../agent/context-sources.js';
+import { loadContextSources, type ContextSourcesInput } from '../agent/context-sources.js';
 import { getProjectMemory } from '../core/project-memory.js';
 import { SESSION_STREAMS_DIR } from '../constants.js';
 import { log } from '../logging/index.js';
@@ -213,7 +213,7 @@ export class SubagentRunner {
     region?: string;
     deniedTools?: string[];
     context?: string;
-    context_override?: { taskId?: string; sessionId?: string };
+    context_override?: ContextSourcesInput;
   }): Promise<void> {
     const agentId = data.agentId ?? 'general';
     const agentDef = await getAgent(agentId);
@@ -335,7 +335,7 @@ export class SubagentRunner {
   private async runEmbedded(
     run: AgentRun & { _history?: MessageParam[]; _abortController?: AbortController; _launchPhase?: string },
     agentDef: AgentDefinition,
-    data: { task: string; taskId?: string; deniedTools?: string[]; context?: string; context_override?: { taskId?: string; sessionId?: string; cwd?: string; host?: string } },
+    data: { task: string; taskId?: string; deniedTools?: string[]; context?: string; context_override?: ContextSourcesInput },
     opts: { model?: string; provider?: string; region?: string; maxTokens?: number; maxToolRounds: number; resume?: boolean },
   ): Promise<void> {
     const isResume = opts.resume === true;

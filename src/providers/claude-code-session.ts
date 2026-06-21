@@ -363,6 +363,59 @@ export class ClaudeCodeSession {
   private _teamIdleTimer: ReturnType<typeof setTimeout> | null = null
   private static readonly TEAM_IDLE_TIMEOUT_MS = 120_000 // 2 min
 
+  // ── Background task / dynamic-workflow tracking ──
+  // A dynamic-workflow turn (or any background subagent) fans out N tasks that
+  // outlive the agent's text turn. The CLI emits a `result` as soon as the main
+  // turn produces output ("Workflow launched in background"), but background tasks
+  // keep running and the CLI only emits session_state_changed{idle} once ALL of
+  // them finish. So `result` must NOT drive turn-completion while bg work is live.
+  //
+  // `session_state_changed` (gated by CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS, which
+  // the daemon now sets) is the authoritative signal. `_sessionStateSeen` flips true
+  // the first time we observe one — once true, we trust the CLI's running/idle and
+  // demote `result` to bookkeeping. If we NEVER see one (old CLI), we fall back to
+  // the `_bgTasksInFlight` counter + the daemon-PULL liveness invariant.
+  /** True once we've observed any session_state_changed event → trust CLI state. */
+  private _sessionStateSeen = false
+  /** Most recent CLI session state, when emitted. */
+  private _cliSessionState: 'running' | 'idle' | 'requires_action' | undefined
+  /** Count of background tasks started but not yet terminated (task_started − task_notification).
+   *  Source of truth for "is background work in flight" when session_state events are absent. */
+  private _bgTasksInFlight = 0
+  /** task_id → live description, for the workflow/background-task progress UI. */
+  private _bgTasks = new Map<string, { description?: string; subagentType?: string; status: string; tokens?: number; lastTool?: string; summary?: string; workflowName?: string }>()
+  /** Wall-clock of the most recent task_* event — feeds the "JSONL still moving ⇒ running" invariant. */
+  private _lastBgActivityTs = 0
+  /** Workflow name from the most recent task_started with task_type==='local_workflow'. */
+  private _workflowName: string | undefined
+
+  /** True when any background subagent / dynamic-workflow task is still running.
+   *  Single choke point: every "is this turn's result intermediate?" decision consults
+   *  THIS, so adding a future bg mechanism only touches one place. Combines the CLI's
+   *  authoritative idle signal (when present) with the in-flight counter (fallback). */
+  hasActiveBackgroundWork(): boolean {
+    // When the CLI emits session-state, idle is authoritative: idle ⇒ no bg work.
+    if (this._sessionStateSeen && this._cliSessionState === 'idle') return false
+    return this._bgTasksInFlight > 0
+  }
+
+  /** Snapshot of background tasks for the UI (Workflow progress panel). */
+  get backgroundTasks(): Array<{ taskId: string; description?: string; subagentType?: string; status: string; tokens?: number; lastTool?: string; summary?: string; workflowName?: string }> {
+    return [...this._bgTasks.entries()].map(([taskId, t]) => ({ taskId, ...t }))
+  }
+  get workflowName(): string | undefined { return this._workflowName }
+
+  /** Broadcast the current background-task set so the UI can render workflow progress. */
+  private _emitBackgroundTasksUpdate(sessionId: string): void {
+    bus.emit(EventNames.SESSION_BACKGROUND_TASKS, {
+      sessionId,
+      taskId: this.taskId,
+      workflowName: this._workflowName,
+      inFlight: this._bgTasksInFlight,
+      tasks: this.backgroundTasks,
+    }, ['main-ai', 'web-ui'], { source: 'session-runner' })
+  }
+
   /**
    * Check if any teammate subagent JSONL files have been written to recently.
    * Subagent files live at ~/.claude/projects/{encoded}/{sessionId}/subagents/*.jsonl.
@@ -2125,6 +2178,122 @@ export class ClaudeCodeSession {
             // one turn produced 194 thinking fragments, 0 clean appends, with
             // 181 system blocks landing directly on a thinking block. Swallowing
             // the event here lets thinking-delta keep appending to one block.
+          } else if (sys.subtype === 'session_state_changed') {
+            // ── Authoritative session state (the turn-over signal) ──
+            // Gated by CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS (daemon sets it).
+            // 'idle' is the ONLY reliable "turn truly over" signal: a dynamic-workflow
+            // turn emits many `result` events as background subagents finish, so
+            // `result` is not a boundary. 'running' keeps us active; 'requires_action'
+            // means the CLI paused on a permission/AskUserQuestion prompt (NOT done).
+            // We do NOT drive AGENT_COMPLETE here — the result handler owns that, but
+            // now consults hasActiveBackgroundWork()/_cliSessionState. We just record
+            // state + nudge UI; idle-driven completion is handled where result is.
+            this._sessionStateSeen = true
+            const newState = sys.state as 'running' | 'idle' | 'requires_action' | undefined
+            this._cliSessionState = newState
+            log.session.info('session_state_changed', {
+              sessionId: sid, taskId: this.taskId, state: newState,
+              bgTasksInFlight: this._bgTasksInFlight,
+            })
+            if (newState === 'running') {
+              if (this._processStatus !== 'running') {
+                this._processStatus = 'running'
+                this.emitStatusChanged('IN_PROGRESS')
+              }
+            } else if (newState === 'idle') {
+              // Authoritative turn-over. If a result was withheld because bg work was
+              // live, emit completion now. Guard with resultEmitted to avoid double-fire
+              // when result + idle are adjacent (normal single-turn case the result
+              // handler already completed).
+              this._bgTasksInFlight = 0
+              if (!this.resultEmitted && this._turnResultEmitted) {
+                // result already processed this turn (normal path) — nothing to do.
+              } else if (!this.resultEmitted) {
+                this._activity = undefined
+                this._processStatus = 'idle'
+                this.emitStatusChanged('AGENT_COMPLETE')
+                bus.emit(EventNames.SESSION_RESULT, {
+                  sessionId: sid, taskId: this.taskId,
+                  result: this.fullText, isError: false,
+                }, ['main-ai', 'session-runner'], { source: 'session-runner' })
+              } else {
+                // Already completed by result handler — just confirm idle status.
+                if (this._processStatus === 'running') {
+                  this._processStatus = 'idle'
+                  this._activity = undefined
+                }
+              }
+            }
+            // requires_action: leave status as-is; the permission flow drives AWAIT.
+          } else if (sys.subtype === 'task_started') {
+            // ── Background task / dynamic-workflow lifecycle (opening bookend) ──
+            const taskId = sys.task_id as string | undefined
+            if (taskId) {
+              if (!this._bgTasks.has(taskId)) this._bgTasksInFlight++
+              const workflowName = sys.workflow_name as string | undefined
+              if (workflowName) this._workflowName = workflowName
+              this._bgTasks.set(taskId, {
+                description: sys.description as string | undefined,
+                subagentType: sys.subagent_type as string | undefined,
+                status: 'running',
+                workflowName,
+              })
+              this._lastBgActivityTs = Date.now()
+              if (this._processStatus !== 'running') {
+                this._processStatus = 'running'
+                this._activity = workflowName ? `Workflow: ${workflowName}` : 'Background task running'
+              }
+              this._emitBackgroundTasksUpdate(sid)
+            }
+          } else if (sys.subtype === 'task_progress') {
+            // Heartbeat — refresh activity timestamp (feeds the liveness invariant) + UI.
+            const taskId = sys.task_id as string | undefined
+            this._lastBgActivityTs = Date.now()
+            if (taskId) {
+              const prev = this._bgTasks.get(taskId) ?? { status: 'running' }
+              const usage = sys.usage as { total_tokens?: number } | undefined
+              this._bgTasks.set(taskId, {
+                ...prev,
+                description: (sys.description as string | undefined) ?? prev.description,
+                subagentType: (sys.subagent_type as string | undefined) ?? prev.subagentType,
+                status: 'running',
+                tokens: usage?.total_tokens ?? prev.tokens,
+                lastTool: (sys.last_tool_name as string | undefined) ?? prev.lastTool,
+                summary: (sys.summary as string | undefined) ?? prev.summary,
+              })
+              this._emitBackgroundTasksUpdate(sid)
+            }
+          } else if (sys.subtype === 'task_updated') {
+            // Status patch — merge into local task map.
+            const taskId = sys.task_id as string | undefined
+            const patch = sys.patch as Record<string, unknown> | undefined
+            this._lastBgActivityTs = Date.now()
+            if (taskId && patch) {
+              const prev = this._bgTasks.get(taskId) ?? { status: 'running' }
+              this._bgTasks.set(taskId, {
+                ...prev,
+                status: (patch.status as string | undefined) ?? prev.status,
+                description: (patch.description as string | undefined) ?? prev.description,
+              })
+              this._emitBackgroundTasksUpdate(sid)
+            }
+          } else if (sys.subtype === 'task_notification') {
+            // Terminal bookend — task reached completed|failed|stopped.
+            const taskId = sys.task_id as string | undefined
+            const status = (sys.status as string | undefined) ?? 'completed'
+            this._lastBgActivityTs = Date.now()
+            if (taskId) {
+              const prev = this._bgTasks.get(taskId)
+              if (prev && prev.status === 'running') {
+                this._bgTasksInFlight = Math.max(0, this._bgTasksInFlight - 1)
+              }
+              this._bgTasks.set(taskId, { ...(prev ?? {}), status })
+              log.session.info('background task terminal', {
+                sessionId: sid, taskId: this.taskId, bgTaskId: taskId, status,
+                remainingInFlight: this._bgTasksInFlight,
+              })
+              this._emitBackgroundTasksUpdate(sid)
+            }
           } else if (sys.subtype && sys.subtype !== 'init' && sys.subtype !== 'status') {
             // ── Observability: structured status cards from the stream-json protocol ──
             // post_turn_summary (per-turn status card: status_category / needs_action /
@@ -2554,6 +2723,44 @@ export class ClaudeCodeSession {
             sessionId: this.claudeSessionId, taskId: this.taskId,
           })
           this._turnResultEmitted = true
+          break
+        }
+
+        // ── Background-work intermediate result (dynamic workflows) ──
+        // A dynamic-workflow turn emits MANY `result` events: the main turn's own
+        // result (often "Workflow launched in background...") PLUS one per background
+        // subagent completion that the CLI feeds back into a fresh ask(). NONE of these
+        // mean "session is done" — only session_state_changed{idle} does (verified live:
+        // idle fires once, strictly after the last result + all task_notifications).
+        //
+        // Two filters:
+        //  (a) origin.kind === 'task-notification' → a result produced by the CLI
+        //      processing a completion notification. Never a real turn-over. Skip
+        //      completion entirely (don't even update _lastResultCost — it's noise).
+        //  (b) the CLI has told us (session_state_changed) that work is still running,
+        //      OR our in-flight counter shows live background tasks → withhold
+        //      AGENT_COMPLETE; stay running. The trailing idle event will complete it.
+        const resultOrigin = (event as Record<string, unknown>).origin as { kind?: string } | undefined
+        const isTaskNotificationResult = resultOrigin?.kind === 'task-notification'
+        if (isTaskNotificationResult) {
+          log.session.info('result is task-notification origin — bookkeeping only, no turn-over', {
+            sessionId: this.claudeSessionId, taskId: this.taskId,
+          })
+          // Capture final text/cost for display but do NOT complete the turn or set
+          // _turnResultEmitted (a real result or idle still has to arrive).
+          if (typeof result.result === 'string' && result.result) this.fullText = result.result
+          break
+        }
+        if (this.hasActiveBackgroundWork()) {
+          log.session.info('result while background work in flight — staying running, awaiting idle', {
+            sessionId: this.claudeSessionId, taskId: this.taskId,
+            bgTasksInFlight: this._bgTasksInFlight, cliState: this._cliSessionState,
+          })
+          if (typeof result.result === 'string' && result.result) this.fullText = result.result
+          if (result.total_cost_usd !== undefined) this._lastResultCost = result.total_cost_usd
+          this._processStatus = 'running'
+          this._activity = this._workflowName ? `Workflow: ${this._workflowName}` : 'Background tasks running'
+          this.emitStatusChanged('IN_PROGRESS')
           break
         }
 

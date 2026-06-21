@@ -7,8 +7,42 @@
  */
 import fs from 'node:fs';
 import path from 'node:path';
-import { WORKING_MEMORY_FILE, COMPACTION_DIR } from '../constants.js';
+import { WORKING_MEMORY_FILE, COMPACTION_DIR, workingMemoryFile } from '../constants.js';
 import { estimateTokens, formatDateKey } from './daily-log.js';
+import { log } from '../logging/index.js';
+
+/**
+ * Resolve the working-memory file for a conversation.
+ *
+ * Per-conversation scratchpad lives beside the conversation's chat file. When a
+ * conversationId is given we use that path; on first access we lazily migrate the
+ * deprecated global working-memory.md into it ONCE (then retire the global file),
+ * so an existing user's main conversation keeps its scratchpad.
+ *
+ * conversationId omitted → fall back to the global file. After Phase 1/2 the only
+ * remaining no-conversationId caller is the deprecated global path; new callers
+ * always pass the pair.
+ */
+function resolveWorkingMemoryPath(agentId?: string, conversationId?: string): string {
+  if (!conversationId) return WORKING_MEMORY_FILE;
+  const perConv = workingMemoryFile(agentId || 'general', conversationId);
+  // Lazy one-time migration: if this conversation has no scratchpad yet but a
+  // legacy global one exists with real content, seed from it and retire the global.
+  if (!fs.existsSync(perConv) && fs.existsSync(WORKING_MEMORY_FILE)) {
+    try {
+      const legacy = fs.readFileSync(WORKING_MEMORY_FILE, 'utf-8');
+      if (!isWorkingMemoryEmpty(legacy)) {
+        fs.mkdirSync(path.dirname(perConv), { recursive: true });
+        fs.writeFileSync(perConv, legacy, 'utf-8');
+        fs.renameSync(WORKING_MEMORY_FILE, `${WORKING_MEMORY_FILE}.migrated`);
+        log.agent.info('working memory migrated to conversation', { agentId: agentId || 'general', conversationId });
+      }
+    } catch (err) {
+      log.agent.warn('working memory migration failed (non-critical)', { error: err instanceof Error ? err.message : String(err) });
+    }
+  }
+  return perConv;
+}
 
 export const MAX_SECTION_TOKENS = 2000;
 export const MAX_TOTAL_WORKING_MEMORY_TOKENS = 12000;
@@ -50,21 +84,27 @@ const SECTION_HEADERS = [
   '# Learnings',
 ];
 
-/** Ensure working-memory.md exists with the template. */
-export function ensureWorkingMemory(): void {
-  if (!fs.existsSync(WORKING_MEMORY_FILE)) {
-    fs.mkdirSync(path.dirname(WORKING_MEMORY_FILE), { recursive: true });
-    fs.writeFileSync(WORKING_MEMORY_FILE, WORKING_MEMORY_TEMPLATE, 'utf-8');
+/** Ensure the conversation's working-memory file exists with the template. */
+export function ensureWorkingMemory(agentId?: string, conversationId?: string): void {
+  const file = resolveWorkingMemoryPath(agentId, conversationId);
+  if (!fs.existsSync(file)) {
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, WORKING_MEMORY_TEMPLATE, 'utf-8');
   }
 }
 
-/** Read the current working memory content. Returns null if file doesn't exist. */
-export function getWorkingMemory(): string | null {
+/** Read a conversation's working memory content. Returns null if file doesn't exist. */
+export function getWorkingMemory(agentId?: string, conversationId?: string): string | null {
   try {
-    return fs.readFileSync(WORKING_MEMORY_FILE, 'utf-8');
+    return fs.readFileSync(resolveWorkingMemoryPath(agentId, conversationId), 'utf-8');
   } catch {
     return null;
   }
+}
+
+/** Absolute path to a conversation's working-memory file (for prompts that name it). */
+export function getWorkingMemoryPath(agentId?: string, conversationId?: string): string {
+  return resolveWorkingMemoryPath(agentId, conversationId);
 }
 
 /** Check if working memory is empty (only template, no real content). */
@@ -136,8 +176,8 @@ export function truncateWorkingMemoryForCompact(content: string, maxTokens: numb
  * Snapshot working memory to compaction archive.
  * Creates memory/compaction/YYYY-MM-DD-HHMM.md.
  */
-export function snapshotWorkingMemory(): string | null {
-  const content = getWorkingMemory();
+export function snapshotWorkingMemory(agentId?: string, conversationId?: string): string | null {
+  const content = getWorkingMemory(agentId, conversationId);
   if (!content || isWorkingMemoryEmpty(content)) return null;
 
   fs.mkdirSync(COMPACTION_DIR, { recursive: true });

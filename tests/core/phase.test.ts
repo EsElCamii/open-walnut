@@ -14,6 +14,7 @@ import {
   VALID_PHASES,
   deriveStatusFromPhase,
   PHASE_TO_STATUS,
+  sessionStreamingPhase,
 } from '../../src/core/phase.js';
 
 describe('PHASE_ORDER', () => {
@@ -102,5 +103,23 @@ describe('deriveStatusFromPhase', () => {
     expect(deriveStatusFromPhase('HUMAN_VERIFIED')).toBe('in_progress');
     expect(deriveStatusFromPhase('POST_WORK_COMPLETED')).toBe('in_progress');
     expect(deriveStatusFromPhase('COMPLETE')).toBe('done');
+  });
+});
+
+describe('sessionStreamingPhase', () => {
+  it('undoes a stale AWAIT_HUMAN_ACTION (streaming session cannot be awaiting human)', () => {
+    expect(sessionStreamingPhase('AWAIT_HUMAN_ACTION')).toBe('IN_PROGRESS');
+  });
+
+  it('does NOT disturb any non-await phase (returns null = no transition)', () => {
+    expect(sessionStreamingPhase('TODO')).toBeNull();
+    expect(sessionStreamingPhase('IN_PROGRESS')).toBeNull();
+    expect(sessionStreamingPhase('AGENT_COMPLETE')).toBeNull();
+  });
+
+  it('never overwrites terminal phases', () => {
+    expect(sessionStreamingPhase('HUMAN_VERIFIED')).toBeNull();
+    expect(sessionStreamingPhase('POST_WORK_COMPLETED')).toBeNull();
+    expect(sessionStreamingPhase('COMPLETE')).toBeNull();
   });
 });

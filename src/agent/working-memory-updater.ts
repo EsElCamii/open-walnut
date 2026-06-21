@@ -8,14 +8,13 @@
  */
 import {
   getWorkingMemory,
+  getWorkingMemoryPath,
   ensureWorkingMemory,
-  isWorkingMemoryEmpty,
   getWorkingMemorySectionSizes,
   MAX_SECTION_TOKENS,
   MAX_TOTAL_WORKING_MEMORY_TOKENS,
   WORKING_MEMORY_TEMPLATE,
 } from '../core/working-memory.js';
-import { WORKING_MEMORY_FILE } from '../constants.js';
 import { estimateTokens } from '../core/daily-log.js';
 import { log } from '../logging/index.js';
 
@@ -26,7 +25,10 @@ const INITIALIZATION_THRESHOLD = 10_000; // tokens before first update
 const UPDATE_THRESHOLD = 5_000;          // token growth between updates
 const TOOL_CALL_THRESHOLD = 3;           // min tool calls since last update
 
-// ── State tracking ──
+// ── State tracking (per conversation) ──
+// Each conversation tracks its own update cadence. A single global object would
+// let one busy conversation's tool-call/token counters suppress or wrongly trigger
+// another conversation's working-memory update (cross-talk).
 interface UpdaterState {
   lastMessageUuid: string | null;
   tokensAtLastExtraction: number;
@@ -35,38 +37,57 @@ interface UpdaterState {
   isCompacting: boolean;
 }
 
-const state: UpdaterState = {
-  lastMessageUuid: null,
-  tokensAtLastExtraction: 0,
-  toolCallsSinceLastExtraction: 0,
-  extractionStartedAt: null,
-  isCompacting: false,
-};
-
-/** Reset state (e.g., on session start). */
-export function resetUpdaterState(): void {
-  state.lastMessageUuid = null;
-  state.tokensAtLastExtraction = 0;
-  state.toolCallsSinceLastExtraction = 0;
-  state.extractionStartedAt = null;
-  state.isCompacting = false;
+function freshUpdaterState(): UpdaterState {
+  return {
+    lastMessageUuid: null,
+    tokensAtLastExtraction: 0,
+    toolCallsSinceLastExtraction: 0,
+    extractionStartedAt: null,
+    isCompacting: false,
+  };
 }
 
-/** Mark compaction in progress (skip updates during compaction). */
-export function setCompacting(value: boolean): void {
-  state.isCompacting = value;
+const stateByConversation = new Map<string, UpdaterState>();
+
+function stateKey(agentId?: string, conversationId?: string): string {
+  return `${agentId || 'general'}:${conversationId || '_'}`;
 }
 
-/** Track tool call count for trigger threshold. */
-export function trackToolCall(): void {
-  state.toolCallsSinceLastExtraction++;
+function getState(agentId?: string, conversationId?: string): UpdaterState {
+  const key = stateKey(agentId, conversationId);
+  let s = stateByConversation.get(key);
+  if (!s) { s = freshUpdaterState(); stateByConversation.set(key, s); }
+  return s;
 }
 
 /**
- * Check if working memory update should trigger.
+ * Reset updater state. With no args (server startup) clears ALL conversations'
+ * state; with a conversation pair resets just that one.
+ */
+export function resetUpdaterState(agentId?: string, conversationId?: string): void {
+  if (agentId === undefined && conversationId === undefined) {
+    stateByConversation.clear();
+    return;
+  }
+  stateByConversation.set(stateKey(agentId, conversationId), freshUpdaterState());
+}
+
+/** Mark compaction in progress (skip updates during compaction) for a conversation. */
+export function setCompacting(value: boolean, agentId?: string, conversationId?: string): void {
+  getState(agentId, conversationId).isCompacting = value;
+}
+
+/** Track tool call count for trigger threshold for a conversation. */
+export function trackToolCall(agentId?: string, conversationId?: string): void {
+  getState(agentId, conversationId).toolCallsSinceLastExtraction++;
+}
+
+/**
+ * Check if working memory update should trigger for a conversation.
  * Called after each AI response in the agent loop.
  */
-export function shouldUpdateWorkingMemory(currentTokens: number): boolean {
+export function shouldUpdateWorkingMemory(currentTokens: number, agentId?: string, conversationId?: string): boolean {
+  const state = getState(agentId, conversationId);
   if (state.isCompacting) return false;
 
   // 15s: normal update should complete within this window (single LLM call + file edit).
@@ -99,9 +120,10 @@ export function shouldUpdateWorkingMemory(currentTokens: number): boolean {
  * Build the update prompt for the forked agent.
  * Injected as a system message with the current working memory content.
  */
-export function buildWorkingMemoryUpdatePrompt(): string {
-  ensureWorkingMemory();
-  const current = getWorkingMemory() ?? WORKING_MEMORY_TEMPLATE;
+export function buildWorkingMemoryUpdatePrompt(agentId?: string, conversationId?: string): string {
+  ensureWorkingMemory(agentId, conversationId);
+  const current = getWorkingMemory(agentId, conversationId) ?? WORKING_MEMORY_TEMPLATE;
+  const workingMemoryPath = getWorkingMemoryPath(agentId, conversationId);
   const sectionSizes = getWorkingMemorySectionSizes(current);
   const totalTokens = estimateTokens(current);
 
@@ -118,7 +140,7 @@ export function buildWorkingMemoryUpdatePrompt(): string {
 
   const warningBlock = warnings.length > 0 ? `\n\n${warnings.join('\n')}` : '';
 
-  return `You are updating the working memory notes file at: ${WORKING_MEMORY_FILE}
+  return `You are updating the working memory notes file at: ${workingMemoryPath}
 
 <current_working_memory>
 ${current}
@@ -159,11 +181,14 @@ Think about what happened since the last update:
 export async function executeWorkingMemoryUpdate(
   runForkedTurn: (prompt: string) => Promise<void>,
   currentTokens: number,
+  agentId?: string,
+  conversationId?: string,
 ): Promise<void> {
+  const state = getState(agentId, conversationId);
   state.extractionStartedAt = Date.now();
 
   try {
-    const prompt = buildWorkingMemoryUpdatePrompt();
+    const prompt = buildWorkingMemoryUpdatePrompt(agentId, conversationId);
     await runForkedTurn(prompt);
 
     // Update state after successful extraction
@@ -173,6 +198,8 @@ export async function executeWorkingMemoryUpdate(
 
     log.agent.info('Working memory updated', {
       tokens: currentTokens,
+      agentId: agentId || 'general',
+      conversationId,
     });
   } catch (err) {
     log.agent.warn('Working memory update failed', {

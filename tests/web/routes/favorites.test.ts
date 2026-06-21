@@ -39,6 +39,7 @@ describe('GET /api/favorites', () => {
     expect(res.status).toBe(200);
     expect(res.body.categories).toEqual([]);
     expect(res.body.projects).toEqual([]);
+    expect(res.body.notes).toEqual([]);
   });
 });
 
@@ -133,21 +134,88 @@ describe('Project favorites', () => {
   });
 });
 
+describe('Note favorites', () => {
+  it('POST adds a note favorite via body', async () => {
+    const app = createApp();
+    const res = await request(app).post('/api/favorites/notes').send({ path: 'PARA/foo.md' });
+
+    expect(res.status).toBe(200);
+    expect(res.body.notes).toContain('PARA/foo.md');
+  });
+
+  it('POST without a path returns 400', async () => {
+    const app = createApp();
+    const res = await request(app).post('/api/favorites/notes').send({});
+
+    expect(res.status).toBe(400);
+  });
+
+  it('adding same note twice is idempotent', async () => {
+    const app = createApp();
+    await request(app).post('/api/favorites/notes').send({ path: 'PARA/foo.md' });
+    const res = await request(app).post('/api/favorites/notes').send({ path: 'PARA/foo.md' });
+
+    expect(res.status).toBe(200);
+    expect(res.body.notes.filter((p: string) => p === 'PARA/foo.md')).toHaveLength(1);
+  });
+
+  it('GET returns favorited notes', async () => {
+    const app = createApp();
+    await request(app).post('/api/favorites/notes').send({ path: '1 Projects/alpha.md' });
+    await request(app).post('/api/favorites/notes').send({ path: '2 Areas/beta.md' });
+
+    const res = await request(app).get('/api/favorites');
+    expect(res.body.notes).toHaveLength(2);
+    expect(res.body.notes).toContain('1 Projects/alpha.md');
+    expect(res.body.notes).toContain('2 Areas/beta.md');
+  });
+
+  it('DELETE removes a note favorite via body', async () => {
+    const app = createApp();
+    await request(app).post('/api/favorites/notes').send({ path: 'PARA/foo.md' });
+    const res = await request(app).delete('/api/favorites/notes').send({ path: 'PARA/foo.md' });
+
+    expect(res.status).toBe(200);
+    expect(res.body.notes).not.toContain('PARA/foo.md');
+  });
+
+  it('DELETE removes a note favorite via query string', async () => {
+    const app = createApp();
+    await request(app).post('/api/favorites/notes').send({ path: 'PARA/foo.md' });
+    const res = await request(app).delete('/api/favorites/notes?path=PARA%2Ffoo.md');
+
+    expect(res.status).toBe(200);
+    expect(res.body.notes).not.toContain('PARA/foo.md');
+  });
+
+  it('preserves slashes and .md verbatim (exact-string storage)', async () => {
+    const app = createApp();
+    const path = '3 Resources/sub dir/My Note.md';
+    await request(app).post('/api/favorites/notes').send({ path });
+
+    const res = await request(app).get('/api/favorites');
+    expect(res.body.notes).toEqual([path]);
+  });
+});
+
 describe('Mixed favorites', () => {
-  it('category and project favorites are independent', async () => {
+  it('category, project, and note favorites are independent', async () => {
     const app = createApp();
     await request(app).post('/api/favorites/categories/Work');
     await request(app).post('/api/favorites/projects/HomeLab');
+    await request(app).post('/api/favorites/notes').send({ path: 'PARA/foo.md' });
 
     const res = await request(app).get('/api/favorites');
     expect(res.body.categories).toEqual(['Work']);
     expect(res.body.projects).toEqual(['HomeLab']);
+    expect(res.body.notes).toEqual(['PARA/foo.md']);
 
-    // Deleting a category doesn't affect projects
+    // Deleting a category doesn't affect projects or notes
     await request(app).delete('/api/favorites/categories/Work');
     const res2 = await request(app).get('/api/favorites');
     expect(res2.body.categories).toEqual([]);
     expect(res2.body.projects).toEqual(['HomeLab']);
+    expect(res2.body.notes).toEqual(['PARA/foo.md']);
   });
 
   it('favorites persist to config and survive re-reads', async () => {

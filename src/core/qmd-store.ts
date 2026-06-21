@@ -63,11 +63,16 @@ export async function getNotesStore(): Promise<QMDStore> {
     notesStorePromise = createStore({
       dbPath: path.join(WALNUT_HOME, 'notes-search.sqlite'),
       config: {
+        // ONE whole-vault collection (was 4 PARA folders). This is the semantic
+        // side of the hybrid notes search; notes anywhere in the vault are now
+        // embedded. The per-save reconcile drives this store ONE changed file at
+        // a time (notes-indexer.ts) — store.update() (used here for cold rebuild /
+        // startup glob only) is NEVER called on the save hot path.
+        // BEHAVIOR CHANGE: notes outside Areas/Projects/Resources/Archive are now
+        // searchable, and the old Archive exclusion + resource/archive down-weight
+        // are dropped (collapsed to a single note_vault weight in memory-search.ts).
         collections: {
-          areas:     { path: path.join(NOTES_DIR, 'Areas'),     pattern: '**/*.md' },
-          projects:  { path: path.join(NOTES_DIR, 'Projects'),  pattern: '**/*.md' },
-          resources: { path: path.join(NOTES_DIR, 'Resources'), pattern: '**/*.md' },
-          archive:   { path: path.join(NOTES_DIR, 'Archive'),   pattern: '**/*.md', includeByDefault: false },
+          vault: { path: NOTES_DIR, pattern: '**/*.md', ignore: ['global-notes.md', '.*/**'] },
         },
       },
     }).then(store => {
@@ -146,7 +151,9 @@ export async function initQmdStores(): Promise<void> {
   process.env.QMD_EMBED_MODEL = process.env.QMD_EMBED_MODEL || DEFAULT_QMD_MODEL;
 
   log.agent.info('QMD: initializing stores...');
-  const [mem, notes] = await Promise.all([getMemoryStore(), getNotesStore()]);
+  // Eagerly open both store singletons at boot (notes is then driven per-file by
+  // the reconciler — see updateAndEmbed group below — not via store.update()).
+  const [mem] = await Promise.all([getMemoryStore(), getNotesStore()]);
 
   // Detect embedding model mismatch by checking content_vectors.model in SQLite.
   // embed() without force skips docs that already have vectors, so it can't
@@ -186,12 +193,18 @@ export async function initQmdStores(): Promise<void> {
     }
   }
 
-  await Promise.all([
-    updateAndEmbed(mem, 'memory'),
-    updateAndEmbed(notes, 'notes'),
-  ]);
+  // Memory store keeps the glob-driven store.update() path.
+  await updateAndEmbed(mem, 'memory');
 
-  // Task and session stores are programmatic-only (no store.update()), but they
+  // NOTES store is now driven PER-FILE by the structural reconciler
+  // (notes-indexer.ts → insertContent/insertDocument keyed on the raw vault-relative
+  // path), NOT by store.update(). Calling store.update() here would re-key every
+  // note under QMD's handelize() (lowercased/slugified) path, DIVERGING from the
+  // reconciler's raw-path keys → two documents per note + redundant re-embeds.
+  // So notes joins the programmatic-store group: model-mismatch detection only,
+  // no glob. The reconciler (kicked by initNotesIndex) populates + embeds per file.
+
+  // Task, session, and notes stores are programmatic (no store.update()), but they
   // still need model mismatch detection. Without this, switching embedding models
   // leaves stale vectors with wrong dimensions → every search fails with
   // "Dimension mismatch for query vector" and returns zero results silently.
@@ -213,6 +226,7 @@ export async function initQmdStores(): Promise<void> {
   }
 
   await Promise.all([
+    checkAndReembed(getNotesStore, 'notes'),
     checkAndReembed(getTaskStore, 'task'),
     checkAndReembed(getSessionStore, 'session'),
   ]);

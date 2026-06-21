@@ -385,3 +385,68 @@ describe('B5: ClaudeCodeSession.transport getter', () => {
     expect(typeof descriptor!.get).toBe('function')
   })
 })
+
+// ═══════════════════════════════════════════════════════════════════
+//  B6: recoverDisconnectedSessions host normalization (regression)
+//
+//  Bug: a local session persists NO host field (host=null), but the local
+//  connection's hostKey is '__local__'. The reconnect-recovery loop filtered
+//  with a raw `s.host !== this.hostKey`, which is ALWAYS true for local
+//  sessions → every local session was skipped → after a local-daemon WS flap
+//  its daemon-side subscriber was never re-added → UI froze ("running, no
+//  output") until a manual refresh. Fix normalizes `s.host ?? '__local__'`.
+// ═══════════════════════════════════════════════════════════════════
+
+describe('B6: recoverDisconnectedSessions host normalization (local sessions)', () => {
+  afterEach(() => { vi.resetModules() })
+
+  // Build a __local__ DaemonConnection whose recovery loop we can drive with a
+  // mocked session list + a spied conn.send. Returns the spy so the test can
+  // assert which sessions the loop actually processed (vs silently skipped).
+  async function runRecoverWith(sessionRecords: Array<Record<string, unknown>>) {
+    vi.doMock('../../src/core/session-tracker.js', () => ({
+      listSessions: vi.fn().mockResolvedValue(sessionRecords),
+      updateSessionRecord: vi.fn().mockResolvedValue(undefined),
+    }))
+    vi.doMock('../../src/core/event-bus.js', () => ({
+      bus: { emit: vi.fn() },
+      EventNames: { SESSION_STATUS_CHANGED: 'session:status-changed' },
+    }))
+    const { DaemonConnection: DC } = await import('../../src/providers/daemon-connection.js')
+    const conn = new DC('__local__', null)
+    const priv = conn as unknown as Record<string, (...a: unknown[]) => unknown>
+    // status → alive so the loop proceeds to reattach; attach → ok no-op.
+    const send = vi.spyOn(priv, 'send').mockResolvedValue({ ok: true, alive: true } as never)
+    // getRegisteredSessionManager has no manager in this unit context → the
+    // loop logs "no manager to reattach" and moves on. We only assert the
+    // host-filter decision (did send('status') fire for this sid?).
+    await (priv.recoverDisconnectedSessions as () => Promise<void>)()
+    return send
+  }
+
+  it('processes a local idle session (host=null) — not skipped by host filter', async () => {
+    const send = await runRecoverWith([
+      { claudeSessionId: 'local-idle-1', host: null, process_status: 'idle', archived: false },
+    ])
+    const statusCalls = send.mock.calls.filter(
+      ([cmd, payload]) => cmd === 'status' && (payload as { sid?: string })?.sid === 'local-idle-1',
+    )
+    expect(statusCalls.length).toBe(1)
+  })
+
+  it('still skips a terminal (stopped) local session', async () => {
+    const send = await runRecoverWith([
+      { claudeSessionId: 'local-stopped-1', host: null, process_status: 'stopped', archived: false },
+    ])
+    const statusCalls = send.mock.calls.filter(([cmd]) => cmd === 'status')
+    expect(statusCalls.length).toBe(0)
+  })
+
+  it('still skips a remote session (host=myhost) on the __local__ connection', async () => {
+    const send = await runRecoverWith([
+      { claudeSessionId: 'remote-1', host: 'myhost', process_status: 'idle', archived: false },
+    ])
+    const statusCalls = send.mock.calls.filter(([cmd]) => cmd === 'status')
+    expect(statusCalls.length).toBe(0)
+  })
+})

@@ -32,8 +32,24 @@ import { ClaudeCodeSession } from '../../src/providers/claude-code-session.js';
 import { bus, EventNames, type BusEvent } from '../../src/core/event-bus.js';
 import { WALNUT_HOME, SESSION_STREAMS_DIR } from '../../src/constants.js';
 import { resetCache as resetQueueCache } from '../../src/core/session-message-queue.js';
+import { createMockDaemon, type MockDaemon } from '../helpers/mock-daemon.js';
 
 const MOCK_CLI = path.resolve(import.meta.dirname, 'mock-claude.mjs');
+
+// Unified daemon architecture (commit ea2e248): ClaudeCodeSession.send() now
+// routes ALL sessions — local included — through a daemon WebSocket. These tests
+// exercise the client-side stream_event classification pipeline
+// (handleStreamLine → classifyStreamEvent → SESSION_*_DELTA), so we stand up a
+// local MockDaemon that spawns the same mock-claude.mjs and forwards its JSONL
+// lines verbatim. Each session is pinned to the mock daemon via _testDaemonUrl.
+let daemon: MockDaemon;
+
+/** Build a session wired to the local mock daemon for stream_event testing. */
+function newSession(taskId: string): ClaudeCodeSession {
+  const session = new ClaudeCodeSession(taskId, 'proj', MOCK_CLI);
+  session._testDaemonUrl = `ws://127.0.0.1:${daemon.port}`;
+  return session;
+}
 
 interface Collected {
   textDeltas: string[];
@@ -121,18 +137,20 @@ beforeEach(async () => {
   await fsp.rm(WALNUT_HOME, { recursive: true, force: true });
   await fsp.mkdir(WALNUT_HOME, { recursive: true });
   await fsp.mkdir(SESSION_STREAMS_DIR, { recursive: true });
+  daemon = await createMockDaemon();
 });
 
 afterEach(async () => {
   bus.clear();
   await new Promise((r) => setTimeout(r, 200));
+  await daemon.stop().catch(() => {});
   await fsp.rm(WALNUT_HOME, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 }).catch(() => {});
 });
 
 describe('stream_event pipeline: text_delta', () => {
   it('emits SESSION_TEXT_DELTA for each content_block_delta and dedups final assistant', async () => {
     const c = makeCollector();
-    const session = new ClaudeCodeSession('task-text', 'proj', MOCK_CLI);
+    const session = newSession('task-text');
     session.send('stream-partial-test');
 
     await waitForResult(c);
@@ -159,7 +177,7 @@ describe('stream_event pipeline: text_delta', () => {
 describe('stream_event pipeline: thinking-then-text (regression: text duplication)', () => {
   it('does NOT emit text twice when thinking block precedes text (SSE index mismatch with assistant array)', async () => {
     const c = makeCollector();
-    const session = new ClaudeCodeSession('task-think-text', 'proj', MOCK_CLI);
+    const session = newSession('task-think-text');
     session.send('stream-partial-thinking-then-text');
 
     await waitForResult(c);
@@ -178,7 +196,7 @@ describe('stream_event pipeline: thinking-then-text (regression: text duplicatio
 describe('stream_event pipeline: thinking_delta', () => {
   it('routes thinking_delta to SESSION_THINKING_DELTA, not SESSION_TEXT_DELTA', async () => {
     const c = makeCollector();
-    const session = new ClaudeCodeSession('task-thinking', 'proj', MOCK_CLI);
+    const session = newSession('task-thinking');
     session.send('stream-partial-thinking');
 
     await waitForResult(c);
@@ -195,7 +213,7 @@ describe('stream_event pipeline: thinking_delta', () => {
 describe('stream_event pipeline: tool_use', () => {
   it('emits SESSION_TOOL_USE exactly once (from final assistant; not from content_block_start)', async () => {
     const c = makeCollector();
-    const session = new ClaudeCodeSession('task-tool', 'proj', MOCK_CLI);
+    const session = newSession('task-tool');
     session.send('stream-partial-tool');
 
     await waitForResult(c);
@@ -220,7 +238,7 @@ describe('stream_event pipeline: tool_use', () => {
 describe('stream_event pipeline: drop rules', () => {
   it('signature_delta never reaches any bus channel', async () => {
     const c = makeCollector();
-    const session = new ClaudeCodeSession('task-sig', 'proj', MOCK_CLI);
+    const session = newSession('task-sig');
     session.send('stream-partial-signature');
 
     await waitForResult(c);
@@ -235,7 +253,7 @@ describe('stream_event pipeline: drop rules', () => {
 describe('stream_event pipeline: unknown catch-all', () => {
   it('surfaces unknown top-level JSONL types via SESSION_UNKNOWN_EVENT scope=top_level', async () => {
     const c = makeCollector();
-    const session = new ClaudeCodeSession('task-unk1', 'proj', MOCK_CLI);
+    const session = newSession('task-unk1');
     session.send('stream-partial-unknown-top-level');
 
     await waitForResult(c);
@@ -248,7 +266,7 @@ describe('stream_event pipeline: unknown catch-all', () => {
 
   it('surfaces unknown stream_event subtypes via SESSION_UNKNOWN_EVENT scope=stream_event', async () => {
     const c = makeCollector();
-    const session = new ClaudeCodeSession('task-unk2', 'proj', MOCK_CLI);
+    const session = newSession('task-unk2');
     session.send('stream-partial-unknown-stream-event');
 
     await waitForResult(c);
@@ -266,7 +284,7 @@ describe('stream_event pipeline: unknown catch-all', () => {
     // that is already covered implicitly by the "1" assertion above because
     // mock emits the unknown line only once per send.
     const c = makeCollector();
-    const session = new ClaudeCodeSession('task-unk-dedup', 'proj', MOCK_CLI);
+    const session = newSession('task-unk-dedup');
     session.send('stream-partial-unknown-stream-event');
     await waitForResult(c);
     expect(c.unknownEvents.filter(u => u.eventType === 'future_sse_event_xyz')).toHaveLength(1);
@@ -276,7 +294,7 @@ describe('stream_event pipeline: unknown catch-all', () => {
 describe('stream_event pipeline: completeness (three fates, no silent loss)', () => {
   it('text run covers parse + drop + unknown without losing data', async () => {
     const c = makeCollector();
-    const session = new ClaudeCodeSession('task-all', 'proj', MOCK_CLI);
+    const session = newSession('task-all');
     session.send('stream-partial-unknown'); // emits unknown + text run
 
     await waitForResult(c);

@@ -331,3 +331,83 @@ describe('delivery failure survival (Fix 2 regression)', () => {
     expect(after).toHaveLength(0); // message gone — exactly the bug we fixed
   });
 });
+
+// Regression for the 2026-06-10 message-loss race: a stale SESSION_RESULT's
+// un-scoped removeProcessed(sessionId) swept a CONCURRENT in-flight batch off
+// disk while its --resume spawn was still settling. The fixes under test:
+//   1. removeProcessed(sessionId, ids) only removes the given batch
+//   2. revertToPending re-INSERTS messages that were swept while in flight
+describe('scoped removeProcessed + revertToPending re-insert (no-loss guarantees)', () => {
+  it('scoped removeProcessed only removes the given ids, not other processing messages', async () => {
+    // Batch 1 goes in flight
+    await enqueueMessage('sess-1', 'batch1');
+    const batch1 = await markProcessing('sess-1');
+
+    // Batch 2 arrives and also goes in flight (e.g. mid-turn injection while
+    // a --resume settle for batch 1 is still pending)
+    await enqueueMessage('sess-1', 'batch2');
+    const batch2 = await markProcessing('sess-1');
+    expect(batch2).toHaveLength(1);
+
+    // Batch 1 delivered → its delivery point removes ONLY its own ids
+    await removeProcessed('sess-1', batch1.map((m) => m.id));
+
+    const after = await getQueue('sess-1');
+    expect(after).toHaveLength(1);
+    expect(after[0].message).toBe('batch2');
+    expect(after[0].status).toBe('processing');
+  });
+
+  it('un-scoped removeProcessed still clears all processing messages (startup/cleanup semantics)', async () => {
+    await enqueueMessage('sess-1', 'a');
+    await enqueueMessage('sess-1', 'b');
+    await markProcessing('sess-1');
+    await removeProcessed('sess-1');
+    expect(await getQueue('sess-1')).toHaveLength(0);
+  });
+
+  it('revertToPending re-inserts a message that was swept from the store while in flight', async () => {
+    await enqueueMessage('sess-1', 'in flight');
+    const batch = await markProcessing('sess-1');
+
+    // A stale turn-end cleanup sweeps the whole session queue (the old bug)
+    await removeProcessed('sess-1');
+    expect(await getQueue('sess-1')).toHaveLength(0);
+
+    // Delivery then fails → revertToPending must RESURRECT the message,
+    // not just mutate an orphaned object.
+    await revertToPending(batch);
+
+    const after = await getQueue('sess-1');
+    expect(after).toHaveLength(1);
+    expect(after[0].message).toBe('in flight');
+    expect(after[0].status).toBe('pending');
+  });
+
+  it('re-inserted message survives restart (loadQueue)', async () => {
+    await enqueueMessage('sess-1', 'resurrect me');
+    const batch = await markProcessing('sess-1');
+    await removeProcessed('sess-1'); // swept
+    await revertToPending(batch);    // resurrected
+
+    resetCache();
+    await loadQueue();
+
+    const after = await getQueue('sess-1');
+    expect(after).toHaveLength(1);
+    expect(after[0].status).toBe('pending');
+    expect(after[0].message).toBe('resurrect me');
+  });
+
+  it('revertToPending keeps queue ordered by enqueue time after re-insert', async () => {
+    const m1 = await enqueueMessage('sess-1', 'first');
+    const batch = await markProcessing('sess-1');
+    await removeProcessed('sess-1'); // first swept while in flight
+    await enqueueMessage('sess-1', 'second'); // newer message arrives
+    await revertToPending(batch); // first re-inserted
+
+    const after = await getQueue('sess-1');
+    expect(after.map((m) => m.message)).toEqual(['first', 'second']);
+    expect(after[0].id).toBe(m1.id);
+  });
+});

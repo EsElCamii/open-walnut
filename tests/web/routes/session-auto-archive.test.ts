@@ -36,9 +36,13 @@ vi.mock('../../../src/providers/claude-code-session.js', () => ({
   sessionRunner: null,
 }));
 
-// Mock session-message-queue (used by retry to send resume messages)
+// Mock session-message-queue (used by retry/restart to inspect & resend the queue)
 vi.mock('../../../src/core/session-message-queue.js', () => ({
   sendMessageToSession: async () => {},
+  // retry & restart both read the queue; empty queue is the right default for
+  // these tests (no pending user messages to re-send).
+  getQueue: async () => [],
+  revertToPending: async () => {},
 }));
 
 import express from 'express';
@@ -46,7 +50,7 @@ import request from 'supertest';
 import { sessionsRouter } from '../../../src/web/routes/sessions.js';
 import { errorHandler } from '../../../src/web/middleware/error-handler.js';
 import { createSessionRecord, updateSessionRecord, getSessionByClaudeId } from '../../../src/core/session-tracker.js';
-import { addTask, _resetForTesting as resetTaskManager } from '../../../src/core/task-manager.js';
+import { addTask, getTask, _resetForTesting as resetTaskManager } from '../../../src/core/task-manager.js';
 import { WALNUT_HOME } from '../../../src/constants.js';
 
 function createApp() {
@@ -161,6 +165,62 @@ describe('POST /api/sessions/quick-start (retry mode)', () => {
   });
 });
 
+// ── Test 3: Quick-start new-task taskMeta WITHOUT pinTier ──
+//
+// Repro: a fresh quick-start with taskMeta that supplies starred/needs_attention/
+// priority but NO pinTier must apply those fields and leave the task UNPINNED.
+// The new-task branch only calls togglePin()+setFocusTier() when taskMeta.pinTier
+// is truthy, so an absent pinTier must not pin the task or set a focus_tier.
+
+describe('POST /api/sessions/quick-start (new task, taskMeta without pinTier)', () => {
+  it('applies starred/needs_attention/priority but leaves the task unpinned', async () => {
+    const app = createApp();
+    const res = await request(app)
+      .post('/api/sessions/quick-start')
+      .send({
+        cwd: '/tmp/test',
+        message: 'Start a fresh task',
+        taskMeta: {
+          starred: true,
+          needs_attention: true,
+          priority: 'important',
+          // pinTier intentionally omitted
+        },
+      });
+
+    expect(res.status).toBe(200);
+    expect(res.body.taskId).toBeTruthy();
+
+    const task = await getTask(res.body.taskId);
+    // Metadata applied …
+    expect(task.starred).toBe(true);
+    expect(task.needs_attention).toBe(true);
+    expect(task.priority).toBe('important');
+    // … but the task is NOT pinned and carries no focus tier.
+    expect(task.pinned).toBeFalsy();
+    expect(task.focus_tier).toBeUndefined();
+  });
+
+  it('does not pin when pinTier is explicitly null', async () => {
+    const app = createApp();
+    const res = await request(app)
+      .post('/api/sessions/quick-start')
+      .send({
+        cwd: '/tmp/test',
+        message: 'Start another task',
+        taskMeta: {
+          starred: true,
+          pinTier: null,
+        },
+      });
+
+    expect(res.status).toBe(200);
+    const task = await getTask(res.body.taskId);
+    expect(task.pinned).toBeFalsy();
+    expect(task.focus_tier).toBeUndefined();
+  });
+});
+
 // ── Test 2: Session retry auto-archives sessions without claudeSessionId ──
 
 describe('POST /api/sessions/:sessionId/retry', () => {
@@ -241,10 +301,17 @@ describe('POST /api/sessions/:sessionId/retry', () => {
   });
 });
 
-// ── Test 3: Session restart auto-archives ──
+// ── Test 3: Session restart resumes in place ──
+//
+// NOTE: restart was reworked (see sessions.ts POST /:sessionId/restart) from the
+// old "archive old session + spawn new" model to an in-place "kill CLI + revert
+// queue + reset to idle + resume the SAME session" model. So restart no longer
+// archives — it resets process_status to 'idle' and returns status 'restarted'.
+// Auto-archive of terminal (error/stopped) sessions now lives only in the
+// retry / quick-start paths (Tests 1 & 2). These tests assert the new contract.
 
 describe('POST /api/sessions/:sessionId/restart', () => {
-  it('archives the session with archive_reason=restart', async () => {
+  it('resets an error session to idle and returns status=restarted', async () => {
     const task = await createTestTask('Restart Task');
     await createSessionRecord('restart-sess-1', task.id, 'proj', '/tmp');
     await updateSessionRecord('restart-sess-1', {
@@ -258,17 +325,18 @@ describe('POST /api/sessions/:sessionId/restart', () => {
       .send({});
 
     expect(res.status).toBe(200);
-    expect(res.body.status).toBe('restarting');
-    expect(res.body.oldSessionId).toBe('restart-sess-1');
-    expect(res.body.taskId).toBe(task.id);
+    expect(res.body.status).toBe('restarted');
+    expect(res.body.sessionId).toBe('restart-sess-1');
 
-    // Verify the session was archived
+    // Restart resumes the SAME session in place — it is NOT archived, the record
+    // is reset to idle and its error cleared so the resumed CLI starts clean.
     const after = await getSessionByClaudeId('restart-sess-1');
-    expect(after!.archived).toBe(true);
-    expect(after!.archive_reason).toBe('restart');
+    expect(after!.archived).toBeFalsy();
+    expect(after!.process_status).toBe('idle');
+    expect(after!.errorMessage).toBeUndefined();
   });
 
-  it('archives stopped sessions on restart', async () => {
+  it('resets a stopped session to idle on restart', async () => {
     const task = await createTestTask('Restart Stopped');
     await createSessionRecord('restart-stopped', task.id, 'proj', '/tmp');
     await updateSessionRecord('restart-stopped', { process_status: 'stopped' });
@@ -279,10 +347,11 @@ describe('POST /api/sessions/:sessionId/restart', () => {
       .send({});
 
     expect(res.status).toBe(200);
+    expect(res.body.status).toBe('restarted');
 
     const after = await getSessionByClaudeId('restart-stopped');
-    expect(after!.archived).toBe(true);
-    expect(after!.archive_reason).toBe('restart');
+    expect(after!.archived).toBeFalsy();
+    expect(after!.process_status).toBe('idle');
   });
 
   it('returns 404 for unknown session', async () => {
@@ -294,7 +363,7 @@ describe('POST /api/sessions/:sessionId/restart', () => {
     expect(res.status).toBe(404);
   });
 
-  it('returns 400 when session has no task', async () => {
+  it('restarts a session even when it has no task (in-place resume)', async () => {
     await createSessionRecord('no-task-restart', '', 'proj', '/tmp');
     await updateSessionRecord('no-task-restart', { process_status: 'error' });
 
@@ -303,8 +372,12 @@ describe('POST /api/sessions/:sessionId/restart', () => {
       .post('/api/sessions/no-task-restart/restart')
       .send({});
 
-    expect(res.status).toBe(400);
-    expect(res.body.error).toContain('no associated task');
+    // In-place resume does not require a task — restart succeeds and resets to idle.
+    expect(res.status).toBe(200);
+    expect(res.body.status).toBe('restarted');
+
+    const after = await getSessionByClaudeId('no-task-restart');
+    expect(after!.process_status).toBe('idle');
   });
 });
 

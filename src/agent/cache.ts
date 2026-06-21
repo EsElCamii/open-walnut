@@ -14,7 +14,15 @@ import type {
 
 export type CacheTTL = '5m' | '1h';
 
-const DEFAULT_TTL: CacheTTL = '5m';
+/** Milliseconds each CacheTTL maps to — single source of truth so the local
+ *  staleness tracker (isWithinTTL) never drifts from the markers we inject. */
+const TTL_MS: Record<CacheTTL, number> = {
+  '5m': 5 * 60 * 1000,
+  '1h': 60 * 60 * 1000,
+};
+
+const DEFAULT_TTL: CacheTTL = '1h';
+const DEFAULT_TTL_MS = TTL_MS[DEFAULT_TTL];
 
 // ── System prompt ──
 
@@ -203,8 +211,10 @@ export function pruneContext(
 
 /**
  * Tracks when the last API call was made so we know if the server-side
- * cache is still warm. The 5m TTL auto-refreshes on each cache hit,
- * so as long as calls are < 5 min apart, pruning is unnecessary.
+ * cache is still warm. The cache TTL auto-refreshes on each cache hit,
+ * so as long as calls are < DEFAULT_TTL apart, pruning is unnecessary.
+ * The default window mirrors DEFAULT_TTL so this tracker never disagrees
+ * with the markers we actually inject.
  */
 export class CacheTTLTracker {
   private lastCallTimestamp = 0;
@@ -215,7 +225,7 @@ export class CacheTTLTracker {
   }
 
   /** Check if the last call was within the given TTL window. */
-  isWithinTTL(ttlMs: number = 5 * 60 * 1000): boolean {
+  isWithinTTL(ttlMs: number = DEFAULT_TTL_MS): boolean {
     if (this.lastCallTimestamp === 0) return false;
     return Date.now() - this.lastCallTimestamp < ttlMs;
   }

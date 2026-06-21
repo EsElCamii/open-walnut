@@ -286,6 +286,35 @@ describe('loadContextSources', () => {
     expect(result).toContain('[3] Assistant:');
   });
 
+  it('suppressSources skips an agent-enabled source (session_history) entirely', async () => {
+    const task = makeTask();
+    await writeTaskStore([task]);
+    await writeProjectMemory('work/homelab', '---\nname: HomeLab\ndescription: test\n---\n');
+
+    // If session_history were loaded, this spy would run and inject the block.
+    const spy = vi.spyOn(await import('../../src/core/session-history.js'), 'readSessionHistory')
+      .mockResolvedValue([
+        { role: 'user' as const, text: 'should not appear', timestamp: '2026-03-31T09:30:00Z' },
+      ]);
+
+    const agent = makeAgentDef({
+      context_sources: [
+        { id: 'session_history', enabled: true },
+      ],
+    });
+
+    const result = await loadContextSources(agent, {
+      taskId: task.id,
+      sessionId: 'test-session-123',
+      suppressSources: ['session_history'],
+    });
+
+    // The whole section is gone and the loader was never invoked.
+    expect(result).not.toContain('<session_history>');
+    expect(result).not.toContain('should not appear');
+    expect(spy).not.toHaveBeenCalled();
+  });
+
   it('session_history truncates user messages at 300 chars', async () => {
     const task = makeTask();
     await writeTaskStore([task]);

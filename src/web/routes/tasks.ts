@@ -241,15 +241,18 @@ const VALID_PHASES_ARRAY = [...VALID_PHASES]
 tasksRouter.get('/', async (req: Request, res: Response, next: NextFunction) => {
   try {
     const t0 = Date.now()
-    const { status, category, project, source, tags, sprint, slim } = req.query as Record<string, string | undefined>
-    const isSlim = slim === '1'
+    const { status, category, project, source, tags, sprint, slim, fields } = req.query as Record<string, string | undefined>
+    // fields=list implies slim + drops summary/description/ext for the home
+    // list payload (~2.6MB saved); the regular ?slim=1 path keeps them inline.
+    const isMinimal = fields === 'list'
+    const isSlim = slim === '1' || isMinimal
 
     // Slim path: listTasksSlim pushes status/category/source filters into SQL
     // and never materializes note/conversation_log. enrich + isTaskBlocked
     // only touch session_id / depends_on / phase fields so they work on the
     // SlimTask shape too (cast via unknown for the enrichment helper).
     if (isSlim) {
-      const rawSlim = (await listTasksSlim({ status, category, source }))
+      const rawSlim = (await listTasksSlim({ status, category, source, minimal: isMinimal }))
         .filter((t) => !t.title.startsWith('.metadata'))
       const tList = Date.now()
       let filtered: SlimTask[] = project

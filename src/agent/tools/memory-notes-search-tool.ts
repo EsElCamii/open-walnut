@@ -22,11 +22,8 @@ export const memoryNotesSearchTool: ToolDefinition = {
     session — per-session notes
 
 **Notes** (user reference library) — long-term documents, personal knowledge base. Written by user and AI. Mostly permanent.
-  Collections:
-    areas — ongoing life domains (finance, health, career, hobbies)
-    projects — active project documents
-    resources — reference material (guides, templates, recipes)
-    archive — completed or inactive items
+  Collection:
+    vault — the whole notes vault (every .md note, any folder)
 
 **Task** — structured task records (title, description, summary, tags, category/project). Semantic search over all tasks.
 
@@ -35,9 +32,9 @@ export const memoryNotesSearchTool: ToolDefinition = {
 **Default (omit sources): memory only.** Pass only note_* for notes-only. Pass only "task" for tasks. Pass only "session" for sessions. Pass both for combined.
   "search tasks" → sources: [task]
   "search sessions" → sources: [session]
-  "search notes" → sources: [note_areas, note_projects, note_resources]
+  "search notes" → sources: [note_vault]
   "search memory" / no qualifier → omit sources
-  "search everything" → sources: [memory_daily, ..., note_areas, ..., task, session]
+  "search everything" → sources: [memory_daily, ..., note_vault, task, session]
 
 ## How to write good queries
 
@@ -70,7 +67,7 @@ The search uses keyword matching (BM25, AND logic) + vector similarity (semantic
           type: 'string',
           enum: [
             'memory_daily', 'memory_topic', 'memory_project', 'memory_repo', 'memory_compaction', 'memory_global', 'memory_session',
-            'note_areas', 'note_projects', 'note_resources', 'note_archive',
+            'note_vault',
             'task', 'session',
           ],
         },

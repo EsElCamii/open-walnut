@@ -47,9 +47,33 @@ function runPluginContentValidation(task: { source: string; id?: string }, field
 
 let initialized = false;
 
+// ── Whole-store read cache ────────────────────────────────────────────────
+// readStore() runs `SELECT * FROM tasks` + rows.map(rowToTask) over the WHOLE
+// table (3000+ rows, each with JSON columns parsed per row) on EVERY call. It
+// is the second hot whole-store scan behind the simultaneous-15s-timeout root
+// cause: /api/tasks runs it once, then enrichTasksWithSessionStatus runs a
+// sessions scan too, and it re-runs uncached on every concurrent request. The
+// single scan is ~50-84ms but the REPETITION under load is the bug.
+//
+// Fix: cache the mapped store and serve it until the next write. Every mutation
+// — single-row (updateTask/addTask/…), per-row fast paths (updateTaskRaw,
+// updateTasksBulk, addTasksBulk, deleteTasksBulk), and whole-store writeStore —
+// funnels through withWriteLock (verified), so invalidating in that lock's
+// finally is the single correct hook. readStore() returns per-call clones so
+// the many helpers that filter/sort/mutate store.tasks in place can't poison
+// the cache. Env-gated for instant prod revert.
+const STORE_CACHE_ENABLED = process.env.WALNUT_STORE_CACHE !== '0';
+let taskStoreCache: TaskStore | null = null;
+
+/** Drop the cached whole-store snapshot. Called from withWriteLock.finally. */
+function invalidateTaskStoreCache(): void {
+  taskStoreCache = null;
+}
+
 /** Reset internal flags for test isolation (call in beforeEach). */
 export function _resetForTesting(): void {
   initialized = false;
+  taskStoreCache = null;
 }
 
 // ── Write lock: serializes all read-modify-write operations ──
@@ -62,7 +86,16 @@ function withWriteLock<T>(fn: () => Promise<T>): Promise<T> {
   const prev = writeLock;
   let resolve: () => void;
   writeLock = new Promise<void>((r) => { resolve = r; });
-  return prev.then(() => withFileLock(TASKS_FILE, fn)).finally(() => resolve!());
+  // Invalidate the whole-store read cache after EVERY locked mutation. All
+  // writers — single-row, per-row fast paths (updateTaskRaw/*Bulk), and
+  // writeStore — funnel through this lock, so this one hook keeps the cache
+  // correct without enumerating writers.
+  return prev
+    .then(() => withFileLock(TASKS_FILE, fn))
+    .finally(() => {
+      invalidateTaskStoreCache();
+      resolve!();
+    });
 }
 
 async function ensureInit(): Promise<void> {
@@ -160,9 +193,33 @@ function sanitizePriority(p: string | undefined): TaskPriority {
 // categories{}) so the helper functions below can keep using
 // store.tasks.filter / store.categories without restructuring. Per-row hot
 // paths (updateTaskRaw, *Bulk) query rows directly and never go through here.
+//
+// ⚠️ DESIGN DEBT — that "read the whole store, filter in JS" shape is a leftover
+// from the tasks.json era and is the wrong shape for SQLite. The helpers below
+// (completeTask, addNote, linkSession, search's expandChildTasks, …) each pull
+// all ~3000+ task rows + per-row JSON.parse just to touch one or a handful.
+// The CORRECT fix is to push predicates into SQL (`WHERE id=?`, `WHERE
+// parent_task_id=?`, indexed lookups) per call site, like updateTaskRaw/*Bulk
+// already do. The read cache below is a deliberate STOPGAP that removes the
+// acute cost (re-scanning per request), NOT the rewrite. See the approved plan
+// in project memory: task_storage_root_cause_and_sqlite_plan.
 
+/**
+ * Whole-store read. Served from an in-process cache invalidated on every write
+ * (withWriteLock.finally). Returns per-call ISOLATED clones — the canonical
+ * cached store is never handed out, because the many exported helpers below
+ * read-modify-write `store.tasks` in place before calling writeStore(). Cloning
+ * (shallow per task object + fresh array/categories) is far cheaper than the
+ * `SELECT *` + per-row rowToTask JSON.parse this cache replaces.
+ *
+ * NOTE: the cache addresses the REPETITION of the scan, not the scan itself —
+ * see the DESIGN DEBT note above for the proper per-call-site SQL-pushdown fix.
+ */
 async function readStore(): Promise<TaskStore> {
   await ensureInit();
+  if (STORE_CACHE_ENABLED && taskStoreCache !== null) {
+    return cloneTaskStore(taskStoreCache);
+  }
   const db = getDb()!;
   const taskRows = db.prepare('SELECT * FROM tasks').all() as Record<string, any>[];
   const tasks = taskRows.map(rowToTask);
@@ -179,7 +236,37 @@ async function readStore(): Promise<TaskStore> {
     tasks,
     ...(Object.keys(categories).length > 0 ? { categories } : {}),
   };
+  if (STORE_CACHE_ENABLED) {
+    taskStoreCache = store;
+    return cloneTaskStore(store);
+  }
   return store;
+}
+
+/**
+ * Shallow-clone a TaskStore so callers can mutate freely without touching the
+ * cached canonical copy. Each task is spread into a fresh object; the array and
+ * categories map are rebuilt.
+ *
+ * Scalar field replacements on a cloned task (task.session_id = …,
+ * task.plan_session_id = undefined, task.phase = …) are fully isolated. A few
+ * read-modify-write helpers DO mutate a nested array in place — notably
+ * `task.session_ids.push(sid)` (linkSessionSlot/addSessionToHistory/linkSession)
+ * — and the spread does NOT deep-copy that array, so the push transiently
+ * touches the cached array too. That is safe ONLY because every such helper
+ * runs inside withWriteLock and immediately calls writeStore(), whose
+ * withWriteLock.finally invalidates the cache before the lock releases — so no
+ * later read ever observes the mutated shared array. The invalidation is the
+ * correctness guarantee, not the (incomplete) shallow clone. A future helper
+ * that mutates a nested field in place WITHOUT writing through the lock must
+ * clone that field itself.
+ */
+function cloneTaskStore(store: TaskStore): TaskStore {
+  return {
+    ...store,
+    tasks: store.tasks.map((t) => ({ ...t })),
+    ...(store.categories ? { categories: { ...store.categories } } : {}),
+  };
 }
 
 /**
@@ -966,14 +1053,34 @@ export async function listTasks(filter: ListTasksFilter = {}): Promise<Task[]> {
  * Slim variant of Task: note/conversation_log stripped, with boolean presence
  * flags. Shape MUST match the post-process strip at /api/tasks slim path so
  * the frontend (TodoPanel.tsx:841-843) sees the exact same keys.
+ *
+ * In `minimal` mode (the home list payload) the heavy `summary`/`description`/
+ * `ext` fields are ALSO dropped — the list view never renders them (verified:
+ * only the detail pane + kebab menu read them), and the detail pane lazy-loads
+ * the full task via fetchTask(id) on focus. has_summary/has_description/has_ext
+ * are then present so the UI knows to trigger that lazy load.
  */
 export type SlimTask = Omit<Task, 'note' | 'conversation_log'> & {
   has_note: boolean;
   has_conversation_log: boolean;
+  // Only populated in minimal mode; undefined on the regular slim path (where
+  // summary/description/ext are still inlined).
+  has_summary?: boolean;
+  has_description?: boolean;
+  has_ext?: boolean;
+  // Precomputed `!!task.ext?.[task.source]` so the kebab menu's synced/unsynced
+  // badge survives ext being dropped from the minimal payload.
+  has_synced?: boolean;
 };
 
 export interface ListTasksSlimFilter extends ListTasksFilter {
   source?: string;
+  /**
+   * Minimal projection for the home list: additionally omit summary,
+   * description, and ext (~2.6MB of a 4MB payload) and return presence flags
+   * instead. The detail pane lazy-loads the full content on focus.
+   */
+  minimal?: boolean;
 }
 
 /**
@@ -986,24 +1093,43 @@ export async function listTasksSlim(filter: ListTasksSlimFilter = {}): Promise<S
   await ensureInit();
 
   const db = getDb()!;
+  const minimal = filter.minimal === true;
   // Column list mirrors EXPLICIT_TASK_COLUMNS minus note/conversation_log.
   // Keep `payload` so custom fields (Task type additions without a dedicated
   // column) still round-trip, matching rowToTask's payload-merge behavior.
+  // In minimal mode, additionally drop summary/description/ext — the list view
+  // never renders them; they're lazy-loaded on focus via fetchTask(id).
+  const heavyCols = ['summary', 'description', 'ext'];
   const selectCols = [
     'id', 'title', 'category', 'project', 'status', 'phase', 'priority', 'source',
     'parent_task_id', 'due_date', 'created_at', 'updated_at', 'completed_at',
     'sprint', 'focus_tier', 'pinned', 'ext', 'tags', 'depends_on', 'session_ids',
     'summary', 'description', 'sync_error', '_synced_at', 'payload',
-  ];
+  ].filter((c) => !(minimal && heavyCols.includes(c)));
   // has_note mirrors JS `!!task.note` (string column; empty string is falsy).
   // has_conversation_log mirrors `!!task.conversation_log` where the column
   // holds the JSON-encoded form (taskToRow JSON.stringifys it). So falsy JS
   // values '' / null / undefined encode to NULL / '""' / 'null' — explicitly
   // reject all three.
-  const sqlCols = selectCols.join(', ')
+  let sqlCols = selectCols.join(', ')
     + ', (note IS NOT NULL AND note != \'\') AS has_note'
     + ', (conversation_log IS NOT NULL AND conversation_log != \'\''
     + ' AND conversation_log != \'""\' AND conversation_log != \'null\') AS has_conversation_log';
+  // In minimal mode the heavy columns are not SELECT'd, so compute presence
+  // flags in SQL for the lazy-load trigger. ext is a JSON column; '{}' / 'null'
+  // / '""' encode an effectively-empty value — reject those alongside NULL.
+  // has_synced mirrors the kebab menu's `!!task.ext?.[task.source]` so dropping
+  // ext from the list payload doesn't lose the synced/unsynced status badge:
+  // json_extract(ext, '$.<source>') is non-null when that source has synced.
+  if (minimal) {
+    sqlCols += ', (summary IS NOT NULL AND summary != \'\') AS has_summary'
+      + ', (description IS NOT NULL AND description != \'\') AS has_description'
+      + ', (ext IS NOT NULL AND ext != \'\' AND ext != \'{}\''
+      + ' AND ext != \'null\' AND ext != \'""\') AS has_ext'
+      + ', (source IS NOT NULL AND source != \'local\''
+      + ' AND ext IS NOT NULL AND json_valid(ext)'
+      + ' AND json_extract(ext, \'$.\' || source) IS NOT NULL) AS has_synced';
+  }
 
   const where: string[] = [];
   const params: Record<string, string> = {};
@@ -1014,7 +1140,7 @@ export async function listTasksSlim(filter: ListTasksSlimFilter = {}): Promise<S
 
   const sql = `SELECT ${sqlCols} FROM tasks${whereSql} ORDER BY updated_at DESC`;
   const rows = db.prepare(sql).all(params) as Record<string, unknown>[];
-  return rows.map(rowToSlimTask);
+  return rows.map((r) => rowToSlimTask(r, minimal));
 }
 
 /**
@@ -1022,7 +1148,7 @@ export async function listTasksSlim(filter: ListTasksSlimFilter = {}): Promise<S
  * (they aren't SELECT'd) and carries through the SQL-computed presence flags
  * as proper booleans (SQLite returns 0/1 for boolean expressions).
  */
-function rowToSlimTask(row: Record<string, any>): SlimTask {
+function rowToSlimTask(row: Record<string, any>, minimal = false): SlimTask {
   // Feed the row into rowToTask minus note/conversation_log so we reuse the
   // payload merge, JSON parsing, pinned coercion, and _syncedAt aliasing.
   // Since note/conversation_log aren't in the row, rowToTask's defaulting
@@ -1033,11 +1159,28 @@ function rowToSlimTask(row: Record<string, any>): SlimTask {
   // shape doesn't accidentally carry an empty `note` alongside `has_note`.
   delete base.note;
   delete base.conversation_log;
-  return {
+  if (minimal) {
+    // Heavy columns weren't SELECT'd, so rowToTask defaulted them (summary=''
+    // / description='' / ext={}). Strip those empty placeholders on the Partial
+    // `base` (before the SlimTask spread) so the minimal payload omits them
+    // entirely; the SQL-computed presence flags drive the detail pane's
+    // lazy-load on focus. (delete is type-legal on the Partial<Task> base.)
+    delete base.summary;
+    delete base.description;
+    delete base.ext;
+  }
+  const slim: SlimTask = {
     ...(base as Omit<Task, 'note' | 'conversation_log'>),
     has_note: row.has_note === 1 || row.has_note === true,
     has_conversation_log: row.has_conversation_log === 1 || row.has_conversation_log === true,
   };
+  if (minimal) {
+    slim.has_summary = row.has_summary === 1 || row.has_summary === true;
+    slim.has_description = row.has_description === 1 || row.has_description === true;
+    slim.has_ext = row.has_ext === 1 || row.has_ext === true;
+    slim.has_synced = row.has_synced === 1 || row.has_synced === true;
+  }
+  return slim;
 }
 
 // ── Dependency helpers (used inside withWriteLock) ──
@@ -2419,11 +2562,11 @@ export async function linkSession(
  * Whether chatting with a pinned task in the given tier should bump it to the
  * front of that tier. Per-tier configurable via ui.bump_tiers.
  * Defaults when unset: focus=false (keep the hand-ordered current sprint),
- * next/satellite/wait=true.
+ * satellite/wait=true.
  */
 function isBumpEnabledForTier(
-  config: { ui?: { bump_tiers?: { focus?: boolean; next?: boolean; satellite?: boolean; wait?: boolean } } },
-  tier: 'focus' | 'next' | 'satellite' | 'wait',
+  config: { ui?: { bump_tiers?: { focus?: boolean; satellite?: boolean; wait?: boolean } } },
+  tier: 'focus' | 'satellite' | 'wait',
 ): boolean {
   const configured = config.ui?.bump_tiers?.[tier];
   if (configured !== undefined) return configured;
@@ -2799,14 +2942,13 @@ export async function getPinnedTasks(): Promise<Task[]> {
     .sort((a, b) => (a.pin_order ?? 0) - (b.pin_order ?? 0));
 }
 
-// Focus tiers: focus (current sprint) → next (queued sprint) → satellite (backlog).
+// Focus tiers: focus (current sprint) → satellite (backlog) → wait (parked).
 // No cap — users decide how many tasks per tier.
-type FocusTier = 'focus' | 'next' | 'satellite' | 'wait';
+type FocusTier = 'focus' | 'satellite' | 'wait';
 
 export interface TierResult {
   pinned_tasks: string[];
   focus_tasks: string[];
-  next_tasks: string[];
   satellite_tasks: string[];
   wait_tasks: string[];
 }
@@ -2819,15 +2961,16 @@ function splitTiers(store: TaskStore): TierResult {
   return {
     pinned_tasks: pinned.map((t) => t.id),
     focus_tasks: pinned.filter((t) => t.focus_tier === 'focus').map((t) => t.id),
-    next_tasks: pinned.filter((t) => t.focus_tier === 'next').map((t) => t.id),
-    satellite_tasks: pinned.filter((t) => !t.focus_tier).map((t) => t.id),
+    // Satellite is the default tier: anything not focus and not wait (incl. the
+    // retired 'next' value on legacy tasks) falls here.
+    satellite_tasks: pinned.filter((t) => t.focus_tier !== 'focus' && t.focus_tier !== 'wait').map((t) => t.id),
     wait_tasks: pinned.filter((t) => t.focus_tier === 'wait').map((t) => t.id),
   };
 }
 
 /**
  * Set the focus tier for a pinned task.
- * 'focus' = current sprint, 'next' = queued sprint, 'satellite' = backlog, 'wait' = parked.
+ * 'focus' = current sprint, 'satellite' = backlog, 'wait' = parked.
  */
 export async function setFocusTier(taskId: string, tier: FocusTier): Promise<TierResult> {
   return withWriteLock(async () => {
@@ -2836,7 +2979,7 @@ export async function setFocusTier(taskId: string, tier: FocusTier): Promise<Tie
     if (!task) throw new Error(`Task not found: ${taskId}`);
     if (!task.pinned) throw new Error(`Task is not pinned: ${task.title}`);
 
-    if (tier === 'focus' || tier === 'next' || tier === 'wait') {
+    if (tier === 'focus' || tier === 'wait') {
       task.focus_tier = tier;
     } else {
       delete task.focus_tier;

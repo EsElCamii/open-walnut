@@ -9,7 +9,7 @@ import { randomBytes } from 'node:crypto';
 import type { ToolDefinition, ToolResultContent, ToolExecuteMeta } from '../tools.js';
 import { runInlineSubagent } from '../../providers/inline-subagent.js';
 
-const VALID_MODELS = new Set(['opus', 'sonnet', 'haiku']);
+const VALID_MODELS = new Set(['opus', 'sonnet', 'haiku', 'fable']);
 
 export const createSubagentTool: ToolDefinition = {
   name: 'subagent_create',
@@ -47,8 +47,8 @@ Default timeout is 120 seconds (max 600).`,
       },
       model: {
         type: 'string',
-        enum: ['opus', 'sonnet', 'haiku'],
-        description: 'Model to use. Default: opus. Use sonnet for simple tasks, haiku for trivial lookups.',
+        enum: ['opus', 'sonnet', 'haiku', 'fable'],
+        description: 'Model to use. Default: opus. Use sonnet for simple tasks, haiku for trivial lookups, fable for fast & capable.',
       },
       timeout_secs: {
         type: 'number',
