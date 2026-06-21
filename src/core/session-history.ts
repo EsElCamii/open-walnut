@@ -1035,9 +1035,41 @@ export async function recoverStateFromJsonl(sessionId: string, cwd?: string, hos
         }
       }
 
-      // result events indicate turn completion
+      // ── Background-task lifecycle (dynamic workflows / subagents) ──
+      // Rebuild the in-flight count so we can tell, after reconnect/restart, whether
+      // a replayed `result` is a real turn-over or just an intermediate result emitted
+      // while background work continues.
+      if (type === 'system') {
+        const subtype = (parsed as Record<string, unknown>).subtype as string | undefined;
+        if (subtype === 'task_started') {
+          state.bgTasksInFlight = (state.bgTasksInFlight ?? 0) + 1;
+        } else if (subtype === 'task_notification') {
+          state.bgTasksInFlight = Math.max(0, (state.bgTasksInFlight ?? 0) - 1);
+        } else if (subtype === 'session_state_changed') {
+          const s = (parsed as Record<string, unknown>).state as
+            | 'running' | 'idle' | 'requires_action' | undefined;
+          state.cliSessionState = s;
+          // idle is the authoritative turn-over signal: it fires only after ALL
+          // background tasks finish. Trust it over any intermediate `result`.
+          if (s === 'idle') { state.workStatus = 'agent_complete'; state.bgTasksInFlight = 0; }
+          else if (s === 'running') { state.workStatus = undefined; }
+        }
+      }
+
+      // result events indicate turn completion — BUT a dynamic-workflow turn emits one
+      // result per background subagent completion, and the main turn's result lands
+      // while subagents still run. So a `result` is only a real turn-over when no
+      // background work remains AND the CLI hasn't told us it's still running. When
+      // session_state events are present, they own workStatus (handled above); we only
+      // fall back to result-implies-complete when bg work is quiescent.
       if (type === 'result') {
-        state.workStatus = (parsed as Record<string, unknown>).is_error ? 'error' : 'agent_complete';
+        const isErr = (parsed as Record<string, unknown>).is_error;
+        if (isErr) {
+          state.workStatus = 'error';
+        } else if ((state.bgTasksInFlight ?? 0) === 0 && state.cliSessionState !== 'running') {
+          state.workStatus = 'agent_complete';
+        }
+        // else: intermediate result during live background work — leave workStatus as-is.
       }
 
       // Scan assistant messages for tool_use blocks

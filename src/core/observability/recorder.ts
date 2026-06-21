@@ -57,6 +57,7 @@ export function recordTurn(partial: Omit<TurnEvent, 'ts'> & { ts?: number }): vo
       deliveryMs: turn.deliveryMs,
       deliveryPath: turn.deliveryPath,
       teamActive: turn.teamActive,
+      backgroundActive: turn.backgroundActive,
     });
 
     // 2. Invariants — catch "silent success" the moment it happens.

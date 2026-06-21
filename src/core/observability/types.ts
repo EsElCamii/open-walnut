@@ -57,6 +57,9 @@ export interface TurnEvent {
   apiRetries?: number;
   /** Whether a Claude Code Team was active (suppresses some invariants). */
   teamActive?: boolean;
+  /** Whether a dynamic-workflow / background subagent set was still in flight
+   *  (suppresses the same intermediate-result invariants as teamActive). */
+  backgroundActive?: boolean;
 
   /** Epoch ms when this turn event was stamped. */
   ts: number;

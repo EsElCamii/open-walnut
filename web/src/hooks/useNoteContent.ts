@@ -63,6 +63,16 @@ export function useNoteContent(notePath: string | null) {
    */
   const recentSaveHashesRef = useRef<Set<string>>(new Set());
   const pendingEchoRef = useRef<{ hash: string } | null>(null);
+  /**
+   * A path that was just MOVED/RENAMED away on disk (the file no longer exists
+   * there). The path-change effect must NOT flush pending edits to it — the
+   * backend already `fs.rename`d it, so a stale `saveNoteContent(oldPath)` would
+   * RE-CREATE the file at the old location. This was the drag-to-move
+   * duplication bug: one note became multiple divergent copies. Set by
+   * `markMovedAway()` right before a move; consumed (and cleared) by the
+   * path-change effect when prevPath matches.
+   */
+  const movedAwayPathRef = useRef<string | null>(null);
 
   // ── Reload helper (used by WS handler and 409 recovery) ──
   const reloadContent = useCallback((targetPath: string) => {
@@ -113,6 +123,36 @@ export function useNoteContent(notePath: string | null) {
   const dismissExternalChange = useCallback(() => {
     pendingExternalRef.current = null;
     setPendingExternal(null);
+  }, []);
+
+  /**
+   * Call RIGHT BEFORE moving/renaming the note that's open in the editor.
+   * Two jobs, both needed to kill the drag-to-move duplication bug:
+   *   1. Synchronously flush any pending edit to the OLD path so the latest
+   *      content is on disk before the backend `fs.rename`s it (content travels
+   *      with the move; nothing is lost).
+   *   2. Mark `oldPath` as moved-away so the subsequent path-change effect does
+   *      NOT flush to it again. Without this, an editor `onEditorUpdate` firing
+   *      between the move and the activePath switch re-arms the debounce timer,
+   *      and the effect's flush re-creates the file at its OLD location —
+   *      exactly what produced the divergent duplicate copies (proven by logs:
+   *      a `PUT …/Projects/Life/Election.md` landing AFTER `Note moved`).
+   * Also cancels the timer + clears dirty so no scheduled save targets oldPath.
+   */
+  const markMovedAway = useCallback(async (oldPath: string) => {
+    if (timerRef.current) { clearTimeout(timerRef.current); timerRef.current = null; }
+    movedAwayPathRef.current = oldPath;
+    const editor = editorRef.current;
+    // Only flush if the open note IS the one being moved and it's dirty.
+    if (editor && currentPathRef.current === oldPath && dirtyRef.current) {
+      try {
+        const md = joinFrontmatter(frontmatterRef.current, editor.storage.markdown.getMarkdown());
+        const hash = contentHashRef.current ?? undefined;
+        const result = await saveNoteContent(oldPath, md, hash);
+        if (result.contentHash) contentHashRef.current = result.contentHash;
+      } catch { /* best-effort — the move proceeds with last-saved content */ }
+    }
+    dirtyRef.current = false;
   }, []);
 
   // ── Listen for external notes updates via WebSocket ──
@@ -217,6 +257,14 @@ export function useNoteContent(notePath: string | null) {
       savedFadeTimerRef.current = null;
     }
 
+    // If the previous path was MOVED away (drag-to-move / rename of the open
+    // note), the file no longer exists there — flushing to it would re-create a
+    // stale copy at the old location (the duplication bug). Skip the flush and
+    // just drop the pending timer/dirty state; the move already carried the
+    // latest content forward (markMovedAway flushed to the old path first).
+    const wasMovedAway = prevPath != null && movedAwayPathRef.current === prevPath;
+    movedAwayPathRef.current = null;
+
     // Flush pending save for previous note before switching.
     // If there is a dirty, unsaved edit and a timer is pending, cancel the timer
     // and fire the save synchronously so the old note's content is not lost.
@@ -225,7 +273,7 @@ export function useNoteContent(notePath: string | null) {
     if (timerRef.current) {
       clearTimeout(timerRef.current);
       timerRef.current = null;
-      if (dirtyRef.current && editorRef.current && prevPath) {
+      if (!wasMovedAway && dirtyRef.current && editorRef.current && prevPath) {
         const editor = editorRef.current;
         const md = joinFrontmatter(frontmatterRef.current, editor.storage.markdown.getMarkdown());
         const hash = contentHashRef.current ?? undefined;
@@ -376,6 +424,13 @@ export function useNoteContent(notePath: string | null) {
   const onEditorUpdate = useCallback((editor: Editor) => {
     editorRef.current = editor;
 
+    // The current path was just moved away on disk but activePath hasn't
+    // switched yet. Any save now would target the OLD (renamed-away) path and
+    // re-create the stale duplicate — drop this update; the new path will load
+    // fresh content momentarily. (Tiptap re-emits an update while the editor is
+    // still showing the moved note's doc.)
+    if (movedAwayPathRef.current === currentPathRef.current) return;
+
     dirtyRef.current = true;
     setSaveStatus('idle');
 
@@ -426,5 +481,7 @@ export function useNoteContent(notePath: string | null) {
     applyExternalChange,
     /** Dismiss the affordance and keep editing (used for the external, non-conflict case). */
     dismissExternalChange,
+    /** Call BEFORE moving/renaming the open note: flush to old path + suppress stale re-write. */
+    markMovedAway,
   };
 }

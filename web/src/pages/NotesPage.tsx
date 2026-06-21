@@ -120,6 +120,7 @@ export function NotesPage() {
     pendingExternal,
     applyExternalChange,
     dismissExternalChange,
+    markMovedAway,
   } = useNoteContent(activeNotePath);
 
   // ── Persist {tabs, activePath} (mirrors the tree-width persistence) ──
@@ -316,11 +317,20 @@ export function NotesPage() {
   // position + active state) so flush-on-switch isn't triggered spuriously (§1.6).
   const handleRenameNote = useCallback(
     async (from: string, to: string) => {
+      // If the note being moved is the one open in the editor, flush its pending
+      // edits to the OLD path AND mark it moved-away FIRST. Otherwise the
+      // post-rename path change (or a tiptap re-emit) fires a stale
+      // `saveNoteContent(oldPath)` that re-creates the just-renamed file at its
+      // old location → the drag-to-move duplication bug (one note became 3
+      // divergent copies). See useNoteContent.markMovedAway.
+      if (from === activeNotePath) {
+        await markMovedAway(from);
+      }
       await renameNote(from, to);
       setTabs((prev) => prev.map((t) => (t.path === from ? { ...t, path: to } : t)));
       setActivePath((cur) => (cur === from ? to : cur));
     },
-    [renameNote],
+    [renameNote, activeNotePath, markMovedAway],
   );
 
   if (treeLoading) return <LoadingSpinner />;

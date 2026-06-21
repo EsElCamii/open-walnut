@@ -26,7 +26,7 @@ export const INVARIANT_RULES: InvariantRule[] = [
     description: 'A successful turn must end with a real stop_reason (not null/empty).',
     severity: 'error',
     check: (t: TurnEvent) => {
-      if (t.teamActive) return null; // intermediate team results legitimately lack a final stop_reason
+      if (t.teamActive || t.backgroundActive) return null; // intermediate team/workflow results legitimately lack a final stop_reason
       if (t.isError) return null; // genuine errors are handled elsewhere
       const succeeded = t.subtype === 'success' || t.isError === false;
       if (!succeeded) return null;
@@ -45,7 +45,7 @@ export const INVARIANT_RULES: InvariantRule[] = [
     description: 'A successful, non-team turn should produce some output text.',
     severity: 'warn',
     check: (t: TurnEvent) => {
-      if (t.teamActive || t.isError) return null;
+      if (t.teamActive || t.backgroundActive || t.isError) return null;
       const succeeded = t.subtype === 'success' || t.isError === false;
       if (!succeeded) return null;
       // Only flag when we positively know the result was empty (resultLen===0),

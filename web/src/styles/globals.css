@@ -17783,6 +17783,14 @@ a.task-kebab-info:hover {
   outline: 1px solid var(--accent);
   outline-offset: -1px;
 }
+/* Whole-folder drop affordance: when dropping into an EXPANDED folder, frame the
+   wrapper (row + its children) so it's unambiguous the file lands INSIDE it —
+   the fix for "dragging onto an open folder showed no indicator". */
+.notes-tree-folder-drop {
+  background: color-mix(in srgb, var(--accent) 9%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 40%, transparent);
+  border-radius: 6px;
+}
 .notes-tree-body.notes-tree-drop-root {
   box-shadow: inset 0 0 0 2px color-mix(in srgb, var(--accent) 45%, transparent);
   border-radius: 6px;

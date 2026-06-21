@@ -107,8 +107,13 @@ export const NotesTreePanel = memo(function NotesTreePanel({
   const [renameValue, setRenameValue] = useState('');
   // Drag-to-move (#5): the path being dragged + the current drop-target folder
   // ('' = vault root). Backend POST /api/notes-v2/move preserves id + backlinks.
+  // draggingPathRef mirrors the state so drag handlers read the source
+  // SYNCHRONOUSLY — React state hasn't always flushed by the time dragover/drop
+  // fire, which made drops silently no-op / land on the wrong target. State is
+  // kept only to drive the dragging/drop-target visual classes.
   const [draggingPath, setDraggingPath] = useState<string | null>(null);
   const [dropTarget, setDropTarget] = useState<string | null>(null);
+  const draggingPathRef = useRef<string | null>(null);
   const searchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const newItemInputRef = useRef<HTMLInputElement>(null);
   const renameInputRef = useRef<HTMLInputElement>(null);
@@ -295,23 +300,30 @@ export const NotesTreePanel = memo(function NotesTreePanel({
   }, [contextMenu, onDeleteNote, confirm]);
 
   // ── Drag-to-move (#5) ──
-  // Source path is carried in component state (dataTransfer too, for completeness).
+  // The dragged source is held in a ref (read synchronously by dragover/drop)
+  // AND state (drives visuals). Drop targets are resolved from the DOM via the
+  // nearest `[data-drop-folder]` ancestor of the event target, NOT from
+  // per-row handlers — so a drop anywhere inside an EXPANDED folder (its child
+  // rows / blank child area) resolves to THAT folder instead of bubbling up to
+  // the root drop zone (the old bug that sent files to the vault root).
   const handleDragStart = useCallback((e: React.DragEvent, path: string) => {
     e.stopPropagation();
+    draggingPathRef.current = path;
     setDraggingPath(path);
     e.dataTransfer.effectAllowed = 'move';
     try { e.dataTransfer.setData('text/plain', path); } catch { /* some browsers restrict */ }
   }, []);
 
   const handleDragEnd = useCallback(() => {
+    draggingPathRef.current = null;
     setDraggingPath(null);
     setDropTarget(null);
   }, []);
 
-  // True if `dest` is the dragged node itself or one of its descendants (can't
-  // move a folder into its own subtree).
+  // True if moving `src` into `destFolder` is a no-op or illegal: same dir,
+  // onto itself, or into its own subtree (folder dragged into a descendant).
   const isInvalidDrop = useCallback((src: string | null, destFolder: string): boolean => {
-    if (!src) return true;
+    if (src == null) return true;
     const srcDir = src.includes('/') ? src.slice(0, src.lastIndexOf('/')) : '';
     if (srcDir === destFolder) return true;                 // same dir — no-op
     if (destFolder === src) return true;                    // onto itself
@@ -319,13 +331,27 @@ export const NotesTreePanel = memo(function NotesTreePanel({
     return false;
   }, []);
 
-  const handleFolderDragOver = useCallback((e: React.DragEvent, folderPath: string) => {
-    if (!draggingPath) return;
+  // Resolve the drop FOLDER for a drag event from the DOM: walk up from the
+  // event target to the nearest element carrying `data-drop-folder`. Returns
+  // '' (vault root) when none is found (the blank tree body). This single
+  // resolver is the whole fix for "drops land on root / no indicator on open
+  // folders" — the innermost folder wins, children included.
+  const resolveDropFolder = useCallback((e: React.DragEvent): string => {
+    const start = e.target as HTMLElement | null;
+    const host = (start?.closest?.('[data-drop-folder]') as HTMLElement | null) ?? null;
+    return host?.getAttribute('data-drop-folder') ?? '';
+  }, []);
+
+  const handleTreeDragOver = useCallback((e: React.DragEvent) => {
+    const src = draggingPathRef.current;
+    if (src == null) return;
     e.preventDefault();
-    e.stopPropagation();
-    e.dataTransfer.dropEffect = isInvalidDrop(draggingPath, folderPath) ? 'none' : 'move';
-    setDropTarget(folderPath);
-  }, [draggingPath, isInvalidDrop]);
+    const dest = resolveDropFolder(e);
+    e.dataTransfer.dropEffect = isInvalidDrop(src, dest) ? 'none' : 'move';
+    // Highlight the resolved folder ('' = root). Only update when it actually
+    // changes so moving the cursor within one folder doesn't thrash the class.
+    setDropTarget((prev) => (prev === dest ? prev : dest));
+  }, [resolveDropFolder, isInvalidDrop]);
 
   const performMove = useCallback(async (src: string, destFolder: string) => {
     const base = src.split('/').pop() as string;
@@ -340,15 +366,19 @@ export const NotesTreePanel = memo(function NotesTreePanel({
     onRenameNote(src, to); // → NotesPage.handleRenameNote → moveNote (preserves id/backlinks)
   }, [onRenameNote, existingNotePaths, alert]);
 
-  const handleDrop = useCallback((e: React.DragEvent, destFolder: string) => {
+  // Single drop handler for the whole tree (delegated). Resolves the target
+  // folder from the DOM so it's correct regardless of which row/area received
+  // the event.
+  const handleTreeDrop = useCallback((e: React.DragEvent) => {
     e.preventDefault();
-    e.stopPropagation();
-    const src = draggingPath;
+    const src = draggingPathRef.current;
+    const dest = resolveDropFolder(e);
+    draggingPathRef.current = null;
     setDraggingPath(null);
     setDropTarget(null);
-    if (!src || isInvalidDrop(src, destFolder)) return;
-    void performMove(src, destFolder);
-  }, [draggingPath, isInvalidDrop, performMove]);
+    if (src == null || isInvalidDrop(src, dest)) return;
+    void performMove(src, dest);
+  }, [resolveDropFolder, isInvalidDrop, performMove]);
 
   // Render tree node recursively
   const renderNode = (node: NoteTreeNode, depth: number = 0) => {
@@ -357,15 +387,16 @@ export const NotesTreePanel = memo(function NotesTreePanel({
     const isRenaming = renaming === node.path;
 
     if (node.type === 'folder') {
+      // `data-drop-folder` on the WRAPPER (row + children) is what makes a drop
+      // anywhere inside this folder — including its expanded child area —
+      // resolve to THIS folder via resolveDropFolder, instead of bubbling to the
+      // root drop zone. The highlight is driven by dropTarget matching this path.
+      const isDropTarget = dropTarget === node.path && !isInvalidDrop(draggingPath, node.path);
       return (
-        <div key={node.path}>
+        <div key={node.path} data-drop-folder={node.path} className={isDropTarget ? 'notes-tree-folder-drop' : undefined}>
           <div
-            className={`notes-tree-item notes-tree-folder depth-${depth}${dropTarget === node.path && !isInvalidDrop(draggingPath, node.path) ? ' notes-tree-drop-target' : ''}`}
+            className={`notes-tree-item notes-tree-folder depth-${depth}${isDropTarget ? ' notes-tree-drop-target' : ''}`}
             data-node-path={node.path}
-            onDragEnd={handleDragEnd}
-            onDragOver={(e) => handleFolderDragOver(e, node.path)}
-            onDragLeave={(e) => { e.stopPropagation(); setDropTarget((t) => (t === node.path ? null : t)); }}
-            onDrop={(e) => handleDrop(e, node.path)}
             onClick={() => toggleFolder(node.path)}
             onContextMenu={(e) => handleContextMenu(e, node)}
             style={{ paddingLeft: `${12 + depth * 16}px` }}
@@ -521,10 +552,12 @@ export const NotesTreePanel = memo(function NotesTreePanel({
       <div
         className={`notes-tree-body${dropTarget === '' && draggingPath && !isInvalidDrop(draggingPath, '') ? ' notes-tree-drop-root' : ''}`}
         ref={bodyRef}
-        // Drop onto blank tree area = move to vault root. Folder rows stopPropagation
-        // so this only fires for the empty space between/around them.
-        onDragOver={(e) => { if (draggingPath) { e.preventDefault(); e.dataTransfer.dropEffect = isInvalidDrop(draggingPath, '') ? 'none' : 'move'; setDropTarget(''); } }}
-        onDrop={(e) => handleDrop(e, '')}
+        // ONE delegated drag surface for the whole tree. resolveDropFolder walks
+        // up from the event target to the nearest [data-drop-folder]; a drop in
+        // blank space (no such ancestor) resolves to '' = vault root. This is why
+        // dropping inside an expanded folder no longer falls through to root.
+        onDragOver={handleTreeDragOver}
+        onDrop={handleTreeDrop}
       >
         {searchResults ? (
           <div className="notes-search-results">

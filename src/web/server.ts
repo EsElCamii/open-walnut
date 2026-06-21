@@ -1196,6 +1196,14 @@ export async function startServer(options: ServerOptions = {}): Promise<HttpServ
         sessionStreamBuffer.appendSystem(sessionId, variant, message, detail)
         sendStreamEvent(sessionId, event.name, event.data)
       }
+    } else if (event.name === 'session:background-tasks') {
+      // Dynamic-workflow / background-subagent progress snapshot → forward to the UI
+      // so it can render the live workflow-progress panel. No stream-buffer append
+      // (it's a live snapshot, not part of the replayable transcript).
+      const { sessionId } = eventData<'session:background-tasks'>(event)
+      if (sessionId) {
+        sendStreamEvent(sessionId, event.name, event.data)
+      }
     } else if (event.name === 'session:thinking-delta') {
       const { sessionId, taskId, delta } = eventData<'session:thinking-delta'>(event)
       if (sessionId) {

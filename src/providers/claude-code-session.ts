@@ -1079,6 +1079,23 @@ export class ClaudeCodeSession {
         if (recovered.activity) session._activity = recovered.activity
         if (recovered.jsonlByteLength) jsonlByteLength = recovered.jsonlByteLength
         if (recovered.teamActive != null) session._teamActive = recovered.teamActive
+        // ── Recover background-task / workflow state ──
+        // Without this, a server restart mid-workflow loses the in-flight count and the
+        // next replayed/real `result` would be mistaken for turn-over (the bug we fixed).
+        if (recovered.bgTasksInFlight != null) session._bgTasksInFlight = recovered.bgTasksInFlight
+        if (recovered.cliSessionState != null) {
+          session._sessionStateSeen = true
+          session._cliSessionState = recovered.cliSessionState
+        }
+        if (session._bgTasksInFlight > 0 && session._cliSessionState !== 'idle') {
+          session._processStatus = 'running'
+          session._activity = 'Background tasks running'
+          session._lastBgActivityTs = Date.now()
+          log.session.info('recovery: background work in flight — keeping running status', {
+            sessionId: session.claudeSessionId, taskId: session.taskId,
+            bgTasksInFlight: session._bgTasksInFlight,
+          })
+        }
         // Arm team-idle safety timer when recovering into team mode.
         // Without this, if no new JSONL events arrive after restart (process alive
         // but team poll loop idle), _teamActive stays true forever and triage never fires.
@@ -2968,6 +2985,7 @@ export class ClaudeCodeSession {
           deliveryMs: this._lastDeliveryMs,
           deliveryPath: this._lastDeliveryPath,
           teamActive: this._teamActive,
+          backgroundActive: this.hasActiveBackgroundWork(),
         })
 
         if (this._teamActive) {
@@ -4101,6 +4119,14 @@ export class SessionRunner {
   isTeamActive(claudeSessionId: string): boolean {
     const session = this.findSessionByClaudeId(claudeSessionId)
     return session?.teamActive ?? false
+  }
+
+  /** Check if a session has background workflow/subagent tasks still running.
+   *  Used by health monitor to skip the idle-timeout kill — a dynamic workflow can run
+   *  for many minutes with no main-turn output, but the session is NOT idle. */
+  isBackgroundWorkActive(claudeSessionId: string): boolean {
+    const session = this.findSessionByClaudeId(claudeSessionId)
+    return session?.hasActiveBackgroundWork() ?? false
   }
 
   /** Check if a session has a pending permission request. Used by health monitor to skip idle timeout. */
