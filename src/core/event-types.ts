@@ -214,15 +214,51 @@ export interface BackgroundTaskInfo {
   workflowName?: string;
 }
 
+/** A phase in a dynamic workflow (from task_progress.workflow_progress[] entries of
+ *  type 'workflow_phase'). Phases group the subagents into stages (e.g. "Fan out"). */
+export interface WorkflowPhaseInfo {
+  index: number;
+  title: string;
+}
+
+/** One subagent inside a dynamic workflow (from workflow_progress[] entries of type
+ *  'workflow_agent'). The CLI sends only the currently-active agents per snapshot, so
+ *  the backend accumulates these by agentId (latest-wins) to reconstruct the full set. */
+export interface WorkflowAgentInfo {
+  agentId: string;
+  index: number;
+  label?: string;
+  phaseIndex?: number;
+  phaseTitle?: string;
+  model?: string;
+  status: string; // normalized: running | completed | failed | stopped | pending
+  promptPreview?: string;
+  resultPreview?: string;
+  tokens?: number;
+  toolCalls?: number;
+  durationMs?: number;
+  startedAt?: number;
+}
+
 /** Snapshot of a session's in-flight background tasks (dynamic workflows / subagents).
  *  Emitted whenever a task_started/progress/updated/notification event mutates the set,
- *  so the UI can render a live workflow-progress panel. */
+ *  so the UI can render a live workflow-progress panel. For dynamic workflows, `phases`
+ *  + `agents` carry the per-subagent breakdown and `scriptSource` the generated script. */
 export interface SessionBackgroundTasksPayload {
   sessionId: string;
   taskId?: string;
   workflowName?: string;
   inFlight: number;
   tasks: BackgroundTaskInfo[];
+  /** Workflow phases (dynamic workflows only). */
+  phases?: WorkflowPhaseInfo[];
+  /** Per-subagent breakdown, accumulated across snapshots (dynamic workflows only). */
+  agents?: WorkflowAgentInfo[];
+  /** The workflow script Claude generated (from task_started.prompt) — lets the UI
+   *  show WHAT workflow was created. */
+  scriptSource?: string;
+  /** Human description of the workflow (from task_started.description). */
+  workflowDescription?: string;
 }
 
 /** Native Claude Code side_question ("/btw") result, broadcast when the CLI's

@@ -1,0 +1,557 @@
+/**
+ * Unit tests for dynamic-workflow / background-task turn-boundary logic.
+ *
+ * A dynamic workflow (`ultracode` → Workflow tool) fans out many background
+ * subagents that outlive the main agent's text turn. The CLI emits MANY `result`
+ * events for one such turn (the main "launched in background" result PLUS one per
+ * subagent completion fed back via ask()), so `result` is NOT a turn boundary.
+ *
+ * The authoritative turn-over signal is `session_state_changed{state:'idle'}`,
+ * which the CLI emits exactly once, strictly after all background tasks finish
+ * (gated by CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS, which the daemon now sets).
+ * When that signal is absent (old CLI), we fall back to the `_bgTasksInFlight`
+ * counter (task_started − task_notification).
+ *
+ * These tests verify the handleStreamLine() branches in ClaudeCodeSession:
+ *   1. running → task_progress×N → idle: stays 'running' mid-workflow, only
+ *      flips to AGENT_COMPLETE on the trailing idle.
+ *   2. multiple results (incl. origin=task-notification) don't complete early.
+ *   3. NORMAL single-turn session (no workflow) still completes (regression guard),
+ *      and a trailing idle does NOT double-fire SESSION_RESULT.
+ *   4. session-history replay reconstructs bgTasksInFlight / cliSessionState.
+ *   5. old CLI (no session_state_changed) falls back to the counter — no deadlock.
+ */
+
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
+import path from 'node:path'
+import fsp from 'node:fs/promises'
+import { createMockConstants } from '../helpers/mock-constants.js'
+
+vi.mock('../../src/constants.js', () => createMockConstants())
+
+import { ClaudeCodeSession } from '../../src/providers/claude-code-session.js'
+import { bus, EventNames } from '../../src/core/event-bus.js'
+import type { BusEvent } from '../../src/core/event-bus.js'
+import { recoverStateFromJsonl } from '../../src/core/session-history.js'
+import { encodeProjectPath } from '../../src/core/session-file-reader.js'
+import { WALNUT_HOME, CLAUDE_HOME, SESSION_STREAMS_DIR } from '../../src/constants.js'
+
+const tmpBase = WALNUT_HOME
+
+// ── JSONL event builders ──
+
+function makeInitEvent(sessionId: string): string {
+  return JSON.stringify({
+    type: 'system', subtype: 'init', session_id: sessionId,
+    cwd: '/tmp', model: 'mock-model', tools: ['Read', 'Edit', 'Bash'],
+    mcp_servers: [], permissionMode: 'default',
+  })
+}
+
+function makeAssistantEvent(sessionId: string, text = 'Working on it'): string {
+  return JSON.stringify({
+    type: 'assistant',
+    message: {
+      id: 'msg_001', type: 'message', role: 'assistant', model: 'mock-model',
+      content: [{ type: 'text', text }], stop_reason: 'end_turn',
+      usage: { input_tokens: 100, output_tokens: 50 },
+    },
+    session_id: sessionId,
+  })
+}
+
+/** A normal turn-over result (no background-work origin). */
+function makeResultEvent(sessionId: string, cost = 0.003, text = 'Done'): string {
+  return JSON.stringify({
+    type: 'result', subtype: 'success', is_error: false,
+    duration_ms: 1500, num_turns: 1, result: text,
+    session_id: sessionId, total_cost_usd: cost,
+    usage: { input_tokens: 100, output_tokens: 50 },
+  })
+}
+
+/** A result the CLI produced while processing a background completion notification.
+ *  origin.kind='task-notification' → never a turn boundary. */
+function makeTaskNotificationResultEvent(sessionId: string, cost: number, text: string): string {
+  return JSON.stringify({
+    type: 'result', subtype: 'success', is_error: false,
+    duration_ms: 800, num_turns: 1, result: text,
+    session_id: sessionId, total_cost_usd: cost,
+    origin: { kind: 'task-notification' },
+    usage: { input_tokens: 50, output_tokens: 20 },
+  })
+}
+
+function makeSessionStateEvent(sessionId: string, state: 'running' | 'idle' | 'requires_action'): string {
+  return JSON.stringify({ type: 'system', subtype: 'session_state_changed', session_id: sessionId, state })
+}
+
+function makeTaskStartedEvent(
+  sessionId: string, taskId: string,
+  opts: { workflowName?: string; description?: string; subagentType?: string } = {},
+): string {
+  return JSON.stringify({
+    type: 'system', subtype: 'task_started', session_id: sessionId, task_id: taskId,
+    workflow_name: opts.workflowName, description: opts.description, subagent_type: opts.subagentType,
+  })
+}
+
+function makeTaskProgressEvent(
+  sessionId: string, taskId: string,
+  opts: { summary?: string; tokens?: number; lastTool?: string } = {},
+): string {
+  return JSON.stringify({
+    type: 'system', subtype: 'task_progress', session_id: sessionId, task_id: taskId,
+    summary: opts.summary, last_tool_name: opts.lastTool,
+    usage: opts.tokens != null ? { total_tokens: opts.tokens } : undefined,
+  })
+}
+
+function makeTaskNotificationEvent(sessionId: string, taskId: string, status = 'completed'): string {
+  return JSON.stringify({
+    type: 'system', subtype: 'task_notification', session_id: sessionId, task_id: taskId, status,
+  })
+}
+
+/** A top-level dynamic-workflow task_started, carrying the generated script. */
+function makeWorkflowStartedEvent(
+  sessionId: string, taskId: string,
+  opts: { workflowName?: string; description?: string; prompt?: string } = {},
+): string {
+  return JSON.stringify({
+    type: 'system', subtype: 'task_started', session_id: sessionId, task_id: taskId,
+    task_type: 'local_workflow', workflow_name: opts.workflowName,
+    description: opts.description, prompt: opts.prompt,
+  })
+}
+
+/** A task_progress carrying a workflow_progress[] snapshot. Pass phases + the
+ *  currently-active agents (the CLI only sends active ones per snapshot). */
+function makeWorkflowProgressEvent(
+  sessionId: string, taskId: string,
+  phases: Array<{ index: number; title: string }>,
+  agents: Array<Record<string, unknown>>,
+): string {
+  return JSON.stringify({
+    type: 'system', subtype: 'task_progress', session_id: sessionId, task_id: taskId,
+    workflow_progress: [
+      ...phases.map(p => ({ type: 'workflow_phase', ...p })),
+      ...agents.map(a => ({ type: 'workflow_agent', ...a })),
+    ],
+  })
+}
+
+// ── Helpers ──
+
+interface MockTransport {
+  isRemote: boolean
+  hasPipe: boolean
+  processName: string
+  pid: number | null
+  outputFile: string | null
+  host: string | null
+  fileSize: number
+  imageCache: Map<string, string>
+  lastEventAt: number
+  tailOffset: number
+}
+
+function createMockTransport(overrides: Partial<MockTransport> = {}): MockTransport {
+  return {
+    isRemote: false, hasPipe: false, processName: 'claude', pid: null,
+    outputFile: null, host: null, fileSize: 0,
+    imageCache: new Map(), lastEventAt: 0, tailOffset: 0,
+    ...overrides,
+  }
+}
+
+function feedLines(session: ClaudeCodeSession, lines: string[]): void {
+  const handle = session as unknown as { handleStreamLine(line: string): void }
+  for (const line of lines) handle.handleStreamLine(line)
+}
+
+/** Wire up a remote FIFO-alive session (the dynamic-workflow common case: a
+ *  long-running CLI on clouddev that stays alive between turns). */
+function makeRunningRemoteSession(taskId: string): ClaudeCodeSession {
+  const session = new ClaudeCodeSession(taskId, 'test-project')
+  const transport = createMockTransport({ isRemote: true, hasPipe: true })
+  ;(session as unknown as { _transport: unknown })._transport = transport
+  ;(session as unknown as { _active: boolean })._active = true
+  ;(session as unknown as { _processStatus: string })._processStatus = 'running'
+  return session
+}
+
+beforeEach(async () => {
+  bus.clear()
+  await fsp.rm(tmpBase, { recursive: true, force: true })
+  await fsp.mkdir(tmpBase, { recursive: true })
+  await fsp.mkdir(SESSION_STREAMS_DIR, { recursive: true })
+})
+
+afterEach(async () => {
+  bus.clear()
+  await new Promise(r => setTimeout(r, 200))
+  await fsp.rm(tmpBase, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 }).catch(() => {})
+})
+
+// ═══════════════════════════════════════════════════════════════════
+//  Test 1: running → task_progress×N → idle
+// ═══════════════════════════════════════════════════════════════════
+
+describe('Dynamic workflow: stays running until idle', () => {
+  it('intermediate result while bg work in flight does NOT complete; idle does', async () => {
+    const sid = 'wf-running-until-idle'
+    const session = makeRunningRemoteSession('task-wf-1')
+
+    const resultEvents: Array<Record<string, unknown>> = []
+    const bgSnapshots: Array<{ inFlight: number; tasks: unknown[]; workflowName?: string }> = []
+    bus.subscribe('main-ai', (e: BusEvent) => {
+      if (e.name === EventNames.SESSION_RESULT) resultEvents.push(e.data as Record<string, unknown>)
+      if (e.name === EventNames.SESSION_BACKGROUND_TASKS) {
+        bgSnapshots.push(e.data as { inFlight: number; tasks: unknown[]; workflowName?: string })
+      }
+    })
+
+    feedLines(session, [
+      makeInitEvent(sid),
+      makeAssistantEvent(sid, 'Workflow launched in background'),
+      makeTaskStartedEvent(sid, 'bg-A', { workflowName: 'review-changes', description: 'Review bugs' }),
+      makeTaskStartedEvent(sid, 'bg-B', { workflowName: 'review-changes', description: 'Review perf' }),
+    ])
+
+    // Two background tasks now in flight; status must be running, workflow name surfaced.
+    expect(session.hasActiveBackgroundWork()).toBe(true)
+    expect(session.processStatus).toBe('running')
+    expect(session.workflowName).toBe('review-changes')
+    expect(session.backgroundTasks.length).toBe(2)
+
+    // Heartbeats — still running, no completion.
+    feedLines(session, [
+      makeTaskProgressEvent(sid, 'bg-A', { summary: 'reading files', tokens: 1200, lastTool: 'Read' }),
+      makeTaskProgressEvent(sid, 'bg-B', { summary: 'profiling', tokens: 3400, lastTool: 'Bash' }),
+    ])
+    expect(session.processStatus).toBe('running')
+    expect(resultEvents.length).toBe(0)
+
+    // The main turn's own `result` arrives while subagents still run — must NOT complete.
+    feedLines(session, [makeResultEvent(sid, 0.01, 'Workflow launched in background')])
+    expect(session.processStatus).toBe('running')
+    expect(session.hasActiveBackgroundWork()).toBe(true)
+    expect(resultEvents.length).toBe(0)
+
+    // Subagents finish one by one.
+    feedLines(session, [makeTaskNotificationEvent(sid, 'bg-A', 'completed')])
+    expect(session.hasActiveBackgroundWork()).toBe(true) // bg-B still running
+    feedLines(session, [makeTaskNotificationEvent(sid, 'bg-B', 'completed')])
+    // Counter is now 0, but without the authoritative idle we keep deferring to it.
+    expect(session.hasActiveBackgroundWork()).toBe(false)
+    expect(resultEvents.length).toBe(0) // notifications alone never emit a turn result
+
+    // Authoritative turn-over.
+    feedLines(session, [makeSessionStateEvent(sid, 'idle')])
+    expect(session.processStatus).toBe('idle')
+    expect(session.hasActiveBackgroundWork()).toBe(false)
+    expect(resultEvents.length).toBe(1) // completed exactly once, driven by idle
+
+    // The UI snapshot stream reflected the in-flight peak then drained to 0.
+    expect(Math.max(...bgSnapshots.map(s => s.inFlight))).toBe(2)
+    expect(bgSnapshots[bgSnapshots.length - 1].inFlight).toBe(0)
+  })
+})
+
+// ═══════════════════════════════════════════════════════════════════
+//  Test 2: multiple results (incl. origin=task-notification) don't complete early
+// ═══════════════════════════════════════════════════════════════════
+
+describe('Dynamic workflow: result-flood does not trigger premature completion', () => {
+  it('task-notification-origin results are bookkeeping only', async () => {
+    const sid = 'wf-result-flood'
+    const session = makeRunningRemoteSession('task-wf-2')
+
+    const resultEvents: Array<Record<string, unknown>> = []
+    bus.subscribe('main-ai', (e: BusEvent) => {
+      if (e.name === EventNames.SESSION_RESULT) resultEvents.push(e.data as Record<string, unknown>)
+    })
+
+    feedLines(session, [
+      makeInitEvent(sid),
+      makeAssistantEvent(sid, 'Launching workflow'),
+      makeTaskStartedEvent(sid, 'bg-1', { workflowName: 'audit' }),
+      makeTaskStartedEvent(sid, 'bg-2', { workflowName: 'audit' }),
+      // The CLI feeds each subagent completion back as a fresh result with
+      // origin.kind='task-notification'. These must be pure noise.
+      makeTaskNotificationResultEvent(sid, 0.02, 'Subagent 1 found 2 bugs'),
+      makeTaskNotificationResultEvent(sid, 0.03, 'Subagent 2 found 1 bug'),
+    ])
+
+    // Despite TWO result events, the turn is not over — no SESSION_RESULT emitted.
+    expect(resultEvents.length).toBe(0)
+    expect(session.processStatus).toBe('running')
+    // fullText captured from the latest result for display, but no completion.
+    expect((session as unknown as { fullText: string }).fullText).toBe('Subagent 2 found 1 bug')
+
+    // Finish + idle.
+    feedLines(session, [
+      makeTaskNotificationEvent(sid, 'bg-1', 'completed'),
+      makeTaskNotificationEvent(sid, 'bg-2', 'completed'),
+      makeSessionStateEvent(sid, 'idle'),
+    ])
+    expect(resultEvents.length).toBe(1)
+    expect(session.processStatus).toBe('idle')
+  })
+})
+
+// ═══════════════════════════════════════════════════════════════════
+//  Test 3: NORMAL single-turn session still completes (regression guard)
+// ═══════════════════════════════════════════════════════════════════
+
+describe('Regression: normal single-turn session completes normally', () => {
+  it('no workflow → result completes the turn immediately', async () => {
+    const sid = 'normal-single-turn'
+    const session = makeRunningRemoteSession('task-normal-1')
+
+    const resultEvents: Array<Record<string, unknown>> = []
+    bus.subscribe('main-ai', (e: BusEvent) => {
+      if (e.name === EventNames.SESSION_RESULT) resultEvents.push(e.data as Record<string, unknown>)
+    })
+
+    feedLines(session, [
+      makeInitEvent(sid),
+      makeAssistantEvent(sid, 'Hello'),
+      makeResultEvent(sid, 0.003, 'Hello'),
+    ])
+
+    // No background work was ever started → the result completes the turn at once.
+    expect(session.hasActiveBackgroundWork()).toBe(false)
+    expect(session.processStatus).toBe('idle')
+    expect(session.active).toBe(true) // FIFO-alive: process stays up for next turn
+    expect(resultEvents.length).toBe(1)
+  })
+
+  it('trailing idle after a normal result does NOT double-fire SESSION_RESULT', async () => {
+    // With the daemon now setting CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS, even a
+    // normal turn ends with a session_state_changed{idle}. It must be a no-op
+    // because the result handler already completed the turn.
+    const sid = 'normal-with-trailing-idle'
+    const session = makeRunningRemoteSession('task-normal-2')
+
+    const resultEvents: Array<Record<string, unknown>> = []
+    bus.subscribe('main-ai', (e: BusEvent) => {
+      if (e.name === EventNames.SESSION_RESULT) resultEvents.push(e.data as Record<string, unknown>)
+    })
+
+    feedLines(session, [
+      makeInitEvent(sid),
+      makeAssistantEvent(sid, 'Answer'),
+      makeResultEvent(sid, 0.003, 'Answer'),
+    ])
+    expect(resultEvents.length).toBe(1)
+    expect(session.processStatus).toBe('idle')
+
+    // Trailing authoritative idle — already completed, must not re-emit.
+    feedLines(session, [makeSessionStateEvent(sid, 'idle')])
+    expect(resultEvents.length).toBe(1)
+    expect(session.processStatus).toBe('idle')
+  })
+})
+
+// ═══════════════════════════════════════════════════════════════════
+//  Test 4: session-history replay reconstructs bg state
+// ═══════════════════════════════════════════════════════════════════
+
+describe('session-history replay: reconstructs bgTasksInFlight / cliSessionState', () => {
+  /** Write JSONL to the canonical local Claude Code path so recoverStateFromJsonl finds it. */
+  async function writeJsonl(sessionId: string, cwd: string, lines: string[]) {
+    const dir = path.join(CLAUDE_HOME, 'projects', encodeProjectPath(cwd))
+    await fsp.mkdir(dir, { recursive: true })
+    await fsp.writeFile(path.join(dir, `${sessionId}.jsonl`), lines.join('\n') + '\n')
+  }
+
+  it('mid-workflow JSONL → bgTasksInFlight>0, no agent_complete', async () => {
+    const sid = 'replay-midflow'
+    const cwd = '/Users/test/wf-project'
+    await writeJsonl(sid, cwd, [
+      makeInitEvent(sid),
+      makeTaskStartedEvent(sid, 'bg-A', { workflowName: 'audit' }),
+      makeTaskStartedEvent(sid, 'bg-B', { workflowName: 'audit' }),
+      makeResultEvent(sid, 0.01, 'Workflow launched in background'),
+      makeTaskNotificationEvent(sid, 'bg-A', 'completed'),
+    ])
+
+    const state = await recoverStateFromJsonl(sid, cwd)
+    expect(state).not.toBeNull()
+    // Two started, one finished → one still in flight; the replayed result must
+    // NOT have been mistaken for turn-over.
+    expect(state!.bgTasksInFlight).toBe(1)
+    expect(state!.workStatus).not.toBe('agent_complete')
+  })
+
+  it('completed-workflow JSONL → idle owns workStatus, counter drained to 0', async () => {
+    const sid = 'replay-complete'
+    const cwd = '/Users/test/wf-project2'
+    await writeJsonl(sid, cwd, [
+      makeInitEvent(sid),
+      makeTaskStartedEvent(sid, 'bg-A', { workflowName: 'audit' }),
+      makeTaskStartedEvent(sid, 'bg-B', { workflowName: 'audit' }),
+      makeResultEvent(sid, 0.01, 'Workflow launched in background'),
+      makeTaskNotificationEvent(sid, 'bg-A', 'completed'),
+      makeTaskNotificationEvent(sid, 'bg-B', 'completed'),
+      makeSessionStateEvent(sid, 'idle'),
+    ])
+
+    const state = await recoverStateFromJsonl(sid, cwd)
+    expect(state).not.toBeNull()
+    expect(state!.bgTasksInFlight).toBe(0)
+    expect(state!.cliSessionState).toBe('idle')
+    expect(state!.workStatus).toBe('agent_complete')
+  })
+})
+
+// ═══════════════════════════════════════════════════════════════════
+//  Test 5: old CLI (no session_state_changed) — counter fallback, no deadlock
+// ═══════════════════════════════════════════════════════════════════
+
+describe('Fallback: old CLI without session_state_changed does not deadlock', () => {
+  it('counter drains to 0 → next result completes the turn', async () => {
+    const sid = 'wf-no-state-events'
+    const session = makeRunningRemoteSession('task-wf-fallback')
+
+    const resultEvents: Array<Record<string, unknown>> = []
+    bus.subscribe('main-ai', (e: BusEvent) => {
+      if (e.name === EventNames.SESSION_RESULT) resultEvents.push(e.data as Record<string, unknown>)
+    })
+
+    feedLines(session, [
+      makeInitEvent(sid),
+      makeAssistantEvent(sid, 'Launching'),
+      makeTaskStartedEvent(sid, 'bg-1'),
+      // Intermediate result while the single bg task runs — counter holds it running
+      // even though NO session_state_changed was ever emitted.
+      makeResultEvent(sid, 0.01, 'Workflow launched in background'),
+    ])
+    expect((session as unknown as { _sessionStateSeen: boolean })._sessionStateSeen).toBe(false)
+    expect(session.hasActiveBackgroundWork()).toBe(true)
+    expect(session.processStatus).toBe('running')
+    expect(resultEvents.length).toBe(0)
+
+    // Subagent finishes → counter hits 0.
+    feedLines(session, [makeTaskNotificationEvent(sid, 'bg-1', 'completed')])
+    expect(session.hasActiveBackgroundWork()).toBe(false)
+
+    // With the counter drained and no idle to wait for, the NEXT result legitimately
+    // completes the turn — proving the fallback never deadlocks.
+    feedLines(session, [makeResultEvent(sid, 0.02, 'All workflow tasks complete')])
+    expect(resultEvents.length).toBe(1)
+    expect(session.processStatus).toBe('idle')
+  })
+})
+
+// ═══════════════════════════════════════════════════════════════════
+//  Test 6: workflow_progress[] parsing — per-subagent visibility
+// ═══════════════════════════════════════════════════════════════════
+
+describe('Dynamic workflow: workflow_progress[] → phases + per-agent breakdown', () => {
+  /** Latest SESSION_BACKGROUND_TASKS snapshot. */
+  function lastSnapshot(): Record<string, unknown> | undefined {
+    return snaps[snaps.length - 1]
+  }
+  let snaps: Array<Record<string, unknown>> = []
+
+  function wire(): ClaudeCodeSession {
+    snaps = []
+    const session = makeRunningRemoteSession('task-wfp')
+    bus.subscribe('web-ui', (e: BusEvent) => {
+      if (e.name === EventNames.SESSION_BACKGROUND_TASKS) snaps.push(e.data as Record<string, unknown>)
+    })
+    return session
+  }
+
+  it('captures script + accumulates agents by agentId across phase boundaries, skipping ghosts', () => {
+    const sid = 'wfp-accumulate'
+    const session = wire()
+
+    feedLines(session, [
+      makeInitEvent(sid),
+      makeAssistantEvent(sid, 'Workflow launched in background'),
+      makeWorkflowStartedEvent(sid, 'wf-top', {
+        workflowName: 'review-changes',
+        description: 'Review changes across two dimensions',
+        prompt: "export const meta = { name: 'review-changes' }\nphase('Fan out')",
+      }),
+    ])
+
+    // Script + name + description captured from task_started.
+    let snap = lastSnapshot()!
+    expect(snap.workflowName).toBe('review-changes')
+    expect(snap.scriptSource).toContain("name: 'review-changes'")
+    expect(snap.workflowDescription).toBe('Review changes across two dimensions')
+
+    // Snapshot 1 (Fan out phase): 2 ghosts (no agentId) + 2 real agents.
+    feedLines(session, [
+      makeWorkflowProgressEvent(sid, 'wf-top',
+        [{ index: 1, title: 'Fan out' }, { index: 2, title: 'Synthesize' }],
+        [
+          { index: 1, label: 'bugs', phaseIndex: 1, phaseTitle: 'Fan out', state: 'start' }, // ghost
+          { index: 2, label: 'perf', phaseIndex: 1, phaseTitle: 'Fan out', state: 'start' }, // ghost
+          { index: 1, label: 'bugs', phaseIndex: 1, phaseTitle: 'Fan out', agentId: 'a-bugs', model: 'global.anthropic.claude-opus-4-8[1m]', state: 'start', promptPreview: 'Review bugs' },
+          { index: 2, label: 'perf', phaseIndex: 1, phaseTitle: 'Fan out', agentId: 'a-perf', model: 'global.anthropic.claude-opus-4-8[1m]', state: 'start', promptPreview: 'Review perf' },
+        ]),
+    ])
+    snap = lastSnapshot()!
+    let agents = snap.agents as Array<Record<string, unknown>>
+    // Ghosts (no agentId) skipped → exactly 2 real agents, both running.
+    expect(agents.length).toBe(2)
+    expect(agents.every(a => a.status === 'running')).toBe(true)
+    expect(agents.find(a => a.agentId === 'a-bugs')!.promptPreview).toBe('Review bugs')
+    expect((snap.phases as unknown[]).length).toBe(2)
+
+    // Snapshot 2 (Synthesize phase): the CLI now sends only the bugs/perf agents as
+    // done WITH resultPreview, plus a NEW synthesize agent. Union must reach 3 agents.
+    feedLines(session, [
+      makeWorkflowProgressEvent(sid, 'wf-top',
+        [{ index: 1, title: 'Fan out' }, { index: 2, title: 'Synthesize' }],
+        [
+          { index: 1, label: 'bugs', phaseIndex: 1, phaseTitle: 'Fan out', agentId: 'a-bugs', state: 'done', tokens: 1200, durationMs: 1800, resultPreview: 'Found 2 bugs' },
+          { index: 2, label: 'perf', phaseIndex: 1, phaseTitle: 'Fan out', agentId: 'a-perf', state: 'done', tokens: 3400, durationMs: 2100, resultPreview: 'Found 1 perf issue' },
+          { index: 3, label: 'synthesize', phaseIndex: 2, phaseTitle: 'Synthesize', agentId: 'a-syn', model: 'global.anthropic.claude-opus-4-8[1m]', state: 'start', promptPreview: 'Combine findings' },
+        ]),
+    ])
+    snap = lastSnapshot()!
+    agents = snap.agents as Array<Record<string, unknown>>
+    // Union across snapshots: bugs + perf (carried over) + synthesize (new) = 3.
+    expect(agents.length).toBe(3)
+    const bugs = agents.find(a => a.agentId === 'a-bugs')!
+    expect(bugs.status).toBe('completed')
+    expect(bugs.resultPreview).toBe('Found 2 bugs')
+    // Merge-don't-clobber: promptPreview from snapshot 1 survives snapshot 2 omitting it.
+    expect(bugs.promptPreview).toBe('Review bugs')
+    expect(agents.find(a => a.agentId === 'a-syn')!.status).toBe('running')
+
+    // Counts the UI derives: 2 done / 3 total · 1 running.
+    const done = agents.filter(a => ['completed', 'failed', 'stopped'].includes(a.status as string)).length
+    const running = agents.filter(a => a.status === 'running').length
+    expect(done).toBe(2)
+    expect(running).toBe(1)
+  })
+
+  it('resets workflow agents when a fresh workflow opens (no leak across turns)', () => {
+    const sid = 'wfp-reset'
+    const session = wire()
+    feedLines(session, [
+      makeInitEvent(sid),
+      makeWorkflowStartedEvent(sid, 'wf-1', { workflowName: 'first', prompt: 'first-script' }),
+      makeWorkflowProgressEvent(sid, 'wf-1', [{ index: 1, title: 'P1' }],
+        [{ index: 1, agentId: 'old-1', state: 'done', resultPreview: 'old' }]),
+    ])
+    expect((lastSnapshot()!.agents as unknown[]).length).toBe(1)
+
+    // A new local_workflow task_started must wipe the prior run's agents + script.
+    feedLines(session, [
+      makeWorkflowStartedEvent(sid, 'wf-2', { workflowName: 'second', prompt: 'second-script' }),
+    ])
+    const snap = lastSnapshot()!
+    expect((snap.agents as unknown[]).length).toBe(0)
+    expect(snap.scriptSource).toBe('second-script')
+    expect(snap.workflowName).toBe('second')
+  })
+})

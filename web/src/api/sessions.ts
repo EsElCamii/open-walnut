@@ -39,10 +39,44 @@ export async function fetchSessionHistory(sessionId: string, opts?: { source?: '
   return { messages: res.messages, forkBoundaryIndex: res.forkBoundaryIndex };
 }
 
-export async function fetchSubagentHistory(sessionId: string, agentId: string): Promise<{ messages: SessionHistoryMessage[] }> {
+export async function fetchSubagentHistory(
+  sessionId: string,
+  agentId: string,
+  opts?: { workflow?: boolean },
+): Promise<{ messages: SessionHistoryMessage[] }> {
+  const params = opts?.workflow ? { workflow: '1' } : undefined;
   return apiGet<{ messages: SessionHistoryMessage[] }>(
     `/api/sessions/${sessionId}/subagent/${encodeURIComponent(agentId)}/history`,
+    params,
   );
+}
+
+/** Persisted dynamic-workflow progress, reconstructed from the on-disk run manifest.
+ *  Returns null when the session never ran a workflow (204). Lets the panel survive
+ *  page reload after the live in-memory state is gone. */
+export async function fetchWorkflowProgress(sessionId: string): Promise<WorkflowProgressSnapshot | null> {
+  try {
+    // apiGet yields `undefined` on a 204 (no workflow ran) — coalesce to null to honor the signature.
+    return (await apiGet<WorkflowProgressSnapshot>(`/api/sessions/${sessionId}/workflow`)) ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/** Mirrors the backend SessionBackgroundTasksPayload (web keeps its own copy). */
+export interface WorkflowProgressSnapshot {
+  sessionId: string;
+  workflowName?: string;
+  workflowDescription?: string;
+  scriptSource?: string;
+  inFlight: number;
+  tasks: unknown[];
+  phases: { index: number; title: string }[];
+  agents: {
+    agentId: string; index: number; label?: string; phaseIndex?: number; phaseTitle?: string;
+    model?: string; status: string; promptPreview?: string; resultPreview?: string;
+    tokens?: number; toolCalls?: number; durationMs?: number; startedAt?: number;
+  }[];
 }
 
 export async function updateSession(sessionId: string, updates: { title?: string; human_note?: string; archived?: boolean; archive_reason?: string; mode?: string }): Promise<SessionRecord> {

@@ -408,6 +408,78 @@ if (outputFormat === 'stream-json') {
       return; // skip default assistant+result tail
     }
 
+    // 2a.7. "workflow-test" — reproduce a dynamic-workflow turn: the main turn
+    //        emits its own `result` ("launched in background") while N background
+    //        subagents are still running, then drains them via task_notification,
+    //        and only AFTER all are done emits the authoritative
+    //        session_state_changed{idle}. This is the exact shape that used to be
+    //        misread as turn-over on the first `result`. The session must stay
+    //        running until idle, and emit session:background-tasks snapshots.
+    if (effectiveMessage === 'workflow-test') {
+      function emitWf(line) { process.stdout.write(JSON.stringify(line) + '\n'); }
+      const sid = outputSessionId;
+
+      // Main turn's text + its own result (NOT a turn boundary — bg work pending).
+      emitWf({
+        type: 'assistant',
+        message: {
+          id: 'msg_wf_main', type: 'message', role: 'assistant', model: 'mock-model',
+          content: [{ type: 'text', text: 'Workflow launched in background' }],
+          stop_reason: 'end_turn', usage: { input_tokens: 100, output_tokens: 30 },
+        },
+        session_id: sid,
+      });
+      // The dynamic workflow opens as ONE top-level task carrying the generated
+      // script (prompt) + name. The N parallel subagents ride inside task_progress's
+      // workflow_progress[] — NOT as separate task_started events (matches real CLI).
+      emitWf({
+        type: 'system', subtype: 'task_started', session_id: sid, task_id: 'wf-top',
+        task_type: 'local_workflow', workflow_name: 'review-changes',
+        description: 'Review changes across two dimensions',
+        prompt: "export const meta = { name: 'review-changes', phases: [{title:'Fan out'},{title:'Synthesize'}] }\nphase('Fan out')\nawait parallel([() => agent('review bugs'), () => agent('review perf')])",
+      });
+      // The main turn's own result — must NOT complete the turn.
+      emitWf({ type: 'result', subtype: 'success', is_error: false, duration_ms: 200, num_turns: 1, result: 'Workflow launched in background', session_id: sid, total_cost_usd: 0.002, usage: { input_tokens: 100, output_tokens: 30 } });
+
+      // Progress heartbeats carry workflow_progress[] snapshots. The CLI sends only
+      // the CURRENTLY ACTIVE agents per snapshot, plus "ghost" entries (no agentId)
+      // that the backend must skip. Then completions, then the authoritative idle —
+      // spaced out so the E2E can observe the "still running" window.
+      setTimeout(() => {
+        emitWf({ type: 'system', subtype: 'task_progress', session_id: sid, task_id: 'wf-top', summary: 'Fan out', usage: { total_tokens: 4600 }, workflow_progress: [
+          { type: 'workflow_phase', index: 1, title: 'Fan out' },
+          { type: 'workflow_phase', index: 2, title: 'Synthesize' },
+          // ghost placeholders (no agentId) — must be ignored by the parser:
+          { type: 'workflow_agent', index: 1, label: 'bugs', phaseIndex: 1, phaseTitle: 'Fan out', state: 'start' },
+          { type: 'workflow_agent', index: 2, label: 'perf', phaseIndex: 1, phaseTitle: 'Fan out', state: 'start' },
+          // real agents with ids:
+          { type: 'workflow_agent', index: 1, label: 'bugs', phaseIndex: 1, phaseTitle: 'Fan out', agentId: 'wfa-bugs', model: 'global.anthropic.claude-opus-4-8[1m]', state: 'start', startedAt: 1, promptPreview: 'Review bugs in the diff' },
+          { type: 'workflow_agent', index: 2, label: 'perf', phaseIndex: 1, phaseTitle: 'Fan out', agentId: 'wfa-perf', model: 'global.anthropic.claude-opus-4-8[1m]', state: 'start', startedAt: 1, promptPreview: 'Review perf in the diff' },
+        ] });
+      }, 150);
+      setTimeout(() => {
+        // An intermediate result the CLI feeds back from a subagent completion — origin marks it noise.
+        emitWf({ type: 'result', subtype: 'success', is_error: false, duration_ms: 100, num_turns: 1, result: 'Subagent A found 2 issues', session_id: sid, total_cost_usd: 0.004, origin: { kind: 'task-notification' }, usage: { input_tokens: 40, output_tokens: 15 } });
+        // Later snapshot: the agents are now terminal (per-phase active set) with resultPreview.
+        emitWf({ type: 'system', subtype: 'task_progress', session_id: sid, task_id: 'wf-top', summary: 'Synthesize', usage: { total_tokens: 9000 }, workflow_progress: [
+          { type: 'workflow_phase', index: 1, title: 'Fan out' },
+          { type: 'workflow_phase', index: 2, title: 'Synthesize' },
+          { type: 'workflow_agent', index: 1, label: 'bugs', phaseIndex: 1, phaseTitle: 'Fan out', agentId: 'wfa-bugs', state: 'done', tokens: 1200, durationMs: 1800, resultPreview: 'Found 2 bugs' },
+          { type: 'workflow_agent', index: 2, label: 'perf', phaseIndex: 1, phaseTitle: 'Fan out', agentId: 'wfa-perf', state: 'done', tokens: 3400, durationMs: 2100, resultPreview: 'Found 1 perf issue' },
+        ] });
+        // The whole workflow task terminates (drains the in-flight counter to 0).
+        emitWf({ type: 'system', subtype: 'task_notification', session_id: sid, task_id: 'wf-top', status: 'completed' });
+      }, 300);
+      setTimeout(() => {
+        // Authoritative turn-over — fires once, strictly after all bg work done.
+        emitWf({ type: 'system', subtype: 'session_state_changed', session_id: sid, state: 'idle' });
+        // Give the runner a tick to process idle before the process would exit;
+        // keep the process alive (FIFO mode) — the daemon reaps it on idle timer.
+      }, 450);
+      // Do NOT exit: in stream-json FIFO mode the CLI stays alive between turns.
+      return;
+    }
+
     // 2b. For "tool-test" messages, emit a tool_use + tool_result before the text
     if (effectiveMessage === 'tool-test') {
       const toolUseEvent = {

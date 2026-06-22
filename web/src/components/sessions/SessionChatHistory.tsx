@@ -6,6 +6,7 @@ import { useLightbox } from '@/hooks/useLightbox';
 import { useEntityClickHandler } from '@/hooks/useEntityClickHandler';
 import { SessionMessage, PlanCard, CollapsedPlanWrite, GenericToolCall } from './SessionMessage';
 import { TeamCard } from './TeamCard';
+import { WorkflowProgress } from './WorkflowProgress';
 import { LoadingSpinner } from '../common/LoadingSpinner';
 import { Lightbox } from '../common/Lightbox';
 import type { SessionHistoryMessage } from '@/types/session';
@@ -1152,6 +1153,10 @@ export const SessionChatHistory = memo(function SessionChatHistory({ sessionId, 
           agentStatuses={teams.find(t => t.teamName === activeTeamTab)?.agentStatuses}
         />
       )}
+
+      {/* Dynamic-workflow / background-task progress — shown on the lead view only.
+          Self-hides when there's no background activity (see WorkflowProgress). */}
+      {!activeTeamTab && sessionId && <WorkflowProgress sessionId={sessionId} />}
 
       {/* Main conversation — hidden when a team tab is active */}
       <div className="session-history" ref={containerRef} onClick={handleContainerClick} style={activeTeamTab ? { display: 'none' } : undefined}>

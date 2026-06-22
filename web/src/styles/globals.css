@@ -3259,6 +3259,206 @@ input:focus, textarea:focus, select:focus {
 .team-tab-dot-done { color: #34c759; }
 .team-tab-dot-error { color: var(--warning); }
 .team-tab-dot-pending { font-size: 9px; }
+
+/* ── Dynamic-workflow / background-task progress panel ── */
+.wf-card {
+  margin: 8px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-secondary);
+  overflow: hidden;
+}
+.wf-card-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 12px;
+  background: var(--bg-tertiary);
+  border-bottom: 1px solid var(--border);
+  font-size: 13px;
+}
+.wf-card-icon { font-size: 13px; }
+.wf-card-title { font-weight: 600; color: var(--fg); }
+.wf-card-count {
+  font-size: 12px;
+  color: var(--fg-muted);
+  background: var(--bg);
+  padding: 2px 8px;
+  border-radius: 8px;
+}
+.wf-card-running { color: var(--accent); }
+.wf-card-tokens { margin-left: auto; font-size: 11px; color: var(--fg-muted); }
+.wf-card-tasks {
+  display: flex;
+  flex-direction: column;
+  max-height: 240px;
+  overflow-y: auto;
+}
+.wf-task {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 12px;
+  font-size: 12px;
+  border-bottom: 1px solid var(--border-subtle, var(--border));
+}
+.wf-task:last-child { border-bottom: none; }
+.wf-task-dot { font-size: 10px; line-height: 1; flex: none; }
+.wf-task-dot-running { color: var(--accent); animation: session-pulse 1.4s ease-in-out infinite; }
+.wf-task-dot-done { color: #34c759; }
+.wf-task-dot-error { color: var(--warning); }
+.wf-task-dot-stopped { color: var(--fg-muted); }
+.wf-task-dot-paused { color: var(--fg-muted); }
+.wf-task-dot-pending { font-size: 9px; }
+.wf-task-name {
+  font-weight: 500;
+  color: var(--fg);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 200px;
+  flex: none;
+}
+.wf-task-activity {
+  color: var(--fg-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  flex: 1;
+  min-width: 0;
+}
+.wf-task-tokens { margin-left: auto; font-size: 11px; color: var(--fg-muted); flex: none; }
+.wf-task-completed .wf-task-name,
+.wf-task-stopped .wf-task-name { color: var(--fg-muted); }
+
+/* ── Dynamic-workflow rich view: script, phases, clickable agent rows ── */
+.wf-script-toggle {
+  margin-left: 8px;
+  font-size: 11px;
+  color: var(--accent);
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 1px 8px;
+  cursor: pointer;
+}
+.wf-script-toggle:hover { background: var(--bg); }
+.wf-card-desc {
+  padding: 6px 12px;
+  font-size: 12px;
+  color: var(--fg-muted);
+  border-bottom: 1px solid var(--border-subtle, var(--border));
+}
+.wf-script {
+  margin: 0;
+  padding: 10px 12px;
+  max-height: 280px;
+  overflow: auto;
+  font-family: var(--mono, ui-monospace, monospace);
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--fg);
+  background: var(--bg);
+  border-bottom: 1px solid var(--border);
+  white-space: pre;
+}
+.wf-phase { display: flex; flex-direction: column; }
+.wf-phase-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 12px;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--fg-muted);
+  background: var(--bg-tertiary);
+  border-bottom: 1px solid var(--border-subtle, var(--border));
+}
+.wf-phase-title { flex: 1; }
+.wf-phase-count { font-weight: 500; }
+.wf-agent { display: flex; flex-direction: column; border-bottom: 1px solid var(--border-subtle, var(--border)); }
+.wf-agent:last-child { border-bottom: none; }
+.wf-agent-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  font-size: 12px;
+  background: none;
+  border: none;
+  cursor: pointer;
+  text-align: left;
+  width: 100%;
+  color: var(--fg);
+}
+.wf-agent-row:hover { background: var(--bg); }
+.wf-agent-caret { font-size: 9px; color: var(--fg-muted); flex: none; width: 10px; }
+.wf-agent-name {
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  flex: none;
+  max-width: 220px;
+}
+.wf-agent-meta { margin-left: auto; font-size: 11px; color: var(--fg-muted); flex: none; }
+.wf-agent-expanded { background: var(--bg); }
+.wf-agent-detail {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 4px 12px 10px 30px;
+}
+.wf-agent-block { display: flex; flex-direction: column; gap: 2px; }
+.wf-agent-block-label {
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--fg-muted);
+}
+.wf-agent-prompt {
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--fg-muted);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.wf-agent-result {
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--fg);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.wf-agent-result-empty { color: var(--fg-muted); font-style: italic; }
+
+/* "View full transcript" — Phase 2 drill-in into the subagent's whole conversation */
+.wf-transcript-toggle {
+  align-self: flex-start;
+  margin-top: 2px;
+  padding: 3px 8px;
+  font-size: 11px;
+  color: var(--accent);
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  cursor: pointer;
+}
+.wf-transcript-toggle:hover { background: var(--bg); }
+.wf-transcript {
+  margin-top: 6px;
+  padding: 8px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  max-height: 360px;
+  overflow: auto;
+}
+.wf-transcript-empty { color: var(--fg-muted); font-style: italic; font-size: 12px; }
+
 .team-card-placeholder {
   padding: 24px;
   text-align: center;

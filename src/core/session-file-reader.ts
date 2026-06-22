@@ -70,6 +70,23 @@ export function remoteSubagentDirPath(sessionId: string, cwd?: string): string {
   return `~/.claude/projects/*/${sessionId}/subagents`;
 }
 
+/** Build the dynamic-workflow run-manifest directory (local absolute).
+ *  Claude Code writes one `wf_<runId>.json` per workflow run here, plus a
+ *  `subagents/workflows/wf_<runId>/` dir holding per-agent transcripts. */
+export function workflowManifestDirPath(sessionId: string, cwd: string): string {
+  const encoded = encodeProjectPath(cwd);
+  return path.join(CLAUDE_HOME, 'projects', encoded, sessionId, 'workflows');
+}
+
+/** Build the remote workflow run-manifest directory (tilde-based). */
+export function remoteWorkflowManifestDirPath(sessionId: string, cwd?: string): string {
+  if (cwd) {
+    const encoded = encodeProjectPath(cwd);
+    return `~/.claude/projects/${encoded}/${sessionId}/workflows`;
+  }
+  return `~/.claude/projects/*/${sessionId}/workflows`;
+}
+
 // ── Async file-existence check ──
 
 async function fileExists(filePath: string): Promise<boolean> {
@@ -507,4 +524,150 @@ async function readRemoteSubagentContents(
     });
     return new Map();
   }
+}
+
+// ── Dynamic-workflow run manifest (reload persistence) ──
+
+/** Parsed dynamic-workflow run manifest (workflows/wf_<runId>.json). Only the
+ *  fields the UI panel needs; the file has more (logs, scriptPath, result,
+ *  status, totalTokens, durationMs — not surfaced; the panel derives token /
+ *  duration aggregates from the per-agent entries instead). */
+export interface WorkflowManifest {
+  runId: string;
+  workflowName?: string;
+  summary?: string;          // human description (== meta.description)
+  script?: string;           // the generated workflow script source
+  startTime?: number;        // used only for latest-run selection
+  /** Full accumulated workflow_progress[] — same format as the live event array. */
+  workflowProgress: unknown[];
+}
+
+/** Filter a dir listing down to `wf_*.json` run-manifest filenames. */
+function workflowManifestNames(entries: string[]): string[] {
+  return entries.filter((f) => f.startsWith('wf_') && f.endsWith('.json'));
+}
+
+/** Read the latest dynamic-workflow run manifest for a session. Returns null when
+ *  the session never ran a workflow. Used to reconstruct the progress panel on
+ *  page reload / after the live in-memory state is gone.
+ *
+ *  A session that invokes the Workflow tool more than once produces one
+ *  `wf_<runId>.json` PER run, so when several exist we parse each and keep the
+ *  most recent by startTime (the panel shows only the latest run). */
+export async function readWorkflowManifest(
+  sessionId: string,
+  cwd?: string,
+  host?: string,
+): Promise<WorkflowManifest | null> {
+  // Resolve the candidate workflows dirs. When cwd is known, the cwd-encoded path
+  // is authoritative — do NOT scan every project dir, because this is called on
+  // EVERY session mount (the panel hook fetches /workflow unconditionally) and the
+  // common case is "session never ran a workflow"; a full ~/.claude/projects scan
+  // per page-load is the exact O(N)-syscall regression the project keeps fixing.
+  // Only fall back to the broad scan when cwd is genuinely unknown.
+  const reader = await createFileReader(host);
+  const dirs: string[] = [];
+  if (host) {
+    dirs.push(remoteWorkflowManifestDirPath(sessionId, cwd));
+  } else if (cwd) {
+    dirs.push(workflowManifestDirPath(sessionId, cwd));
+  } else {
+    const projectsDir = path.join(CLAUDE_HOME, 'projects');
+    try {
+      for (const dir of await fsp.readdir(projectsDir)) {
+        dirs.push(path.join(projectsDir, dir, sessionId, 'workflows'));
+      }
+    } catch {
+      // projects dir scan failed — nothing to read
+    }
+  }
+
+  for (const dir of dirs) {
+    let entries: string[];
+    try {
+      entries = await reader.listDir(dir);
+    } catch {
+      continue;
+    }
+    const names = workflowManifestNames(entries);
+    if (names.length === 0) continue;
+
+    // Parse every manifest in this dir, keep the one with the latest startTime.
+    let best: WorkflowManifest | null = null;
+    for (const name of names) {
+      const filePath = host ? `${dir}/${name}` : path.join(dir, name);
+      const content = await reader.readFile(filePath);
+      if (!content) continue;
+      try {
+        const m = JSON.parse(content) as Record<string, unknown>;
+        const wp = Array.isArray(m.workflowProgress) ? m.workflowProgress : [];
+        const manifest: WorkflowManifest = {
+          runId: typeof m.runId === 'string' ? m.runId : name.replace(/\.json$/, ''),
+          workflowName: typeof m.workflowName === 'string' ? m.workflowName : undefined,
+          summary: typeof m.summary === 'string' ? m.summary : undefined,
+          script: typeof m.script === 'string' ? m.script : undefined,
+          startTime: typeof m.startTime === 'number' ? m.startTime : undefined,
+          workflowProgress: wp,
+        };
+        if (!best || (manifest.startTime ?? 0) >= (best.startTime ?? 0)) best = manifest;
+      } catch (err) {
+        log.session.debug('failed to parse workflow manifest', {
+          sessionId, filePath,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+    if (best) return best;
+  }
+  return null;
+}
+
+/** Read a single workflow subagent's transcript JSONL by agentId. Scans the
+ *  nested subagents/workflows/<runId>/agent-<agentId>.jsonl layout. Returns the
+ *  raw content, or null if not found. */
+export async function readWorkflowSubagentContent(
+  sessionId: string,
+  agentId: string,
+  cwd?: string,
+  host?: string,
+): Promise<string | null> {
+  const filename = `agent-${agentId}.jsonl`;
+  const reader = await createFileReader(host);
+
+  // Resolve candidate `subagents/workflows` parent dirs (each holds wf_<runId>/ dirs).
+  // cwd-encoded path is authoritative when known; only scan all project dirs as a
+  // last resort (cwd unknown) — same O(N)-syscall avoidance as readWorkflowManifest.
+  const parents: string[] = [];
+  if (host) {
+    parents.push(`${remoteSubagentDirPath(sessionId, cwd)}/workflows`);
+  } else if (cwd) {
+    parents.push(path.join(subagentDirPath(sessionId, cwd), 'workflows'));
+  } else {
+    const projectsDir = path.join(CLAUDE_HOME, 'projects');
+    try {
+      for (const dir of await fsp.readdir(projectsDir)) {
+        parents.push(path.join(projectsDir, dir, sessionId, 'subagents', 'workflows'));
+      }
+    } catch {
+      // projects dir scan failed — nothing to read
+    }
+  }
+
+  for (const parent of parents) {
+    let runDirs: string[];
+    try {
+      runDirs = await reader.listDir(parent);
+    } catch {
+      continue;
+    }
+    for (const runDir of runDirs) {
+      if (!runDir.startsWith('wf_')) continue;
+      const filePath = host
+        ? `${parent}/${runDir}/${filename}`
+        : path.join(parent, runDir, filename);
+      const content = await reader.readFile(filePath);
+      if (content) return content;
+    }
+  }
+  return null;
 }

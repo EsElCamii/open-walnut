@@ -19,8 +19,12 @@ import {
   readSessionJsonlContent,
   readSubagentContents,
   readSingleSubagentContent,
+  readWorkflowManifest,
+  readWorkflowSubagentContent,
   remoteJsonlPath,
 } from './session-file-reader.js';
+import { accumulateWorkflowProgress, sortedPhases, sortedAgents } from './workflow-progress.js';
+import type { SessionBackgroundTasksPayload, WorkflowPhaseInfo, WorkflowAgentInfo } from './event-types.js';
 import os from 'node:os';
 import path from 'node:path';
 import { findImagePaths, findRelativeImageNames } from '../providers/session-io.js';
@@ -543,14 +547,21 @@ function parseSessionMessages(content: string): SessionHistoryMessage[] {
 /**
  * Read a single subagent's history by agentId (for lazy-load on demand).
  * Returns parsed child messages, or empty array if not found.
+ *
+ * `workflow=true` scans the nested subagents/workflows/<runId>/ layout used by
+ * the dynamic-workflow tool; otherwise the flat subagents/ layout (Task/Team).
  */
 export async function readSingleSubagentHistory(
   sessionId: string,
   agentId: string,
   cwd?: string,
   host?: string,
+  workflow?: boolean,
 ): Promise<SessionHistoryMessage[]> {
-  const content = await readSingleSubagentContent(sessionId, agentId, cwd, host);
+  const content = workflow
+    ? (await readWorkflowSubagentContent(sessionId, agentId, cwd, host))
+        ?? (await readSingleSubagentContent(sessionId, agentId, cwd, host)) // fall back to flat layout
+    : await readSingleSubagentContent(sessionId, agentId, cwd, host);
   if (!content) return [];
   try {
     return parseSessionMessages(content);
@@ -561,6 +572,48 @@ export async function readSingleSubagentHistory(
     });
     return [];
   }
+}
+
+/**
+ * Reconstruct a session's dynamic-workflow progress panel from the on-disk run
+ * manifest (workflows/wf_<runId>.json). Used to repopulate the panel on page
+ * reload / after server restart, when the live in-memory ClaudeCodeSession state
+ * is gone. Returns null when the session never ran a workflow.
+ *
+ * The manifest stores the full accumulated `workflowProgress[]` in the same
+ * format as the live event stream, so we run it through the SAME shared
+ * accumulator — the reconstructed payload is byte-for-byte what the live panel
+ * would have shown at the end of the run.
+ */
+export async function reconstructWorkflowProgress(
+  sessionId: string,
+  cwd?: string,
+  host?: string,
+): Promise<SessionBackgroundTasksPayload | null> {
+  const manifest = await readWorkflowManifest(sessionId, cwd, host);
+  if (!manifest) return null;
+
+  const phases = new Map<number, WorkflowPhaseInfo>();
+  const agents = new Map<string, WorkflowAgentInfo>();
+  accumulateWorkflowProgress(manifest.workflowProgress, phases, agents);
+
+  // inFlight here is best-effort display state: derive it from the agents still
+  // marked running rather than hardcoding 0. The manifest is normally written at
+  // run-end (so this is 0), but if a reload ever catches a mid-run manifest this
+  // reports honestly. Either way it's superseded by the next live snapshot, and
+  // turn-boundary completion is driven by session_state_changed{idle}, NOT this.
+  const agentList = sortedAgents(agents);
+  const inFlight = agentList.filter(a => a.status === 'running').length;
+  return {
+    sessionId,
+    workflowName: manifest.workflowName,
+    inFlight,
+    tasks: [],
+    phases: sortedPhases(phases),
+    agents: agentList,
+    scriptSource: manifest.script,
+    workflowDescription: manifest.summary,
+  };
 }
 
 /**

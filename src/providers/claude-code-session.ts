@@ -44,6 +44,8 @@ import { recoverStateFromJsonl, extractImageFilePathFromInput } from '../core/se
 import type { SessionRecord, SessionMode, ProcessStatus, TaskPhase } from '../core/types.js'
 import { SESSION_MODEL_CLI_MAP, DEFAULT_CLI_MODEL } from '../core/types.js'
 import { classifyStreamEvent, classifyDelta } from './claude-stream-event-map.js'
+import { accumulateWorkflowProgress, sortedPhases, sortedAgents } from '../core/workflow-progress.js'
+import type { WorkflowPhaseInfo, WorkflowAgentInfo } from '../core/event-types.js'
 import { recordTurn } from '../core/observability/recorder.js'
 import type { SessionServerClient } from './session-server-client.js'
 import { sanitizeInitModel, CONTEXT_WINDOW_DEFAULT } from '../agent/providers/defaults.js'
@@ -388,6 +390,17 @@ export class ClaudeCodeSession {
   private _lastBgActivityTs = 0
   /** Workflow name from the most recent task_started with task_type==='local_workflow'. */
   private _workflowName: string | undefined
+  /** The workflow script Claude generated (task_started.prompt) + its description —
+   *  lets the UI show WHAT workflow was created. */
+  private _workflowScript: string | undefined
+  private _workflowDescription: string | undefined
+  /** Dynamic-workflow phases, keyed by phase index (from workflow_progress[]). */
+  private _workflowPhases = new Map<number, WorkflowPhaseInfo>()
+  /** Per-subagent breakdown, keyed by agentId. The CLI emits only the currently-active
+   *  agents per task_progress snapshot, so we accumulate here (latest-wins merge) to
+   *  reconstruct the full set across phases. Parse logic lives in the shared
+   *  workflow-progress module so reload-from-disk reconstruction stays in sync. */
+  private _workflowAgents = new Map<string, WorkflowAgentInfo>()
 
   /** True when any background subagent / dynamic-workflow task is still running.
    *  Single choke point: every "is this turn's result intermediate?" decision consults
@@ -404,6 +417,33 @@ export class ClaudeCodeSession {
     return [...this._bgTasks.entries()].map(([taskId, t]) => ({ taskId, ...t }))
   }
   get workflowName(): string | undefined { return this._workflowName }
+  /** Per-subagent breakdown for the workflow progress panel, ordered by index. */
+  get workflowAgents(): WorkflowAgentInfo[] {
+    return sortedAgents(this._workflowAgents)
+  }
+
+  /** Parse a task_progress.workflow_progress[] array into _workflowPhases + _workflowAgents.
+   *  Delegates to the shared accumulator so reload-from-disk reconstruction (which
+   *  reads the same array from the on-disk manifest) parses identically. */
+  private _ingestWorkflowProgress(wp: unknown[]): void {
+    accumulateWorkflowProgress(wp, this._workflowPhases, this._workflowAgents)
+  }
+
+  /** Clear all dynamic-workflow state. Called when a fresh workflow opens (a new
+   *  task_started with task_type==='local_workflow') so a previous run's
+   *  agents/phases/script/name don't leak across turns.
+   *
+   *  Safe to call from the task_started handler: a dynamic workflow opens with
+   *  exactly ONE top-level local_workflow task_started — the N subagents ride
+   *  inside task_progress.workflow_progress[] and do NOT each fire their own
+   *  task_started — so this reset fires once per run, not once per subagent. */
+  private _resetWorkflowState(): void {
+    this._workflowPhases.clear()
+    this._workflowAgents.clear()
+    this._workflowScript = undefined
+    this._workflowDescription = undefined
+    this._workflowName = undefined
+  }
 
   /** Broadcast the current background-task set so the UI can render workflow progress. */
   private _emitBackgroundTasksUpdate(sessionId: string): void {
@@ -413,6 +453,10 @@ export class ClaudeCodeSession {
       workflowName: this._workflowName,
       inFlight: this._bgTasksInFlight,
       tasks: this.backgroundTasks,
+      phases: sortedPhases(this._workflowPhases),
+      agents: this.workflowAgents,
+      scriptSource: this._workflowScript,
+      workflowDescription: this._workflowDescription,
     }, ['main-ai', 'web-ui'], { source: 'session-runner' })
   }
 
@@ -2248,6 +2292,14 @@ export class ClaudeCodeSession {
             if (taskId) {
               if (!this._bgTasks.has(taskId)) this._bgTasksInFlight++
               const workflowName = sys.workflow_name as string | undefined
+              // A dynamic workflow opens with task_type='local_workflow' and carries the
+              // generated script in `prompt`. Capture it (and reset any prior run's agents)
+              // so the UI can show WHAT workflow was created + a fresh per-subagent view.
+              if (sys.task_type === 'local_workflow') {
+                this._resetWorkflowState()
+                if (typeof sys.prompt === 'string') this._workflowScript = sys.prompt
+                if (typeof sys.description === 'string') this._workflowDescription = sys.description
+              }
               if (workflowName) this._workflowName = workflowName
               this._bgTasks.set(taskId, {
                 description: sys.description as string | undefined,
@@ -2266,6 +2318,12 @@ export class ClaudeCodeSession {
             // Heartbeat — refresh activity timestamp (feeds the liveness invariant) + UI.
             const taskId = sys.task_id as string | undefined
             this._lastBgActivityTs = Date.now()
+            // Dynamic-workflow per-subagent breakdown rides on task_progress in the
+            // `workflow_progress` array — accumulate it (the CLI sends only the currently
+            // active agents per snapshot). This is the data behind the rich progress panel.
+            const wp = sys.workflow_progress as unknown[] | undefined
+            const ingestedWorkflow = Array.isArray(wp) && wp.length > 0
+            if (ingestedWorkflow) this._ingestWorkflowProgress(wp as unknown[])
             if (taskId) {
               const prev = this._bgTasks.get(taskId) ?? { status: 'running' }
               const usage = sys.usage as { total_tokens?: number } | undefined
@@ -2278,8 +2336,10 @@ export class ClaudeCodeSession {
                 lastTool: (sys.last_tool_name as string | undefined) ?? prev.lastTool,
                 summary: (sys.summary as string | undefined) ?? prev.summary,
               })
-              this._emitBackgroundTasksUpdate(sid)
             }
+            // Emit if EITHER bookkeeping ran — a workflow_progress snapshot without a
+            // task_id must still push the accumulated agents to the panel.
+            if (taskId || ingestedWorkflow) this._emitBackgroundTasksUpdate(sid)
           } else if (sys.subtype === 'task_updated') {
             // Status patch — merge into local task map.
             const taskId = sys.task_id as string | undefined

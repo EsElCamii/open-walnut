@@ -5,7 +5,7 @@
 import { Router, type Request, type Response, type NextFunction } from 'express'
 import { log } from '../../logging/index.js'
 import { listSessions, getRecentSessions, getSessionSummaries, getSessionsForTask, getSessionByClaudeId, updateSessionRecord, isTriageSession, isEnvironmentSession } from '../../core/session-tracker.js'
-import { readSessionHistory, readSingleSubagentHistory, extractPlanContent, rewriteHistoryRemoteImages } from '../../core/session-history.js'
+import { readSessionHistory, readSingleSubagentHistory, reconstructWorkflowProgress, extractPlanContent, rewriteHistoryRemoteImages } from '../../core/session-history.js'
 import { listTasks, getTask, addTask, updateTask, togglePin, setFocusTier, linkSession } from '../../core/task-manager.js'
 import { getConfig } from '../../core/config-manager.js'
 import { bus, EventNames, eventData } from '../../core/event-bus.js'
@@ -973,8 +973,11 @@ sessionsRouter.get('/:sessionId/subagent/:agentId/history', async (req: Request,
 
     const record = await getSessionByClaudeId(sessionId)
     const cwd = record?.cwd
+    // ?workflow=1 → scan the nested subagents/workflows/<runId>/ layout (dynamic
+    // workflow subagents); otherwise the flat Task/Team layout.
+    const isWorkflow = req.query.workflow === '1' || req.query.workflow === 'true'
 
-    let messages = await readSingleSubagentHistory(sessionId, agentId, cwd, record?.host)
+    let messages = await readSingleSubagentHistory(sessionId, agentId, cwd, record?.host, isWorkflow)
 
     // Rewrite remote image paths for remote sessions
     if (record?.host && messages.length > 0) {
@@ -982,6 +985,24 @@ sessionsRouter.get('/:sessionId/subagent/:agentId/history', async (req: Request,
     }
 
     res.json({ messages })
+  } catch (err) {
+    next(err)
+  }
+})
+
+// GET /api/sessions/:sessionId/workflow — reconstruct the dynamic-workflow progress
+// panel from the on-disk run manifest. Lets the panel survive page reload / server
+// restart, when the live in-memory session state is gone. 204 = no workflow ran.
+sessionsRouter.get('/:sessionId/workflow', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const sessionId = req.params.sessionId as string
+    const record = await getSessionByClaudeId(sessionId)
+    const payload = await reconstructWorkflowProgress(sessionId, record?.cwd, record?.host)
+    if (!payload) {
+      res.status(204).end()
+      return
+    }
+    res.json(payload)
   } catch (err) {
     next(err)
   }
