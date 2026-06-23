@@ -3314,6 +3314,39 @@ input:focus, textarea:focus, select:focus {
 }
 .wf-card-running { color: var(--accent); }
 .wf-card-tokens { margin-left: auto; font-size: 11px; color: var(--fg-muted); }
+/* Full-screen toggle — small icon button, mirrors the session panel's expand. */
+.wf-card-fullscreen {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  flex: none;
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--fg-muted);
+  cursor: pointer;
+}
+.wf-card-fullscreen:hover { background: var(--bg); color: var(--fg); }
+/* Keep the fullscreen button hard against the right edge even when there are no
+   tokens (which is what carries margin-left:auto in the normal case). */
+.wf-card-header > .wf-card-fullscreen { margin-left: auto; }
+.wf-card-tokens ~ .wf-card-fullscreen,
+.wf-card-collapse ~ .wf-card-tokens { margin-left: auto; }
+.wf-card-tokens ~ .wf-card-fullscreen { margin-left: 8px; }
+
+/* Full-screen panel: fill the promoted 95vw x 95vh container; the task list must
+   grow to fill instead of being capped at the inline 240px max-height. */
+.wf-card.open-walnut-fullscreen {
+  display: flex;
+  flex-direction: column;
+  margin: 0;
+}
+.wf-card.open-walnut-fullscreen .wf-card-tasks {
+  flex: 1;
+  max-height: none;
+}
 .wf-card-tasks {
   display: flex;
   flex-direction: column;

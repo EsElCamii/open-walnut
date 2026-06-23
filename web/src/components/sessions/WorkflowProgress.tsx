@@ -19,6 +19,8 @@
 import { memo, useState } from 'react';
 import { useBackgroundTasks, type BackgroundTask, type WorkflowAgent } from '@/hooks/useBackgroundTasks';
 import { WorkflowTranscriptModal, type TranscriptTarget } from './WorkflowTranscriptModal';
+import { useFullscreen } from '@/hooks/useFullscreen';
+import { ICON_EXPAND, ICON_COLLAPSE } from '../common/Icons';
 
 const TERMINAL = new Set(['completed', 'failed', 'stopped', 'killed']);
 
@@ -130,6 +132,9 @@ export const WorkflowProgress = memo(function WorkflowProgress({ sessionId }: { 
   const [collapseOverride, setCollapseOverride] = useState<boolean | null>(null);
   // Which subagent's full transcript is open in the big modal reader (null = none).
   const [transcriptTarget, setTranscriptTarget] = useState<TranscriptTarget | null>(null);
+  // Whole-panel full screen — same CSS-promotion hook the session panel uses
+  // (95vw x 95vh, Escape to exit, shared scroll lock).
+  const { isFullscreen, enterFullscreen, exitFullscreen, fullscreenClass, FullscreenBackdrop } = useFullscreen();
 
   const isWorkflow = agents.length > 0;
 
@@ -148,7 +153,8 @@ export const WorkflowProgress = memo(function WorkflowProgress({ sessionId }: { 
 
   // Collapse: default collapsed once the run is finished (nothing running) so the
   // panel doesn't hog vertical space; expanded while work is live. User clicks win.
-  const collapsed = collapseOverride ?? (running === 0);
+  // Fullscreen forces expanded — a collapsed full-screen panel makes no sense.
+  const collapsed = !isFullscreen && (collapseOverride ?? (running === 0));
 
   // Group agents by phase for the rich view; keep phase order by index.
   // ONE sentinel for "agent has no phaseIndex" in BOTH the group match and the orphan
@@ -172,14 +178,17 @@ export const WorkflowProgress = memo(function WorkflowProgress({ sessionId }: { 
     setTranscriptTarget({ agentId: a.agentId, label: a.label, model: a.model, meta: agentMeta(a) });
 
   return (
-    <div className={`wf-card ${collapsed ? 'wf-card-collapsed' : ''}`}>
+    <>
+    {FullscreenBackdrop}
+    <div className={`wf-card ${collapsed ? 'wf-card-collapsed' : ''}${fullscreenClass}`}>
       <div className="wf-card-header">
-        {/* The whole bar toggles collapse; the chevron just signals it's clickable. */}
+        {/* The whole bar toggles collapse; the chevron just signals it's clickable.
+            (Disabled while fullscreen — the panel is force-expanded then.) */}
         <button
           className="wf-card-collapse"
-          onClick={() => setCollapseOverride(!collapsed)}
+          onClick={() => !isFullscreen && setCollapseOverride(!collapsed)}
           aria-expanded={!collapsed}
-          title={collapsed ? 'Expand' : 'Collapse'}
+          title={isFullscreen ? '' : collapsed ? 'Expand' : 'Collapse'}
         >
           <span className="wf-card-caret">{collapsed ? '▸' : '▾'}</span>
           <span className="wf-card-icon">{'⚙'}</span>
@@ -197,6 +206,15 @@ export const WorkflowProgress = memo(function WorkflowProgress({ sessionId }: { 
             {showScript ? 'Hide script' : 'View script'}
           </button>
         )}
+        {/* Whole-panel full screen — same affordance as the session panel. */}
+        <button
+          className="wf-card-fullscreen"
+          onClick={isFullscreen ? exitFullscreen : enterFullscreen}
+          title={isFullscreen ? 'Collapse back' : 'Expand to full screen'}
+          aria-label={isFullscreen ? 'Exit full screen' : 'Expand workflow to full screen'}
+        >
+          {isFullscreen ? ICON_COLLAPSE : ICON_EXPAND}
+        </button>
       </div>
 
       {!collapsed && (
@@ -260,5 +278,6 @@ export const WorkflowProgress = memo(function WorkflowProgress({ sessionId }: { 
         />
       )}
     </div>
+    </>
   );
 });
