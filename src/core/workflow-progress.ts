@@ -20,8 +20,15 @@
 import type { WorkflowPhaseInfo, WorkflowAgentInfo } from './event-types.js';
 
 /** Normalize the CLI's workflow_agent `state` into our status vocabulary.
- *  Observed states: start, done. Defensive about future/unknown values so a new
- *  CLI state never throws — it just falls back to 'running'. */
+ *  Only `start` and `done` have been OBSERVED from the live CLI; every other arm
+ *  (running/active, result/completed/success, error/failed, stopped/killed/…,
+ *  queued/pending) is a defensive synonym in case the CLI vocabulary grows — they
+ *  are speculative, not confirmed. Unknown values fall back to 'running' on
+ *  purpose: a display-only panel should show "still working" for a state it can't
+ *  classify rather than falsely claim completion. (If a future CLI emits an
+ *  unrecognized TERMINAL state, the agent would stay visually "running" until the
+ *  run ends — acceptable for a non-authoritative view; completion is still driven
+ *  solely by session_state_changed{idle}, never by this status.) */
 export function normalizeWorkflowState(state: unknown): string {
   switch (String(state ?? '').toLowerCase()) {
     case 'start': case 'running': case 'active': return 'running';

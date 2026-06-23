@@ -36,6 +36,10 @@ export function WorkflowTranscriptModal({
   useModalOverlay(onClose);
   const [messages, setMessages] = useState<SessionHistoryMessage[] | null>(null);
   const [loading, setLoading] = useState(false);
+  // Distinct from an empty transcript: a fetch failure must NOT render the same as
+  // "this agent produced nothing" — otherwise a backend/network error silently looks
+  // like a legitimately empty run.
+  const [failed, setFailed] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -43,6 +47,7 @@ export function WorkflowTranscriptModal({
     const cached = getSubagentCache(sessionId, cacheKey);
     if (cached) { setMessages(cached); return; }
     setLoading(true);
+    setFailed(false);
     fetchSubagentHistory(sessionId, target.agentId, { workflow: true })
       .then((res) => {
         if (cancelled) return;
@@ -54,6 +59,7 @@ export function WorkflowTranscriptModal({
         if (cancelled) return;
         log.warn('workflow', 'failed to load subagent transcript', { agentId: target.agentId, error: String(err) });
         setMessages([]);
+        setFailed(true);
       })
       .finally(() => { if (!cancelled) setLoading(false); });
     return () => { cancelled = true; };
@@ -72,6 +78,8 @@ export function WorkflowTranscriptModal({
         <div className="wf-modal-body">
           {loading ? (
             <div className="wf-modal-loading">Loading transcript…</div>
+          ) : failed ? (
+            <div className="wf-modal-loading">Failed to load transcript. Close and reopen to retry.</div>
           ) : messages && messages.length > 0 ? (
             messages.map((m, i) => <SessionMessage key={i} message={m} sessionId={sessionId} />)
           ) : (

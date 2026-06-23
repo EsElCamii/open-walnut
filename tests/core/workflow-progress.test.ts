@@ -212,4 +212,20 @@ describe('reconstructWorkflowProgress (on-disk manifest)', () => {
     expect(out!.workflowName).toBe('new-run')
     expect(out!.agents?.length).toBe(2)
   })
+
+  it('breaks a startTime tie deterministically by runId (not FS order)', async () => {
+    // Two runs with the SAME startTime — selection must not depend on the
+    // platform's directory-iteration order. Higher runId wins, deterministically.
+    await writeManifest('wf_aaa', {
+      runId: 'wf_aaa', workflowName: 'run-aaa', startTime: 500,
+      workflowProgress: [{ type: 'workflow_agent', index: 1, agentId: 'x', state: 'done' }],
+    })
+    await writeManifest('wf_zzz', {
+      runId: 'wf_zzz', workflowName: 'run-zzz', startTime: 500,
+      workflowProgress: [{ type: 'workflow_agent', index: 1, agentId: 'y', state: 'done' }],
+    })
+
+    const out = await reconstructWorkflowProgress(sid, cwd)
+    expect(out!.workflowName).toBe('run-zzz')
+  })
 })

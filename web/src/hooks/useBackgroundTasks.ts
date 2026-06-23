@@ -124,7 +124,12 @@ export function useBackgroundTasks(sessionId: string | undefined): BackgroundTas
     };
     if (!sessionId || d.sessionId !== sessionId) return;
     sawLiveRef.current = true;
-    log.info('workflow', `background-tasks snapshot: inFlight=${d.inFlight ?? 0} tasks=${d.tasks?.length ?? 0} agents=${d.agents?.length ?? 0}`, { sessionId });
+    // debug (gated), NOT info: this fires on EVERY task_progress snapshot. During a
+    // large fan-out the snapshots are frequent, and log.info routes through the
+    // browser-logger forwarder to the server log file — per-snapshot info logging on
+    // a streaming hot path is the documented event-loop-starvation pattern. Opt in
+    // with localStorage.walnutLogLevel = 'debug' when tracing.
+    log.debug('workflow', `background-tasks snapshot: inFlight=${d.inFlight ?? 0} tasks=${d.tasks?.length ?? 0} agents=${d.agents?.length ?? 0}`, { sessionId });
     setState({
       workflowName: d.workflowName,
       workflowDescription: d.workflowDescription,

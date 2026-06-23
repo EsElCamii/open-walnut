@@ -1,6 +1,7 @@
 import { apiGet, apiPatch, apiPost } from './client';
 import type { SessionSummary, SessionRecord } from '@open-walnut/core';
 import type { ImageAttachment } from './chat';
+import { log } from '@/utils/log';
 
 export async function fetchSessions(): Promise<SessionSummary[]> {
   const res = await apiGet<{ sessions: SessionSummary[] }>('/api/sessions');
@@ -58,7 +59,12 @@ export async function fetchWorkflowProgress(sessionId: string): Promise<Workflow
   try {
     // apiGet yields `undefined` on a 204 (no workflow ran) — coalesce to null to honor the signature.
     return (await apiGet<WorkflowProgressSnapshot>(`/api/sessions/${sessionId}/workflow`)) ?? null;
-  } catch {
+  } catch (err) {
+    // A real failure (500 / timeout / malformed JSON) is NOT the same as "no
+    // workflow ran" (204 → null above). Don't silently conflate them: warn so a
+    // persistent backend bug doesn't masquerade as an empty panel. We still return
+    // null because the panel is non-critical and live events can repopulate it.
+    log.warn('workflow', 'failed to fetch persisted workflow progress', { sessionId, error: String(err) });
     return null;
   }
 }

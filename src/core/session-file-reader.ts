@@ -609,7 +609,15 @@ export async function readWorkflowManifest(
           startTime: typeof m.startTime === 'number' ? m.startTime : undefined,
           workflowProgress: wp,
         };
-        if (!best || (manifest.startTime ?? 0) >= (best.startTime ?? 0)) best = manifest;
+        // Latest run wins by startTime. On a tie (or both missing startTime),
+        // break deterministically by runId so the choice doesn't depend on the
+        // platform's directory-iteration order (which is unspecified).
+        if (!best) {
+          best = manifest;
+        } else {
+          const dt = (manifest.startTime ?? 0) - (best.startTime ?? 0);
+          if (dt > 0 || (dt === 0 && manifest.runId > best.runId)) best = manifest;
+        }
       } catch (err) {
         log.session.debug('failed to parse workflow manifest', {
           sessionId, filePath,
@@ -624,7 +632,13 @@ export async function readWorkflowManifest(
 
 /** Read a single workflow subagent's transcript JSONL by agentId. Scans the
  *  nested subagents/workflows/<runId>/agent-<agentId>.jsonl layout. Returns the
- *  raw content, or null if not found. */
+ *  raw content, or null if not found.
+ *
+ *  First match across run dirs wins — this is correct because an agentId is
+ *  globally unique (it's the `agent-<id>.jsonl` filename the CLI assigns), so a
+ *  given agentId lives under exactly one wf_<runId>/ dir. We therefore don't need
+ *  to know which run the panel reconstructed; there's no cross-run collision to
+ *  disambiguate. */
 export async function readWorkflowSubagentContent(
   sessionId: string,
   agentId: string,

@@ -1155,8 +1155,11 @@ export const SessionChatHistory = memo(function SessionChatHistory({ sessionId, 
       )}
 
       {/* Dynamic-workflow / background-task progress — shown on the lead view only.
-          Self-hides when there's no background activity (see WorkflowProgress). */}
-      {!activeTeamTab && sessionId && <WorkflowProgress sessionId={sessionId} />}
+          Self-hides when there's no background activity (see WorkflowProgress).
+          key={sessionId} forces a fresh remount on session switch so the panel's
+          local UI state (expanded agent, open transcript modal, collapse override)
+          can't leak from one session into the next. */}
+      {!activeTeamTab && sessionId && <WorkflowProgress key={sessionId} sessionId={sessionId} />}
 
       {/* Main conversation — hidden when a team tab is active */}
       <div className="session-history" ref={containerRef} onClick={handleContainerClick} style={activeTeamTab ? { display: 'none' } : undefined}>
