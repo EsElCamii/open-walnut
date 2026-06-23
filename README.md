@@ -12,9 +12,15 @@
 
 <p align="center"><sub><b>USED BY ENGINEERS AT</b></sub></p>
 <p align="center">
-  <img src="docs/logo-amazon.svg" alt="Amazon" height="26" />
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/logo-amazon-white.svg" />
+    <img src="docs/logo-amazon-dark.svg" alt="Amazon" height="26" />
+  </picture>
   &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
-  <img src="docs/logo-doordash.svg" alt="DoorDash" height="24" />
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/logo-doordash-white.svg" />
+    <img src="docs/logo-doordash-dark.svg" alt="DoorDash" height="26" />
+  </picture>
 </p>
 
 **An AI agent that manages your projects, notes, and coding sessions — with the missing web UI for Claude Code built in.**

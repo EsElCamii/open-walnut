@@ -62,11 +62,10 @@
 
   /* trusted-by logo strip */
   .trusted{margin-top:34px}
-  .trusted .label{font-size:12px;font-weight:700;letter-spacing:2px;text-transform:uppercase;color:#6f7b9c;margin-bottom:14px}
-  .logos{display:flex;gap:46px;align-items:center;justify-content:center;flex-wrap:wrap}
-  .logos img{height:26px;width:auto;opacity:.72;filter:grayscale(100%);transition:.25s}
+  .trusted .label{font-size:12px;font-weight:700;letter-spacing:2px;text-transform:uppercase;color:#6f7b9c;margin-bottom:18px}
+  .logos{display:flex;gap:56px;align-items:center;justify-content:center;flex-wrap:wrap}
+  .logos img{height:30px;width:auto;display:block;opacity:.78;filter:grayscale(100%);transition:.25s}
   .logos img:hover{opacity:1;filter:grayscale(0%)}
-  .logos .amazon{height:30px;position:relative;top:3px}
   @keyframes floaty{0%,100%{transform:translateY(0)}50%{transform:translateY(-5px)}}
   .logos img{animation:floaty 4s ease-in-out infinite}
   .logos img:nth-child(2){animation-delay:.8s}
@@ -128,7 +127,7 @@
     <div class="trusted">
       <div class="label">Used by engineers at</div>
       <div class="logos">
-        <img class="amazon" src="assets/logo-amazon.svg" alt="Amazon" />
+        <img src="assets/logo-amazon.svg" alt="Amazon" />
         <img src="assets/logo-doordash.svg" alt="DoorDash" />
       </div>
     </div>
