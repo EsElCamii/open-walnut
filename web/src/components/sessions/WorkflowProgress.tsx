@@ -16,13 +16,9 @@
  * session_state_changed{idle} signal, never by this panel.
  */
 
-import { memo, useCallback, useState } from 'react';
+import { memo, useState } from 'react';
 import { useBackgroundTasks, type BackgroundTask, type WorkflowAgent } from '@/hooks/useBackgroundTasks';
-import { fetchSubagentHistory } from '@/api/sessions';
-import { getSubagentCache, setSubagentCache } from '@/cache/session-cache';
-import { SessionMessage } from './SessionMessage';
-import type { SessionHistoryMessage } from '@/types/session';
-import { log } from '@/utils/log';
+import { WorkflowTranscriptModal, type TranscriptTarget } from './WorkflowTranscriptModal';
 
 const TERMINAL = new Set(['completed', 'failed', 'stopped', 'killed']);
 
@@ -74,41 +70,21 @@ const TaskRow = memo(function TaskRow({ task }: { task: BackgroundTask }) {
   );
 });
 
-// ── Rich workflow subagent row (clickable → inline detail) ──
-const WorkflowAgentRow = memo(function WorkflowAgentRow({
-  agent, sessionId, expanded, onToggle,
-}: { agent: WorkflowAgent; sessionId: string; expanded: boolean; onToggle: () => void }) {
-  const meta = [shortModel(agent.model), fmtTokens(agent.tokens) && `${fmtTokens(agent.tokens)} tok`, fmtDuration(agent.durationMs)]
+/** Build the "model · tokens · duration" meta line for an agent. */
+function agentMeta(agent: WorkflowAgent): string {
+  return [shortModel(agent.model), fmtTokens(agent.tokens) && `${fmtTokens(agent.tokens)} tok`, fmtDuration(agent.durationMs)]
     .filter(Boolean).join(' · ');
+}
 
-  // Phase 2: the full per-agent transcript (subagents/workflows/<run>/agent-<id>.jsonl),
-  // lazy-loaded on demand. resultPreview is the headline; this is the whole conversation.
-  const [transcript, setTranscript] = useState<SessionHistoryMessage[] | null>(null);
-  const [loadingTranscript, setLoadingTranscript] = useState(false);
-  const [showTranscript, setShowTranscript] = useState(false);
-
-  const loadTranscript = useCallback(async () => {
-    if (showTranscript) { setShowTranscript(false); return; }
-    setShowTranscript(true);
-    if (transcript || loadingTranscript) return;
-    // Namespace the cache key (`wf:`) so a workflow subagent's transcript can't collide
-    // with a flat Task/Team subagent of the same id in this session (different on-disk layout).
-    const cacheKey = `wf:${agent.agentId}`;
-    const cached = getSubagentCache(sessionId, cacheKey);
-    if (cached) { setTranscript(cached); return; }
-    setLoadingTranscript(true);
-    try {
-      const res = await fetchSubagentHistory(sessionId, agent.agentId, { workflow: true });
-      setTranscript(res.messages);
-      setSubagentCache(sessionId, cacheKey, res.messages);
-      log.info('workflow', `loaded subagent transcript ${agent.agentId}: ${res.messages.length} msgs`, { sessionId });
-    } catch (err) {
-      log.warn('workflow', 'failed to load subagent transcript', { agentId: agent.agentId, error: String(err) });
-    } finally {
-      setLoadingTranscript(false);
-    }
-  }, [showTranscript, transcript, loadingTranscript, sessionId, agent.agentId]);
-
+// ── Rich workflow subagent row (clickable → inline prompt/result preview;
+//    "View full transcript" opens the large modal reader) ──
+const WorkflowAgentRow = memo(function WorkflowAgentRow({
+  agent, expanded, onToggle, onOpenTranscript,
+}: {
+  agent: WorkflowAgent; expanded: boolean;
+  onToggle: () => void; onOpenTranscript: (a: WorkflowAgent) => void;
+}) {
+  const meta = agentMeta(agent);
   return (
     <div className={`wf-agent ${expanded ? 'wf-agent-expanded' : ''}`}>
       <button className="wf-agent-row" onClick={onToggle} title={agent.agentId}>
@@ -135,18 +111,10 @@ const WorkflowAgentRow = memo(function WorkflowAgentRow({
               </div>
             )}
           </div>
-          <button className="wf-transcript-toggle" onClick={loadTranscript}>
-            {loadingTranscript ? 'Loading transcript…' : showTranscript ? 'Hide full transcript' : 'View full transcript'}
+          {/* Full transcript is too long for this cramped box → open the large modal reader. */}
+          <button className="wf-transcript-toggle" onClick={() => onOpenTranscript(agent)}>
+            View full transcript →
           </button>
-          {showTranscript && !loadingTranscript && (
-            <div className="wf-transcript">
-              {transcript && transcript.length > 0 ? (
-                transcript.map((m, i) => <SessionMessage key={i} message={m} sessionId={sessionId} />)
-              ) : (
-                <div className="wf-transcript-empty">No transcript available</div>
-              )}
-            </div>
-          )}
         </div>
       )}
     </div>
@@ -157,6 +125,11 @@ export const WorkflowProgress = memo(function WorkflowProgress({ sessionId }: { 
   const { workflowName, workflowDescription, scriptSource, inFlight, tasks, phases, agents } = useBackgroundTasks(sessionId);
   const [expandedAgent, setExpandedAgent] = useState<string | null>(null);
   const [showScript, setShowScript] = useState(false);
+  // null = follow the smart default (collapse a finished run, expand a live one);
+  // true/false = the user clicked the chevron and now owns the state.
+  const [collapseOverride, setCollapseOverride] = useState<boolean | null>(null);
+  // Which subagent's full transcript is open in the big modal reader (null = none).
+  const [transcriptTarget, setTranscriptTarget] = useState<TranscriptTarget | null>(null);
 
   const isWorkflow = agents.length > 0;
 
@@ -172,6 +145,10 @@ export const WorkflowProgress = memo(function WorkflowProgress({ sessionId }: { 
   const totalTokens = isWorkflow
     ? agents.reduce((s, a) => s + (a.tokens ?? 0), 0)
     : tasks.reduce((s, t) => s + (t.tokens ?? 0), 0);
+
+  // Collapse: default collapsed once the run is finished (nothing running) so the
+  // panel doesn't hog vertical space; expanded while work is live. User clicks win.
+  const collapsed = collapseOverride ?? (running === 0);
 
   // Group agents by phase for the rich view; keep phase order by index.
   // ONE sentinel for "agent has no phaseIndex" in BOTH the group match and the orphan
@@ -191,13 +168,25 @@ export const WorkflowProgress = memo(function WorkflowProgress({ sessionId }: { 
     ? agents.filter(a => !phases.some(p => p.index === (a.phaseIndex ?? NO_PHASE)))
     : [];
 
+  const openTranscript = (a: WorkflowAgent) =>
+    setTranscriptTarget({ agentId: a.agentId, label: a.label, model: a.model, meta: agentMeta(a) });
+
   return (
-    <div className="wf-card">
+    <div className={`wf-card ${collapsed ? 'wf-card-collapsed' : ''}`}>
       <div className="wf-card-header">
-        <span className="wf-card-icon">{'⚙'}</span>
-        <span className="wf-card-title" title={workflowDescription}>
-          {workflowName ? `Workflow: ${workflowName}` : 'Background tasks'}
-        </span>
+        {/* The whole bar toggles collapse; the chevron just signals it's clickable. */}
+        <button
+          className="wf-card-collapse"
+          onClick={() => setCollapseOverride(!collapsed)}
+          aria-expanded={!collapsed}
+          title={collapsed ? 'Expand' : 'Collapse'}
+        >
+          <span className="wf-card-caret">{collapsed ? '▸' : '▾'}</span>
+          <span className="wf-card-icon">{'⚙'}</span>
+          <span className="wf-card-title" title={workflowDescription}>
+            {workflowName ? `Workflow: ${workflowName}` : 'Background tasks'}
+          </span>
+        </button>
         <span className="wf-card-count">
           {done}/{total}{isWorkflow ? ' agents' : ''}
           {running > 0 && <span className="wf-card-running"> · {running} running</span>}
@@ -210,53 +199,65 @@ export const WorkflowProgress = memo(function WorkflowProgress({ sessionId }: { 
         )}
       </div>
 
-      {workflowDescription && isWorkflow && (
-        <div className="wf-card-desc">{workflowDescription}</div>
-      )}
+      {!collapsed && (
+        <>
+          {workflowDescription && isWorkflow && (
+            <div className="wf-card-desc">{workflowDescription}</div>
+          )}
 
-      {showScript && scriptSource && (
-        <pre className="wf-script">{scriptSource}</pre>
-      )}
+          {showScript && scriptSource && (
+            <pre className="wf-script">{scriptSource}</pre>
+          )}
 
-      {isWorkflow ? (
-        <div className="wf-card-tasks">
-          {phaseList.map(phase => {
-            const phaseAgents = phases.length ? agentsByPhase(phase.index) : agents;
-            if (phaseAgents.length === 0) return null;
-            return (
-              <div key={phase.index} className="wf-phase">
-                {phase.title && (
-                  <div className="wf-phase-header">
-                    <span className="wf-phase-title">{phase.title}</span>
-                    <span className="wf-phase-count">{phaseAgents.filter(a => TERMINAL.has(a.status)).length}/{phaseAgents.length}</span>
+          {isWorkflow ? (
+            <div className="wf-card-tasks">
+              {phaseList.map(phase => {
+                const phaseAgents = phases.length ? agentsByPhase(phase.index) : agents;
+                if (phaseAgents.length === 0) return null;
+                return (
+                  <div key={phase.index} className="wf-phase">
+                    {phase.title && (
+                      <div className="wf-phase-header">
+                        <span className="wf-phase-title">{phase.title}</span>
+                        <span className="wf-phase-count">{phaseAgents.filter(a => TERMINAL.has(a.status)).length}/{phaseAgents.length}</span>
+                      </div>
+                    )}
+                    {phaseAgents.map(a => (
+                      <WorkflowAgentRow
+                        key={a.agentId}
+                        agent={a}
+                        expanded={expandedAgent === a.agentId}
+                        onToggle={() => setExpandedAgent(prev => prev === a.agentId ? null : a.agentId)}
+                        onOpenTranscript={openTranscript}
+                      />
+                    ))}
                   </div>
-                )}
-                {phaseAgents.map(a => (
-                  <WorkflowAgentRow
-                    key={a.agentId}
-                    agent={a}
-                    sessionId={sessionId}
-                    expanded={expandedAgent === a.agentId}
-                    onToggle={() => setExpandedAgent(prev => prev === a.agentId ? null : a.agentId)}
-                  />
-                ))}
-              </div>
-            );
-          })}
-          {orphanAgents.map(a => (
-            <WorkflowAgentRow
-              key={a.agentId}
-              agent={a}
-              sessionId={sessionId}
-              expanded={expandedAgent === a.agentId}
-              onToggle={() => setExpandedAgent(prev => prev === a.agentId ? null : a.agentId)}
-            />
-          ))}
-        </div>
-      ) : (
-        <div className="wf-card-tasks">
-          {tasks.map(t => <TaskRow key={t.taskId} task={t} />)}
-        </div>
+                );
+              })}
+              {orphanAgents.map(a => (
+                <WorkflowAgentRow
+                  key={a.agentId}
+                  agent={a}
+                  expanded={expandedAgent === a.agentId}
+                  onToggle={() => setExpandedAgent(prev => prev === a.agentId ? null : a.agentId)}
+                  onOpenTranscript={openTranscript}
+                />
+              ))}
+            </div>
+          ) : (
+            <div className="wf-card-tasks">
+              {tasks.map(t => <TaskRow key={t.taskId} task={t} />)}
+            </div>
+          )}
+        </>
+      )}
+
+      {transcriptTarget && (
+        <WorkflowTranscriptModal
+          target={transcriptTarget}
+          sessionId={sessionId}
+          onClose={() => setTranscriptTarget(null)}
+        />
       )}
     </div>
   );
