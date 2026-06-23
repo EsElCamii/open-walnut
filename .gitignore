@@ -6,6 +6,7 @@ coverage/
 *.png
 !docs/*.png
 !web/public/*.png
+!site/assets/*.png
 .playwright-mcp/
 
 # Auto Claude data directory

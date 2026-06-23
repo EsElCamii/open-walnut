@@ -6,15 +6,11 @@
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.8-blue.svg)](https://www.typescriptlang.org/)
 [![GitHub stars](https://img.shields.io/github/stars/EvanZhang008/open-walnut?style=social)](https://github.com/EvanZhang008/open-walnut)
 
-![Open Walnut — AI butler with chat, Claude Code sessions, and task management](docs/social-preview.png)
+[![Open Walnut — the open-source home for all your Claude Code, notes, tasks, and calendar (click to watch the demo)](docs/demo-video-thumb.png)](https://youtu.be/uN4WCZ-n2mw)
+
+<p align="center"><b>▶️ <a href="https://youtu.be/uN4WCZ-n2mw">Watch the 3-minute demo on YouTube</a></b> &nbsp;·&nbsp; <i>Used by engineers at Amazon &amp; DoorDash.</i></p>
 
 **An AI agent that manages your projects, notes, and coding sessions — with the missing web UI for Claude Code built in.**
-
-### 🎬 Watch the 3-minute demo
-
-[![Walnut — the open-source home for all your Claude Code, notes, tasks, and calendar](docs/demo-video-thumb.png)](https://youtu.be/2MPd-gaYC6s)
-
-> **An open-source home for all your Claude Code — plus notes, tasks, and calendar.** ▶️ [Watch the demo on YouTube](https://youtu.be/2MPd-gaYC6s)
 
 Open Walnut is not just a dashboard — it's an AI-native app. A built-in AI agent with 30+ tools manages your tasks, spawns and monitors Claude Code sessions, and builds a **self-organizing knowledge base** that gets smarter the more you use it. Raw daily observations auto-distill into organized topic pages. Old noise decays. Important patterns persist. It also gives Claude Code a proper web interface: real-time streaming, multi-session monitoring, visual task boards, and a personal notes vault. Think of it as an AI butler with a perfect memory and a beautiful UI.
 
@@ -23,7 +19,7 @@ Open Walnut is not just a dashboard — it's an AI-native app. A built-in AI age
 ## Table of Contents
 
 - [Why Open Walnut?](#why-open-walnut)
-- [Screenshots](#screenshots)
+- [See it in action](#see-it-in-action)
 - [Key Features](#key-features)
 - [Multi-Agent — But Human-Centered](#multi-agent--but-human-centered)
 - [Quick Start](#quick-start) | **[Getting Started Guide](GETTING_STARTED.md)**
@@ -60,21 +56,37 @@ Open Walnut replaces all of that with one system:
 | Apple Notes / Obsidian | Notes vault (wiki-links, backlinks, PARA folders) + agent-maintained memory (daily logs, topics, project memory) |
 | Manual AI workflows | 30+ agent tools, cron jobs, automated triage |
 
-## Screenshots
+## See it in action
 
-### Talk to the agent, get things done
+### Tell the agent what you want → it creates the task *and* a Claude Code session
 
-![Open Walnut AI task manager — create a task through natural language chat](docs/demo-create-task.png)
+![Open Walnut creates a task from natural language and spawns a Claude Code session](docs/gifs/01-task-to-session.gif)
 
-> "I need to file my tax before this week. Make it high priority and star."
->
-> Open Walnut creates the category, project, and task — sets priority, due date, and star — in one shot.
+> *"Start a task to create a simple HTML to-do app in Claude Code."* — the main agent creates the task and kicks off a Claude Code session for it, in one shot.
 
-### AI sessions that work for you
+### A full session panel: chat, terminal, files, history, fork
 
-![Open Walnut Claude Code session — AI starts a coding session attached to a task](docs/demo-start-session.png)
+![Open Walnut Claude Code session panel with chat, terminal, files and fork](docs/gifs/02-session-panel.gif)
 
-> The agent spawns a Claude Code session attached to the task. It runs in plan mode, reports progress, and you can check on it anytime from the session panel.
+> Chat with the session, switch modes like the Claude Code CLI, open a real terminal, browse files, recap past messages, or fork into a sub-session — all in one click.
+
+### Focus, Satellite, Wait — drag tasks into the tier that matches your day
+
+![Open Walnut pinned task tiers — drag tasks between Focus, Satellite, and Wait](docs/gifs/03-focus-tiers.gif)
+
+> Pin what you're actively working on to **Focus**, park secondary work in **Satellite**, and hold blocked work in **Wait**. Status is color-coded and updates as the AI works.
+
+### One home: tasks on the left, agent chat in the middle, Claude Code on the right
+
+![Open Walnut home page — tasks, main agent chat, and Claude Code session side by side](docs/gifs/04-home-three-pane.gif)
+
+> The main agent manages every task and session with full context — your memory, your notes, and your live coding session, all on one screen.
+
+### Notes + memory the AI can actually search
+
+![Open Walnut notes and memory — ask the AI to find something across your local notes](docs/gifs/05-notes-memory.gif)
+
+> An Obsidian-style notes vault stored locally, indexed in a local vector database. Ask *"what is my health routine?"* and the agent finds it across your notes — your data never leaves your disk.
 
 ## Key Features
 

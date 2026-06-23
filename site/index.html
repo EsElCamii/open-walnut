@@ -1,0 +1,205 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Walnut — The open-source home for all your Claude Code</title>
+<meta name="description" content="Walnut is a self-hosted, open-source web UI for managing your Claude Code sessions — plus tasks, notes, a calendar, and a self-organizing memory. Local-first, MIT licensed." />
+<link rel="icon" type="image/png" href="assets/walnut-icon.png" />
+
+<!-- Open Graph / social -->
+<meta property="og:type" content="website" />
+<meta property="og:title" content="Walnut — The open-source home for all your Claude Code" />
+<meta property="og:description" content="A self-hosted web UI for your Claude Code sessions — plus tasks, notes, calendar, and memory. Local-first, MIT." />
+<meta property="og:image" content="assets/hero.png" />
+<meta name="twitter:card" content="summary_large_image" />
+<meta name="twitter:title" content="Walnut — The open-source home for all your Claude Code" />
+<meta name="twitter:description" content="A self-hosted web UI for your Claude Code sessions — plus tasks, notes, calendar, and memory." />
+<meta name="twitter:image" content="assets/hero.png" />
+
+<style>
+  :root{
+    --bg:#0b0f1a; --bg2:#241445; --violet:#a78bfa; --violet2:#7c5cff;
+    --ink:#eef1f8; --muted:#9aa6c4; --card:#141a2b; --line:rgba(160,175,255,.16);
+    --green:#22c55e;
+  }
+  *{margin:0;padding:0;box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  body{
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Inter,system-ui,sans-serif;
+    color:var(--ink);
+    background:radial-gradient(120% 90% at 75% 0%, #2a1850 0%, var(--bg) 55%) , var(--bg);
+    line-height:1.55; -webkit-font-smoothing:antialiased;
+  }
+  a{color:var(--violet);text-decoration:none}
+  .wrap{max-width:1060px;margin:0 auto;padding:0 22px}
+  .btn{
+    display:inline-flex;align-items:center;gap:9px;font-weight:700;font-size:16px;
+    padding:13px 22px;border-radius:12px;border:1px solid transparent;transition:.18s;
+  }
+  .btn-primary{background:linear-gradient(135deg,var(--violet2),#4f7cff);color:#fff;box-shadow:0 10px 30px rgba(90,90,255,.35)}
+  .btn-primary:hover{transform:translateY(-1px);box-shadow:0 14px 38px rgba(90,90,255,.5)}
+  .btn-ghost{background:rgba(120,130,255,.08);border-color:var(--line);color:var(--ink)}
+  .btn-ghost:hover{background:rgba(120,130,255,.16)}
+
+  /* nav */
+  nav{display:flex;align-items:center;justify-content:space-between;padding:20px 0}
+  .brand{display:flex;align-items:center;gap:11px;font-weight:800;font-size:19px;color:#fff}
+  .brand img{width:34px;height:34px;border-radius:9px}
+  .nav-links{display:flex;gap:22px;align-items:center}
+  .nav-links a{color:var(--muted);font-weight:600;font-size:15px}
+  .nav-links a:hover{color:#fff}
+  @media(max-width:640px){.nav-links a:not(.btn){display:none}}
+
+  /* hero */
+  header{text-align:center;padding:46px 0 26px}
+  .pill{display:inline-flex;align-items:center;gap:8px;font-size:13px;font-weight:700;letter-spacing:.4px;
+    color:#b7f7cf;background:rgba(34,197,94,.12);border:1px solid rgba(34,197,94,.35);padding:6px 14px;border-radius:999px;margin-bottom:22px}
+  h1{font-size:clamp(34px,6vw,62px);line-height:1.04;font-weight:900;letter-spacing:-1.5px;color:#fff}
+  h1 .hl{color:var(--violet)}
+  .sub{font-size:clamp(16px,2.4vw,21px);color:var(--muted);max-width:680px;margin:18px auto 0}
+  .cta{display:flex;gap:14px;justify-content:center;flex-wrap:wrap;margin-top:30px}
+  .usedby{margin-top:20px;color:var(--muted);font-size:14px;font-style:italic}
+
+  /* video */
+  .video-wrap{max-width:880px;margin:42px auto 0;border-radius:16px;overflow:hidden;
+    border:1px solid var(--line);box-shadow:0 30px 80px rgba(0,0,0,.5);position:relative;aspect-ratio:16/9;background:#000}
+  .video-wrap iframe{position:absolute;inset:0;width:100%;height:100%;border:0}
+
+  /* sections */
+  section{padding:60px 0}
+  h2{font-size:clamp(26px,4vw,38px);font-weight:800;letter-spacing:-.6px;color:#fff;text-align:center}
+  .lead{text-align:center;color:var(--muted);max-width:620px;margin:14px auto 0;font-size:17px}
+
+  .feature{display:grid;grid-template-columns:1fr 1fr;gap:34px;align-items:center;margin-top:54px}
+  .feature:nth-child(even) .ftext{order:2}
+  .feature img{width:100%;border-radius:14px;border:1px solid var(--line);box-shadow:0 18px 50px rgba(0,0,0,.45)}
+  .feature h3{font-size:23px;font-weight:800;color:#fff;margin-bottom:10px}
+  .feature p{color:var(--muted);font-size:16px}
+  @media(max-width:760px){.feature{grid-template-columns:1fr;gap:18px}.feature:nth-child(even) .ftext{order:0}}
+
+  /* grid of small features */
+  .grid{display:grid;grid-template-columns:repeat(3,1fr);gap:18px;margin-top:48px}
+  @media(max-width:760px){.grid{grid-template-columns:1fr}}
+  .gcard{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:22px}
+  .gcard h4{color:#fff;font-size:17px;margin-bottom:7px}
+  .gcard p{color:var(--muted);font-size:14.5px}
+
+  /* install */
+  .code{background:#0a0d17;border:1px solid var(--line);border-radius:12px;padding:20px 22px;max-width:640px;margin:30px auto 0;
+    font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:14.5px;color:#cfe;overflow:auto}
+  .code .c{color:#6b7aa0}
+
+  footer{border-top:1px solid var(--line);padding:34px 0;text-align:center;color:var(--muted);font-size:14px}
+  .footlinks{display:flex;gap:20px;justify-content:center;margin-bottom:14px}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <nav>
+    <div class="brand"><img src="assets/walnut-icon.png" alt="Walnut logo"/> Walnut</div>
+    <div class="nav-links">
+      <a href="#features">Features</a>
+      <a href="#install">Install</a>
+      <a href="https://youtu.be/uN4WCZ-n2mw">Demo</a>
+      <a class="btn btn-ghost" href="https://github.com/EvanZhang008/open-walnut">★ GitHub</a>
+    </div>
+  </nav>
+
+  <header>
+    <span class="pill">● OPEN SOURCE · SELF-HOSTED · MIT</span>
+    <h1>The open-source home for<br/>all your <span class="hl">Claude Code</span></h1>
+    <p class="sub">A self-hosted web UI that runs and monitors every Claude Code session — plus tasks, notes, a calendar, and a memory that organizes itself. Your data stays on your machine.</p>
+    <div class="cta">
+      <a class="btn btn-primary" href="https://github.com/EvanZhang008/open-walnut">★ Star on GitHub</a>
+      <a class="btn btn-ghost" href="https://youtu.be/uN4WCZ-n2mw">▶ Watch the demo</a>
+    </div>
+    <div class="usedby">Used by engineers at Amazon &amp; DoorDash.</div>
+
+    <div class="video-wrap">
+      <iframe src="https://www.youtube.com/embed/uN4WCZ-n2mw" title="Walnut demo" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture" allowfullscreen></iframe>
+    </div>
+  </header>
+
+  <section id="features">
+    <h2>One app for everything around Claude Code</h2>
+    <p class="lead">Stop losing sessions in terminal tabs. Walnut gives Claude Code a real UI and ties it to the work it's for.</p>
+
+    <div class="feature">
+      <div class="ftext">
+        <h3>Natural language → task → live session</h3>
+        <p>Tell the main agent what you want. It creates the task and spawns a Claude Code session for it — in one shot — then streams every tool call and output live in your browser.</p>
+      </div>
+      <img src="assets/01-task-to-session.gif" alt="Create a task and a Claude Code session from natural language"/>
+    </div>
+
+    <div class="feature">
+      <div class="ftext">
+        <h3>A real session panel</h3>
+        <p>Chat with the session and switch modes like the CLI, open a real terminal, browse files, recap past messages, or fork into a sub-session — all in one click.</p>
+      </div>
+      <img src="assets/02-session-panel.gif" alt="Claude Code session panel: chat, terminal, files, fork"/>
+    </div>
+
+    <div class="feature">
+      <div class="ftext">
+        <h3>Focus, Satellite, Wait</h3>
+        <p>Drag what you're actively working on into <b>Focus</b>, park secondary work in <b>Satellite</b>, and hold blocked work in <b>Wait</b>. Status is color-coded and updates as the AI works.</p>
+      </div>
+      <img src="assets/03-focus-tiers.gif" alt="Drag tasks between Focus, Satellite, and Wait tiers"/>
+    </div>
+
+    <div class="feature">
+      <div class="ftext">
+        <h3>Tasks, agent chat &amp; Claude Code — one screen</h3>
+        <p>Tasks on the left, the main agent chat in the middle, your live Claude Code session on the right. The agent manages it all with full context from your memory and notes.</p>
+      </div>
+      <img src="assets/04-home-three-pane.gif" alt="Home page: tasks, agent chat, and Claude Code side by side"/>
+    </div>
+
+    <div class="feature">
+      <div class="ftext">
+        <h3>Notes &amp; memory the AI can search</h3>
+        <p>An Obsidian-style notes vault stored locally and indexed in a local vector database. Ask <i>"what is my health routine?"</i> and the agent finds it across your notes — nothing leaves your disk.</p>
+      </div>
+      <img src="assets/05-notes-memory.gif" alt="Ask the AI to find information across your local notes"/>
+    </div>
+
+    <div class="grid">
+      <div class="gcard"><h4>🖥️ Multi-session dashboard</h4><p>Run and monitor dozens of Claude Code sessions side by side, with live status.</p></div>
+      <div class="gcard"><h4>🔌 Remote over SSH</h4><p>Run sessions on remote machines with automatic Node version detection.</p></div>
+      <div class="gcard"><h4>🧠 Self-organizing memory</h4><p>A background agent distills session history into searchable topic pages.</p></div>
+      <div class="gcard"><h4>📅 Tasks &amp; calendar</h4><p>4-layer task hierarchy, priorities, due dates, and a calendar view.</p></div>
+      <div class="gcard"><h4>🔒 Local-first &amp; private</h4><p>Plain JSON / Markdown / SQLite in a local folder. No telemetry, no cloud DB.</p></div>
+      <div class="gcard"><h4>⚙️ Cron &amp; automation</h4><p>Scheduled jobs, heartbeat checklists, and automated session triage.</p></div>
+    </div>
+  </section>
+
+  <section id="install">
+    <h2>Get started in two commands</h2>
+    <p class="lead">Node ≥ 22 and the Claude Code CLI. That's it.</p>
+    <div class="code">
+<span class="c"># clone &amp; run</span><br/>
+git clone https://github.com/EvanZhang008/open-walnut.git<br/>
+cd open-walnut &amp;&amp; npm install &amp;&amp; npm start<br/><br/>
+<span class="c"># then open http://localhost:3456</span>
+    </div>
+    <div class="cta" style="margin-top:30px">
+      <a class="btn btn-primary" href="https://github.com/EvanZhang008/open-walnut">★ Star on GitHub</a>
+      <a class="btn btn-ghost" href="https://github.com/EvanZhang008/open-walnut/blob/main/GETTING_STARTED.md">📖 Getting started</a>
+    </div>
+  </section>
+
+</div>
+
+<footer>
+  <div class="footlinks">
+    <a href="https://github.com/EvanZhang008/open-walnut">GitHub</a>
+    <a href="https://youtu.be/uN4WCZ-n2mw">Demo video</a>
+    <a href="https://github.com/EvanZhang008/open-walnut/blob/main/LICENSE">MIT License</a>
+  </div>
+  Walnut — a personal AI butler. Open source &amp; self-hosted. Built with Claude Code.
+</footer>
+</body>
+</html>
