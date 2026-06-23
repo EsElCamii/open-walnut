@@ -8,7 +8,14 @@
 
 [![Open Walnut — the open-source home for all your Claude Code, notes, tasks, and calendar (click to watch the demo)](docs/demo-video-thumb.png)](https://youtu.be/uN4WCZ-n2mw)
 
-<p align="center"><b>▶️ <a href="https://youtu.be/uN4WCZ-n2mw">Watch the 3-minute demo on YouTube</a></b> &nbsp;·&nbsp; <i>Used by engineers at Amazon &amp; DoorDash.</i></p>
+<p align="center"><b>▶️ <a href="https://youtu.be/uN4WCZ-n2mw">Watch the 3-minute demo on YouTube</a></b></p>
+
+<p align="center"><sub><b>USED BY ENGINEERS AT</b></sub></p>
+<p align="center">
+  <img src="docs/logo-amazon.svg" alt="Amazon" height="26" />
+  &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+  <img src="docs/logo-doordash.svg" alt="DoorDash" height="24" />
+</p>
 
 **An AI agent that manages your projects, notes, and coding sessions — with the missing web UI for Claude Code built in.**
 
